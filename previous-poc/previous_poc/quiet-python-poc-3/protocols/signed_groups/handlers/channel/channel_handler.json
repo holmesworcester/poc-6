@@ -1,0 +1,382 @@
+{
+  "type": "channel",
+  "projector": {
+    "description": "Projects channel events",
+    "func": "projector.project",
+    "tests": [
+      {
+        "description": "Channel created by network member",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "channel",
+              "id": "channel_123",
+              "network_id": "net_123",
+              "name": "General",
+              "created_by": "user_123",
+              "signature": "dummy_sig_Y2hhbm5lbDpjaGFubmVsXzEyMzpHZW5lcmFsOm5ldF8xMjM6dXNlcl8xMjM=_by_user_123"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123",
+                "name": "General",
+                "created_by": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Channel blocked when signature is from non-user",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "creator_pub",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "channel",
+              "id": "channel_fake",
+              "network_id": "net_123",
+              "name": "Fake Channel",
+              "created_by": "user_123",
+              "signature": "dummy_sig_Y2hhbm5lbDpjaGFubmVsX2Zha2U6bmV0XzEyMzpGYWtlIENoYW5uZWw6dXNlcl8xMjM=_by_unknown_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "channels": []
+          }
+        }
+      },
+      {
+        "description": "Auto-unblocks blocked message when channel arrives (same-batch)",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_1",
+                "pubkey": "user_1",
+                "network_id": "net_1"
+              },
+              {
+                "id": "user_456",
+                "pubkey": "user_456",
+                "network_id": "net_1"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "msg_c",
+                "blocked_by_id": "chan_1",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_c",
+                  "channel_id": "chan_1",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Test message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfYzpjaGFuXzE6dXNlcl80NTY6dXNlcl80NTY6VGVzdCBtZXNzYWdl_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Channel chan_1 not found",
+                "created_at_ms": 900
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "channel",
+              "id": "chan_1",
+              "network_id": "net_1",
+              "name": "Ch",
+              "created_by": "user_1",
+              "signature": "dummy_sig_Y2hhbm5lbDpjaGFuXzE6Q2g6bmV0XzE6dXNlcl8x_by_user_1"
+            }
+          }
+        },
+        "ticks": 2,
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_c"
+              }
+            ],
+            "channels": [
+              {
+                "id": "chan_1"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "commands": {
+    "create": {
+      "description": "Creates a new channel",
+      "func": "create.execute",
+      "tests": [
+        {
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "creator_pub",
+                  "privkey": "creator_priv",
+                  "name": "Alice"
+                }
+              ],
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "creator_pub",
+                  "network_id": "net_123",
+                  "name": "Alice"
+                }
+              ],
+              "networks": [
+                {
+                  "id": "net_123",
+                  "name": "Test Network",
+                  "creator_pubkey": "creator_pub"
+                }
+              ],
+              "groups": [
+                {
+                  "id": "group_default",
+                  "name": "General",
+                  "created_by": "user_123"
+                }
+              ]
+            },
+            "params": {
+              "name": "general",
+              "network_id": "net_123",
+              "user_id": "user_123",
+              "group_id": "group_default"
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "channelId": "*",
+                "name": "general",
+                "networkId": "net_123",
+                "groupId": "group_default"
+              },
+              "newEvents": [
+                {
+                  "type": "channel",
+                  "id": "*",
+                  "name": "general",
+                  "network_id": "net_123",
+                  "created_by": "user_123",
+                  "group_id": "group_default",
+                  "signature": "dummy_sig_Y2hhbm5lbDoqOm5ldF8xMjM6Z2VuZXJhbDp1c2VyXzEyMw==_by_creator_pub"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Creates channel with group",
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "creator_pub",
+                  "privkey": "creator_priv",
+                  "name": "Alice"
+                }
+              ],
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "creator_pub",
+                  "network_id": "net_123",
+                  "name": "Alice"
+                }
+              ],
+              "groups": [
+                {
+                  "id": "group_123",
+                  "name": "Developers",
+                  "created_by": "user_123"
+                }
+              ]
+            },
+            "params": {
+              "name": "dev-chat",
+              "network_id": "net_123",
+              "user_id": "user_123",
+              "group_id": "group_123"
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "channelId": "*",
+                "name": "dev-chat",
+                "networkId": "net_123",
+                "groupId": "group_123"
+              },
+              "newEvents": [
+                {
+                  "type": "channel",
+                  "id": "*",
+                  "name": "dev-chat",
+                  "network_id": "net_123",
+                  "created_by": "user_123",
+                  "group_id": "group_123",
+                  "signature": "dummy_sig_Y2hhbm5lbDoqOm5ldF8xMjM6ZGV2LWNoYXQ6dXNlcl8xMjM=_by_creator_pub"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Fails when user not in network",
+          "given": {
+            "db": {
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "creator_pub",
+                  "network_id": "different_net"
+                }
+              ],
+              "groups": [
+                {
+                  "id": "group_123",
+                  "name": "Test Group",
+                  "created_by": "user_123"
+                }
+              ]
+            },
+            "params": {
+              "name": "invalid",
+              "network_id": "net_123",
+              "user_id": "user_123",
+              "group_id": "group_123"
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "error": "User user_123 not found in network net_123"
+          }
+        }
+      ]
+    },
+    "list": {
+      "description": "List channels",
+      "func": "list.execute",
+      "tests": [
+        {
+          "description": "List all channels",
+          "given": {
+            "db": {
+              "channels": [
+                {
+                  "id": "channel1",
+                  "name": "general",
+                  "network_id": "net1",
+                  "created_by": "user1",
+                  "created_at_ms": 1000
+                },
+                {
+                  "id": "channel2",
+                  "name": "random",
+                  "network_id": "net1",
+                  "group_id": "group1",
+                  "created_by": "user1",
+                  "created_at_ms": 2000
+                }
+              ]
+            },
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "channels": [
+                  {
+                    "id": "channel1",
+                    "name": "general",
+                    "network_id": "net1",
+                    "group_id": null,
+                    "created_at_ms": 1000
+                  },
+                  {
+                    "id": "channel2",
+                    "name": "random",
+                    "network_id": "net1",
+                    "group_id": "group1",
+                    "created_at_ms": 2000
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "description": "Empty list when no channels",
+          "given": {
+            "db": {},
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "channels": []
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

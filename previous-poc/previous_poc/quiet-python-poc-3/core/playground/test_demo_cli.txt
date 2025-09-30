@@ -1,0 +1,25 @@
+# Demo of message_via_tor using playground CLI
+# This replicates demo.py functionality
+
+# Create identities
+/api POST /identities name=Alice
+/api POST /identities name=Bob
+
+# List identities to get their IDs
+/api GET /identities
+
+# Set Alice as current user (use the actual ID from above)
+/define alice_id dummy_pubkey_WP7dWHe9
+
+# Generate invite from Alice
+/api POST /identities/{alice_id}/invite
+
+# Now we'd switch to Bob and use the invite code
+# But first let's send a message from Alice
+/define user {alice_id}
+/api POST /messages senderId={user} text=Hello from Alice!
+
+# Check messages (need peerId)
+/api GET /messages/{user}
+
+# There's no /events endpoint in this protocol

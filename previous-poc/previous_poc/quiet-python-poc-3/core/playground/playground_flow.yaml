@@ -1,0 +1,83 @@
+# Streamlined configuration for demo flow
+# This config makes it easier to follow the create -> invite -> join -> message flow
+
+version: 1.0
+protocol: protocols/message_via_tor
+layout: 2x2
+
+windows:
+  - id: alice
+    title: "Alice"
+    position: [0, 0]
+    aliases:
+      # Identity management
+      setup: "/api POST /identities name=Alice"
+      whoami: "/api GET /identities"
+      
+      # Peer management  
+      invite: "/api POST /identities/{alice}/invite"
+      peers: "/api GET /identities/{alice}/peers"
+      
+      # Messaging
+      send: "/api POST /messages senderId={alice} text={*}"
+      inbox: "/api GET /messages/{alice}"
+      
+      # Quick set alice ID
+      set: "/define alice {1}"
+      
+    default_command: "send {input}"
+
+  - id: bob
+    title: "Bob"
+    position: [0, 1]
+    aliases:
+      # Identity management
+      setup: "/api POST /identities name=Bob"
+      whoami: "/api GET /identities"
+      
+      # Peer management
+      join: "/api POST /identities/{bob}/join invite={1}"
+      peers: "/api GET /identities/{bob}/peers"
+      
+      # Messaging
+      send: "/api POST /messages senderId={bob} text={*}"
+      inbox: "/api GET /messages/{bob}"
+      
+      # Quick set bob ID
+      set: "/define bob {1}"
+      
+    default_command: "send {input}"
+
+  - id: commands
+    title: "Quick Commands"
+    position: [1, 0]
+    aliases:
+      # Complete setup flow
+      step1: "/echo Step 1: Run 'setup' in both Alice and Bob windows"
+      step2: "/echo Step 2: Copy identity IDs and run 'set <id>' in each window"
+      step3: "/echo Step 3: Run 'invite' in Alice window"
+      step4: "/echo Step 4: Copy invite and run 'join <invite>' in Bob window"
+      step5: "/echo Step 5: Type messages directly in Alice/Bob windows"
+      
+      # Useful commands
+      ids: "/api GET /identities"
+      help: "/help"
+
+  - id: monitor
+    title: "Activity Monitor"
+    position: [1, 1]
+    aliases:
+      # Monitor all activity
+      tick: "/api POST /tick"
+      clear: "/clear"
+      
+# Usage:
+# 1. Run 'setup' in Alice window
+# 2. Run 'setup' in Bob window  
+# 3. Look at identity IDs and run 'set <alice_id>' in Alice window
+# 4. Run 'set <bob_id>' in Bob window
+# 5. Run 'invite' in Alice window
+# 6. Copy the invite code
+# 7. Run 'join <invite_code>' in Bob window
+# 8. Now just type messages in either window - they'll be sent!
+# 9. Use 'inbox' to see received messages

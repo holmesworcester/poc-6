@@ -1,0 +1,548 @@
+{
+  "description": "Edge case validation tests for signed_groups protocol",
+  "tests": [
+    {
+      "description": "Message to non-existent channel gets blocked correctly",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "message",
+            "id": "msg_orphan",
+            "channel_id": "channel_nonexistent",
+            "author_id": "alice",
+            "peer_id": "alice",
+            "user_id": "alice",
+            "content": "Message to nowhere",
+            "signature": "dummy_sig_signed_by_alice"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "messages": [],
+          "blocked": [
+            {
+              "event_id": "msg_orphan",
+              "blocked_by_id": "channel_nonexistent",
+              "event_type": "message",
+              "reason": "Channel channel_nonexistent not found"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "User attempts to add themselves to a group they created",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_alice",
+              "name": "Alice's Group",
+              "created_by": "alice"
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "add",
+            "id": "add_duplicate",
+            "user_id": "alice",
+            "group_id": "group_alice",
+            "added_by": "alice",
+            "signature": "dummy_sig_signed_by_alice"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "adds": [
+            {
+              "id": "add_duplicate",
+              "user_id": "alice",
+              "group_id": "group_alice",
+              "added_by": "alice"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Channel created with invalid network_id",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123",
+              "name": "Test Group",
+              "created_by": "alice"
+            }
+          ],
+          "adds": [
+            {
+              "id": "add_alice",
+              "user_id": "alice",
+              "group_id": "group_123",
+              "added_by": "alice"
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "channel",
+            "id": "channel_wrong_net",
+            "name": "Wrong Network Channel",
+            "network_id": "net_different",
+            "group_id": "group_123",
+            "created_by": "alice",
+            "signature": "dummy_sig_signed_by_alice"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "channels": [],
+          "blocked": [
+            {
+              "event_id": "channel_wrong_net",
+              "blocked_by_id": "creator_alice",
+              "event_type": "channel",
+              "reason": "Creator alice not in network net_different"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Signature verification failure cascades properly",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            },
+            {
+              "id": "bob",
+              "pubkey": "bob_pub",
+              "network_id": "net_123",
+              "name": "Bob"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123",
+              "name": "Test Group",
+              "created_by": "alice"
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "add",
+            "id": "add_forged",
+            "user_id": "bob",
+            "group_id": "group_123",
+            "added_by": "alice",
+            "signature": "dummy_sig_signed_by_bob"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "adds": [],
+          "blocked": [
+            {
+              "event_id": "add_forged",
+              "blocked_by_id": "signature_alice",
+              "event_type": "add",
+              "reason": "Invalid signature: expected signature from alice"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Empty or null content handling",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123",
+              "name": "Test Group",
+              "created_by": "alice"
+            }
+          ],
+          "channels": [
+            {
+              "id": "channel_123",
+              "name": "General",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "created_by": "alice"
+            }
+          ],
+          "adds": [
+            {
+              "id": "add_alice",
+              "user_id": "alice",
+              "group_id": "group_123",
+              "added_by": "alice"
+            }
+          ]
+        },
+        "envelope": [
+          {
+            "data": {
+              "type": "message",
+              "id": "msg_empty",
+              "channel_id": "channel_123",
+              "author_id": "alice",
+              "peer_id": "alice",
+              "user_id": "alice",
+              "content": "",
+              "signature": "dummy_sig_signed_by_alice"
+            },
+            "metadata": {}
+          },
+          {
+            "data": {
+              "type": "group",
+              "id": "group_empty_name",
+              "name": "",
+              "created_by": "alice",
+              "signature": "dummy_sig_signed_by_alice"
+            },
+            "metadata": {}
+          }
+        ],
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "messages": [
+            {
+              "id": "msg_empty",
+              "content": ""
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123"
+            },
+            {
+              "id": "group_empty_name",
+              "name": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Timestamp ordering vs logical ordering conflict",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123",
+              "name": "Test Group",
+              "created_by": "alice",
+              "created_at_ms": 5000
+            }
+          ],
+          "channels": [
+            {
+              "id": "channel_123",
+              "name": "General",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "created_by": "alice",
+              "created_at_ms": 3000
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "message",
+            "id": "msg_time_paradox",
+            "channel_id": "channel_123",
+            "author_id": "alice",
+            "peer_id": "alice",
+            "user_id": "alice",
+            "content": "Message from the past",
+            "signature": "dummy_sig_signed_by_alice",
+            "created_at_ms": 1000
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "messages": [
+            {
+              "id": "msg_time_paradox",
+              "content": "Message from the past"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "User with extremely long name",
+      "given": {
+        "db": {
+          "networks": [
+            {
+              "id": "net_123",
+              "name": "Test Network",
+              "creator_pubkey": "creator_pub"
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "user",
+            "id": "user_long_name",
+            "network_id": "net_123",
+            "pubkey": "long_name_pub",
+            "name": "ThisIsAnExtremelyLongUserNameThatMightCauseIssuesInSomeSystemsIfNotHandledProperlyAndCouldPotentiallyBreakUILayoutsOrDatabaseFieldsIfThereAreCharacterLimitsInPlaceWhichThereUsuallyAreInMostProductionSystemsButWeNeedToTestThisCaseAnywayToEnsureRobustnessOfTheSystemAgainstUnexpectedInputFromUsersWhoMightTryToBreakThingsEitherMaliciouslyOrJustByAccident",
+            "signature": "dummy_sig"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "users": [
+            {
+              "id": "user_long_name",
+              "name": "ThisIsAnExtremelyLongUserNameThatMightCauseIssuesInSomeSystemsIfNotHandledProperlyAndCouldPotentiallyBreakUILayoutsOrDatabaseFieldsIfThereAreCharacterLimitsInPlaceWhichThereUsuallyAreInMostProductionSystemsButWeNeedToTestThisCaseAnywayToEnsureRobustnessOfTheSystemAgainstUnexpectedInputFromUsersWhoMightTryToBreakThingsEitherMaliciouslyOrJustByAccident"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Invite with malformed invite_pubkey",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123",
+              "name": "Test Group",
+              "created_by": "alice"
+            }
+          ],
+          "adds": [
+            {
+              "id": "add_alice",
+              "user_id": "alice",
+              "group_id": "group_123",
+              "added_by": "alice"
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "invite",
+            "id": "invite_malformed",
+            "invite_pubkey": "not-a-valid-pubkey-format",
+            "network_id": "net_123",
+            "group_id": "group_123",
+            "created_by": "alice",
+            "signature": "dummy_sig_signed_by_alice"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "invites": [
+            {
+              "id": "invite_malformed",
+              "invite_pubkey": "not-a-valid-pubkey-format"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Batch processing with mixed valid and invalid events",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_123",
+              "name": "Test Group",
+              "created_by": "alice"
+            }
+          ]
+        },
+        "envelope": [
+          {
+            "data": {
+              "type": "add",
+              "id": "add_valid",
+              "user_id": "alice",
+              "group_id": "group_123",
+              "added_by": "alice",
+              "signature": "dummy_sig_signed_by_alice"
+            },
+            "metadata": {}
+          },
+          {
+            "data": {
+              "type": "add",
+              "id": "add_invalid_group",
+              "user_id": "alice",
+              "group_id": "nonexistent_group",
+              "added_by": "alice",
+              "signature": "dummy_sig_signed_by_alice"
+            },
+            "metadata": {}
+          },
+          {
+            "data": {
+              "type": "channel",
+              "id": "channel_valid",
+              "name": "Valid Channel",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "created_by": "alice",
+              "signature": "dummy_sig_signed_by_alice"
+            },
+            "metadata": {}
+          },
+          {
+            "data": {
+              "type": "message",
+              "id": "msg_blocked",
+              "channel_id": "channel_valid",
+              "author_id": "nonexistent_user",
+              "peer_id": "nonexistent_user",
+              "user_id": "nonexistent_user",
+              "content": "From unknown user",
+              "signature": "dummy_sig_signed_by_nonexistent_user"
+            },
+            "metadata": {}
+          }
+        ],
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "adds": [
+            {
+              "id": "add_valid"
+            }
+          ],
+          "channels": [
+            {
+              "id": "channel_valid"
+            }
+          ],
+          "messages": [],
+          "blocked": [
+            {
+              "event_id": "add_invalid_group",
+              "blocked_by_id": "group_nonexistent_group"
+            },
+            {
+              "event_id": "msg_blocked",
+              "blocked_by_id": "nonexistent_user"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

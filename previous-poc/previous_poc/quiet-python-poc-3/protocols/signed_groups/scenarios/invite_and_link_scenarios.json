@@ -1,0 +1,140 @@
+{
+  "description": "Invite signature validation and link event scenario tests",
+  "tests": [
+    {
+      "description": "Invite signature validation edge case",
+      "given": {
+        "db": {
+          "networks": [
+            {
+              "id": "net_123",
+              "name": "Test Network",
+              "creator_pubkey": "creator_pub",
+              "first_group_id": "group_first"
+            }
+          ],
+          "groups": [
+            {
+              "id": "group_first",
+              "name": "First Group",
+              "created_by": "creator"
+            }
+          ],
+          "invites": [
+            {
+              "id": "invite_valid",
+              "invite_pubkey": "invite_pub_valid",
+              "network_id": "net_123",
+              "group_id": "group_first"
+            }
+          ],
+          "users": [
+            {
+              "id": "creator",
+              "pubkey": "creator_pub",
+              "network_id": "net_123",
+              "name": "Creator"
+            }
+          ]
+        },
+        "envelope": [
+          {
+            "data": {
+              "type": "user",
+              "id": "user_valid_invite",
+              "network_id": "net_123",
+              "group_id": "group_first",
+              "pubkey": "user_valid_pub",
+              "name": "Valid User",
+              "invite_id": "invite_valid",
+              "invite_signature": "dummy_invite_sig",
+              "signature": "dummy_sig"
+            },
+            "metadata": {}
+          },
+          {
+            "data": {
+              "type": "user",
+              "id": "user_reuse_invite",
+              "network_id": "net_123",
+              "group_id": "group_first",
+              "pubkey": "user_reuse_pub",
+              "name": "Reuse User",
+              "invite_id": "invite_valid",
+              "invite_signature": "dummy_invite_sig_different",
+              "signature": "dummy_sig"
+            },
+            "metadata": {}
+          }
+        ],
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "users": [
+            {
+              "id": "creator"
+            },
+            {
+              "id": "user_valid_invite",
+              "invite_id": "invite_valid"
+            },
+            {
+              "id": "user_reuse_invite",
+              "invite_id": "invite_valid"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Link events with missing references",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ]
+        },
+        "envelope": [
+          {
+            "data": {
+              "type": "link",
+              "from_type": "user",
+              "from_id": "alice",
+              "to_type": "group",
+              "to_id": "nonexistent_group",
+              "link_type": "member"
+            },
+            "metadata": {}
+          },
+          {
+            "data": {
+              "type": "link",
+              "from_type": "user",
+              "from_id": "nonexistent_user",
+              "to_type": "channel",
+              "to_id": "nonexistent_channel",
+              "link_type": "access"
+            },
+            "metadata": {}
+          }
+        ],
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "then": {
+        "db": {
+          "links": []
+        }
+      }
+    }
+  ]
+}

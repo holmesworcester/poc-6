@@ -1,0 +1,1 @@
+"""Tests for member event type."""

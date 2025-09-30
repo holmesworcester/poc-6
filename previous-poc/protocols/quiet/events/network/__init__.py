@@ -1,0 +1,1 @@
+"""Network event type module."""

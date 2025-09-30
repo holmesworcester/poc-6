@@ -1,0 +1,37 @@
+# Simple messaging configuration
+# Shows how to use /define for user context
+
+version: 1.0
+protocol: protocols/message_via_tor
+layout: 1x2
+
+windows:
+  - id: alice_window
+    title: "Alice's Chat"
+    position: [0, 0]
+    aliases:
+      # Quick setup
+      setup: "/define user alice"
+      # Send message (broadcasts to peers)
+      msg: "/api POST /messages senderId={user} text={*}"
+    # With default command, can just type the message
+    default_command: "/api POST /messages senderId={user} text={input}"
+
+  - id: bob_window  
+    title: "Bob's Chat"
+    position: [0, 1]
+    aliases:
+      # Quick setup
+      setup: "/define user bob"
+      # Send message
+      msg: "/api POST /messages senderId={user} text={*}"
+      # List my messages
+      inbox: "/api GET /messages?identity={user}"
+    default_command: "/api POST /messages senderId={user} text={input}"
+
+# Usage workflow:
+# 1. Alice window: "setup" (sets user=alice)
+# 2. Bob window: "setup" (sets user=bob)
+# 3. Alice window: "Hello from Alice!"
+# 4. Bob window: "inbox" (see the message)
+# 5. Bob window: "Hi back!" (broadcasts reply)

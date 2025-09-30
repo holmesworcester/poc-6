@@ -1,0 +1,40 @@
+# Error handling scenario for message_via_tor
+# Tests various error conditions and edge cases
+
+# Error: Send message without identity
+1:This should fail
+wait 100
+
+# Create identity
+1:/create alice
+
+# Error: Invalid command
+1:/invalid_command
+wait 100
+
+# Success: Now commands should work
+1:/invite -> myInvite
+2:/join bob $myInvite
+
+# Error: Try to join on a panel that already has an identity
+2:/join charlie $myInvite
+wait 100
+
+# Error: Use undefined variable
+3:/join david $undefinedVar
+wait 100
+
+# Success: Help should always work
+1:/help
+2:/help
+3:/help
+
+# Error: Show link before generating invite
+3:/link
+wait 100
+
+# Success: After all errors, normal operation continues
+1:Despite the errors, messaging still works!
+tick 5
+
+refresh

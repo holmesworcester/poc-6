@@ -1,0 +1,413 @@
+{
+  "type": "invite",
+  "projector": {
+    "description": "Projects invite events",
+    "func": "projector.project",
+    "tests": [
+      {
+        "description": "Invite blocked without group_id",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "inviter_pub",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "invite",
+              "id": "invite_no_group",
+              "invite_pubkey": "invite_pub_123",
+              "network_id": "net_123",
+              "created_by": "user_123",
+              "signature": "dummy_sig_aW52aXRlOmludml0ZV9ub19ncm91cDpOb25lOk5vbmU6aW52aXRlX3B1Yl8xMjM=_by_invite_pub_123"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "invites": []
+          }
+        }
+      },
+      {
+        "description": "Valid invite with group_id",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "inviter_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group",
+                "created_by": "user_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "invite",
+              "id": "invite_id_123",
+              "invite_pubkey": "invite_pub_123",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "created_by": "user_123",
+              "signature": "dummy_sig_aW52aXRlOmludml0ZV9pZF8xMjM6aW52aXRlX3B1Yl8xMjM6bmV0XzEyMzpncm91cF8xMjM6dXNlcl8xMjM=_by_inviter_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "invites": [
+              {
+                "id": "invite_id_123",
+                "invite_pubkey": "invite_pub_123",
+                "network_id": "net_123",
+                "group_id": "group_123",
+                "created_by": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Invite blocked when signature is from non-user",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "inviter_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "invite",
+              "id": "invite_fake",
+              "invite_pubkey": "invite_pub_fake",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "created_by": "user_123",
+              "signature": "invalid_signature"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "invites": []
+          }
+        }
+      },
+      {
+        "description": "Auto-unblocks user waiting for this invite",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "inviter_pub",
+                "created_at_ms": 800
+              }
+            ],
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "inviter_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "user_waiting",
+                "blocked_by_id": "invite_new",
+                "event_type": "user",
+                "data": {
+                  "type": "user",
+                  "id": "user_waiting",
+                  "network_id": "net_123",
+                  "pubkey": "waiting_pub",
+                  "name": "Waiting User",
+                  "invite_id": "invite_new",
+                  "group_id": "group_123",
+                  "signature": "dummy_sig_dXNlcjp1c2VyX3dhaXRpbmc6bmV0XzEyMzpXYWl0aW5nIFVzZXI6d2FpdGluZ19wdWI=_by_waiting_pub"
+                },
+                "metadata": {},
+                "reason": "Invite invite_new not found",
+                "created_at_ms": 900
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "invite",
+              "id": "invite_new",
+              "invite_pubkey": "invite_pub_new",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "created_by": "user_123",
+              "signature": "dummy_sig_aW52aXRlOmludml0ZV9uZXc6aW52aXRlX3B1Yl9uZXc6bmV0XzEyMzpncm91cF8xMjM6dXNlcl8xMjM=_by_inviter_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 2,
+        "then": {
+          "db": {
+            "invites": [
+              {
+                "id": "invite_new"
+              }
+            ],
+            "users": [
+              {
+                "id": "user_123"
+              },
+              {
+                "id": "user_waiting"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Invite blocked when not for first group",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "inviter_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_first",
+                "name": "First Group",
+                "created_by": "user_123"
+              },
+              {
+                "id": "group_second",
+                "name": "Second Group",
+                "created_by": "user_123"
+              }
+            ],
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "inviter_pub",
+                "first_group_id": "group_first"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "invite",
+              "id": "invite_wrong_group",
+              "invite_pubkey": "invite_pub_wrong",
+              "network_id": "net_123",
+              "group_id": "group_second",
+              "created_by": "user_123",
+              "signature": "dummy_sig_aW52aXRlOmludml0ZV93cm9uZ19ncm91cDppbnZpdGVfcHViX3dyb25nOm5ldF8xMjM6Z3JvdXBfc2Vjb25kOnVzZXJfMTIz_by_inviter_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "invites": [],
+            "blocked": [
+              {
+                "event_id": "invite_wrong_group",
+                "blocked_by_id": "first_group_group_second",
+                "event_type": "invite",
+                "reason": "Must create invite for first group: group_first"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "commands": {
+    "create": {
+      "description": "Creates an invite for the network",
+      "func": "create.execute",
+      "tests": [
+        {
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "inviter_pub",
+                  "privkey": "inviter_priv",
+                  "name": "Alice"
+                }
+              ],
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "inviter_pub",
+                  "network_id": "net_123"
+                }
+              ],
+              "groups": [
+                {
+                  "id": "group_123",
+                  "name": "First Group",
+                  "created_by": "user_123"
+                }
+              ],
+              "networks": [
+                {
+                  "id": "net_123",
+                  "name": "Test Network",
+                  "creator_pubkey": "inviter_pub",
+                  "first_group_id": "group_123",
+                  "created_at_ms": 1000
+                }
+              ]
+            },
+            "params": {
+              "identityId": "inviter_pub"
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "inviteLink": "*",
+                "inviteId": "*"
+              },
+              "newEvents": [
+                {
+                  "type": "invite",
+                  "id": "*",
+                  "invite_pubkey": "*",
+                  "network_id": "net_123",
+                  "group_id": "group_123",
+                  "created_by": "user_123",
+                  "signature": "ZHVtbXlfc2lnX2Zvcl9pbnZpdGU6Kjpncm91cF8xMjM6Tm9uZToq"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "list": {
+      "description": "List invites",
+      "func": "list.execute",
+      "tests": [
+        {
+          "description": "List all invites",
+          "given": {
+            "db": {
+              "invites": [
+                {
+                  "id": "invite1",
+                  "invite_pubkey": "invite_pub1",
+                  "network_id": "net1",
+                  "group_id": "group1",
+                  "created_by": "user1",
+                  "created_at_ms": 1000
+                },
+                {
+                  "id": "invite2",
+                  "invite_pubkey": "invite_pub2",
+                  "network_id": "net1",
+                  "group_id": "group2",
+                  "created_by": "user2",
+                  "created_at_ms": 2000
+                }
+              ]
+            },
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "invites": [
+                  {
+                    "id": "invite1",
+                    "invite_pubkey": "invite_pub1",
+                    "network_id": "net1",
+                    "group_id": "group1",
+                    "created_by": "user1",
+                    "created_at_ms": 1000
+                  },
+                  {
+                    "id": "invite2",
+                    "invite_pubkey": "invite_pub2",
+                    "network_id": "net1",
+                    "group_id": "group2",
+                    "created_by": "user2",
+                    "created_at_ms": 2000
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "description": "Empty list when no invites",
+          "given": {
+            "db": {},
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "invites": []
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

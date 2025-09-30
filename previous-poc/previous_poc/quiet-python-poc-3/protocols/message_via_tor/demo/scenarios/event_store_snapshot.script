@@ -1,0 +1,43 @@
+# Test event store and snapshot functionality
+
+# Create an identity and generate some events
+POST /identities {"name": "alice"}
+EXPECT 201
+CAPTURE alice_id $.identityId
+
+# Create a peer
+POST /peers {"publicKey": "peer_pubkey_123", "name": "bob"}
+EXPECT 201
+CAPTURE bob_id $.peerId
+
+# Send a message to generate more events
+POST /messages {"text": "Hello Bob", "senderId": "${alice_id}", "recipientPeerId": "${bob_id}"}
+EXPECT 201
+CAPTURE message_id $.messageId
+
+# Check event store - should have identity, peer, and message events
+GET /events?limit=10
+EXPECT 200
+EXPECT_BODY_CONTAINS "identity"
+EXPECT_BODY_CONTAINS "peer" 
+EXPECT_BODY_CONTAINS "message"
+
+# Get database snapshot
+GET /snapshot
+EXPECT 200
+CAPTURE snapshot $.structured
+CAPTURE sql_dump $.sql_dump
+
+# Verify snapshot contains expected tables as arrays
+EXPECT_VAR snapshot.identities TRUTHY
+EXPECT_VAR snapshot.peers TRUTHY
+EXPECT_VAR snapshot.messages TRUTHY
+# Verify they are arrays, not objects with columns/rows
+EXPECT_VAR snapshot.identities[0] TRUTHY
+EXPECT_VAR snapshot.peers[0] TRUTHY
+EXPECT_VAR snapshot.messages[0] TRUTHY
+
+# Verify SQL dump contains CREATE TABLE statements
+EXPECT_VAR sql_dump CONTAINS "CREATE TABLE"
+EXPECT_VAR sql_dump CONTAINS "identities"
+EXPECT_VAR sql_dump CONTAINS "INSERT INTO"

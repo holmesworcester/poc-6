@@ -1,0 +1,25 @@
+{
+  "type": "event_store",
+  "description": "Protocol-specific event store for message via tor",
+  "commands": {
+    "list": {
+      "description": "List events from the event store",
+      "func": "list.execute",
+      "tests": [
+        {
+          "given": {
+            "db": {},
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "events": []
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

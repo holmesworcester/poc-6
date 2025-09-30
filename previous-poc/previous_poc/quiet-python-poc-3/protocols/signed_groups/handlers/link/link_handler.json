@@ -1,0 +1,260 @@
+{
+  "type": "link",
+  "projector": {
+    "description": "Projects link events that associate devices with users",
+    "func": "projector.project",
+    "tests": [
+      {
+        "description": "Valid link is accepted",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "link_invites": [
+              {
+                "id": "link_invite_123",
+                "link_invite_pubkey": "link_pub_123",
+                "user_id": "user_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link",
+              "id": "link_123",
+              "peer_id": "new_device_123",
+              "user_id": "user_123",
+              "link_invite_id": "link_invite_123",
+              "link_invite_signature": "dummy_link_sig_",
+              "signature": "dummy_sig_bGluazpsaW5rXzEyMzpuZXdfZGV2aWNlXzEyMzp1c2VyXzEyMzpsaW5rX2ludml0ZV8xMjM=_by_new_device_123"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "links": [
+              {
+                "id": "link_123",
+                "peer_id": "new_device_123",
+                "user_id": "user_123",
+                "link_invite_id": "link_invite_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Link blocked when link-invite doesn't exist",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link",
+              "id": "link_456",
+              "peer_id": "new_device_456",
+              "user_id": "user_123",
+              "link_invite_id": "nonexistent_invite",
+              "link_invite_signature": "dummy_link_sig_",
+              "signature": "dummy_sig_bGluazpsaW5rXzQ1NjpuZXdfZGV2aWNlXzQ1Njp1c2VyXzEyMzpub25leGlzdGVudF9pbnZpdGU=_by_new_device_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "links": []
+          }
+        }
+      },
+      {
+        "description": "Link blocked when signature doesn't match peer_id",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "link_invites": [
+              {
+                "id": "link_invite_123",
+                "link_invite_pubkey": "link_pub_123",
+                "user_id": "user_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link",
+              "id": "link_fake",
+              "peer_id": "new_device_789",
+              "user_id": "user_123",
+              "link_invite_id": "link_invite_123",
+              "link_invite_signature": "dummy_link_sig_",
+              "signature": "dummy_sig_bGluazpsaW5rX2Zha2U6bmV3X2RldmljZV83ODk6dXNlcl8xMjM6bGlua19pbnZpdGVfMTIz_by_wrong_device"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "links": []
+          }
+        }
+      },
+      {
+        "description": "Link blocked when user_id doesn't match link-invite",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              },
+              {
+                "id": "user_456",
+                "pubkey": "other_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "link_invites": [
+              {
+                "id": "link_invite_123",
+                "link_invite_pubkey": "link_pub_123",
+                "user_id": "user_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link",
+              "id": "link_mismatch",
+              "peer_id": "new_device_999",
+              "user_id": "user_456",
+              "link_invite_id": "link_invite_123",
+              "link_invite_signature": "dummy_link_sig_",
+              "signature": "dummy_sig_bGluazpsaW5rX21pc21hdGNoOm5ld19kZXZpY2VfOTk5OnVzZXJfNDU2OmxpbmtfaW52aXRlXzEyMw==_by_new_device_999"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "links": []
+          }
+        }
+      },
+      {
+        "description": "Auto-unblocks message waiting for linked peer",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              },
+              {
+                "id": "user_456",
+                "pubkey": "user456_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ],
+            "link_invites": [
+              {
+                "id": "link_invite_123",
+                "link_invite_pubkey": "link_pub_123",
+                "user_id": "user_123"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "msg_from_new_device",
+                "blocked_by_id": "new_device_123",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_from_new_device",
+                  "channel_id": "channel_123",
+                  "author_id": "user_123",
+                  "peer_id": "new_device_123",
+                  "user_id": "user_123",
+                  "content": "Test message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfZnJvbV9uZXdfZGV2aWNlOmNoYW5uZWxfMTIzOnVzZXJfMTIzOm5ld19kZXZpY2VfMTIzOlRlc3QgbWVzc2FnZQ==_by_new_device_123"
+                },
+                "metadata": {},
+                "reason": "Peer new_device_123 not found",
+                "created_at_ms": 900
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link",
+              "id": "link_123",
+              "peer_id": "new_device_123",
+              "user_id": "user_123",
+              "link_invite_id": "link_invite_123",
+              "link_invite_signature": "dummy_link_sig_",
+              "signature": "dummy_sig_bGluazpsaW5rXzEyMzpuZXdfZGV2aWNlXzEyMzp1c2VyXzEyMzpsaW5rX2ludml0ZV8xMjM=_by_new_device_123"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 2,
+        "then": {
+          "db": {
+            "links": [
+              {
+                "id": "link_123"
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg_from_new_device"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

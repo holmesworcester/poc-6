@@ -1,0 +1,231 @@
+{
+  "scenarios": {
+    "self_messaging": {
+      "description": "Identity can send and receive messages to self",
+      "steps": [
+        {
+          "name": "create_identity",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "SelfMessager"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "my_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "send_note_to_self",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "text": "Remember to test messaging",
+              "senderId": "${my_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "body.messageId": "*"
+          }
+        },
+        {
+          "name": "read_own_messages",
+          "request": {
+            "method": "GET",
+            "path": "/messages/${my_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 1
+            },
+            "body.messages[0].text": "Remember to test messaging"
+          }
+        }
+      ]
+    },
+
+    "identity_isolation": {
+      "description": "Multiple identities maintain separate message views",
+      "steps": [
+        {
+          "name": "create_alice",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "create_bob",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Bob"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "alice_sends_self_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "text": "Alice's private note",
+              "senderId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "bob_sends_self_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "text": "Bob's private note",
+              "senderId": "${bob_id}"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "alice_sees_only_her_message",
+          "request": {
+            "method": "GET",
+            "path": "/messages/${alice_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 1
+            },
+            "body.messages[0].text": "Alice's private note"
+          }
+        },
+        {
+          "name": "bob_sees_only_his_message",
+          "request": {
+            "method": "GET",
+            "path": "/messages/${bob_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 1
+            },
+            "body.messages[0].text": "Bob's private note"
+          }
+        }
+      ]
+    },
+
+    "message_timestamps": {
+      "description": "Messages preserve timestamp order",
+      "steps": [
+        {
+          "name": "create_timekeeper",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "TimeKeeper"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "keeper_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "send_first_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "text": "First message",
+              "senderId": "${keeper_id}",
+              "time_now_ms": 1000
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "send_second_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "text": "Second message",
+              "senderId": "${keeper_id}",
+              "time_now_ms": 2000
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "send_third_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "text": "Third message",
+              "senderId": "${keeper_id}",
+              "time_now_ms": 3000
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "verify_message_order",
+          "request": {
+            "method": "GET",
+            "path": "/messages/${keeper_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 3
+            },
+            "body.messages[0].text": "First message",
+            "body.messages[1].text": "Second message",
+            "body.messages[2].text": "Third message"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,278 @@
+{
+  "description": "Blocking and unblocking scenario tests",
+  "tests": [
+    {
+      "description": "Multiple blocked events with same blocked_by_id",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "blocked": [
+            {
+              "event_id": "evt_1",
+              "blocked_by_id": "missing_group",
+              "event_type": "channel",
+              "data": "{\"type\": \"channel\", \"id\": \"ch_1\", \"group_id\": \"missing_group\"}",
+              "metadata": "{}",
+              "reason": "Group missing_group not found",
+              "created_at_ms": 100
+            },
+            {
+              "event_id": "evt_2",
+              "blocked_by_id": "missing_group",
+              "event_type": "add",
+              "data": "{\"type\": \"add\", \"id\": \"add_1\", \"group_id\": \"missing_group\"}",
+              "metadata": "{}",
+              "reason": "Group missing_group not found",
+              "created_at_ms": 200
+            },
+            {
+              "event_id": "evt_3",
+              "blocked_by_id": "missing_group",
+              "event_type": "message",
+              "data": "{\"type\": \"message\", \"id\": \"msg_1\", \"channel_id\": \"ch_in_missing_group\"}",
+              "metadata": "{}",
+              "reason": "Related to missing_group",
+              "created_at_ms": 300
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "group",
+            "id": "missing_group",
+            "name": "Previously Missing Group",
+            "created_by": "alice",
+            "signature": "dummy_sig_signed_by_alice"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "ticks": 5,
+      "then": {
+        "db": {
+          "groups": [
+            {
+              "id": "missing_group"
+            }
+          ],
+          "blocked": []
+        }
+      }
+    },
+    {
+      "description": "Circular dependency blocking (should handle gracefully)",
+      "given": {
+        "db": {
+          "users": [
+            {
+              "id": "alice",
+              "pubkey": "alice_pub",
+              "network_id": "net_123",
+              "name": "Alice"
+            }
+          ],
+          "blocked": [
+            {
+              "event_id": "event_a",
+              "blocked_by_id": "event_b",
+              "event_type": "custom",
+              "data": "{\"type\": \"custom\", \"id\": \"event_a\", \"depends_on\": \"event_b\"}",
+              "metadata": "{}",
+              "reason": "Waiting for event_b",
+              "created_at_ms": 100
+            },
+            {
+              "event_id": "event_b",
+              "blocked_by_id": "event_c",
+              "event_type": "custom",
+              "data": "{\"type\": \"custom\", \"id\": \"event_b\", \"depends_on\": \"event_c\"}",
+              "metadata": "{}",
+              "reason": "Waiting for event_c",
+              "created_at_ms": 200
+            },
+            {
+              "event_id": "event_c",
+              "blocked_by_id": "event_a",
+              "event_type": "custom",
+              "data": "{\"type\": \"custom\", \"id\": \"event_c\", \"depends_on\": \"event_a\"}",
+              "metadata": "{}",
+              "reason": "Waiting for event_a",
+              "created_at_ms": 300
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "message",
+            "id": "msg_normal",
+            "channel_id": "channel_123",
+            "author_id": "alice",
+            "peer_id": "alice",
+            "user_id": "alice",
+            "content": "Normal message",
+            "signature": "dummy_sig_signed_by_alice"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "ticks": 5,
+      "then": {
+        "db": {
+          "blocked": [
+            {
+              "event_id": "event_a"
+            },
+            {
+              "event_id": "event_b"
+            },
+            {
+              "event_id": "event_c"
+            },
+            {
+              "event_id": "msg_normal",
+              "blocked_by_id": "channel_123",
+              "reason": "Channel channel_123 not found"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "description": "Maximum blocking depth scenario",
+      "given": {
+        "db": {
+          "blocked": [
+            {
+              "event_id": "evt_10",
+              "blocked_by_id": "evt_9",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_10\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_9",
+              "created_at_ms": 1000
+            },
+            {
+              "event_id": "evt_9",
+              "blocked_by_id": "evt_8",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_9\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_8",
+              "created_at_ms": 900
+            },
+            {
+              "event_id": "evt_8",
+              "blocked_by_id": "evt_7",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_8\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_7",
+              "created_at_ms": 800
+            },
+            {
+              "event_id": "evt_7",
+              "blocked_by_id": "evt_6",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_7\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_6",
+              "created_at_ms": 700
+            },
+            {
+              "event_id": "evt_6",
+              "blocked_by_id": "evt_5",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_6\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_5",
+              "created_at_ms": 600
+            },
+            {
+              "event_id": "evt_5",
+              "blocked_by_id": "evt_4",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_5\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_4",
+              "created_at_ms": 500
+            },
+            {
+              "event_id": "evt_4",
+              "blocked_by_id": "evt_3",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_4\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_3",
+              "created_at_ms": 400
+            },
+            {
+              "event_id": "evt_3",
+              "blocked_by_id": "evt_2",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_3\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_2",
+              "created_at_ms": 300
+            },
+            {
+              "event_id": "evt_2",
+              "blocked_by_id": "evt_1",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_2\"}",
+              "metadata": "{}",
+              "reason": "Waiting for evt_1",
+              "created_at_ms": 200
+            },
+            {
+              "event_id": "evt_1",
+              "blocked_by_id": "user_123",
+              "event_type": "custom",
+              "data": "{\"id\": \"evt_1\"}",
+              "metadata": "{}",
+              "reason": "Waiting for user_123",
+              "created_at_ms": 100
+            }
+          ]
+        },
+        "envelope": {
+          "data": {
+            "type": "user",
+            "id": "user_123",
+            "network_id": "net_123",
+            "pubkey": "user_pub",
+            "name": "Unblocking User",
+            "signature": "dummy_sig"
+          },
+          "metadata": {}
+        },
+        "env": {
+          "CRYPTO_MODE": "dummy"
+        }
+      },
+      "ticks": 15,
+      "then": {
+        "db": {
+          "users": [
+            {
+              "id": "user_123"
+            }
+          ],
+          "blocked": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+# Demo configuration for message_via_tor protocol
+# Replicates demo.py functionality using playground.py
+
+version: 1.0
+protocol: protocols/message_via_tor
+layout: 2x2
+
+# Global API settings
+api:
+  base_url: http://localhost:8000
+  timeout: 30
+
+# Window definitions
+windows:
+  - id: identity
+    title: "Identity Management"
+    position: [0, 0]
+    aliases:
+      # Create a new identity
+      create: "/api POST /identities name={1}"
+      # List all identities
+      list: "/api GET /identities"
+      # Set current user for this window
+      use: "/define user {1}"
+      # Show current user
+      whoami: "/define"
+    default_command: "list"
+
+  - id: peers
+    title: "Peer Management"
+    position: [0, 1]
+    aliases:
+      # Send an invite
+      invite: "/api POST /identities/{user}/invite"
+      # Join using an invite
+      join: "/api POST /identities/{user}/join invite={1}"
+      # List peers for current user
+      peers: "/api GET /identities/{user}/peers"
+      # Set current user
+      use: "/define user {1}"
+    default_command: "peers"
+
+  - id: messages
+    title: "Messages"
+    position: [1, 0]
+    aliases:
+      # Send a message (broadcasts to all peers)
+      message: "/api POST /messages senderId={user} text={*}"
+      send: "/api POST /messages senderId={user} text={*}"
+      # List messages
+      list: "/api GET /messages?identity={user}"
+      # Set current user
+      use: "/define user {1}"
+    # Default command allows just typing the message
+    default_command: "/api POST /messages senderId={user} text={input}"
+
+  - id: events
+    title: "Event Stream"
+    position: [1, 1]
+    aliases:
+      # Show all events
+      all: "/api GET /events"
+      # Show events for current user
+      mine: "/api GET /events?identity={user}"
+      # Set current user
+      use: "/define user {1}"
+      # Clear the display
+      clear: "/clear"
+    default_command: "mine"
+
+# Example usage for complete demo flow:
+# 
+# 1. Create identities (Identity window):
+#    create alice
+#    create bob
+#    list
+#
+# 2. Set up peer connection (Peers window):
+#    use alice
+#    invite
+#    # Copy the invite code from response
+#    use bob  
+#    join <invite_code>
+#    peers
+#
+# 3. Send messages (Messages window):
+#    use alice
+#    Hello from Alice!
+#    use bob
+#    Hi back from Bob!
+#
+# 4. View messages (Messages window):
+#    /api GET /messages/alice
+#    /api GET /messages/bob
+#
+# Note: The 'user' variable is window-specific, so you need to set it in each window

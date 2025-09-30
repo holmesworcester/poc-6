@@ -1,0 +1,21 @@
+# Demo showing playground aliases matching demo.py functionality
+# First, load the demo config to get aliases
+
+# Check available aliases
+/alias
+
+# Use the create alias to make identities
+create Charlie
+create David
+
+# List all identities
+list
+
+# Set current user using alias
+use dummy_pubkey_WP7dWHe9
+
+# The 'message' alias sends a message
+message Hello from the playground!
+
+# Check messages (note: requires peerId in this API)
+/api GET /messages/dummy_pubkey_WP7dWHe9

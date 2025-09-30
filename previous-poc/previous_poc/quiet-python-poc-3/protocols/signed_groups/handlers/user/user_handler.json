@@ -1,0 +1,1153 @@
+{
+  "type": "user",
+  "projector": {
+    "description": "Projects user events",
+    "func": "projector.project",
+    "tests": [
+      {
+        "description": "Network creator user is valid without group_id",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "creator_pub",
+                "created_at_ms": 1000
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_123",
+              "network_id": "net_123",
+              "pubkey": "creator_pub",
+              "name": "Creator",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzEyMzpuZXRfMTIzOkNyZWF0b3I6Y3JlYXRvcl9wdWI=_by_creator_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "network_id": "net_123",
+                "pubkey": "creator_pub",
+                "name": "Creator"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "User blocked when missing group_id",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "creator_pub",
+                "first_group_id": "group_123",
+                "created_at_ms": 1000
+              }
+            ],
+            "invites": [
+              {
+                "id": "invite_123",
+                "invite_pubkey": "invite_pub_123",
+                "group_id": "group_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_no_group",
+              "network_id": "net_123",
+              "pubkey": "new_user_pub",
+              "name": "New User",
+              "invite_id": "invite_123",
+              "invite_signature": "dummy_invite_sig",
+              "signature": "dummy_sig_dXNlcjp1c2VyX25vX2dyb3VwOm5ldF8xMjM6TmV3IFVzZXI6bmV3X3VzZXJfcHVi_by_new_user_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_no_group",
+                "network_id": "net_123",
+                "group_id": "group_123",
+                "pubkey": "new_user_pub",
+                "name": "New User",
+                "invite_id": "invite_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "User with valid invite is accepted",
+        "given": {
+          "db": {
+            "invites": [
+              {
+                "id": "invite_123",
+                "invite_pubkey": "invite_pub_123",
+                "group_id": "group_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_456",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "pubkey": "user_456",
+              "name": "New User",
+              "invite_id": "invite_123",
+              "invite_signature": "dummy_invite_sig",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzQ1NjpuZXRfMTIzOk5ldyBVc2VyOnVzZXJfNDU2_by_user_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_456",
+                "network_id": "net_123",
+                "group_id": "group_123",
+                "pubkey": "user_456",
+                "name": "New User",
+                "invite_id": "invite_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "User without valid invite is blocked",
+        "given": {
+          "db": {
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_789",
+              "network_id": "net_123",
+              "group_id": "group_123",
+              "pubkey": "invalid_user_pub",
+              "name": "Invalid User",
+              "invite_id": "nonexistent_invite",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzc4OTpuZXRfMTIzOkludmFsaWQgVXNlcjppbnZhbGlkX3VzZXJfcHVi_by_invalid_user_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": []
+          }
+        }
+      },
+      {
+        "description": "User blocked when signature is from non-user",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "creator_pub",
+                "created_at_ms": 1000
+              }
+            ],
+            "users": [
+              {
+                "id": "existing_user",
+                "pubkey": "existing_pub",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_fake",
+              "network_id": "net_123",
+              "pubkey": "fake_pub",
+              "name": "Fake User",
+              "signature": "dummy_sig_dXNlcjp1c2VyX2Zha2U6bmV0XzEyMzpGYWtlIFVzZXI6ZmFrZV9wdWI=_by_fake_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "existing_user",
+                "pubkey": "existing_pub",
+                "network_id": "net_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "User blocked when joining wrong first group",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "creator_pub",
+                "first_group_id": "group_first",
+                "created_at_ms": 1000
+              }
+            ],
+            "invites": [
+              {
+                "id": "invite_123",
+                "invite_pubkey": "invite_pub_123",
+                "group_id": "group_second"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_first",
+                "name": "First Group"
+              },
+              {
+                "id": "group_second",
+                "name": "Second Group"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_wrong_group",
+              "network_id": "net_123",
+              "group_id": "group_second",
+              "pubkey": "wrong_user_pub",
+              "name": "Wrong Group User",
+              "invite_id": "invite_123",
+              "signature": "dummy_sig_dXNlcjp1c2VyX3dyb25nX2dyb3VwOm5ldF8xMjM6V3JvbmcgR3JvdXAgVXNlcjp3cm9uZ191c2VyX3B1Yg==_by_wrong_user_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": [],
+            "blocked": [
+              {
+                "event_id": "user_wrong_group",
+                "blocked_by_id": "first_group_group_first",
+                "event_type": "user"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Idempotency - processing same user event twice doesn't duplicate",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "creator_pub",
+                "created_at_ms": 1000
+              }
+            ],
+            "users": [
+              {
+                "id": "user_123",
+                "network_id": "net_123",
+                "pubkey": "creator_pub",
+                "name": "Creator",
+                "created_at_ms": 1000
+              }
+            ],
+            "event_store": [
+              {
+                "event_type": "user",
+                "data": {
+                  "type": "user",
+                  "id": "user_123",
+                  "network_id": "net_123",
+                  "pubkey": "creator_pub",
+                  "name": "Creator",
+                  "signature": "dummy_sig_dXNlcjp1c2VyXzEyMzpuZXRfMTIzOkNyZWF0b3I6Y3JlYXRvcl9wdWI=_by_creator_pub"
+                },
+                "metadata": {}
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_123",
+              "network_id": "net_123",
+              "pubkey": "creator_pub",
+              "name": "Creator",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzEyMzpuZXRfMTIzOkNyZWF0b3I6Y3JlYXRvcl9wdWI=_by_creator_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "network_id": "net_123",
+                "pubkey": "creator_pub",
+                "name": "Creator"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Auto-unblocks blocked message when author arrives (same-batch)",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "user_456",
+                "created_at_ms": 1000
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "name": "test-channel",
+                "network_id": "net_123",
+                "created_by": "user_123",
+                "created_at_ms": 1000,
+                "group_id": "group_123"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "msg_waiting",
+                "blocked_by_id": "user_456",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_waiting",
+                  "channel_id": "channel_123",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfd2FpdGluZzpjaGFubmVsXzEyMzp1c2VyXzQ1Njp1c2VyXzQ1NjpCbG9ja2VkIG1lc3NhZ2U=_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Author user_456 not found",
+                "created_at_ms": 900
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Test Group",
+                "created_by": "user_123",
+                "created_at_ms": 1000
+              }
+            ],
+            "adds": [
+              {
+                "id": "add_user_456_group_123",
+                "group_id": "group_123",
+                "user_id": "user_456",
+                "added_by": "user_123",
+                "created_at_ms": 950
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_456",
+              "network_id": "net_123",
+              "pubkey": "user_456",
+              "name": "User 456",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzQ1NjpuZXRfMTIzOlVzZXIgNDU2OnVzZXJfNDU2_by_user_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 2,
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_456"
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg_waiting"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Auto-unblocks previously blocked invite when creator arrives",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "user_creator",
+                "created_at_ms": 1000
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "First Group"
+              }
+            ],
+            "users": [],
+            "blocked": [
+              {
+                "event_id": "invite_456",
+                "blocked_by_id": "user_creator",
+                "event_type": "invite",
+                "data": {
+                  "type": "invite",
+                  "id": "invite_456",
+                  "invite_pubkey": "pub_invite_456",
+                  "network_id": "net_123",
+                  "group_id": "group_123",
+                  "created_by": "user_creator",
+                  "signature": "dummy_sig_aW52aXRlOmludml0ZV80NTY6cHViX2ludml0ZV80NTY6bmV0XzEyMzpncm91cF8xMjM6dXNlcl9jcmVhdG9y_by_user_creator"
+                },
+                "metadata": {},
+                "reason": "Creator user_creator not found",
+                "created_at_ms": 900
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_creator",
+              "network_id": "net_123",
+              "pubkey": "user_creator",
+              "name": "Creator",
+              "signature": "dummy_sig_dXNlcjp1c2VyX2NyZWF0b3I6bmV0XzEyMzpDcmVhdG9yOnVzZXJfY3JlYXRvcg==_by_user_creator"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 2,
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_creator"
+              }
+            ],
+            "invites": [
+              {
+                "id": "invite_456"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Multiple messages blocked by same user are all unblocked",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "user_456",
+                "created_at_ms": 1000
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "name": "test-channel",
+                "network_id": "net_123",
+                "created_by": "user_123",
+                "created_at_ms": 1000,
+                "group_id": "group_123"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "msg_1",
+                "blocked_by_id": "user_456",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_1",
+                  "channel_id": "channel_123",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfMTpjaGFubmVsXzEyMzp1c2VyXzQ1Njp1c2VyXzQ1NjpCbG9ja2VkIG1lc3NhZ2U=_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Author user_456 not found",
+                "created_at_ms": 900
+              },
+              {
+                "event_id": "msg_2",
+                "blocked_by_id": "user_456",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_2",
+                  "channel_id": "channel_123",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfMjpjaGFubmVsXzEyMzp1c2VyXzQ1Njp1c2VyXzQ1NjpCbG9ja2VkIG1lc3NhZ2U=_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Author user_456 not found",
+                "created_at_ms": 900
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Test Group",
+                "created_by": "user_123",
+                "created_at_ms": 1000
+              }
+            ],
+            "adds": [
+              {
+                "id": "add_user_456_group_123",
+                "group_id": "group_123",
+                "user_id": "user_456",
+                "added_by": "user_123",
+                "created_at_ms": 950
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_456",
+              "network_id": "net_123",
+              "pubkey": "user_456",
+              "name": "User 456",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzQ1NjpuZXRfMTIzOlVzZXIgNDU2OnVzZXJfNDU2_by_user_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 3,
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_456"
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg_1"
+              },
+              {
+                "id": "msg_2"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Cascading unblock - user unblocks message which unblocks other events",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "user_456",
+                "created_at_ms": 1000
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "name": "test-channel",
+                "network_id": "net_123",
+                "created_by": "user_123",
+                "created_at_ms": 1000,
+                "group_id": "group_123"
+              }
+            ],
+            "users": [
+              {
+                "id": "user_789"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "msg_1",
+                "blocked_by_id": "user_456",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_1",
+                  "channel_id": "channel_123",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfMTpjaGFubmVsXzEyMzp1c2VyXzQ1Njp1c2VyXzQ1NjpCbG9ja2VkIG1lc3NhZ2U=_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Author user_456 not found",
+                "created_at_ms": 900
+              },
+              {
+                "event_id": "msg_reply",
+                "blocked_by_id": "msg_1",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_reply",
+                  "channel_id": "channel_123",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfcmVwbHk6Y2hhbm5lbF8xMjM6dXNlcl80NTY6dXNlcl80NTY6QmxvY2tlZCBtZXNzYWdl_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Waiting for message msg_1",
+                "created_at_ms": 900
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Test Group",
+                "created_by": "user_123",
+                "created_at_ms": 1000
+              }
+            ],
+            "adds": [
+              {
+                "id": "add_user_456_group_123",
+                "group_id": "group_123",
+                "user_id": "user_456",
+                "added_by": "user_123",
+                "created_at_ms": 950
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_456",
+              "network_id": "net_123",
+              "pubkey": "user_456",
+              "name": "User 456",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzQ1NjpuZXRfMTIzOlVzZXIgNDU2OnVzZXJfNDU2_by_user_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 4,
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_456"
+              },
+              {
+                "id": "user_789"
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg_1"
+              },
+              {
+                "id": "msg_reply"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Partial unblock - only events actually blocked by arriving user are unblocked",
+        "given": {
+          "db": {
+            "networks": [
+              {
+                "id": "net_123",
+                "name": "Test Network",
+                "creator_pubkey": "user_456",
+                "created_at_ms": 1000
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "name": "test-channel",
+                "network_id": "net_123",
+                "created_by": "user_123",
+                "created_at_ms": 1000,
+                "group_id": "group_123"
+              }
+            ],
+            "blocked": [
+              {
+                "event_id": "msg_456",
+                "blocked_by_id": "user_456",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_456",
+                  "channel_id": "channel_123",
+                  "author_id": "user_456",
+                  "peer_id": "user_456",
+                  "user_id": "user_456",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfNDU2OmNoYW5uZWxfMTIzOnVzZXJfNDU2OnVzZXJfNDU2OkJsb2NrZWQgbWVzc2FnZQ==_by_user_456"
+                },
+                "metadata": {},
+                "reason": "Author user_456 not found",
+                "created_at_ms": 900
+              },
+              {
+                "event_id": "msg_789",
+                "blocked_by_id": "user_789",
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_789",
+                  "channel_id": "channel_123",
+                  "author_id": "user_789",
+                  "peer_id": "user_789",
+                  "user_id": "user_789",
+                  "content": "Blocked message",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfNzg5OmNoYW5uZWxfMTIzOnVzZXJfNzg5OnVzZXJfNzg5OkJsb2NrZWQgbWVzc2FnZQ==_by_user_789"
+                },
+                "metadata": {},
+                "reason": "Author user_789 not found",
+                "created_at_ms": 900
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Test Group",
+                "created_by": "user_123",
+                "created_at_ms": 1000
+              }
+            ],
+            "adds": [
+              {
+                "id": "add_user_456_group_123",
+                "group_id": "group_123",
+                "user_id": "user_456",
+                "added_by": "user_123",
+                "created_at_ms": 950
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "user",
+              "id": "user_456",
+              "network_id": "net_123",
+              "pubkey": "user_456",
+              "name": "User 456",
+              "signature": "dummy_sig_dXNlcjp1c2VyXzQ1NjpuZXRfMTIzOlVzZXIgNDU2OnVzZXJfNDU2_by_user_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "ticks": 2,
+        "then": {
+          "db": {
+            "users": [
+              {
+                "id": "user_456"
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg_456"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "commands": {
+    "join": {
+      "description": "Join network using invite link",
+      "func": "join.execute",
+      "tests": [
+        {
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "joiner_pub",
+                  "privkey": "joiner_priv",
+                  "name": "Joiner"
+                }
+              ],
+              "invites": [
+                {
+                  "id": "invite_123",
+                  "invite_pubkey": "invite_pub_3c2dc7663a29e15e61240f9fd005e643",
+                  "network_id": "net_123",
+                  "group_id": "group_123"
+                }
+              ],
+              "groups": [
+                {
+                  "id": "group_123",
+                  "name": "First Group"
+                }
+              ]
+            },
+            "params": {
+              "identityId": "joiner_pub",
+              "inviteLink": "signed-groups://invite/eyJpbnZpdGVfc2VjcmV0IjogImludml0ZV9zZWNyZXRfMTIzIiwgIm5ldHdvcmtfaWQiOiAibmV0XzEyMyIsICJuZXR3b3JrX25hbWUiOiAiVGVzdCBOZXR3b3JrIiwgImdyb3VwX2lkIjogImdyb3VwXzEyMyJ9"
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "userId": "*",
+                "networkId": "net_123"
+              },
+              "newEvents": [
+                {
+                  "type": "user",
+                  "id": "*",
+                  "network_id": "net_123",
+                  "group_id": "group_123",
+                  "pubkey": "joiner_pub",
+                  "name": "Joiner",
+                  "invite_id": "*",
+                  "invite_signature": "*",
+                  "signature": "dummy_sig_dXNlcjoqOm5ldF8xMjM6Sm9pbmVyOmpvaW5lcl9wdWI=_by_joiner_pub"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "User who joins via invite has access to group channels",
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "bob_pub",
+                  "privkey": "bob_priv",
+                  "name": "Bob"
+                }
+              ],
+              "invites": [
+                {
+                  "id": "invite_general",
+                  "invite_pubkey": "invite_pub_3c2dc7663a29e15e61240f9fd005e643",
+                  "network_id": "fun_network",
+                  "group_id": "general_group"
+                }
+              ],
+              "groups": [
+                {
+                  "id": "general_group",
+                  "name": "General"
+                }
+              ],
+              "channels": [
+                {
+                  "id": "general_channel",
+                  "network_id": "fun_network",
+                  "group_id": "general_group",
+                  "name": "general"
+                }
+              ]
+            },
+            "params": {
+              "identityId": "bob_pub",
+              "inviteLink": "signed-groups://invite/eyJpbnZpdGVfc2VjcmV0IjogImludml0ZV9zZWNyZXRfMTIzIiwgIm5ldHdvcmtfaWQiOiAiZnVuX25ldHdvcmsiLCAibmV0d29ya19uYW1lIjogIkZ1biBOZXR3b3JrIiwgImdyb3VwX2lkIjogImdlbmVyYWxfZ3JvdXAifQ=="
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "userId": "*",
+                "networkId": "fun_network"
+              },
+              "newEvents": [
+                {
+                  "type": "user",
+                  "id": "*",
+                  "network_id": "fun_network",
+                  "group_id": "general_group",
+                  "pubkey": "bob_pub",
+                  "name": "Bob",
+                  "invite_id": "*",
+                  "invite_signature": "*",
+                  "signature": "dummy_sig_dXNlcjoqOmZ1bl9uZXR3b3JrOkJvYjpib2JfcHVi_by_bob_pub"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "list": {
+      "description": "List users",
+      "func": "list.execute",
+      "tests": [
+        {
+          "description": "List all users",
+          "given": {
+            "db": {
+              "users": [
+                {
+                  "id": "user1",
+                  "pubkey": "pub1",
+                  "network_id": "net1",
+                  "name": "Alice",
+                  "group_id": "group1"
+                },
+                {
+                  "id": "user2",
+                  "pubkey": "pub2",
+                  "network_id": "net1",
+                  "name": "Bob"
+                }
+              ]
+            },
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "users": [
+                  {
+                    "id": "user1",
+                    "pubkey": "pub1",
+                    "network_id": "net1",
+                    "name": "Alice",
+                    "group_id": "group1"
+                  },
+                  {
+                    "id": "user2",
+                    "pubkey": "pub2",
+                    "network_id": "net1",
+                    "name": "Bob"
+                  }
+                ]
+              }
+            },
+            "snapshot": {
+              "users": [
+                {
+                  "id": "user1",
+                  "pubkey": "pub1",
+                  "network_id": "net1",
+                  "name": "Alice",
+                  "group_id": "group1"
+                },
+                {
+                  "id": "user2",
+                  "pubkey": "pub2",
+                  "network_id": "net1",
+                  "name": "Bob"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "List users filtered by network",
+          "given": {
+            "db": {
+              "users": [
+                {
+                  "id": "user1",
+                  "pubkey": "pub1",
+                  "network_id": "net1",
+                  "name": "Alice"
+                },
+                {
+                  "id": "user2",
+                  "pubkey": "pub2",
+                  "network_id": "net1",
+                  "name": "Bob"
+                },
+                {
+                  "id": "user3",
+                  "pubkey": "pub3",
+                  "network_id": "net2",
+                  "name": "Charlie"
+                }
+              ]
+            },
+            "params": {
+              "network_id": "net1"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "users": [
+                  {
+                    "id": "user1",
+                    "pubkey": "pub1",
+                    "network_id": "net1",
+                    "name": "Alice"
+                  },
+                  {
+                    "id": "user2",
+                    "pubkey": "pub2",
+                    "network_id": "net1",
+                    "name": "Bob"
+                  }
+                ]
+              }
+            },
+            "snapshot": {
+              "users": [
+                {
+                  "id": "user1",
+                  "pubkey": "pub1",
+                  "network_id": "net1",
+                  "name": "Alice"
+                },
+                {
+                  "id": "user2",
+                  "pubkey": "pub2",
+                  "network_id": "net1",
+                  "name": "Bob"
+                },
+                {
+                  "id": "user3",
+                  "pubkey": "pub3",
+                  "network_id": "net2",
+                  "name": "Charlie"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Empty list when no users exist",
+          "given": {
+            "db": {
+              "users": []
+            },
+            "params": {}
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "users": []
+              }
+            },
+            "snapshot": {
+              "users": []
+            }
+          }
+        }
+      ]
+    }
+  }
+}

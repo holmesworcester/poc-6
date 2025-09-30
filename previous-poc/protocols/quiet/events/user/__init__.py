@@ -1,0 +1,1 @@
+"""User event type module - provides commands for user actions."""

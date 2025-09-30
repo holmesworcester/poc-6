@@ -1,0 +1,302 @@
+{
+  "type": "peer",
+  "projector": {
+    "description": "Validates peer has public key and adds to projection",
+    "func": "projector.project",
+    "tests": [
+      {
+        "given": {
+          "db": {
+            "identities": [
+              {
+                "pubkey": "test_identity",
+                "privkey": "test_privkey",
+                "name": "Test Identity"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {
+              "received_by": "test_identity"
+            },
+            "payload": {
+              "type": "peer",
+              "pubkey": "peer123",
+              "name": "Alice"
+            }
+          }
+        },
+        "then": {
+          "snapshot": {
+            "peers": [
+              {
+                "pubkey": "peer123",
+                "name": "Alice",
+                "joined_via": "direct",
+                "received_by": "test_identity",
+                "added_at": "*"
+              }
+            ],
+            "event_store": [
+              {
+                "event_type": "peer",
+                "data": {
+                  "type": "peer",
+                  "pubkey": "peer123",
+                  "name": "Alice"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "given": {
+          "db": {},
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "peer",
+              "pubkey": ""
+            }
+          }
+        },
+        "then": {
+          "snapshot": {
+            "peers": []
+          }
+        }
+      },
+      {
+        "description": "When peer event arrives, should remove unknown_peer flag from matching messages",
+        "given": {
+          "db": {
+            "messages": [
+              {
+                "text": "Hello from unknown",
+                "sender": "new_peer",
+                "timestamp": 1000,
+                "unknown_peer": true,
+                "received_by": "test_identity",
+                "event_id": "evt1",
+                "sig": "",
+                "created_at": 0
+              },
+              {
+                "text": "Another message",
+                "sender": "other_peer",
+                "timestamp": 2000,
+                "unknown_peer": true,
+                "received_by": "test_identity",
+                "event_id": "evt2",
+                "sig": "",
+                "created_at": 0
+              }
+            ],
+            "peers": []
+          },
+          "envelope": {
+            "metadata": {
+              "received_by": "test_identity"
+            },
+            "payload": {
+              "type": "peer",
+              "pubkey": "new_peer",
+              "name": "New Peer"
+            }
+          }
+        },
+        "then": {
+          "snapshot": {
+            "messages": [
+              {
+                "text": "Hello from unknown",
+                "sender": "new_peer",
+                "received_by": "test_identity",
+                "event_id": "*",
+                "created_at": "*",
+                "timestamp": "*",
+                "sig": "*",
+                "recipient": "*"
+              },
+              {
+                "text": "Another message",
+                "sender": "other_peer",
+                "received_by": "test_identity",
+                "unknown_peer": true,
+                "event_id": "*",
+                "created_at": "*",
+                "timestamp": "*",
+                "sig": "*",
+                "recipient": "*"
+              }
+            ],
+            "peers": [
+              {
+                "pubkey": "new_peer",
+                "name": "New Peer",
+                "joined_via": "direct",
+                "received_by": "test_identity",
+                "added_at": "*"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Self-generated peer event for own identity should have received_by set to self",
+        "given": {
+          "db": {
+            "identities": [
+              {
+                "pubkey": "alice_pubkey",
+                "privkey": "alice_privkey",
+                "name": "Alice"
+              },
+              {
+                "pubkey": "bob_pubkey",
+                "privkey": "bob_privkey",
+                "name": "Bob"
+              }
+            ],
+            "peers": []
+          },
+          "envelope": {
+            "metadata": {
+              "selfGenerated": true
+            },
+            "payload": {
+              "type": "peer",
+              "pubkey": "bob_pubkey",
+              "name": "Bob"
+            }
+          }
+        },
+        "then": {
+          "snapshot": {
+            "peers": [
+              {
+                "pubkey": "bob_pubkey",
+                "name": "Bob",
+                "joined_via": "direct",
+                "received_by": "bob_pubkey",
+                "added_at": "*"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Peer event should only remove unknown_peer flag for messages received by same identity",
+        "given": {
+          "db": {
+            "messages": [
+              {
+                "text": "Message for identity1",
+                "sender": "new_peer",
+                "timestamp": 1000,
+                "unknown_peer": true,
+                "received_by": "identity1",
+                "event_id": "evt1",
+                "sig": "",
+                "created_at": 0
+              },
+              {
+                "text": "Message for identity2",
+                "sender": "new_peer",
+                "timestamp": 2000,
+                "unknown_peer": true,
+                "received_by": "identity2",
+                "event_id": "evt2",
+                "sig": "",
+                "created_at": 0
+              }
+            ],
+            "peers": []
+          },
+          "envelope": {
+            "metadata": {
+              "received_by": "identity1"
+            },
+            "payload": {
+              "type": "peer",
+              "pubkey": "new_peer",
+              "name": "New Peer"
+            }
+          }
+        },
+        "then": {
+          "snapshot": {
+            "messages": [
+              {
+                "text": "Message for identity1",
+                "sender": "new_peer",
+                "received_by": "identity1",
+                "event_id": "*",
+                "created_at": "*",
+                "timestamp": "*",
+                "sig": "*",
+                "recipient": "*"
+              },
+              {
+                "text": "Message for identity2",
+                "sender": "new_peer",
+                "received_by": "identity2",
+                "unknown_peer": true,
+                "event_id": "*",
+                "created_at": "*",
+                "timestamp": "*",
+                "sig": "*",
+                "recipient": "*"
+              }
+            ],
+            "peers": [
+              {
+                "pubkey": "new_peer",
+                "name": "New Peer",
+                "joined_via": "direct",
+                "received_by": "identity1",
+                "added_at": "*"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "commands": {
+    "create": {
+      "description": "Creates a new peer event",
+      "func": "create.execute",
+      "tests": [
+        {
+          "given": {
+            "db": {},
+            "params": {
+              "publicKey": "peer456",
+              "name": "Bob"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "return": "Peer created",
+                "peer": {
+                  "pubkey": "peer456",
+                  "name": "Bob"
+                }
+              },
+              "newEvents": [
+                {
+                  "type": "peer",
+                  "pubkey": "peer456",
+                  "name": "Bob"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

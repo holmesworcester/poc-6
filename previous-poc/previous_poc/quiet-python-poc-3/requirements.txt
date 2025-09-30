@@ -1,0 +1,6 @@
+PyYAML
+rich
+textual
+pytest
+typing-extensions
+PyNaCl

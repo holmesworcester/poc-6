@@ -1,0 +1,473 @@
+{
+  "scenarios": {
+    "error_handling_tests": {
+      "description": "Test various error conditions and edge cases",
+      "steps": [
+        {
+          "name": "create_network_without_identity",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "Invalid Network"
+            }
+          },
+          "assertions": {
+            "status": 400
+          }
+        },
+        {
+          "name": "create_identity",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "test_user"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "identity_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "send_message_without_channel",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "user_id": "fake_user",
+              "peer_id": "fake_user",
+              "content": "This should fail"
+            }
+          },
+          "assertions": {
+            "status": 400
+          }
+        },
+        {
+          "name": "join_with_invalid_invite",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "invalid-invite-link",
+              "identityId": "${identity_id}"
+            }
+          },
+          "assertions": {
+            "status": 400
+          }
+        },
+        {
+          "name": "create_network_success",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "Valid Network",
+              "identityId": "${identity_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "create_channel_without_group",
+          "request": {
+            "method": "POST",
+            "path": "/channels",
+            "body": {
+              "name": "orphan-channel",
+              "network_id": "${network_id}",
+              "user_id": "${user_id}"
+            }
+          },
+          "assertions": {
+            "status": 400
+          }
+        },
+        {
+          "name": "list_messages_without_channel_id",
+          "request": {
+            "method": "GET",
+            "path": "/messages"
+          },
+          "assertions": {
+            "status": 400
+          }
+        }
+      ]
+    },
+    
+    "variable_capture_test": {
+      "description": "Test variable capture and substitution functionality",
+      "steps": [
+        {
+          "name": "create_alice",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_id": "$.identityId",
+              "alice_pubkey": "$.publicKey"
+            }
+          }
+        },
+        {
+          "name": "create_bob",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "bob"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "alice_creates_network_with_variable",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "test-network",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "channel_id": "$.defaultChannelId"
+            }
+          }
+        },
+        {
+          "name": "create_invite_with_captured_id",
+          "request": {
+            "method": "POST",
+            "path": "/invites",
+            "body": {
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "invite_code": "$.inviteLink"
+            }
+          }
+        },
+        {
+          "name": "bob_joins_with_captured_invite",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${invite_code}",
+              "identityId": "${bob_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "verify_captured_variables_work",
+          "request": {
+            "method": "GET",
+            "path": "/users?network_id=${network_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.users": {
+              "$length": 2
+            }
+          }
+        }
+      ]
+    },
+    
+    "list_endpoints_test": {
+      "description": "Test all list endpoints are working correctly",
+      "steps": [
+        {
+          "name": "list_identities_empty",
+          "request": {
+            "method": "GET",
+            "path": "/identities"
+          },
+          "assertions": {
+            "status": 200,
+            "body.identities": []
+          }
+        },
+        {
+          "name": "create_test_identity",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "test"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "test_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "tick_for_projection",
+          "request": {
+            "method": "POST",
+            "path": "/tick",
+            "body": {}
+          },
+          "assertions": {
+            "status": 200
+          }
+        },
+        {
+          "name": "list_identities_after_create",
+          "request": {
+            "method": "GET",
+            "path": "/identities"
+          },
+          "assertions": {
+            "status": 200,
+            "body.identities": {
+              "$length": 1
+            },
+            "body.identities[0].name": "test"
+          }
+        },
+        {
+          "name": "create_network",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "test-network",
+              "identityId": "${test_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "user_id": "$.userId",
+              "group_id": "$.firstGroupId"
+            }
+          }
+        },
+        {
+          "name": "list_networks",
+          "request": {
+            "method": "GET",
+            "path": "/networks"
+          },
+          "assertions": {
+            "status": 200,
+            "body.networks": {
+              "$length": 1
+            },
+            "body.networks[0].name": "test-network"
+          }
+        },
+        {
+          "name": "list_users",
+          "request": {
+            "method": "GET",
+            "path": "/users"
+          },
+          "assertions": {
+            "status": 200,
+            "body.users": {
+              "$length": 1
+            }
+          }
+        },
+        {
+          "name": "list_groups",
+          "request": {
+            "method": "GET",
+            "path": "/groups"
+          },
+          "assertions": {
+            "status": 200,
+            "body.groups": {
+              "$length": 1
+            }
+          }
+        },
+        {
+          "name": "list_channels",
+          "request": {
+            "method": "GET",
+            "path": "/channels"
+          },
+          "assertions": {
+            "status": 200,
+            "body.channels": {
+              "$length": 1
+            }
+          }
+        },
+        {
+          "name": "create_invite",
+          "request": {
+            "method": "POST",
+            "path": "/invites",
+            "body": {
+              "identityId": "${test_id}"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "list_invites",
+          "request": {
+            "method": "GET",
+            "path": "/invites"
+          },
+          "assertions": {
+            "status": 200,
+            "body.invites": {
+              "$length": 1
+            }
+          }
+        }
+      ]
+    },
+    
+    "command_parity_test": {
+      "description": "Test all commands that should work in both CLI and TUI modes",
+      "steps": [
+        {
+          "name": "create_identity_alice",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "network_creation",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "test",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "user_id": "$.userId",
+              "channel_id": "$.defaultChannelId",
+              "group_id": "$.firstGroupId"
+            }
+          }
+        },
+        {
+          "name": "invite_generation",
+          "request": {
+            "method": "POST",
+            "path": "/invites",
+            "body": {
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "channel_creation",
+          "request": {
+            "method": "POST",
+            "path": "/channels",
+            "body": {
+              "name": "general",
+              "network_id": "${network_id}",
+              "user_id": "${user_id}",
+              "group_id": "${group_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "new_channel_id": "$.channelId"
+            }
+          }
+        },
+        {
+          "name": "group_creation",
+          "request": {
+            "method": "POST",
+            "path": "/groups",
+            "body": {
+              "name": "developers",
+              "user_id": "${user_id}"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "message_sending",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${channel_id}",
+              "user_id": "${user_id}",
+              "peer_id": "${user_id}",
+              "content": "Test message"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        }
+      ]
+    }
+  }
+}

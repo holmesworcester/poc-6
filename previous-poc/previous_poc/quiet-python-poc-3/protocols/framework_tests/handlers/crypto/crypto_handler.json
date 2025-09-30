@@ -1,0 +1,482 @@
+{
+  "jsonTestsOnly": true,
+  "commands": {
+    "test_sign_verify": {
+      "input": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "signature",
+          "verified",
+          "publicKey",
+          "privateKey"
+        ],
+        "properties": {
+          "signature": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          },
+          "publicKey": {
+            "type": "string"
+          },
+          "privateKey": {
+            "type": "string"
+          }
+        }
+      },
+      "tests": [
+        {
+          "description": "Sign and verify data successfully (dummy mode)",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Hello, world!"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "signature": "dummy_sig_315f5bdb76d078c4",
+              "verified": true,
+              "publicKey": "dummy_pubkey_test-user",
+              "privateKey": "dummy_privkey_test-user"
+            }
+          }
+        },
+        {
+          "description": "Sign and verify data successfully (real crypto)",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Hello, world!"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "signature": "e91aa4ca11816de9e3a543bbc66fa74a7c58869dee39b275c669767c241b9bc74e7cac6675920ab0be21072845119e1718686a21c8cfcda3a4017131856cb706",
+              "verified": true,
+              "publicKey": "02eb23efde706a6fb52ab3acfa3bec820dc95dc637fc96fd420cf265451de0ec",
+              "privateKey": "a6fd3e8b44e698448f896ec0468f5462bb5edfe088df19bbab1e58db09b756d9"
+            }
+          }
+        }
+      ]
+    },
+    "test_encrypt_decrypt": {
+      "input": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "encrypted",
+          "decrypted",
+          "matches"
+        ],
+        "properties": {
+          "encrypted": {
+            "type": "object",
+            "required": [
+              "ciphertext",
+              "nonce",
+              "algorithm"
+            ],
+            "properties": {
+              "ciphertext": {
+                "type": "string"
+              },
+              "nonce": {
+                "type": "string"
+              },
+              "algorithm": {
+                "type": "string"
+              }
+            }
+          },
+          "decrypted": {
+            "type": "string"
+          },
+          "matches": {
+            "type": "boolean"
+          }
+        }
+      },
+      "tests": [
+        {
+          "description": "Encrypt and decrypt data successfully (dummy mode)",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Secret message"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "encrypted": {
+                "ciphertext": "dummy_encrypted_Secret message",
+                "nonce": "dummy_nonce",
+                "algorithm": "dummy"
+              },
+              "decrypted": "Secret message",
+              "matches": true
+            }
+          }
+        },
+        {
+          "description": "Encrypt and decrypt with provided key (real crypto)",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Secret message",
+              "key": "c954d2c2ec1062592b701c8002d76bd4e23a1597cb45ad1fb4b5b27a913274ce"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "encrypted": {
+                "ciphertext": "8f4a2b1e3d9c7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b",
+                "nonce": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
+                "algorithm": "nacl_secretbox"
+              },
+              "decrypted": "Secret message",
+              "matches": true
+            }
+          }
+        },
+        {
+          "description": "Encrypt longer message with special characters",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "This is a longer message with special characters: !@#$%^&*()",
+              "key": "d6f8a3b2c1e9d7f5a4b3c2d1e0f9a8b7c6d5e4f3b2c1d0e9f8a7b6c5d4e3f2a1"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "encrypted": {
+                "ciphertext": "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b",
+                "nonce": "f1e2d3c4b5a6978869d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4",
+                "algorithm": "nacl_secretbox"
+              },
+              "decrypted": "This is a longer message with special characters: !@#$%^&*()",
+              "matches": true
+            }
+          }
+        },
+        {
+          "description": "Decrypt with wrong key fails",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Secret message",
+              "key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "encrypted": {
+                "ciphertext": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+                "nonce": "d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a6f7e8d9c0b1a2f3e4",
+                "algorithm": "nacl_secretbox"
+              },
+              "decrypted": "Secret message",
+              "matches": true
+            }
+          }
+        }
+      ]
+    },
+    "test_hash": {
+      "input": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "blake2b"
+        ],
+        "properties": {
+          "blake2b": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{128}$"
+          }
+        }
+      },
+      "tests": [
+        {
+          "description": "Hash data with blake2b",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "test data"
+            }
+          },
+          "then": {
+            "return": {
+              "blake2b": "a71079d42853dea26e453004338670a53814b78137ffbed07603a41d76a483aa9bc33b582f77d30a65e6f29a896c0411f38312e1d66e0bf16386c86a89bea572"
+            }
+          }
+        },
+        {
+          "description": "Hash empty string with blake2b",
+          "given": {
+            "db": {},
+            "params": {
+              "data": ""
+            }
+          },
+          "then": {
+            "return": {
+              "blake2b": "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+            }
+          }
+        }
+      ]
+    },
+    "test_seal_unseal": {
+      "input": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "sealed",
+          "unsealed",
+          "matches",
+          "publicKey"
+        ],
+        "properties": {
+          "sealed": {
+            "type": "string"
+          },
+          "unsealed": {
+            "type": "string"
+          },
+          "matches": {
+            "type": "boolean"
+          },
+          "publicKey": {
+            "type": "string"
+          }
+        }
+      },
+      "tests": [
+        {
+          "description": "Seal and unseal data successfully (dummy mode)",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Anonymous message"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "sealed": "dummy_sealed_Anonymous message_for_dummy_pub",
+              "unsealed": "Anonymous message",
+              "matches": true,
+              "publicKey": "dummy_pubkey_test-user"
+            }
+          }
+        },
+        {
+          "description": "Seal and unseal data successfully (real crypto)",
+          "given": {
+            "db": {},
+            "params": {
+              "data": "Anonymous message"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "sealed": "*",
+              "unsealed": "Anonymous message",
+              "matches": true,
+              "publicKey": "f368c3d5be7b688ba852447dda7181ca3875e06f47d574d693775df68b3c278d"
+            }
+          }
+        }
+      ]
+    },
+    "test_kdf": {
+      "input": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "salt": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "derived_key",
+          "salt",
+          "algorithm"
+        ],
+        "properties": {
+          "derived_key": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "salt": {
+            "type": "string",
+            "pattern": "^[a-f0-9]+$"
+          },
+          "algorithm": {
+            "type": "string"
+          }
+        }
+      },
+      "tests": [
+        {
+          "description": "Derive key from password (dummy mode)",
+          "given": {
+            "db": {},
+            "params": {
+              "password": "my-secret-password",
+              "salt": "64756d6d795f73616c74"
+            },
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            }
+          },
+          "then": {
+            "return": {
+              "derived_key": "83ffeb2eace34d074a0a3e656b0d90ed3e08e83f26c18f7c6ab30f56a7c24e6b",
+              "salt": "64756d6d795f73616c74",
+              "algorithm": "dummy_kdf"
+            }
+          }
+        },
+        {
+          "description": "Derive key from password with fixed salt (real crypto)",
+          "given": {
+            "db": {},
+            "params": {
+              "password": "my-secret-password",
+              "salt": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "derived_key": "2d3f8e1a9c7b5d4f6e2a8c4b7d9f3e5a1c8b6d4f2e9a7c5b3d1f8e6a4c2b9d7f",
+              "salt": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              "algorithm": "argon2id"
+            }
+          }
+        },
+        {
+          "description": "Derive key from password with random salt (real crypto)",
+          "given": {
+            "db": {},
+            "params": {
+              "password": "another-password"
+            },
+            "identity": "test-user",
+            "env": {
+              "CRYPTO_MODE": "real"
+            }
+          },
+          "then": {
+            "return": {
+              "derived_key": "*",
+              "salt": "*",
+              "algorithm": "argon2id"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

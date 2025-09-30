@@ -1,0 +1,1299 @@
+{
+  "type": "message",
+  "projector": {
+    "description": "Projects message events - used for testing concurrency",
+    "func": "projector.project",
+    "tests": [
+      {
+        "description": "Message blocked when missing peer_id",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_no_peer",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "user_id": "user_123",
+              "content": "Hello",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfbm9fcGVlcjpjaGFubmVsXzEyMzp1c2VyXzEyMzp1c2VyXzEyMzpIZWxsbw==_by_user_123",
+              "peer_id": "user_123"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": []
+          }
+        }
+      },
+      {
+        "description": "Message blocked when peer_id doesn't match user_id and peer is not linked",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_mismatch",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "peer_456",
+              "user_id": "user_123",
+              "content": "Hello",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfbWlzbWF0Y2g6Y2hhbm5lbF8xMjM6dXNlcl8xMjM6cGVlcl80NTY6SGVsbG8=_by_peer_456"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": []
+          }
+        }
+      },
+      {
+        "description": "Message from linked device is accepted",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ],
+            "links": [
+              {
+                "id": "link_123",
+                "peer_id": "new_device_456",
+                "user_id": "user_123",
+                "link_invite_id": "invite_123",
+                "peer_pubkey": "new_device_456"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_from_linked",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "new_device_456",
+              "user_id": "user_123",
+              "content": "Hello from linked device",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfZnJvbV9saW5rZWQ6Y2hhbm5lbF8xMjM6dXNlcl8xMjM6bmV3X2RldmljZV80NTY6SGVsbG8gZnJvbSBsaW5rZWQgZGV2aWNl_by_new_device_456"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_from_linked",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "new_device_456",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message blocked when signature doesn't match peer_id",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ],
+            "links": [
+              {
+                "id": "link_123",
+                "peer_id": "new_device_456",
+                "user_id": "user_123",
+                "link_invite_id": "invite_123",
+                "peer_pubkey": "new_device_456"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_bad_sig",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "new_device_456",
+              "user_id": "user_123",
+              "content": "Bad signature",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfYmFkX3NpZzpjaGFubmVsXzEyMzp1c2VyXzEyMzpuZXdfZGV2aWNlXzQ1NjpCYWQgc2lnbmF0dXJl_by_other_device"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": []
+          }
+        }
+      },
+      {
+        "description": "Self-message (peer_id == user_id) is accepted",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_123",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "user_123",
+              "user_id": "user_123",
+              "content": "Hello",
+              "text": "Hello",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfMTIzOmNoYW5uZWxfMTIzOnVzZXJfMTIzOnVzZXJfMTIzOkhlbGxv_by_user_123"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_123",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "user_123",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message blocked when peer_id is user's pubkey instead of user_id",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_wrong_peer",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "author_pub",
+              "user_id": "user_123",
+              "content": "Using pubkey as peer_id",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfd3JvbmdfcGVlcjpjaGFubmVsXzEyMzp1c2VyXzEyMzphdXRob3JfcHViOlVzaW5nIHB1YmtleSBhcyBwZWVyX2lk_by_author_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": []
+          }
+        }
+      },
+      {
+        "description": "Message from unknown author is blocked",
+        "given": {
+          "db": {
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_456",
+              "channel_id": "channel_123",
+              "author_id": "unknown_user",
+              "peer_id": "unknown_user",
+              "user_id": "unknown_user",
+              "content": "Hello from unknown",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfNDU2OmNoYW5uZWxfMTIzOnVua25vd25fdXNlcjp1bmtub3duX3VzZXI6SGVsbG8gZnJvbSB1bmtub3du_by_unknown_pub"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": []
+          }
+        }
+      },
+      {
+        "description": "Message blocked when signature is from non-user",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_fake",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "user_123",
+              "user_id": "user_123",
+              "content": "Fake message",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfZmFrZTpjaGFubmVsXzEyMzp1c2VyXzEyMzp1c2VyXzEyMzpGYWtlIG1lc3NhZ2U=_by_user_123"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": []
+          }
+        }
+      },
+      {
+        "description": "Idempotency - duplicate message doesn't create duplicate state",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ],
+            "messages": [
+              {
+                "id": "msg_123",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "user_123",
+                "user_id": "user_123",
+                "content": "Hello",
+                "created_at_ms": 0
+              }
+            ],
+            "event_store": [
+              {
+                "event_type": "message",
+                "data": {
+                  "type": "message",
+                  "id": "msg_123",
+                  "channel_id": "channel_123",
+                  "author_id": "user_123",
+                  "peer_id": "user_123",
+                  "user_id": "user_123",
+                  "content": "Hello",
+                  "signature": "dummy_sig_bWVzc2FnZTptc2dfMTIzOmNoYW5uZWxfMTIzOnVzZXJfMTIzOnVzZXJfMTIzOkhlbGxv_by_user_123"
+                },
+                "metadata": {}
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_123",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "user_123",
+              "user_id": "user_123",
+              "content": "Hello",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfMTIzOmNoYW5uZWxfMTIzOnVzZXJfMTIzOnVzZXJfMTIzOkhlbGxv_by_user_123"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_123",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "user_123",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Lost dependency - message blocked when author doesn't exist yet",
+        "given": {
+          "db": {
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_789",
+              "channel_id": "channel_123",
+              "author_id": "new_user",
+              "peer_id": "new_user",
+              "user_id": "new_user",
+              "content": "Message from new user",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfNzg5OmNoYW5uZWxfMTIzOm5ld191c2VyOm5ld191c2VyOk1lc3NhZ2UgZnJvbSBuZXcgdXNlcg==_by_new_user"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [],
+            "blocked": [
+              {
+                "event_id": "msg_789",
+                "blocked_by_id": "new_user",
+                "event_type": "message"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message blocked when author not in channel's group",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              },
+              {
+                "id": "user_456",
+                "pubkey": "user_456",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Developers",
+                "created_by": "user_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123",
+                "group_id": "group_123"
+              }
+            ],
+            "adds": []
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_blocked",
+              "channel_id": "channel_123",
+              "author_id": "user_456",
+              "peer_id": "user_456",
+              "user_id": "user_456",
+              "content": "I'm not in this group!",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfYmxvY2tlZDpjaGFubmVsXzEyMzp1c2VyXzQ1Njp1c2VyXzQ1NjpJJ20gbm90IGluIHRoaXMgZ3JvdXAh_by_user_456"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [],
+            "blocked": [
+              {
+                "event_id": "msg_blocked",
+                "blocked_by_id": "group_membership_group_123_user_456",
+                "event_type": "message"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message allowed when author is group creator",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Developers",
+                "created_by": "user_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123",
+                "group_id": "group_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_from_creator",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "user_123",
+              "user_id": "user_123",
+              "content": "Hello from group creator",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfZnJvbV9jcmVhdG9yOmNoYW5uZWxfMTIzOnVzZXJfMTIzOnVzZXJfMTIzOkhlbGxvIGZyb20gZ3JvdXAgY3JlYXRvcg==_by_user_123"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_from_creator",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "user_123",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message allowed when author was added to group",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              },
+              {
+                "id": "user_456",
+                "pubkey": "user_456",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "name": "Developers",
+                "created_by": "user_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123",
+                "group_id": "group_123"
+              }
+            ],
+            "adds": [
+              {
+                "id": "add_123",
+                "group_id": "group_123",
+                "user_id": "user_456",
+                "added_by": "user_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_from_member",
+              "channel_id": "channel_123",
+              "author_id": "user_456",
+              "peer_id": "user_456",
+              "user_id": "user_456",
+              "content": "Hello from added member",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfZnJvbV9tZW1iZXI6Y2hhbm5lbF8xMjM6dXNlcl80NTY6dXNlcl80NTY6SGVsbG8gZnJvbSBhZGRlZCBtZW1iZXI=_by_user_456"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_from_member",
+                "channel_id": "channel_123",
+                "author_id": "user_456",
+                "peer_id": "user_456",
+                "user_id": "user_456"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message from future linked device is accepted",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "author_pub",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ],
+            "link_invites": [
+              {
+                "id": "link_invite_789",
+                "link_invite_pubkey": "link_pub_789",
+                "user_id": "user_123"
+              }
+            ],
+            "links": [
+              {
+                "id": "link_789",
+                "peer_id": "future_device_789",
+                "user_id": "user_123",
+                "link_invite_id": "link_invite_789",
+                "peer_pubkey": "future_device_789"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_from_future_linked",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "future_device_789",
+              "user_id": "user_123",
+              "content": "Message sent from linked device",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfZnJvbV9mdXR1cmVfbGlua2VkOmNoYW5uZWxfMTIzOnVzZXJfMTIzOmZ1dHVyZV9kZXZpY2VfNzg5Ok1lc3NhZ2Ugc2VudCBmcm9tIGxpbmtlZCBkZXZpY2U=_by_future_device_789"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_from_future_linked",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "future_device_789",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Self-message with dummy crypto signature",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_123",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "created_by": "user_123"
+              }
+            ],
+            "user_groups": [
+              {
+                "user_id": "user_123",
+                "group_id": "group_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_real_123",
+              "channel_id": "channel_123",
+              "author_id": "user_123",
+              "peer_id": "user_123",
+              "user_id": "user_123",
+              "content": "Hello with dummy crypto",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfcmVhbF8xMjM6Y2hhbm5lbF8xMjM6dXNlcl8xMjM6dXNlcl8xMjM6SGVsbG8gd2l0aCBkdW1teSBjcnlwdG8=_by_user_123"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_real_123",
+                "channel_id": "channel_123",
+                "author_id": "user_123",
+                "peer_id": "user_123",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Message accepted with valid signature (dummy crypto mode)",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_456",
+                "pubkey": "user_456",
+                "network_id": "net_123"
+              }
+            ],
+            "channels": [
+              {
+                "id": "channel_456",
+                "network_id": "net_123"
+              }
+            ],
+            "groups": [
+              {
+                "id": "group_123",
+                "created_by": "user_456"
+              }
+            ],
+            "user_groups": [
+              {
+                "user_id": "user_456",
+                "group_id": "group_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "message",
+              "id": "msg_wildcard",
+              "channel_id": "channel_456",
+              "author_id": "user_456",
+              "peer_id": "user_456",
+              "user_id": "user_456",
+              "content": "Test message",
+              "signature": "dummy_sig_bWVzc2FnZTptc2dfd2lsZGNhcmQ6Y2hhbm5lbF80NTY6dXNlcl80NTY6dXNlcl80NTY6VGVzdCBtZXNzYWdl_by_user_456"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "messages": [
+              {
+                "id": "msg_wildcard",
+                "channel_id": "channel_456",
+                "author_id": "user_456",
+                "peer_id": "user_456",
+                "user_id": "user_456"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "commands": {
+    "create": {
+      "description": "Creates a new message",
+      "func": "create.execute",
+      "tests": [
+        {
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "user_pub",
+                  "privkey": "user_priv",
+                  "name": "Alice"
+                }
+              ],
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "user_pub",
+                  "network_id": "net_123",
+                  "name": "Alice"
+                }
+              ],
+              "channels": [
+                {
+                  "id": "channel_123",
+                  "network_id": "net_123",
+                  "name": "general"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "channel_123",
+              "user_id": "user_123",
+              "peer_id": "user_123",
+              "content": "Hello, world!"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "messageId": "*",
+                "channelId": "channel_123"
+              },
+              "newEvents": [
+                {
+                  "type": "message",
+                  "id": "*",
+                  "channel_id": "channel_123",
+                  "author_id": "user_123",
+                  "peer_id": "user_123",
+                  "user_id": "user_123",
+                  "content": "Hello, world!",
+                  "text": "Hello, world!",
+                  "signature": "dummy_sig_bWVzc2FnZToqOmNoYW5uZWxfMTIzOnVzZXJfMTIzOnVzZXJfMTIzOkhlbGxvLCB3b3JsZCE=_by_user_123"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Message from linked device",
+          "given": {
+            "db": {
+              "identities": [
+                {
+                  "pubkey": "device_456",
+                  "privkey": "device_456_priv",
+                  "name": "Alice Device"
+                }
+              ],
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "user_pub",
+                  "network_id": "net_123",
+                  "name": "Alice"
+                }
+              ],
+              "channels": [
+                {
+                  "id": "channel_123",
+                  "network_id": "net_123"
+                }
+              ],
+              "links": [
+                {
+                  "id": "link_123",
+                  "peer_id": "device_456",
+                  "user_id": "user_123",
+                  "link_invite_id": "invite_123",
+                  "peer_pubkey": "device_456"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "channel_123",
+              "user_id": "user_123",
+              "peer_id": "device_456",
+              "content": "From my other device"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "messageId": "*",
+                "channelId": "channel_123"
+              },
+              "newEvents": [
+                {
+                  "type": "message",
+                  "id": "*",
+                  "channel_id": "channel_123",
+                  "author_id": "user_123",
+                  "peer_id": "device_456",
+                  "user_id": "user_123",
+                  "content": "From my other device",
+                  "signature": "dummy_sig_bWVzc2FnZToqOmNoYW5uZWxfMTIzOnVzZXJfMTIzOmRldmljZV80NTY6RnJvbSBteSBvdGhlciBkZXZpY2U=_by_device_456"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Fails when channel doesn't exist",
+          "given": {
+            "db": {
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "user_pub",
+                  "network_id": "net_123"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "unknown_channel",
+              "user_id": "user_123",
+              "peer_id": "user_pub",
+              "content": "Hello"
+            }
+          },
+          "then": {
+            "error": "Channel unknown_channel not found"
+          }
+        },
+        {
+          "description": "Fails when peer not authorized",
+          "given": {
+            "db": {
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "user_pub",
+                  "network_id": "net_123"
+                }
+              ],
+              "channels": [
+                {
+                  "id": "channel_123",
+                  "network_id": "net_123"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "channel_123",
+              "user_id": "user_123",
+              "peer_id": "unauthorized_peer",
+              "content": "Hello"
+            }
+          },
+          "then": {
+            "error": "Peer unauthorized_peer is not authorized for user user_123"
+          }
+        },
+        {
+          "description": "Fails when using pubkey as peer_id for self-message",
+          "given": {
+            "db": {
+              "users": [
+                {
+                  "id": "user_123",
+                  "pubkey": "user_pub",
+                  "network_id": "net_123"
+                }
+              ],
+              "channels": [
+                {
+                  "id": "channel_123",
+                  "network_id": "net_123"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "channel_123",
+              "user_id": "user_123",
+              "peer_id": "user_pub",
+              "content": "Hello"
+            }
+          },
+          "then": {
+            "error": "Peer user_pub is not authorized for user user_123"
+          }
+        }
+      ]
+    },
+    "list": {
+      "description": "List messages in a channel",
+      "func": "list.execute",
+      "tests": [
+        {
+          "description": "List messages from channel",
+          "given": {
+            "db": {
+              "messages": [
+                {
+                  "id": "msg1",
+                  "channel_id": "chan123",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "First message",
+                  "created_at_ms": 1000,
+                  "author_id": "user1"
+                },
+                {
+                  "id": "msg2",
+                  "channel_id": "chan123",
+                  "user_id": "user2",
+                  "peer_id": "user2",
+                  "content": "Second message",
+                  "created_at_ms": 2000,
+                  "author_id": "user2"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "chan123"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "messages": [
+                  {
+                    "id": "msg1",
+                    "channel_id": "chan123",
+                    "user_id": "user1",
+                    "peer_id": "user1",
+                    "content": "First message",
+                    "created_at_ms": 1000,
+                    "author_id": "user1"
+                  },
+                  {
+                    "id": "msg2",
+                    "channel_id": "chan123",
+                    "user_id": "user2",
+                    "peer_id": "user2",
+                    "content": "Second message",
+                    "created_at_ms": 2000,
+                    "author_id": "user2"
+                  }
+                ]
+              }
+            },
+            "snapshot": {
+              "messages": [
+                {
+                  "id": "msg1",
+                  "channel_id": "chan123",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "First message",
+                  "created_at_ms": 1000,
+                  "author_id": "user1"
+                },
+                {
+                  "id": "msg2",
+                  "channel_id": "chan123",
+                  "user_id": "user2",
+                  "peer_id": "user2",
+                  "content": "Second message",
+                  "created_at_ms": 2000,
+                  "author_id": "user2"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "List messages with limit",
+          "given": {
+            "db": {
+              "messages": [
+                {
+                  "id": "msg1",
+                  "channel_id": "chan123",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "First message",
+                  "created_at_ms": 1000,
+                  "author_id": "user1"
+                },
+                {
+                  "id": "msg2",
+                  "channel_id": "chan123",
+                  "user_id": "user2",
+                  "peer_id": "user2",
+                  "content": "Second message",
+                  "created_at_ms": 2000,
+                  "author_id": "user2"
+                },
+                {
+                  "id": "msg3",
+                  "channel_id": "chan123",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "Third message",
+                  "created_at_ms": 3000,
+                  "author_id": "user1"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "chan123",
+              "limit": 2
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "messages": [
+                  {
+                    "id": "msg2",
+                    "channel_id": "chan123",
+                    "user_id": "user2",
+                    "peer_id": "user2",
+                    "content": "Second message",
+                    "created_at_ms": 2000,
+                    "author_id": "user2"
+                  },
+                  {
+                    "id": "msg3",
+                    "channel_id": "chan123",
+                    "user_id": "user1",
+                    "peer_id": "user1",
+                    "content": "Third message",
+                    "created_at_ms": 3000,
+                    "author_id": "user1"
+                  }
+                ]
+              }
+            },
+            "snapshot": {
+              "messages": [
+                {
+                  "id": "msg1",
+                  "channel_id": "chan123",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "First message",
+                  "created_at_ms": 1000,
+                  "author_id": "user1"
+                },
+                {
+                  "id": "msg2",
+                  "channel_id": "chan123",
+                  "user_id": "user2",
+                  "peer_id": "user2",
+                  "content": "Second message",
+                  "created_at_ms": 2000,
+                  "author_id": "user2"
+                },
+                {
+                  "id": "msg3",
+                  "channel_id": "chan123",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "Third message",
+                  "created_at_ms": 3000,
+                  "author_id": "user1"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Empty list when channel has no messages",
+          "given": {
+            "db": {
+              "messages": [
+                {
+                  "id": "msg1",
+                  "channel_id": "other_chan",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "Message in different channel",
+                  "created_at_ms": 1000,
+                  "author_id": "user1"
+                }
+              ]
+            },
+            "params": {
+              "channel_id": "chan123"
+            }
+          },
+          "then": {
+            "return": {
+              "api_response": {
+                "messages": []
+              }
+            },
+            "snapshot": {
+              "messages": [
+                {
+                  "id": "msg1",
+                  "channel_id": "other_chan",
+                  "user_id": "user1",
+                  "peer_id": "user1",
+                  "content": "Message in different channel",
+                  "created_at_ms": 1000,
+                  "author_id": "user1"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Error when channel_id missing",
+          "given": {
+            "db": {
+              "messages": []
+            },
+            "params": {}
+          },
+          "then": {
+            "error": "channel_id is required"
+          }
+        }
+      ]
+    }
+  }
+}

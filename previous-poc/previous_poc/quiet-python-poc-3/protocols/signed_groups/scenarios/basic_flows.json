@@ -1,0 +1,572 @@
+{
+  "scenarios": {
+    "single_user_creates_network": {
+      "description": "A single user creates a network and sends a message",
+      "steps": [
+        {
+          "name": "create_identity",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "body.name": "Alice",
+            "capture": {
+              "alice_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "create_network",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "Alice's Network",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "body.name": "Alice's Network",
+            "capture": {
+              "network_id": "$.networkId",
+              "general_group_id": "$.firstGroupId",
+              "general_channel_id": "$.defaultChannelId"
+            }
+          }
+        },
+        {
+          "name": "create_invite",
+          "request": {
+            "method": "POST",
+            "path": "/invites",
+            "body": {
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "invite_link": "$.inviteLink"
+            }
+          }
+        },
+        {
+          "name": "join_network_as_alice",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${invite_link}",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "run_tick",
+          "request": {
+            "method": "POST",
+            "path": "/tick",
+            "body": {
+              "time_now_ms": 1000
+            }
+          },
+          "assertions": {
+            "status": 200
+          }
+        },
+        {
+          "name": "send_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${general_channel_id}",
+              "user_id": "${alice_user_id}",
+              "peer_id": "${alice_user_id}",
+              "content": "Hello, world!"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "body.channelId": "${general_channel_id}",
+            "capture": {
+              "message_id": "$.messageId"
+            }
+          }
+        },
+        {
+          "name": "list_messages",
+          "request": {
+            "method": "GET",
+            "path": "/messages?channel_id=${general_channel_id}"
+          },
+          "assertions": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    "two_users_messaging": {
+      "description": "Two users join a network and exchange messages",
+      "steps": [
+        {
+          "name": "create_alice",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "create_bob",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Bob"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "alice_creates_network",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "Shared Network",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "general_group_id": "$.firstGroupId",
+              "general_channel_id": "$.defaultChannelId"
+            }
+          }
+        },
+        {
+          "name": "alice_creates_invite",
+          "request": {
+            "method": "POST",
+            "path": "/invites",
+            "body": {
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_invite": "$.inviteLink"
+            }
+          }
+        },
+        {
+          "name": "alice_joins",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${alice_invite}",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "tick_after_alice_joins",
+          "request": {
+            "method": "POST",
+            "path": "/tick",
+            "body": {
+              "time_now_ms": 2000
+            }
+          },
+          "assertions": {
+            "status": 200
+          }
+        },
+        {
+          "name": "bob_joins",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${alice_invite}",
+              "identityId": "${bob_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "tick_after_bob_joins",
+          "request": {
+            "method": "POST",
+            "path": "/tick",
+            "body": {
+              "time_now_ms": 3000
+            }
+          },
+          "assertions": {
+            "status": 200
+          }
+        },
+        {
+          "name": "alice_sends_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${general_channel_id}",
+              "user_id": "${alice_user_id}",
+              "peer_id": "${alice_user_id}",
+              "content": "Hi Bob!"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "bob_sends_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${general_channel_id}",
+              "user_id": "${bob_user_id}",
+              "peer_id": "${bob_user_id}",
+              "content": "Hi Alice!"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "list_messages",
+          "request": {
+            "method": "GET",
+            "path": "/messages?channel_id=${general_channel_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 2
+            }
+          }
+        }
+      ]
+    },
+    "group_membership_flow": {
+      "description": "Create a new group and add users to it",
+      "steps": [
+        {
+          "name": "create_alice",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "create_bob",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Bob"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "create_charlie",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Charlie"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "charlie_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "alice_creates_network",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "Team Network",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "general_group_id": "$.firstGroupId"
+            }
+          }
+        },
+        {
+          "name": "create_invite",
+          "request": {
+            "method": "POST",
+            "path": "/invites",
+            "body": {
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "invite_link": "$.inviteLink"
+            }
+          }
+        },
+        {
+          "name": "alice_joins",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${invite_link}",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "bob_joins",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${invite_link}",
+              "identityId": "${bob_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "bob_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "charlie_joins",
+          "request": {
+            "method": "POST",
+            "path": "/users/join",
+            "body": {
+              "inviteLink": "${invite_link}",
+              "identityId": "${charlie_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "charlie_user_id": "$.userId"
+            }
+          }
+        },
+        {
+          "name": "tick_after_joins",
+          "request": {
+            "method": "POST",
+            "path": "/tick",
+            "body": {
+              "time_now_ms": 4000
+            }
+          },
+          "assertions": {
+            "status": 200
+          }
+        },
+        {
+          "name": "alice_creates_dev_group",
+          "request": {
+            "method": "POST",
+            "path": "/groups",
+            "body": {
+              "name": "Dev Team",
+              "user_id": "${alice_user_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "dev_group_id": "$.groupId"
+            }
+          }
+        },
+        {
+          "name": "alice_adds_bob_to_dev_group",
+          "request": {
+            "method": "POST",
+            "path": "/group-memberships",
+            "body": {
+              "user_id": "${bob_user_id}",
+              "group_id": "${dev_group_id}",
+              "added_by": "${alice_user_id}"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "tick_after_add",
+          "request": {
+            "method": "POST",
+            "path": "/tick",
+            "body": {
+              "time_now_ms": 5000
+            }
+          },
+          "assertions": {
+            "status": 200
+          }
+        },
+        {
+          "name": "create_dev_channel",
+          "request": {
+            "method": "POST",
+            "path": "/channels",
+            "body": {
+              "name": "dev-chat",
+              "network_id": "${network_id}",
+              "user_id": "${alice_user_id}",
+              "group_id": "${dev_group_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "dev_channel_id": "$.channelId"
+            }
+          }
+        },
+        {
+          "name": "alice_messages_in_dev_channel",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${dev_channel_id}",
+              "user_id": "${alice_user_id}",
+              "peer_id": "${alice_user_id}",
+              "content": "Welcome to the dev team!"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "bob_messages_in_dev_channel",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${dev_channel_id}",
+              "user_id": "${bob_user_id}",
+              "peer_id": "${bob_user_id}",
+              "content": "Thanks for adding me!"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "verify_dev_channel_messages",
+          "request": {
+            "method": "GET",
+            "path": "/messages?channel_id=${dev_channel_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 2
+            }
+          }
+        },
+        {
+          "name": "list_users_in_network",
+          "request": {
+            "method": "GET",
+            "path": "/users?network_id=${network_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.users": {
+              "$length": 4
+            }
+          }
+        }
+      ]
+    }
+  }
+}

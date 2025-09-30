@@ -1,0 +1,1 @@
+"""Message event type module."""

@@ -1,0 +1,1 @@
+"""Invite event type module."""

@@ -1,0 +1,103 @@
+{
+  "type": "link_invite",
+  "projector": {
+    "description": "Projects link-invite events for multi-device support",
+    "func": "projector.project",
+    "tests": [
+      {
+        "description": "Valid link-invite is accepted",
+        "given": {
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          },
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_123",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link_invite",
+              "id": "link_invite_123",
+              "link_invite_pubkey": "link_pub_123",
+              "user_id": "user_123",
+              "signature": "dummy_sig_bGlua19pbnZpdGU6bGlua19pbnZpdGVfMTIzOmxpbmtfcHViXzEyMzp1c2VyXzEyMw==_by_user_123"
+            }
+          }
+        },
+        "then": {
+          "db": {
+            "link_invites": [
+              {
+                "id": "link_invite_123",
+                "link_invite_pubkey": "link_pub_123",
+                "user_id": "user_123"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "description": "Link-invite blocked when user doesn't exist",
+        "given": {
+          "db": {},
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link_invite",
+              "id": "link_invite_456",
+              "link_invite_pubkey": "link_pub_456",
+              "user_id": "unknown_user",
+              "signature": "dummy_sig_link_invite"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "link_invites": []
+          }
+        }
+      },
+      {
+        "description": "Link-invite blocked when signature is from non-user",
+        "given": {
+          "db": {
+            "users": [
+              {
+                "id": "user_123",
+                "pubkey": "user_pub",
+                "network_id": "net_123"
+              }
+            ]
+          },
+          "envelope": {
+            "metadata": {},
+            "payload": {
+              "type": "link_invite",
+              "id": "link_invite_fake",
+              "link_invite_pubkey": "link_pub_fake",
+              "user_id": "user_123",
+              "signature": "dummy_sig_from_unknown"
+            }
+          },
+          "env": {
+            "CRYPTO_MODE": "dummy"
+          }
+        },
+        "then": {
+          "db": {
+            "link_invites": []
+          }
+        }
+      }
+    ]
+  }
+}

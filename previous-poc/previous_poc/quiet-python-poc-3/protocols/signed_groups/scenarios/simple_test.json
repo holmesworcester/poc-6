@@ -1,0 +1,89 @@
+{
+  "scenarios": {
+    "direct_message_test": {
+      "description": "Test direct message creation without invites",
+      "steps": [
+        {
+          "name": "create_identity",
+          "request": {
+            "method": "POST",
+            "path": "/identities",
+            "body": {
+              "name": "Alice"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "alice_id": "$.identityId"
+            }
+          }
+        },
+        {
+          "name": "create_network",
+          "request": {
+            "method": "POST",
+            "path": "/networks",
+            "body": {
+              "name": "Test Network",
+              "identityId": "${alice_id}"
+            }
+          },
+          "assertions": {
+            "status": 201,
+            "capture": {
+              "network_id": "$.networkId",
+              "group_id": "$.firstGroupId",
+              "channel_id": "$.defaultChannelId"
+            }
+          }
+        },
+        {
+          "name": "check_initial_user",
+          "request": {
+            "method": "GET",
+            "path": "/users?network_id=${network_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.users": {
+              "$length": 1
+            },
+            "capture": {
+              "user_id": "$.users[0].id"
+            }
+          }
+        },
+        {
+          "name": "send_message",
+          "request": {
+            "method": "POST",
+            "path": "/messages",
+            "body": {
+              "channel_id": "${channel_id}",
+              "user_id": "${user_id}",
+              "peer_id": "${user_id}",
+              "content": "Test message"
+            }
+          },
+          "assertions": {
+            "status": 201
+          }
+        },
+        {
+          "name": "list_messages",
+          "request": {
+            "method": "GET",
+            "path": "/messages?channel_id=${channel_id}"
+          },
+          "assertions": {
+            "status": 200,
+            "body.messages": {
+              "$length": 1
+            }
+          }
+        }
+      ]
+    }
+  }
+}

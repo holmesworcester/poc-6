@@ -1,0 +1,513 @@
+{
+  "type": "incoming",
+  "version": 1,
+  "description": "Processes incoming messages from network and routes to appropriate handlers",
+  "commands": {
+    "process_incoming": {
+      "description": "Processes incoming message queue and routes to handlers",
+      "func": "process_incoming.execute",
+      "tests": [
+        {
+          "description": "Successfully decrypt two-layer envelope and route to handler (dummy)",
+          "given": {
+            "params": {
+              "time_now_ms": 1000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "outerKeyHash1234567890123456789012345678901234567890123456789012{\"innerHash\":\"innerKeyHash123\",\"data\":\"{\\\"type\\\":\\\"message\\\",\\\"text\\\":\\\"Hello\\\",\\\"sender\\\":\\\"alice\\\"}\"}",
+                  "origin": "peer1",
+                  "received_at": 1000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "outerKeyHash1234567890123456789012345678901234567890123456789012",
+                  "key_value": "outer_key"
+                },
+                {
+                  "key_hash": "innerKeyHash123",
+                  "key_value": "inner_key"
+                }
+              ],
+              "identities": [
+                {
+                  "pubkey": "alice",
+                  "privkey": "0"
+                }
+              ],
+              "known_senders": [
+                {
+                  "pubkey": "alice"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "messages": [
+                {
+                  "text": "Hello",
+                  "sender": "alice"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Generate encrypted blob and decrypt it (real crypto)",
+          "comment": "This test generates encrypted data using the actual encryption code, then decrypts it",
+          "given": {
+            "params": {
+              "time_now_ms": 1000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d79958ad89b346b1b421068da0a5246b5c5eaf54cf864ac610df3915434e5c96710a0262fc32548480e4e4f45c8a55b31bdc06d19b636d2eba73589b9caf8c44e80e2f77a4878ad2819a5c685279ece51c99357f3732f241dbc3225acf0fabc2f83d58926885f7478a5a3aa5c1c1805aa34289277f7e82b775fdf3c86baf895238fc27575103c4a12a70e65517b9e773a6fbf238eb8e701f845c51b9defcab38af052ee3ba577707107200713cd5cab693838ae181c2475ba6358fb90309f1f2fa169dd0fcdaafabf8eb857babfdc9c7850822e5bc5ee6038e3105426eeda9dd45f6fab257011551e5779827362bf9e6c7aeac119c955e6f08e267628796b214e0e2ce933bbe0309f209a073fbafe941b32de9e20f02e10498e51d4be576811a2e2b997c162fa6229d46c927c669f7e6878a6fb7070f988d3a41da34aed305f35d96c1d32ee4",
+                  "origin": "test_setup",
+                  "received_at": 1000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d79958",
+                  "key_value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                {
+                  "key_hash": "69c6718bad81422d4d230563e6926cffcfb5375991806b1ac1c5c3998bbed949",
+                  "key_value": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                }
+              ],
+              "identities": [
+                {
+                  "pubkey": "alice",
+                  "privkey": "0"
+                }
+              ],
+              "known_senders": [
+                {
+                  "pubkey": "alice"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "messages": [
+                {
+                  "text": "Hello",
+                  "sender": "alice"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Missing outer key creates missing_key event (dummy)",
+          "given": {
+            "params": {
+              "time_now_ms": 2000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "unknownKeyHash12345678901234567890123456789012345678901234567890encrypted_data",
+                  "origin": "peer2",
+                  "received_at": 2000
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "pending_missing_key": [
+                {
+                  "missingHash": "unknownKeyHash12345678901234567890123456789012345678901234567890",
+                  "inNetwork": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Missing outer key creates missing_key event (real crypto)",
+          "given": {
+            "params": {
+              "time_now_ms": 2000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef123456789012345678901234567890123456789012345678some_encrypted_data_here",
+                  "origin": "peer2",
+                  "received_at": 2000
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "pending_missing_key": [
+                {
+                  "missingHash": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                  "inNetwork": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Missing inner key creates missing_key event (dummy)",
+          "given": {
+            "params": {
+              "time_now_ms": 3000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "outerKeyHash1234567890123456789012345678901234567890123456789012{\"innerHash\":\"unknownInnerKey\",\"data\":\"encrypted_inner\"}",
+                  "origin": "peer3",
+                  "received_at": 3000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "outerKeyHash1234567890123456789012345678901234567890123456789012",
+                  "key_value": "outer_key"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "pending_missing_key": [
+                {
+                  "missingHash": "unknownInnerKey",
+                  "inNetwork": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Missing inner key with real crypto creates missing_key event",
+          "given": {
+            "params": {
+              "time_now_ms": 3000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d799584b03a9b86587faa371b508af3e785e8d337fc750b4053fd290937e3787cff740b60d1c4acc826cf115ed8f66fbbfbc7d01dd88c429ce4809c3d64c3d05524c6db7ba0d0666657b38ba60f5de06a241b1876fadf9b411c7850b6e98c29c6be7ca8e4492eddfda216d697f724cc6a4028cd5bd1832f77c513c24dd0df98d7b692f958492142d6549f8b0e109236c8618476c31467bdd0d21e985dfa148a71e945a5ba85b4253971753020bad64a852792ad2",
+                  "origin": "peer3",
+                  "received_at": 3000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d79958",
+                  "key_value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "pending_missing_key": [
+                {
+                  "missingHash": "unknownInnerKeyHash1234567890123456789012345678901234567890123456",
+                  "inNetwork": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Invalid JSON after decrypt drops message (dummy)",
+          "given": {
+            "params": {
+              "time_now_ms": 4000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "validKeyHash1234567890123456789012345678901234567890123456789012345not_json_data",
+                  "origin": "peer4",
+                  "received_at": 4000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "validKeyHash1234567890123456789012345678901234567890123456789012345",
+                  "key_value": "valid_key"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": []
+            }
+          }
+        },
+        {
+          "description": "Invalid data with real crypto drops (no nonce)",
+          "given": {
+            "params": {
+              "time_now_ms": 4000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210not_valid_encrypted_data",
+                  "origin": "peer4",
+                  "received_at": 4000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                  "key_value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": []
+            }
+          }
+        },
+        {
+          "description": "Already decrypted envelope passes through (dummy)",
+          "given": {
+            "params": {
+              "time_now_ms": 5000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "dummy"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "envelope": true,
+                  "data": {
+                    "payload": {
+                      "type": "message",
+                      "text": "Already decrypted",
+                      "sender": "alice"
+                    },
+                    "metadata": {
+                      "selfGenerated": true
+                    }
+                  },
+                  "received_at": 5000
+                }
+              ],
+              "identities": [
+                {
+                  "pubkey": "alice",
+                  "privkey": "0"
+                }
+              ],
+              "known_senders": [
+                {
+                  "pubkey": "alice"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "messages": [
+                {
+                  "text": "Already decrypted",
+                  "sender": "alice"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Already decrypted envelope passes through (real crypto)",
+          "given": {
+            "params": {
+              "time_now_ms": 5000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "envelope": true,
+                  "data": {
+                    "payload": {
+                      "type": "message",
+                      "text": "Already decrypted",
+                      "sender": "alice"
+                    },
+                    "metadata": {
+                      "selfGenerated": true
+                    }
+                  },
+                  "received_at": 5000
+                }
+              ],
+              "identities": [
+                {
+                  "pubkey": "alice",
+                  "privkey": "0"
+                }
+              ],
+              "known_senders": [
+                {
+                  "pubkey": "alice"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "messages": [
+                {
+                  "text": "Already decrypted",
+                  "sender": "alice"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Two-layer decryption with unknown event type goes to unknown handler (real crypto)",
+          "given": {
+            "params": {
+              "time_now_ms": 6000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d7995888a8551c63643a70b28c1b06dfc18c165796fe8dce1021e0c8866c99560ad41acb34f5f8d67eefd63bebd65e87f1fe208cac289c9add01ab284acfc5be725843e31a1c06148ee67d3c684d1871b89a5ae8c83d5c363681c854f8c1d35f3e8e7dd5e0c88dce2762aa86235fb0ca5a5267d54fc7cac2b6e965571bb3c41c347ab226b08ca0fcbcaa8b8573141d59ace3917c9db7fca60f2aed63ffeb5a1b976d0c7cfcc589e1f26e4249f65da06cdee61d08322f3ce61cb11d7ad2d6bd992847e7392933eba41e35aa42aeb9e92dcbadef5506bb487cea200818e413d9c1407c0ac0455447437f2bfb0d042a9bafd8a30f4a36aab9e51bda7ff0fadc4173f7ed0d69dfd4e1f5eaf13a71238cf5e37c8e7eae090be64e262ae91686e74a8e9c4860951c489574843f392ba2a8c2f39030218452a3cc9e77878715e39123c7d3fc70eaa9894070a3e9caa9396a20b4c9ca542993a9211c4c7395a2e098cb4fdcec42180d6f23fe",
+                  "origin": "test_setup",
+                  "received_at": 6000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d79958",
+                  "key_value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                },
+                {
+                  "key_hash": "69c6718bad81422d4d230563e6926cffcfb5375991806b1ac1c5c3998bbed949",
+                  "key_value": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "unknown_events": [
+                {
+                  "data": {
+                    "type": "custom_event_type",
+                    "payload": "test data",
+                    "sender": "alice"
+                  },
+                  "timestamp": 6000
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Missing inner key creates missing_key event with proper hash (real crypto)",
+          "given": {
+            "params": {
+              "time_now_ms": 7000
+            },
+            "identity": null,
+            "env": {
+              "CRYPTO_MODE": "real"
+            },
+            "db": {
+              "incoming": [
+                {
+                  "data": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d799585b36b81227c61e9f0084faa7b3f000a4e9c7926c6c7877e51f73c7291e5281bd9651c8d3fe7720c4e0ca4ed891d5bdeb65fa68b976435c2a8f9cddcc764123cd1cdc4133598f0d95e63daba135aab7cf8c046182fa37953e56cc3e13aae1fd76947a268b4e1b1ea432f341c4b525336c8ce42dc77193dfe3942a8ed8bd5639e1fa1c774d7546d6a038dc632fb0e4db2d9614a3b23e4c69cfeedfd3fc5db5304bd79cbdad0ff55b923399102e1302cad3162b2e28305b7c1f6dbf60035c954056d02e14364ba9b2e7a96016a67e1bd9c0e04e275eb9a6cc554165f1bc672a491283b04110d2751780bfb2f53f1ad91f8e647e65d91d4d891b676a283239b9ba74a86b1a5667adaf5514f737e1b7dacc346eec32f567cd5c127089d0ff41c4b6756821707150029bc234c219a7e066db0f9ad4fdbaf47c572f891d706d3605c321b9c19ac162a3ce31a3eb574abc40ed9f0448693a49381142b844ea210c1585fb0e",
+                  "origin": "test_setup",
+                  "received_at": 7000
+                }
+              ],
+              "key_map": [
+                {
+                  "key_hash": "3083e1ce982abd7f59235aa1ea3c97046562c75205d4dab8affd2f3600d79958",
+                  "key_value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+              ]
+            }
+          },
+          "then": {
+            "db": {
+              "incoming": [],
+              "pending_missing_key": [
+                {
+                  "missingHash": "5cdbdb8963a47c9e1c0058adb1db2a5748248a240be05fc2e006f2550bd462be",
+                  "inNetwork": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "job": "process_incoming"
+}

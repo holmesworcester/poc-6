@@ -1,0 +1,1 @@
+"""Address event type for network routing."""
