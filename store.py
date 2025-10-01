@@ -14,13 +14,13 @@ def store(blob: bytes, db: Any, t_ms: int, return_dupes: bool) -> str:
         else:
             return ""
 
-def store_with_seen(blob: bytes, creator: str, t_ms: int, db: Any) -> str:
-    """Store a blob with the corresponding seen events and return the seen_id."""
-    import seen
+def store_with_first_seen(blob: bytes, creator: str, t_ms: int, db: Any) -> str:
+    """Store a blob with the corresponding first_seen events and return the first_seen_id."""
+    import first_seen
     id = store(blob, db, t_ms, return_dupes=True)
-    """Create and store a seen event for the blob and return the seen_id."""
-    seen_id = seen.create(id, creator, t_ms, db, return_dupes=False)
-    return seen_id
+    """Create and store a first_seen event for the blob and return the first_seen_id."""
+    first_seen_id = first_seen.create(id, creator, t_ms, db, return_dupes=False)
+    return first_seen_id
 
 
 def get(blob_id: str, db: Any) -> bytes:

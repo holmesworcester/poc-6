@@ -9,8 +9,7 @@ import nacl.encoding
 import nacl.utils
 from nacl.public import SealedBox
 
-import key
-import network
+from events import key, network
 import store
 
 # ===== Constants =====
