@@ -109,6 +109,13 @@ All projected state is scoped per-peer via `seen_by_peer_id`:
 - List queries filter by `seen_by_peer_id`: `WHERE channel_id = ? AND seen_by_peer_id = ?`
 - This allows a single client to manage multiple peers in the same or different networks
 
+**List function pattern:**
+- All list functions follow the pattern: `list_*(filter_params..., seen_by_peer_id, db)`
+- Examples:
+  - `list_messages(channel_id, seen_by_peer_id, db)` - filters by channel and peer
+  - `list_all_groups(seen_by_peer_id, db)` - filters by peer only (groups aren't scoped to channels)
+- The `db` parameter always comes last for consistency across the codebase
+
 ### Testing Requirements
 
 - **No `time.time()` calls** - all timestamps must be explicit parameters for deterministic testing
