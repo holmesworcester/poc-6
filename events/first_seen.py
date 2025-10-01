@@ -23,8 +23,8 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
     referenced_event_id = first_seen_event['ref_id']
 
     # Extract peer and timestamp from first_seen event
-    seen_by_peer_id = first_seen_event['created_by']  # Who saw this event
-    received_at = first_seen_event['created_at']  # When they saw it
+    seen_by_peer_id = first_seen_event['created_by']  # Who saw this event (for local: creator, for incoming: receiving peer from transit_key)
+    received_at = first_seen_event['created_at']  # When they saw it (for first_seen events: created_at = stored_at)
 
     """Update our tables mapping first_seen events to the events they reference"""
     db.execute(

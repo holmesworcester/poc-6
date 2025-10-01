@@ -89,11 +89,12 @@ def unseal(ciphertext: bytes, private_key: bytes) -> bytes:
 
 
 def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> str:
-    """Unwrap a blob and store it with first_seen metadata."""
+    """Unwrap an incoming transit blob and store it, with its corresponding "first_seen" event blob. The seen_by_peer_id is determined by the transit_key (the receiving peer)."""
     hint = key.extract_hint(blob)
-    first_seen_by = network.get_peer_id_for_transit_key(hint, db) # TODO: "first_seen" might be confusing here because each identity has its own "first seen" moment. 
+    # For incoming blobs: seen_by_peer_id = peer who owns the transit_key (the receiving peer)
+    seen_by_peer_id = network.get_peer_id_for_transit_key(hint, db)
     unwrapped_blob = unwrap(blob, db)
-    first_seen_id = store.store_with_first_seen(unwrapped_blob, first_seen_by, t_ms, db)
+    first_seen_id = store.store_with_first_seen(unwrapped_blob, seen_by_peer_id, t_ms, db)
     return first_seen_id
 
 def unwrap(wrapped_blob: bytes, db: Any) -> bytes:

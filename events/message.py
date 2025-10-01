@@ -28,7 +28,7 @@ def create_message(params: dict[str, Any], db: Any, t_ms: int) -> dict[str, Any]
     first_seen_id = store.store_with_first_seen(blob, creator, t_ms, db)
     projected_first_seen = first_seen.project(first_seen_id, db)
     channel = params['channel']
-    latest = list_messages(channel, db)
+    latest = list_messages(channel, db, creator)
     db.commit()
     return {
         'id': first_seen_id,
