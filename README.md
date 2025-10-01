@@ -1,3 +1,15 @@
+# TODO:
+
+ - store.get() - called in seen.py but doesn't exist
+  - seen.create() - called in store.py but doesn't exist
+  - group.list_all_groups() - called in group.py but doesn't exist
+- Various project() functions in event modules
+  - crypto.py:6 calls get_peer_id_for_transit_key_hint() but network.py has get_peer_id_for_transit_key()
+  - sync.py:34-36 creates incoming blob twice, second with undefined peer_ids
+  - sync.py:35 calls undefined create() function
+- add signing/verification and then groups
+- consider other names for first_seen e.g. arrival
+
 # Quiet Protocol Proof of Concept #6
 
 This is a proof-of-concept protocol for eventually consistent state syncing.
