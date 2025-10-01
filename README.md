@@ -33,5 +33,85 @@ Helpful lessons from last time:
 - it is useful to for each event type to have a 
 - Goal: functions in each are simple enough that 
 
-# Design 
+# Design
+
+## Event Structure and Projection Pattern
+
+### Standardized Event Fields
+
+All events follow a consistent structure with these standard fields:
+- `type`: Event type identifier (e.g., 'message', 'group')
+- `created_by`: Peer ID who created the event
+- `created_at`: Timestamp (ms) when the event was created
+
+Field names are standardized across all event types. Database columns may differ from event field names, but this is explicit in the projection code.
+
+### First-Seen Pattern
+
+The `first_seen` event type wraps references to other events and tracks:
+- **WHO** saw the event (via `seen_by_peer_id`)
+- **WHEN** they saw it (via `received_at`, derived from first_seen's `created_at`)
+- **WHAT** event they saw (`ref_id` = referenced event ID)
+
+This enables multi-peer support within a single client, as each peer has their own view of which events they've seen and when.
+
+#### `seen_by_peer_id` Semantics
+
+The `seen_by_peer_id` field identifies which peer "saw" an event, but its value depends on how the event arrived:
+
+**For locally created events:**
+- `seen_by_peer_id` = `creator_id` (the peer_id of the peer who created the event)
+- The creator immediately "sees" their own event
+- Example: When peer_id A creates a message, `seen_by_peer_id` = A
+
+**For incoming transit blobs (during sync):**
+- `seen_by_peer_id` = peer ID corresponding to the transit_key used for wrapping
+- The transit_key is determined by the receiving peer's original sync request
+- This is looked up via `network.get_peer_id_for_transit_key(hint, db)`
+- Example: When peer B receives a blob wrapped with B's transit_key, `seen_by_peer_id` = B
+- **Important:** `seen_by_peer_id` ≠ `creator_id` for incoming events
+
+In the `first_seen` event itself, `created_by` equals `seen_by_peer_id`, but the source of this value differs based on the creation path.
+
+#### Timing Semantics
+
+All timestamps are in milliseconds since epoch.
+
+All events in the event store have two timestamps:
+- **`created_at`** (field in event data): When the event was created by its author
+- **`stored_at`** (column in store table): When the event blob was stored in the local database
+
+For different event types:
+- **Message events**: `created_at` = author's creation time (may be in the past when received); `stored_at` = when stored locally
+- **first_seen events**: `created_at` = `stored_at` = when this peer "saw" the referenced event (both set to the same `t_ms`)
+
+In projections:
+- **`received_at`** is extracted from `first_seen.created_at` - represents when this peer saw the referenced event
+- **`created_at`** is extracted from the referenced event (e.g., message) - represents the original author's creation time
+- The messages table stores both: sort/display by message's `created_at`, filter by peer via `received_at`
+
+The `stored_at` values exist in the event store but are not typically projected into application tables. Only the `stored_at` of first_seen events is semantically meaningful per-peer (and we use `first_seen.created_at` which equals it).
+
+### Projection Flow
+
+1. `first_seen.project(first_seen_id, db)` is called
+2. Extracts `seen_by_peer_id` from first_seen event's `created_by` field (who saw this event)
+3. Extracts `received_at` from first_seen event's `created_at` field (when they saw it)
+4. Projects to first_seen table: `(first_seen_id, event_id, seen_by_peer_id, received_at)`
+5. Loads the referenced event and extracts its `created_at` (original author timestamp)
+6. Calls event-specific projector: `message.project(event_id, db, seen_by_peer_id, received_at)`
+7. Event projector inserts into its table with both timestamps: message's `created_at` (author time) and `received_at` (peer's viewing time)
+
+### Multi-Peer Support
+
+All projected state is scoped per-peer via `seen_by_peer_id`:
+- Messages table includes `seen_by_peer_id` column
+- List queries filter by `seen_by_peer_id`: `WHERE channel_id = ? AND seen_by_peer_id = ?`
+- This allows a single client to manage multiple peers in the same or different networks
+
+### Testing Requirements
+
+- **No `time.time()` calls** - all timestamps must be explicit parameters for deterministic testing
+- `received_at` comes from `first_seen.created_at` (which equals the `t_ms` passed to `store_with_first_seen()`)
+- Tests can control time progression by passing explicit `t_ms` values to all event creation and storage functions
 
