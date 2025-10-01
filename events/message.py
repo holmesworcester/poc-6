@@ -5,7 +5,7 @@ import store
 from events import group
 
 
-def create_message(params: dict[str, Any], db: Any, t_ms: int) -> dict[str, Any]:
+def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages."""
     import json
     import first_seen
@@ -28,7 +28,7 @@ def create_message(params: dict[str, Any], db: Any, t_ms: int) -> dict[str, Any]
     first_seen_id = store.store_with_first_seen(blob, creator, t_ms, db)
     projected_first_seen = first_seen.project(first_seen_id, db)
     channel = params['channel']
-    latest = list_messages(channel, db, creator)
+    latest = list_messages(channel, creator, db)
     db.commit()
     return {
         'id': first_seen_id,
@@ -36,7 +36,7 @@ def create_message(params: dict[str, Any], db: Any, t_ms: int) -> dict[str, Any]
     }
 
 
-def list_messages(channel_id: int, db: Any, seen_by_peer_id: str) -> list[dict[str, Any]]:
+def list_messages(channel_id: int, seen_by_peer_id: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer."""
     messages = db.query(
         "SELECT * FROM messages WHERE channel_id = ? AND seen_by_peer_id = ? ORDER BY created_at DESC LIMIT 50",
@@ -45,7 +45,7 @@ def list_messages(channel_id: int, db: Any, seen_by_peer_id: str) -> list[dict[s
     return messages
 
 
-def project(event_id: str, db: Any, seen_by_peer_id: str, received_at: int) -> str | None:
+def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
     """Project a single message event into the database."""
     import json
 

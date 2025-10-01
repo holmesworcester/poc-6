@@ -12,14 +12,14 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
     db.commit()
 
 
-def send_requests(from_peer_id: str, db: Any, t_ms: int) -> None:
+def send_requests(from_peer_id: str, t_ms: int, db: Any) -> None:
     """Send sync requests to all peers."""
     peer_rows = db.query("SELECT peer_id FROM peers WHERE peer_id != ?", (from_peer_id,))
     for row in peer_rows:
-        send_request(row['peer_id'], from_peer_id, db, t_ms)
+        send_request(row['peer_id'], from_peer_id, t_ms, db)
     db.commit()
 
-def send_request(to_peer_id: str, from_peer_id: str, db: Any, t_ms: int) -> None:
+def send_request(to_peer_id: str, from_peer_id: str, t_ms: int, db: Any) -> None:
     """Send a sync request to a peer."""
     # Create a sync event for the peer
     response_transit_key = key.create_sym_key(db)
@@ -28,5 +28,5 @@ def send_request(to_peer_id: str, from_peer_id: str, db: Any, t_ms: int) -> None
     request_blob = crypto.wrap(request_plaintext, to_key, db)
 
     # simulate sending - add to incoming queue
-    incoming.create(request_blob, db, t_ms)
+    incoming.create(request_blob, t_ms, db)
     # TODO: create sync response and send it back

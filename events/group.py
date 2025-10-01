@@ -1,7 +1,7 @@
 """Group management functions."""
 from typing import Any
 
-def create(params: dict[str, Any], db: Any, t_ms: int) -> dict[str, Any]:
+def create(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
     """Create a new group."""
     created_by = params['created_by']
     all_groups = list_all_groups(db)
@@ -22,7 +22,7 @@ def pick_key(group_id: str, db: Any) -> Any:
     return result['key'] if result else None
 
 
-def project(event_id: str, db: Any, seen_by_peer_id: str, received_at: int) -> str | None:
+def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
     """Project a single group event into the database."""
     # TODO: implement
     return None

@@ -9,6 +9,6 @@ def drain(batch_size: int, db: Any) -> list[bytes]:
     return blobs
 
 
-def create(blob: bytes, db: Any, t_ms: int) -> None:
+def create(blob: bytes, t_ms: int, db: Any) -> None:
     """Create an incoming transit blob entry at t_ms"""
     db.execute("INSERT INTO incoming_blobs (blob, sent_at) VALUES (?, ?)", (blob, t_ms))

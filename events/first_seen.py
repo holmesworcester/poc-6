@@ -39,9 +39,9 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
     """Project based on event type for all in events/ directory except first_seen"""
     event_type = event_data['type']  # e.g., 'message', 'group', etc.
     if event_type == 'message':
-        projected_id = message.project(referenced_event_id, db, seen_by_peer_id, received_at)
+        projected_id = message.project(referenced_event_id, seen_by_peer_id, received_at, db)
     elif event_type == 'group':
-        projected_id = group.project(referenced_event_id, db, seen_by_peer_id, received_at)
+        projected_id = group.project(referenced_event_id, seen_by_peer_id, received_at, db)
     else:
         projected_id = None  # No projection needed for this event type
     return [projected_id, first_seen_id]
