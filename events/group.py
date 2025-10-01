@@ -4,14 +4,14 @@ from typing import Any
 def create(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
     """Create a new group."""
     created_by = params['created_by']
-    all_groups = list_all_groups(db)
+    all_groups = list_all_groups(created_by, db)
     # TODO: implement group creation logic (depends on signing / sig verification)
     return {"id": "new_group_id", "groups": all_groups}
 
 
-def list_all_groups(db: Any) -> list[dict[str, Any]]:
-    """List all groups."""
-    # TODO: implement
+def list_all_groups(seen_by_peer_id: str, db: Any) -> list[dict[str, Any]]:
+    """List all groups for a specific peer."""
+    # TODO: implement - should filter by seen_by_peer_id
     return []
 
 
