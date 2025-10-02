@@ -1,110 +1,79 @@
-"""Pre-key management functions."""
+"""Prekey event type (local-only prekey keypair)."""
 from typing import Any
+import json
+import logging
 import crypto
 import store
-from events import key, peer
+
+log = logging.getLogger(__name__)
 
 
-def create(peer_id: str, peer_shared_id: str, group_id: str,
-           key_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
-    """Create a prekey event for receiving sync requests.
+def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
+    """Create a local-only prekey event (like peer.create).
 
-    Generates Ed25519 keypair, stores private key in peers table,
-    publishes public key as shareable event.
+    Generates Ed25519 keypair, stores both public and private keys in event.
+    Projects prekey_private to peers table.
 
     Args:
-        peer_id: Local peer ID (for signing and storing private key)
-        peer_shared_id: Public peer ID (for created_by)
-        group_id: Group context (for access control)
-        key_id: Key to encrypt the prekey event with
+        peer_id: Local peer ID (for projection and storage)
         t_ms: Timestamp
         db: Database connection
 
     Returns:
         (prekey_id, prekey_private): The stored prekey event ID and private key bytes
     """
+    log.info(f"prekey.create() creating new prekey for peer_id={peer_id}, t_ms={t_ms}")
+
     # Generate Ed25519 keypair for prekey
     prekey_private, prekey_public = crypto.generate_keypair()
-    prekey_public_b64 = crypto.b64encode(prekey_public)
 
-    # Store private key in peers table (need to add prekey_private column)
-    db.execute(
-        "UPDATE peers SET prekey_private = ? WHERE peer_id = ?",
-        (prekey_private, peer_id)
-    )
-
-    # Create prekey event
+    # Create event blob (plaintext JSON, no encryption for local-only)
     event_data = {
         'type': 'prekey',
-        'peer_id': peer_shared_id,
-        'group_id': group_id,
-        'public_key': prekey_public_b64,
-        'created_by': peer_shared_id,
-        'created_at': t_ms,
-        'key_id': key_id
+        'public_key': crypto.b64encode(prekey_public),
+        'private_key': crypto.b64encode(prekey_private),
+        'peer_id': peer_id,
+        'created_at': t_ms
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
+    blob = json.dumps(event_data).encode()
 
-    # Get key_data for encryption
-    key_data = key.get_key(key_id, db)
+    # Store the blob to get prekey_id
+    prekey_id = store.blob(blob, t_ms, return_dupes=True, db=db)
+    log.info(f"prekey.create() generated prekey_id={prekey_id}")
 
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    # Create first_seen wrapper where peer sees itself
+    from events import first_seen
+    first_seen_id = first_seen.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
+    first_seen.project(first_seen_id, db)
 
-    # Store event with first_seen wrapper and projection
-    prekey_id = store.event(blob, peer_id, t_ms, db)
-
+    log.info(f"prekey.create() projected prekey_id={prekey_id}")
     return prekey_id, prekey_private
 
 
-def project(prekey_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
-    """Project prekey event into pre_keys table."""
+def project(prekey_id: str, seen_by_peer_id: str, db: Any) -> None:
+    """Project prekey event into peers table (sets prekey_private column)."""
+    log.info(f"prekey.project() prekey_id={prekey_id}, seen_by={seen_by_peer_id}")
+
     # Get blob from store
     blob = store.get(prekey_id, db)
     if not blob:
-        return None
-
-    # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, db)
-    if not unwrapped:
-        return None
+        log.warning(f"prekey.project() blob not found for prekey_id={prekey_id}")
+        return
 
     # Parse JSON
-    event_data = crypto.parse_json(unwrapped)
+    event_data = crypto.parse_json(blob)
 
-    # Verify signature - get public key from created_by peer_shared
-    from events import peer_shared
-    created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
-    if not crypto.verify_event(event_data, public_key):
-        return None
-
-    # Insert into pre_keys table
-    prekey_public = crypto.b64decode(event_data['public_key'])
+    # Update peers table with prekey_private
     db.execute(
-        """INSERT OR IGNORE INTO pre_keys
-           (peer_id, public_key, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            event_data['peer_id'],
-            prekey_public,
-            event_data['created_at']
-        )
+        "UPDATE peers SET prekey_private = ? WHERE peer_id = ?",
+        (crypto.b64decode(event_data['private_key']), event_data['peer_id'])
     )
 
-    # Insert into shareable_events
+    # Insert into pre_keys table with public key (for others to encrypt sync requests)
     db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            prekey_id,
-            event_data['created_by'],
-            event_data['created_at']
-        )
+        "INSERT OR REPLACE INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
+        (event_data['peer_id'], crypto.b64decode(event_data['public_key']), event_data['created_at'])
     )
 
     # Mark as valid for this peer
@@ -112,8 +81,6 @@ def project(prekey_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> 
         "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
         (prekey_id, seen_by_peer_id)
     )
-
-    return prekey_id
 
 
 def get_transit_prekey_for_peer(peer_id: str, db: Any) -> dict[str, Any] | None:
