@@ -177,6 +177,9 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
     elif event_type == 'user':
         from events import user
         projected_id = user.project(ref_id, seen_by_peer_id, received_at, db)
+    elif event_type == 'prekey':
+        from events import prekey
+        projected_id = prekey.project(ref_id, seen_by_peer_id, received_at, db)
 
     # Mark event as valid for this peer
     log.info(f"Marking {event_type} event {ref_id} as valid for peer {seen_by_peer_id}")
@@ -184,6 +187,13 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
         "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
         (ref_id, seen_by_peer_id)
     )
+
+    # Notify blocked queue - unblock events that were waiting for this event
+    unblocked_ids = queues.blocked.notify_event_valid(ref_id, seen_by_peer_id, db)
+    if unblocked_ids:
+        log.info(f"Unblocked {len(unblocked_ids)} events after {ref_id} became valid")
+        # Re-project unblocked events recursively
+        project_ids(unblocked_ids, db)
 
     return [projected_id, first_seen_id]
 

@@ -12,8 +12,11 @@ CREATE TABLE IF NOT EXISTS blocked_events (
     first_seen_id TEXT NOT NULL,
     seen_by_peer_id TEXT NOT NULL,
     missing_deps TEXT NOT NULL,  -- JSON array of missing dep IDs
+    deps_remaining INTEGER NOT NULL DEFAULT 0,  -- Count for Kahn's algorithm
     PRIMARY KEY (first_seen_id, seen_by_peer_id)
 );
+CREATE INDEX IF NOT EXISTS idx_blocked_events_peer
+    ON blocked_events(seen_by_peer_id);
 
 -- Dependency tracking for Kahn's algorithm
 CREATE TABLE IF NOT EXISTS blocked_event_deps (

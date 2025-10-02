@@ -39,6 +39,11 @@ class Database:
         """Execute INSERT/UPDATE/DELETE statement."""
         self._conn.execute(sql, params)
 
+    def execute_returning(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        """Execute UPDATE/INSERT/DELETE with RETURNING clause and return results."""
+        cursor = self._conn.execute(sql, params)
+        return [dict(row) for row in cursor.fetchall()]
+
     def commit(self) -> None:
         """Commit the current transaction."""
         self._conn.commit()

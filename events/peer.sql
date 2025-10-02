@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS peers (
     peer_id TEXT PRIMARY KEY,
     public_key TEXT NOT NULL,
     private_key BLOB NOT NULL,
+    prekey_private BLOB,
     created_at INTEGER NOT NULL
 );
 

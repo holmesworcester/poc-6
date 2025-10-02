@@ -122,7 +122,7 @@ def test_two_player_invite_realistic():
 
     # Bob stores invite blob and projects it
     bob_invite_blob_b64 = decoded_invite_data['invite_blob']
-    bob_invite_secret = decoded_invite_data['invite_secret']
+    bob_invite_private_key = crypto.b64decode(decoded_invite_data['invite_private_key'])
 
     invite_blob_bytes = crypto.b64decode(bob_invite_blob_b64)
     bob_invite_blob_id = store.blob(invite_blob_bytes, t_ms=t_ms + 8000, return_dupes=True, db=db)
@@ -152,7 +152,7 @@ def test_two_player_invite_realistic():
 
     # Bob creates user event with invite proof, encrypted with INVITE KEY (not personal key)
     # This way Alice can decrypt it using the invite key from the invite link
-    bob_user_id = user.create(
+    bob_user_id, bob_prekey_id = user.create(
         peer_id=bob_peer_id,
         peer_shared_id=bob_peer_shared_id,
         group_id=bob_group_id,
@@ -160,9 +160,9 @@ def test_two_player_invite_realistic():
         key_id=bob_invite_key_id,  # Use invite key, not personal key!
         t_ms=t_ms + 9000,
         db=db,
-        invite_secret=bob_invite_secret
+        invite_private_key=bob_invite_private_key
     )
-    print(f"Bob user_id: {bob_user_id[:16]}...")
+    print(f"Bob user_id: {bob_user_id[:16]}..., prekey_id: {bob_prekey_id[:16]}...")
 
     db.commit()
 
@@ -176,6 +176,7 @@ def test_two_player_invite_realistic():
             peer_id=bob_peer_id,
             peer_shared_id=bob_peer_shared_id,
             user_id=bob_user_id,
+            prekey_id=bob_prekey_id,
             invite_data=decoded_invite_data,
             t_ms=t_ms + 10000 + (attempt * 1000),
             db=db
@@ -222,20 +223,16 @@ def test_two_player_invite_realistic():
     if bob_membership:
         print(f"✓ Bob is a member of Alice's group")
 
-    # === PHASE 6: REGISTER PREKEYS FOR SYNC (NOW THAT BOB IS VALIDATED) ===
-    print("\n=== Phase 6: Register Prekeys for Sync ===")
+    # === PHASE 6: REGISTER ALICE'S PREKEY FOR SYNC ===
+    print("\n=== Phase 6: Register Alice's Prekey for Sync ===")
 
-    # Now that Alice knows Bob, they can exchange prekeys for sync
+    # Bob's prekey is already created by user.create()
+    # Alice needs a prekey too (TODO: Alice should create a user event for herself)
     alice_public_key = peer.get_public_key(alice_peer_id, db)
-    bob_public_key = peer.get_public_key(bob_peer_id, db)
 
     db.execute(
         "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
         (alice_peer_id, alice_public_key, t_ms + 16000)
-    )
-    db.execute(
-        "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (bob_peer_id, bob_public_key, t_ms + 17000)
     )
     db.commit()
 

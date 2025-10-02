@@ -59,26 +59,8 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
 
     first_seen.project_ids(valid_first_seen_ids, db)
 
-    # Process blocked events - some may now be unblocked after this batch
-    # Check which peers received events in this batch
-    seen_peers = set()
-    for first_seen_id in valid_first_seen_ids:
-        fs_blob = store.get(first_seen_id, db)
-        if fs_blob:
-            fs_data = crypto.parse_json(fs_blob)
-            seen_peers.add(fs_data.get('seen_by'))
-
-    # Try to unblock events for each peer until no further progress
-    made_progress = True
-    while made_progress:
-        made_progress = False
-        for seen_by_peer_id in list(seen_peers):
-            unblocked_ids = queues.blocked.process(seen_by_peer_id, db)
-            if unblocked_ids:
-                log.info(f"Unblocked {len(unblocked_ids)} events for peer {seen_by_peer_id}")
-                # Re-project unblocked events
-                first_seen.project_ids(unblocked_ids, db)
-                made_progress = True
+    # Event-driven unblocking now happens automatically in first_seen.project()
+    # via queues.blocked.notify_event_valid() - no need for scan-all loop
 
     db.commit()
 

@@ -7,8 +7,10 @@ from events import key, peer
 
 def create(peer_id: str, peer_shared_id: str, group_id: str,
            name: str, key_id: str, t_ms: int, db: Any,
-           invite_secret: str | None = None) -> str:
+           invite_private_key: bytes | None = None) -> tuple[str, str]:
     """Create a user event representing network membership.
+
+    Also auto-creates a prekey for receiving sync requests.
 
     Args:
         peer_id: Local peer ID (for signing)
@@ -18,10 +20,10 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
         key_id: Key to encrypt the user event with
         t_ms: Timestamp
         db: Database connection
-        invite_secret: Optional invite secret (if joining via invite)
+        invite_private_key: Optional invite private key (32 bytes, if joining via invite)
 
     Returns:
-        user_id: The stored user event ID
+        (user_id, prekey_id): The stored user and prekey event IDs
     """
     # Create base user event
     event_data = {
@@ -35,18 +37,21 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
     }
 
     # If joining via invite, add invite proof fields
-    if invite_secret:
-        # Get public key for signature (from peer_shared)
-        from events import peer_shared
-        public_key_bytes = peer_shared.get_public_key(peer_shared_id, peer_id, db)
-        public_key_hex = public_key_bytes.hex()
+    if invite_private_key:
+        # Derive public key from private key
+        import nacl.signing
+        signing_key = nacl.signing.SigningKey(invite_private_key)
+        invite_public_key = bytes(signing_key.verify_key)
+        invite_pubkey_b64 = crypto.b64encode(invite_public_key)
 
-        # Derive invite pubkey and signature
-        invite_pubkey = crypto.derive_invite_pubkey(invite_secret)
-        invite_signature = crypto.derive_invite_signature(invite_secret, public_key_hex, group_id)
+        # Sign proof message: peer_shared_id + ":" + group_id
+        # This proves Bob knows the invite private key and is joining this specific group with this peer
+        proof_message = f"{peer_shared_id}:{group_id}".encode('utf-8')
+        invite_signature = crypto.sign(proof_message, invite_private_key)
+        invite_signature_b64 = crypto.b64encode(invite_signature)
 
-        event_data['invite_pubkey'] = invite_pubkey
-        event_data['invite_signature'] = invite_signature
+        event_data['invite_pubkey'] = invite_pubkey_b64
+        event_data['invite_signature'] = invite_signature_b64
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, db)
@@ -62,7 +67,18 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
     # Store event with first_seen wrapper and projection
     user_id = store.event(blob, peer_id, t_ms, db)
 
-    return user_id
+    # Auto-create prekey for sync requests (inline, following poc-5 pattern)
+    from events import prekey
+    prekey_id, prekey_private = prekey.create(
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        group_id=group_id,
+        key_id=key_id,
+        t_ms=t_ms + 1,  # Slightly later timestamp
+        db=db
+    )
+
+    return user_id, prekey_id
 
 
 def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
@@ -105,6 +121,15 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
         # Verify invite's group_id matches user event
         if invite_row['group_id'] != event_data['group_id']:
             return None  # Group mismatch
+
+        # Verify the Ed25519 signature
+        # The signature should be over: peer_id + ":" + group_id
+        proof_message = f"{event_data['peer_id']}:{event_data['group_id']}".encode('utf-8')
+        invite_pubkey = crypto.b64decode(event_data['invite_pubkey'])
+        invite_signature = crypto.b64decode(event_data['invite_signature'])
+
+        if not crypto.verify(proof_message, invite_signature, invite_pubkey):
+            return None  # Invalid signature
 
     # Insert into users table
     db.execute(
@@ -154,8 +179,9 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
 
 
 def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
-                          invite_data: dict[str, Any], t_ms: int, db: Any) -> None:
-    """Send peer, user, address events to invite address for bootstrap.
+                          prekey_id: str, invite_data: dict[str, Any],
+                          t_ms: int, db: Any) -> None:
+    """Send peer, user, address, prekey events to invite address for bootstrap.
 
     Called repeatedly until sync is established (job pattern).
     Uses invite key from invite_data for encryption.
@@ -164,6 +190,7 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
         peer_id: Local peer ID (private)
         peer_shared_id: Public peer ID
         user_id: User event ID
+        prekey_id: Prekey event ID
         invite_data: Decoded invite link data containing invite_key_secret, ip, port
         t_ms: Timestamp
         db: Database connection
@@ -215,7 +242,16 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
     canonical_address = crypto.canonicalize_json(signed_address)
     wrapped_address = crypto.wrap(canonical_address, invite_key, db)
 
-    # Add all three to incoming queue (simulates sending to invite address)
+    # Get prekey blob (created by user.create() auto-creation)
+    prekey_blob = store.get(prekey_id, db)
+    if not prekey_blob:
+        return  # Can't send if blob not found
+
+    # Wrap with invite key for transit
+    wrapped_prekey = crypto.wrap(prekey_blob, invite_key, db)
+
+    # Add all four to incoming queue (simulates sending to invite address)
     queues.incoming.add(wrapped_peer, t_ms, db)
     queues.incoming.add(wrapped_user, t_ms, db)
     queues.incoming.add(wrapped_address, t_ms, db)
+    queues.incoming.add(wrapped_prekey, t_ms, db)

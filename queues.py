@@ -41,11 +41,14 @@ class blocked:
 
         log.warning(f"queues.blocked.add() blocking first_seen_id={first_seen_id}, peer={seen_by_peer_id}, missing_deps={missing_deps}")
 
-        # Store blocked event
+        # Count dependencies for Kahn's algorithm
+        deps_remaining = len(missing_deps)
+
+        # Store blocked event with dependency counter
         db.execute(
-            """INSERT OR REPLACE INTO blocked_events (first_seen_id, seen_by_peer_id, missing_deps)
-               VALUES (?, ?, ?)""",
-            (first_seen_id, seen_by_peer_id, json.dumps(missing_deps))
+            """INSERT OR REPLACE INTO blocked_events (first_seen_id, seen_by_peer_id, missing_deps, deps_remaining)
+               VALUES (?, ?, ?, ?)""",
+            (first_seen_id, seen_by_peer_id, json.dumps(missing_deps), deps_remaining)
         )
 
         # Clear and re-insert dependency tracking
@@ -134,3 +137,84 @@ class blocked:
 
         log.debug(f"queues.blocked._all_deps_satisfied() ALL deps satisfied for first_seen_id={first_seen_id}")
         return True
+
+    @staticmethod
+    def notify_event_valid(event_id: str, seen_by_peer_id: str, db: Any) -> list[str]:
+        """Notify that an event became valid - decrements counters and unblocks ready events (Kahn's algorithm).
+
+        Args:
+            event_id: The event that just became valid
+            seen_by_peer_id: Which peer saw this event
+            db: Database connection
+
+        Returns:
+            List of first_seen_ids that were unblocked and need re-projection
+        """
+        log.debug(f"queues.blocked.notify_event_valid() event_id={event_id}, peer={seen_by_peer_id}")
+
+        # Find all events waiting for this dependency (uses idx_blocked_deps_lookup)
+        waiting_events = db.query("""
+            SELECT DISTINCT first_seen_id, seen_by_peer_id
+            FROM blocked_event_deps
+            WHERE dep_id = ? AND seen_by_peer_id = ?
+        """, (event_id, seen_by_peer_id))
+
+        if not waiting_events:
+            log.debug(f"queues.blocked.notify_event_valid() no events waiting for {event_id}")
+            return []
+
+        log.debug(f"queues.blocked.notify_event_valid() found {len(waiting_events)} events waiting for {event_id}")
+
+        # Decrement counters atomically using UPDATE...RETURNING
+        # Build placeholders for IN clause
+        placeholders = ','.join(['(?, ?)' for _ in waiting_events])
+        params = []
+        for evt in waiting_events:
+            params.extend([evt['first_seen_id'], evt['seen_by_peer_id']])
+
+        try:
+            # Try atomic UPDATE...RETURNING (SQLite 3.35+)
+            decremented = db.execute_returning(f"""
+                UPDATE blocked_events
+                SET deps_remaining = deps_remaining - 1
+                WHERE (first_seen_id, seen_by_peer_id) IN (VALUES {placeholders})
+                RETURNING first_seen_id, deps_remaining
+            """, tuple(params))
+
+            # Find which hit zero
+            unblocked = [row['first_seen_id'] for row in decremented if row['deps_remaining'] == 0]
+
+        except Exception as e:
+            # Fallback: manual decrement and check
+            log.debug(f"queues.blocked.notify_event_valid() RETURNING failed, using fallback: {e}")
+            unblocked = []
+            for evt in waiting_events:
+                db.execute("""
+                    UPDATE blocked_events
+                    SET deps_remaining = deps_remaining - 1
+                    WHERE first_seen_id = ? AND seen_by_peer_id = ?
+                """, (evt['first_seen_id'], evt['seen_by_peer_id']))
+
+                # Check if it hit zero
+                result = db.query_one("""
+                    SELECT deps_remaining FROM blocked_events
+                    WHERE first_seen_id = ? AND seen_by_peer_id = ?
+                """, (evt['first_seen_id'], evt['seen_by_peer_id']))
+
+                if result and result['deps_remaining'] == 0:
+                    unblocked.append(evt['first_seen_id'])
+
+        # Cleanup: delete unblocked events from blocked_events
+        if unblocked:
+            log.info(f"queues.blocked.notify_event_valid() UNBLOCKING {len(unblocked)} events: {unblocked}")
+
+            # Build DELETE with IN clause
+            placeholders_del = ','.join(['?' for _ in unblocked])
+            db.execute(f"""
+                DELETE FROM blocked_events
+                WHERE first_seen_id IN ({placeholders_del}) AND seen_by_peer_id = ?
+            """, tuple(unblocked) + (seen_by_peer_id,))
+
+            db.commit()
+
+        return unblocked

@@ -167,64 +167,6 @@ def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
     return hash(hint + plaintext_bytes, size=NONCE_SIZE)
 
 
-# ===== Invite Verification Functions =====
-
-def derive_invite_pubkey(invite_secret: str) -> str:
-    """Derive invite pubkey from invite secret using KDF.
-
-    Args:
-        invite_secret: URL-safe base64 string (24 bytes encoded)
-
-    Returns:
-        Hex-encoded pubkey (64 chars = 32 bytes)
-    """
-    import hashlib
-    # Create salt from constant
-    salt = hashlib.sha256(b"quiet_invite_kdf_v1").digest()[:16]
-    # Derive pubkey from secret
-    pubkey_bytes = kdf(invite_secret.encode('utf-8'), salt=salt, size=32)
-    return pubkey_bytes.hex()
-
-
-def derive_invite_signature(invite_secret: str, public_key: str, group_id: str) -> str:
-    """Derive invite signature proving possession of invite secret.
-
-    Args:
-        invite_secret: URL-safe base64 string
-        public_key: Hex-encoded public key of the joiner
-        group_id: Base64-encoded group ID (serves as network identifier)
-
-    Returns:
-        Hex-encoded signature (64 chars = 32 bytes, truncated from hash)
-    """
-    # Commitment: hash of invite_secret + public_key + group_id
-    commitment_data = f"{invite_secret}:{public_key}:{group_id}"
-    signature_hash = hash(commitment_data.encode('utf-8'), size=32)
-    # Return first 64 hex chars (32 bytes)
-    return signature_hash.hex()[:64]
-
-
-def verify_invite_proof(invite_secret: str, public_key: str, group_id: str,
-                       claimed_pubkey: str, claimed_signature: str) -> bool:
-    """Verify that invite proof fields match the invite secret.
-
-    Args:
-        invite_secret: The invite secret from the link
-        public_key: Hex-encoded public key of the joiner
-        group_id: Base64-encoded group ID (serves as network identifier)
-        claimed_pubkey: The invite_pubkey from the user event
-        claimed_signature: The invite_signature from the user event
-
-    Returns:
-        True if both pubkey and signature are valid
-    """
-    expected_pubkey = derive_invite_pubkey(invite_secret)
-    expected_signature = derive_invite_signature(invite_secret, public_key, group_id)
-
-    return (claimed_pubkey == expected_pubkey and
-            claimed_signature == expected_signature)
-
-
 # ===== Wrap/Unwrap Functions =====
 
 

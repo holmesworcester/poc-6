@@ -103,7 +103,7 @@ def test_three_player_invite_messaging():
     bob_group_id = bob_invite_row['group_id']
 
     # Bob creates user event with invite proof
-    bob_user_id = user.create(
+    bob_user_id, bob_prekey_id = user.create(
         peer_id=bob_peer_id,
         peer_shared_id=bob_peer_shared_id,
         group_id=bob_group_id,
@@ -111,9 +111,9 @@ def test_three_player_invite_messaging():
         key_id=bob_key_id,
         t_ms=t_ms + 700,
         db=db,
-        invite_secret=bob_invite_secret
+        invite_private_key=bob_invite_secret
     )
-    print(f"Bob user_id: {bob_user_id[:16]}...")
+    print(f"Bob user_id: {bob_user_id[:16]}..., prekey_id: {bob_prekey_id[:16]}...")
 
     # Bob's public key for sync
     bob_public_key = peer.get_public_key(bob_peer_id, db)

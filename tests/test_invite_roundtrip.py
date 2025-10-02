@@ -134,7 +134,7 @@ def test_invite_roundtrip():
     print(f"Bob got group_id from invite: {bob_group_id}")
 
     # 10. Bob creates user event with invite proof (dependency check will pass - invite exists)
-    bob_user_id = user.create(
+    bob_user_id, bob_prekey_id = user.create(
         peer_id=bob_peer_id,
         peer_shared_id=bob_peer_shared_id,
         group_id=bob_group_id,
@@ -142,9 +142,9 @@ def test_invite_roundtrip():
         key_id=bob_key_id,
         t_ms=t_ms + 1000,
         db=db,
-        invite_secret=bob_invite_secret
+        invite_private_key=bob_invite_secret
     )
-    print(f"Bob user_id: {bob_user_id}")
+    print(f"Bob user_id: {bob_user_id}, prekey_id: {bob_prekey_id}")
 
     # === BOB SENDS EVENTS BACK TO ALICE (SIMULATED) ===
 

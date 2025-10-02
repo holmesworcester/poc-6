@@ -246,32 +246,17 @@ def _recreate_projection_tables(db: Any) -> None:
 
 
 def _replay_events(event_ids: list[str], db: Any) -> None:
-    """Replay first_seen events in order, then process blocked queue."""
+    """Replay first_seen events in order. Event-driven unblocking happens automatically."""
     from events import first_seen
-    import queues
 
-    # Project all events
+    # Project all events - unblocking happens automatically via notify_event_valid()
     for event_id in event_ids:
         first_seen.project(event_id, db)
 
-    # Process blocked events until queue is empty
-    max_iterations = 100
-    for iteration in range(max_iterations):
-        peer_rows = db.query("SELECT DISTINCT seen_by_peer_id FROM blocked_events")
-        if not peer_rows:
-            break
-
-        had_progress = False
-        for peer_row in peer_rows:
-            unblocked_first_seen_ids = queues.blocked.process(peer_row['seen_by_peer_id'], db)
-            if unblocked_first_seen_ids:
-                had_progress = True
-                # Re-project unblocked first_seen events
-                for first_seen_id in unblocked_first_seen_ids:
-                    first_seen.project(first_seen_id, db)
-
-        if not had_progress:
-            break
+    # Safety check: verify no events remain blocked (would indicate a bug)
+    remaining = db.query("SELECT COUNT(*) as count FROM blocked_events")
+    if remaining and remaining[0]['count'] > 0:
+        print(f"⚠️  Warning: {remaining[0]['count']} events still blocked after replay")
 
     db.commit()
 

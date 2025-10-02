@@ -22,11 +22,10 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
     """
-    # Generate invite secret (24 bytes, URL-safe)
-    invite_secret = secrets.token_urlsafe(24)
-
-    # Derive invite pubkey from secret
-    invite_pubkey = crypto.derive_invite_pubkey(invite_secret)
+    # Generate Ed25519 keypair for invite proof
+    # Bob will sign with private key, Alice stores public key in invite event
+    invite_private_key, invite_public_key = crypto.generate_keypair()
+    invite_pubkey_b64 = crypto.b64encode(invite_public_key)
 
     # Generate invite-scoped key_secret for initial event encryption
     invite_key_secret = crypto.generate_secret()
@@ -52,7 +51,7 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # Create invite event with all join metadata
     event_data = {
         'type': 'invite',
-        'invite_pubkey': invite_pubkey,
+        'invite_pubkey': invite_pubkey_b64,
         'group_id': group_id,
         'inviter_id': inviter_peer_shared_id,
         'invite_key_secret_id': invite_key_id,
@@ -96,7 +95,8 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # Target: reduce link from ~1055 chars to ~520 chars
     invite_link_data = {
         'invite_blob': crypto.b64encode(invite_blob_bytes),
-        'invite_secret': invite_secret,
+        'invite_private_key': crypto.b64encode(invite_private_key),
+        'invite_public_key': crypto.b64encode(invite_public_key),
         'invite_key_secret': invite_key_secret_hex,
         'transit_secret': transit_secret.hex(),
         'transit_secret_id': transit_secret_id,
