@@ -110,15 +110,8 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
         (message_id, channel_id, group_id, author_id, content, created_at, seen_by_peer_id, received_at)
     )
 
-    # Insert into shareable_events
-    db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            event_id,
-            author_id,
-            created_at
-        )
-    )
+    # Insert into shareable_events with window_id
+    from events import sync
+    sync.add_shareable_event(event_id, author_id, created_at, db)
 
     return event_id

@@ -61,17 +61,10 @@ def project(peer_shared_id: str, seen_by_peer_id: str, received_at: int, db: Any
         )
     )
 
-    # Insert into shareable_events
+    # Insert into shareable_events with window_id
     # peer_shared events use the peer_shared_id as both event_id and peer_id (shareable identifier)
-    db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            peer_shared_id,
-            peer_shared_id,  # Use peer_shared_id as the shareable identifier
-            event_data['created_at']
-        )
-    )
+    from events import sync
+    sync.add_shareable_event(peer_shared_id, peer_shared_id, event_data['created_at'], db)
 
     # Mark as valid for this peer
     db.execute(

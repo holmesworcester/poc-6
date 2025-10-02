@@ -5,34 +5,18 @@ import os
 
 
 def create_all(db: Any) -> None:
-    """Create all database tables by loading SQL files and creating cross-cutting tables.
+    """Create all database tables by loading SQL files.
 
-    This function:
-    1. Creates the shareable_events table (cross-cutting, not owned by a single module)
-    2. Loads all .sql files from the root directory and events/ directory
+    Loads all .sql files from the root directory and events/ directory (including subdirectories).
     """
-    # Create shareable_events table (cross-cutting table for sync)
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS shareable_events (
-            event_id TEXT PRIMARY KEY,
-            peer_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-    """)
-
-    # Index for querying shareable events by peer
-    db.execute("""
-        CREATE INDEX IF NOT EXISTS idx_shareable_events_peer
-        ON shareable_events(peer_id, created_at DESC)
-    """)
-
     # Get the directory of this file
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Load all .sql files from root and events/ directory
+    # Load all .sql files from root and events/ directory (including subdirs)
     sql_files = []
     sql_files.extend(glob.glob(os.path.join(base_dir, '*.sql')))
     sql_files.extend(glob.glob(os.path.join(base_dir, 'events', '*.sql')))
+    sql_files.extend(glob.glob(os.path.join(base_dir, 'events', '**', '*.sql'), recursive=True))
 
     # Sort for deterministic order
     sql_files.sort()

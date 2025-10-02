@@ -149,16 +149,9 @@ def project(invite_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> 
         )
     )
 
-    # Insert into shareable_events
-    db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            invite_id,
-            event_data['created_by'],
-            event_data['created_at']
-        )
-    )
+    # Insert into shareable_events with window_id
+    from events import sync
+    sync.add_shareable_event(invite_id, event_data['created_by'], event_data['created_at'], db)
 
     # Mark as valid for this peer (user events depend on invite events)
     db.execute(
