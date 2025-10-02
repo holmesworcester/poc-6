@@ -9,7 +9,7 @@ import nacl.encoding
 import nacl.utils
 from nacl.public import SealedBox
 
-from events import key, network
+from events import key
 import store
 
 # ===== Constants =====
@@ -126,48 +126,44 @@ def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
 # ===== Wrap/Unwrap Functions =====
 
 
-def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> str:
-    """Unwrap an incoming transit blob and store it, with its corresponding "first_seen" event blob.
-
-    The seen_by_peer_id is determined by the transit_key (the receiving peer).
-    Returns empty string if unwrap fails (missing key, decryption error, etc.).
-    """
-    import logging
-    log = logging.getLogger(__name__)
-
-    hint = key.extract_id(blob)
-    # For incoming blobs: seen_by_peer_id = peer who owns the transit_key (the receiving peer)
-    seen_by_peer_id = network.get_peer_id_for_transit_key(hint, db)
-
-    unwrapped_blob = unwrap(blob, db)
-    if unwrapped_blob is None:
-        log.info(f"Skipping storage for blob with id {hint.hex()}: unwrap failed")
-        return ""
-
-    first_seen_id = store.store_with_first_seen(unwrapped_blob, seen_by_peer_id, t_ms, db)
-    return first_seen_id
-
-def unwrap(wrapped_blob: bytes, db: Any) -> bytes | None:
+def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
     """Extract key id from blob, determine if sym or asym, fetch key, then unseal or decrypt.
 
-    Returns None on non-critical errors (missing key, decryption failure, invalid JSON, non-canonical).
-    Logs errors for debugging. Blob remains in store for future retry/recovery.
+    Returns tuple of (plaintext, missing_key_ids).
+    - If plaintext JSON: (plaintext_bytes, [])
+    - If successful decrypt: (plaintext_bytes, [])
+    - If key missing: (None, [key_id_hex])
+    - If other error: (None, [])
+
+    Blob remains in store for future retry/recovery.
     """
     import logging
     log = logging.getLogger(__name__)
+
+    # Check if blob is plaintext JSON (starts with '{' or '[')
+    if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
+        try:
+            # Verify it's valid JSON
+            json.loads(wrapped_blob.decode('utf-8'))
+            return (wrapped_blob, [])
+        except Exception:
+            # Not valid JSON, continue with decrypt attempt
+            pass
 
     # Extract id from blob
     try:
         id_bytes = key.extract_id(wrapped_blob)
     except Exception as e:
         log.error(f"Failed to extract id from blob: {e}")
-        return None
+        return (None, [])
 
     # Get the key using the id
     key_data = key.get_key_by_id(id_bytes, db)
     if not key_data:
-        log.warning(f"Key not found for id: {id_bytes.hex()} (may arrive later)")
-        return None
+        import base64
+        key_id_b64 = base64.b64encode(id_bytes).decode('ascii')
+        log.warning(f"Key not found for id: {key_id_b64} (may arrive later)")
+        return (None, [key_id_b64])
 
     # Extract the encrypted portion (after the id)
     id_length = len(id_bytes)
@@ -189,25 +185,27 @@ def unwrap(wrapped_blob: bytes, db: Any) -> bytes | None:
             plaintext = unseal(encrypted_data, private_key)
         else:
             log.error(f"Unknown key type: {key_type}")
-            return None
+            return (None, [])
     except Exception as e:
-        log.error(f"Decryption failed for id {id_bytes.hex()}: {e}")
-        return None
+        import base64
+        log.error(f"Decryption failed for id {base64.b64encode(id_bytes).decode('ascii')}: {e}")
+        return (None, [])
 
     # Parse and verify JSON is canonical
     try:
         event_data = json.loads(plaintext.decode('utf-8'))
     except Exception as e:
         log.error(f"Invalid JSON after decryption: {e}")
-        return None
+        return (None, [])
 
     # Verify canonicalization
     canonical_check = canonicalize_json(event_data)
     if canonical_check != plaintext:
-        log.error(f"Non-canonical JSON detected in blob (id: {id_bytes.hex()})")
-        return None
+        import base64
+        log.error(f"Non-canonical JSON detected in blob (id: {base64.b64encode(id_bytes).decode('ascii')})")
+        return (None, [])
 
-    return plaintext
+    return (plaintext, [])
 
 
 def wrap(plaintext: dict[str, Any], key_data: Any, db: Any) -> bytes:

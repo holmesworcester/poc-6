@@ -12,7 +12,8 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     # Extract params
     channel_id = params['channel_id']
     group_id = params['group_id']
-    created_by = params['created_by']
+    peer_id = params['peer_id']  # Local peer ID
+    peer_shared_id = params['peer_shared_id']  # Shareable identity ID
     content = params.get('content', '')
     key_id = params['key_id']
 
@@ -21,13 +22,13 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
         'type': 'message',
         'channel_id': channel_id,
         'group_id': group_id,
-        'created_by': created_by,
+        'created_by': peer_shared_id,  # References shareable peer identity
         'content': content,
         'created_at': t_ms
     }
 
-    # Sign the event
-    private_key = peer.get_private_key(created_by, db)
+    # Sign the event with local peer's private key
+    private_key = peer.get_private_key(peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
@@ -36,11 +37,11 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     # Wrap (canonicalize + encrypt)
     blob = crypto.wrap(signed_event, key_data, db)
 
-    # Store with first_seen (shareable event) - returns event_id
-    event_id = store.store_with_first_seen(blob, created_by, t_ms, db)
+    # Store event with first_seen wrapper and projection
+    event_id = store.event(blob, peer_id, t_ms, db)
 
     # Get latest messages
-    latest = list_messages(channel_id, created_by, db)
+    latest = list_messages(channel_id, peer_id, db)
 
     db.commit()
 
@@ -68,15 +69,16 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
     if not event_blob:
         return None
 
-    unwrapped = crypto.unwrap(event_blob, db)
+    unwrapped, _ = crypto.unwrap(event_blob, db)
     if not unwrapped:
-        return None
+        return None  # Already blocked by first_seen.project() if keys missing
 
     event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
 
-    # Verify signature - get public key from created_by peer
+    # Verify signature - get public key from created_by peer_shared
+    from events import peer_shared
     created_by = event_data.get('created_by')
-    public_key = peer.get_public_key(created_by, db)
+    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
     if not crypto.verify_event(event_data, public_key):
         return None  # Reject unsigned or invalid signature
 

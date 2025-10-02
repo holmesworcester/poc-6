@@ -1,7 +1,8 @@
 # TODO:
 
+- test unblocking on 1 peer 
+- get check for deps out of crypto unwrap. 
 - add 2 peer comms first
-- signing/verification
 - bootstrapping (user, invite, proof of invite)
 - groups (to bootstrapping too)
 - group encryption

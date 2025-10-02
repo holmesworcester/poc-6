@@ -6,19 +6,28 @@ import store
 from events import key, peer
 
 
-def create(name: str, created_by_peer_id: str, key_id: str, t_ms: int, db: Any) -> str:
-    """Create a group event (shareable, encrypted), store with first_seen, return event_id."""
+def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any) -> str:
+    """Create a group event (shareable, encrypted), store with first_seen, return event_id.
+
+    Args:
+        name: Group name
+        peer_id: Local peer ID (for signing and seen_by)
+        peer_shared_id: Shareable identity ID (for created_by field)
+        key_id: Encryption key ID
+        t_ms: Timestamp
+        db: Database connection
+    """
     # Create event dict
     event_data = {
         'type': 'group',
         'name': name,
-        'created_by': created_by_peer_id,
+        'created_by': peer_shared_id,  # References shareable peer identity
         'created_at': t_ms,
         'key_id': key_id  # Store key_id in event for later retrieval
     }
 
-    # Sign the event
-    private_key = peer.get_private_key(created_by_peer_id, db)
+    # Sign the event with local peer's private key
+    private_key = peer.get_private_key(peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
@@ -27,8 +36,8 @@ def create(name: str, created_by_peer_id: str, key_id: str, t_ms: int, db: Any) 
     # Wrap (canonicalize + encrypt)
     blob = crypto.wrap(signed_event, key_data, db)
 
-    # Store with first_seen (shareable event)
-    event_id = store.store_with_first_seen(blob, created_by_peer_id, t_ms, db)
+    # Store with first_seen (shareable event) - seen_by is the LOCAL peer_id
+    event_id = store.store_with_first_seen(blob, peer_id, t_ms, db)
 
     return event_id
 
@@ -41,16 +50,17 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
         return None
 
     # Unwrap (decrypt)
-    unwrapped = crypto.unwrap(blob, db)
+    unwrapped, _ = crypto.unwrap(blob, db)
     if not unwrapped:
-        return None
+        return None  # Already blocked by first_seen.project() if keys missing
 
     # Parse JSON
     event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
 
-    # Verify signature - get public key from created_by peer
+    # Verify signature - get public key from created_by peer_shared
+    from events import peer_shared
     created_by = event_data['created_by']
-    public_key = peer.get_public_key(created_by, db)
+    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
     if not crypto.verify_event(event_data, public_key):
         return None  # Reject unsigned or invalid signature
 
