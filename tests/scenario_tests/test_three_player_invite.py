@@ -6,6 +6,8 @@ Based on test_invite_roundtrip and test_multi_identity_chat_sim patterns.
 
 import sqlite3
 import time
+import json
+import base64
 
 from db import Database
 import schema
@@ -73,90 +75,165 @@ def test_three_player_invite_messaging():
     print(f"Invite ID: {alice_invite_id[:16]}...")
     print(f"Invite link: {invite_link[:50]}...")
 
+    # Alice stores the invite key secret locally (she'll need it to decrypt Bob's bootstrap events)
+    # IMPORTANT: key_id must be base64 string (matching key.create() pattern)
+    alice_invite_key_secret = bytes.fromhex(invite_data['invite_key_secret'])
+    alice_invite_key_id_bytes = crypto.hash(alice_invite_key_secret, size=16)
+    alice_invite_key_id = crypto.b64encode(alice_invite_key_id_bytes)
+
+    # Create a proper key event (so unwrap can find it)
+    invite_key_event_data = {
+        'type': 'key',
+        'key': crypto.b64encode(alice_invite_key_secret),
+        'peer_id': alice_peer_id,
+        'created_at': t_ms + 450
+    }
+    invite_key_event_blob = json.dumps(invite_key_event_data).encode()
+    db.execute(
+        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+        (alice_invite_key_id_bytes, invite_key_event_blob, t_ms + 450)
+    )
+
+    # Also store in keys table
+    db.execute(
+        "INSERT OR IGNORE INTO keys (key_id, key, created_at) VALUES (?, ?, ?)",
+        (alice_invite_key_id, alice_invite_key_secret, t_ms + 450)
+    )
+    db.commit()
+
     # === BOB JOINS VIA INVITE ===
     print("\n=== Bob joins via invite ===")
 
     # Bob decodes invite link (simulated)
-    import base64
-    import json
     invite_code = invite_link[15:]  # Remove "quiet://invite/" prefix
     padded = invite_code + '=' * (-len(invite_code) % 4)
     decoded_json = base64.urlsafe_b64decode(padded).decode()
     decoded_invite_data = json.loads(decoded_json)
 
     # Bob extracts invite data
-    bob_invite_secret = decoded_invite_data['invite_secret']
+    bob_invite_private_key = crypto.b64decode(decoded_invite_data['invite_private_key'])
+
+    # Bob extracts and stores invite key (shared with Alice)
+    invite_key_secret_hex = decoded_invite_data['invite_key_secret']
+    invite_key_secret = bytes.fromhex(invite_key_secret_hex)
+    bob_invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
+    bob_invite_key_id = crypto.b64encode(bob_invite_key_id_bytes)
 
     # Bob creates local peer
     bob_peer_id, bob_peer_shared_id = peer.create(t_ms + 500, db)
     print(f"Bob peer_id: {bob_peer_id[:16]}...")
     print(f"Bob peer_shared_id: {bob_peer_shared_id[:16]}...")
 
+    # Bob stores the invite key (matching Alice's pattern)
+    invite_key_event_data = {
+        'type': 'key',
+        'key': crypto.b64encode(invite_key_secret),
+        'peer_id': bob_peer_id,
+        'created_at': t_ms + 550
+    }
+    invite_key_event_blob = json.dumps(invite_key_event_data).encode()
+    db.execute(
+        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+        (bob_invite_key_id_bytes, invite_key_event_blob, t_ms + 550)
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO keys (key_id, key, created_at) VALUES (?, ?, ?)",
+        (bob_invite_key_id, invite_key_secret, t_ms + 550)
+    )
+
     # Bob creates his own key (for local encryption)
     bob_key_id = key.create(bob_peer_id, t_ms + 600, db)
 
-    # Bob stores invite blob first to get group_id
+    # Bob stores invite blob and projects it (using manual pattern to avoid dependency issues)
     bob_invite_blob_b64 = decoded_invite_data['invite_blob']
     bob_invite_blob_bytes = crypto.b64decode(bob_invite_blob_b64)
-    bob_invite_id = store.event(bob_invite_blob_bytes, bob_peer_id, t_ms + 650, db)
+    bob_invite_id = store.blob(bob_invite_blob_bytes, t_ms=t_ms + 650, return_dupes=True, db=db)
+
+    from events import first_seen
+    bob_invite_fs_id = first_seen.create(bob_invite_id, bob_peer_id, t_ms=t_ms + 650, db=db, return_dupes=True)
+    first_seen.project(bob_invite_fs_id, db)
+
     bob_invite_row = db.query_one("SELECT group_id FROM invites WHERE invite_id = ?", (bob_invite_id,))
     bob_group_id = bob_invite_row['group_id']
 
-    # Bob creates user event with invite proof
+    # Bob creates user event with invite proof (encrypted with INVITE KEY so Alice can decrypt it)
     bob_user_id, bob_prekey_id = user.create(
         peer_id=bob_peer_id,
         peer_shared_id=bob_peer_shared_id,
         group_id=bob_group_id,
         name="Bob",
-        key_id=bob_key_id,
+        key_id=bob_invite_key_id,  # Use invite key, not personal key!
         t_ms=t_ms + 700,
         db=db,
-        invite_private_key=bob_invite_secret
+        invite_private_key=bob_invite_private_key
     )
     print(f"Bob user_id: {bob_user_id[:16]}..., prekey_id: {bob_prekey_id[:16]}...")
 
-    # Bob's public key for sync
-    bob_public_key = peer.get_public_key(bob_peer_id, db)
+    db.commit()
 
-    # === BOB SENDS HIS EVENTS TO ALICE (simulated network delivery) ===
-    print("\n=== Bob shares events with Alice ===")
+    # === BOB SENDS BOOTSTRAP EVENTS TO ALICE ===
+    print("\n=== Bob sends bootstrap events ===")
 
-    # Bob shares his peer_shared event with Alice
-    bob_peer_shared_blob = store.get(bob_peer_shared_id, db)
-    alice_received_bob_ps = store.event(bob_peer_shared_blob, alice_peer_id, t_ms + 800, db)
-    print(f"Alice received Bob's peer_shared: {alice_received_bob_ps[:16]}...")
+    # Bob repeatedly sends bootstrap events (simulating UDP retries)
+    for attempt in range(3):
+        print(f"Bootstrap attempt {attempt + 1}/3...")
+        user.send_bootstrap_events(
+            peer_id=bob_peer_id,
+            peer_shared_id=bob_peer_shared_id,
+            user_id=bob_user_id,
+            prekey_id=bob_prekey_id,
+            invite_data=decoded_invite_data,
+            t_ms=t_ms + 800 + (attempt * 100),
+            db=db
+        )
 
-    # Bob shares his user event with Alice
-    bob_user_blob = store.get(bob_user_id, db)
-    alice_received_bob_user = store.event(bob_user_blob, alice_peer_id, t_ms + 900, db)
-    print(f"Alice received Bob's user: {alice_received_bob_user[:16]}...")
+    db.commit()
 
-    # === ALICE SHARES HER EVENTS WITH BOB ===
-    print("\n=== Alice shares events with Bob ===")
+    # === ALICE PROCESSES INCOMING (RECEIVES BOB'S BOOTSTRAP) ===
+    print("\n=== Alice processes incoming ===")
 
-    # Alice shares her peer_shared with Bob
-    alice_peer_shared_blob = store.get(alice_peer_shared_id, db)
-    bob_received_alice_ps = store.event(alice_peer_shared_blob, bob_peer_id, t_ms + 1000, db)
+    # Check incoming queue before processing
+    incoming_count = len(db.query("SELECT * FROM incoming_blobs"))
+    print(f"Incoming blobs before processing: {incoming_count}")
 
-    # Alice shares her network key with Bob (so he can decrypt messages)
-    alice_key_blob = store.get(alice_network_key_id, db)
-    bob_received_alice_key = store.event(alice_key_blob, bob_peer_id, t_ms + 1100, db)
+    # Alice processes incoming queue (multiple rounds for blocked event resolution)
+    sync.receive(batch_size=10, t_ms=t_ms + 1200, db=db)
+    sync.receive(batch_size=10, t_ms=t_ms + 1300, db=db)
+    sync.receive(batch_size=10, t_ms=t_ms + 1400, db=db)
 
-    # Alice shares group/channel with Bob
-    alice_group_blob = store.get(alice_group_id, db)
-    bob_received_alice_group = store.event(alice_group_blob, bob_peer_id, t_ms + 1200, db)
+    # Check incoming queue after processing
+    incoming_after = len(db.query("SELECT * FROM incoming_blobs"))
+    print(f"Incoming blobs after processing: {incoming_after}")
 
-    alice_channel_blob = store.get(alice_channel_id, db)
-    bob_received_alice_channel = store.event(alice_channel_blob, bob_peer_id, t_ms + 1300, db)
-
-    # Register prekeys for Alice and Bob to sync
-    db.execute(
-        "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (alice_peer_id, alice_public_key, t_ms + 1400)
+    # Check if Alice validated Bob's user
+    bob_user_valid_for_alice = db.query_one(
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
+        (bob_user_id, alice_peer_id)
     )
+    if bob_user_valid_for_alice:
+        print("✓ Alice validated Bob's user event")
+    else:
+        # Debug: check what's blocked and what Alice has
+        blocked = db.query("SELECT * FROM blocked_events WHERE seen_by_peer_id = ?", (alice_peer_id,))
+        print(f"✗ Alice has {len(blocked)} blocked events")
+
+        # Check if Bob's peer_shared is valid for Alice
+        bob_peer_shared_valid = db.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
+            (bob_peer_shared_id, alice_peer_id)
+        )
+        print(f"   Bob peer_shared valid for Alice: {bob_peer_shared_valid is not None}")
+
+        # Check how many events Alice has
+        alice_events = len(db.query("SELECT * FROM valid_events WHERE seen_by_peer_id = ?", (alice_peer_id,)))
+        print(f"   Alice has {alice_events} valid events total")
+
+    # Register Alice's prekey for sync (Bob's prekey was auto-created by user.create())
+    # Use peer_shared_id for prekey table (that's what sync.send_request() looks up)
+    alice_public_key = peer.get_public_key(alice_peer_id, db)
     db.execute(
         "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (bob_peer_id, bob_public_key, t_ms + 1500)
+        (alice_peer_shared_id, alice_public_key, t_ms + 1400)
     )
 
     # === CHARLIE CREATES ISOLATED NETWORK ===
@@ -244,15 +321,16 @@ def test_three_player_invite_messaging():
     print("\n=== Sending sync requests ===")
 
     # Alice and Bob send sync requests to each other
+    # Use peer_shared_id for to_peer_id (that's what prekey lookup uses)
     sync.send_request(
-        to_peer_id=bob_peer_id,
+        to_peer_id=bob_peer_shared_id,
         from_peer_id=alice_peer_id,
         from_peer_shared_id=alice_peer_shared_id,
         t_ms=t_ms + 4000,
         db=db
     )
     sync.send_request(
-        to_peer_id=alice_peer_id,
+        to_peer_id=alice_peer_shared_id,
         from_peer_id=bob_peer_id,
         from_peer_shared_id=bob_peer_shared_id,
         t_ms=t_ms + 4100,
@@ -262,7 +340,7 @@ def test_three_player_invite_messaging():
     # Charlie tries to send sync requests but they'll fail (no prekeys)
     try:
         sync.send_request(
-            to_peer_id=alice_peer_id,
+            to_peer_id=alice_peer_shared_id,
             from_peer_id=charlie_peer_id,
             from_peer_shared_id=charlie_peer_shared_id,
             t_ms=t_ms + 4200,
@@ -396,6 +474,18 @@ def test_three_player_invite_messaging():
     assert not bob_sees_charlie, "Bob should NOT see Charlie's message"
 
     print("\n✓ All assertions passed!")
+
+    # === CONVERGENCE TESTING ===
+    print("\n=== Running Convergence Tests ===")
+
+    from tests.utils import assert_reprojection
+    assert_reprojection(db)
+
+    from tests.utils import assert_idempotency
+    assert_idempotency(db, num_trials=10, max_repetitions=5)
+
+    from tests.utils import assert_convergence
+    assert_convergence(db)
 
 
 if __name__ == '__main__':

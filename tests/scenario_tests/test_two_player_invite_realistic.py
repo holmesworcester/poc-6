@@ -230,9 +230,10 @@ def test_two_player_invite_realistic():
     # Alice needs a prekey too (TODO: Alice should create a user event for herself)
     alice_public_key = peer.get_public_key(alice_peer_id, db)
 
+    # Use peer_shared_id for prekey table (that's what sync.send_request() looks up)
     db.execute(
         "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (alice_peer_id, alice_public_key, t_ms + 16000)
+        (alice_peer_shared_id, alice_public_key, t_ms + 16000)
     )
     db.commit()
 
@@ -241,7 +242,7 @@ def test_two_player_invite_realistic():
 
     # Bob sends sync request to Alice
     sync.send_request(
-        to_peer_id=alice_peer_id,
+        to_peer_id=alice_peer_shared_id,  # Use shared ID for prekey lookup
         from_peer_id=bob_peer_id,
         from_peer_shared_id=bob_peer_shared_id,
         t_ms=t_ms + 18000,
@@ -250,7 +251,7 @@ def test_two_player_invite_realistic():
 
     # Alice sends sync request to Bob
     sync.send_request(
-        to_peer_id=bob_peer_id,
+        to_peer_id=bob_peer_shared_id,  # Use shared ID for prekey lookup
         from_peer_id=alice_peer_id,
         from_peer_shared_id=alice_peer_shared_id,
         t_ms=t_ms + 19000,
@@ -301,14 +302,14 @@ def test_two_player_invite_realistic():
 
     # Exchange messages via sync
     sync.send_request(
-        to_peer_id=bob_peer_id,
+        to_peer_id=bob_peer_shared_id,  # Use shared ID for prekey lookup
         from_peer_id=alice_peer_id,
         from_peer_shared_id=alice_peer_shared_id,
         t_ms=t_ms + 25000,
         db=db
     )
     sync.send_request(
-        to_peer_id=alice_peer_id,
+        to_peer_id=alice_peer_shared_id,  # Use shared ID for prekey lookup
         from_peer_id=bob_peer_id,
         from_peer_shared_id=bob_peer_shared_id,
         t_ms=t_ms + 26000,
@@ -351,6 +352,18 @@ def test_two_player_invite_realistic():
     print("✓ Invite proof validated")
 
     print("\n=== ✓ ALL TESTS PASSED ===")
+
+    # === CONVERGENCE TESTING ===
+    print("\n=== Running Convergence Tests ===")
+
+    from tests.utils import assert_reprojection
+    assert_reprojection(db)
+
+    from tests.utils import assert_idempotency
+    assert_idempotency(db, num_trials=10, max_repetitions=5)
+
+    from tests.utils import assert_convergence
+    assert_convergence(db)
 
 
 if __name__ == '__main__':

@@ -265,7 +265,7 @@ def test_three_player_messaging():
 
     # Convergence test
     from tests.utils import assert_convergence
-    assert_convergence(db, num_trials=10)
+    assert_convergence(db)
 
 
 if __name__ == '__main__':

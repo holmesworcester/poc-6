@@ -7,6 +7,38 @@ import store
 import crypto
 
 
+def is_foreign_local_dep(field: str, event_data: dict[str, Any], seen_by_peer_id: str) -> bool:
+    """Check if dependency references another peer's local-only data.
+
+    'Local' is relative to the creator - some deps reference the creator's
+    local state (never shared). These should only be checked when we ARE
+    the creator, and skipped when we're not.
+
+    Examples:
+    - peer_shared.peer_id → references creator's local peer
+    - key.peer_id → references owner's local peer
+
+    Args:
+        field: Dependency field name (e.g., 'peer_id', 'group_id')
+        event_data: The event being processed
+        seen_by_peer_id: Who is processing this event
+
+    Returns:
+        True if this is a foreign local dep (should skip check), False otherwise
+    """
+    event_type = event_data.get('type')
+    created_by = event_data.get('created_by')
+
+    # Schema: peer_shared and key events have peer_id referencing creator's local peer
+    CREATOR_LOCAL_PEER_TYPES = {'peer_shared', 'key'}
+
+    if event_type in CREATOR_LOCAL_PEER_TYPES and field == 'peer_id':
+        # Skip only if we're not the creator (foreign local)
+        return seen_by_peer_id != created_by
+
+    return False
+
+
 def check_deps(event_data: dict[str, Any], seen_by_peer_id: str, db: Any) -> list[str]:
     """Check dependencies exist in valid_events for this peer.
 
@@ -26,15 +58,22 @@ def check_deps(event_data: dict[str, Any], seen_by_peer_id: str, db: Any) -> lis
 
     for field in dep_fields:
         dep_id = event_data.get(field)
-        if dep_id:
-            # Check if this dep is valid for this peer
-            valid = db.query_one(
-                "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ? LIMIT 1",
-                (dep_id, seen_by_peer_id)
-            )
-            if not valid:
-                log.debug(f"first_seen.check_deps() missing dep: {field}={dep_id} for peer={seen_by_peer_id}")
-                missing_deps.append(dep_id)
+        if not dep_id:
+            continue
+
+        # Skip foreign local deps (creator's local state we'll never have)
+        if is_foreign_local_dep(field, event_data, seen_by_peer_id):
+            log.debug(f"first_seen.check_deps() skipping foreign local dep: {field}={dep_id}")
+            continue
+
+        # Check if this dep is valid for this peer
+        valid = db.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ? LIMIT 1",
+            (dep_id, seen_by_peer_id)
+        )
+        if not valid:
+            log.debug(f"first_seen.check_deps() missing dep: {field}={dep_id} for peer={seen_by_peer_id}")
+            missing_deps.append(dep_id)
 
     if missing_deps:
         log.debug(f"first_seen.check_deps() total missing deps: {missing_deps}")
@@ -110,33 +149,22 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
     log.info(f"Parsed event data, type={event_type}")
 
     # Phase 2: Check semantic dependencies
-    # Special cases that skip dependency checking:
-    # 1. Sync events - they introduce new peers, no deps to check
-    # 2. Peer_shared events - they reference local peer_id which is not shareable
-    # 3. Key events - they reference local peer_id (owner) which is not shareable
-    # 4. Self-created user events with invite proof - creator doesn't have the invite event
+    # Special cases that skip ALL dependency checking:
+    # 1. Sync events - they introduce new peers, have no semantic deps
+    # 2. Self-created user events with invite proof - creator doesn't have invite as valid event
+    #
+    # Note: peer_shared and key events now use foreign local dep checking instead of blanket skip
     event_type = event_data.get('type')
     skip_dep_check = False
 
     if event_type == 'sync':
-        skip_dep_check = True  # Sync events introduce new peers
-    elif event_type == 'peer_shared':
-        skip_dep_check = True  # peer_shared references local peer_id (not shareable)
-    elif event_type == 'key':
-        skip_dep_check = True  # key references local peer_id (owner) which is not shareable
+        skip_dep_check = True  # Sync events introduce new peers, no deps to validate
     elif event_type == 'user' and 'invite_pubkey' in event_data:
-        # Check if this user event's peer_id (peer_shared_id) maps to the seeing peer
-        # by checking if the peer_shared was created by the local peer
-        from events import peer_shared
-        try:
-            peer_shared_blob = store.get(event_data.get('peer_id', ''), db)
-            if peer_shared_blob:
-                peer_shared_data = crypto.parse_json(peer_shared_blob)
-                # peer_shared events have a 'peer_id' field linking to local peer
-                if peer_shared_data.get('peer_id') == seen_by_peer_id:
-                    skip_dep_check = True
-        except:
-            pass
+        # Self-created user with invite proof: creator doesn't have invite in valid_events
+        # (invite comes from out-of-band link, not network sync)
+        created_by = event_data.get('created_by')
+        if seen_by_peer_id == created_by:
+            skip_dep_check = True
 
     if not skip_dep_check:
         missing_deps = check_deps(event_data, seen_by_peer_id, db)
@@ -179,7 +207,11 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
         projected_id = user.project(ref_id, seen_by_peer_id, received_at, db)
     elif event_type == 'prekey':
         from events import prekey
-        projected_id = prekey.project(ref_id, seen_by_peer_id, received_at, db)
+        prekey.project(ref_id, seen_by_peer_id, db)
+        projected_id = ref_id
+    elif event_type == 'prekey_shared':
+        from events import prekey_shared
+        projected_id = prekey_shared.project(ref_id, seen_by_peer_id, received_at, db)
 
     # Mark event as valid for this peer
     log.info(f"Marking {event_type} event {ref_id} as valid for peer {seen_by_peer_id}")

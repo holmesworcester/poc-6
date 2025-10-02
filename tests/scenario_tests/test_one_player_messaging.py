@@ -131,7 +131,7 @@ def test_alice_sends_to_herself():
 
     # Convergence test: verify projection is order-independent
     from tests.utils import assert_convergence
-    assert_convergence(db, num_trials=10)
+    assert_convergence(db)
 
 
 if __name__ == '__main__':

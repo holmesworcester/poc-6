@@ -68,17 +68,26 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
     user_id = store.event(blob, peer_id, t_ms, db)
 
     # Auto-create prekey for sync requests (inline, following poc-5 pattern)
-    from events import prekey
+    # Create local prekey (local-only, has private key)
+    from events import prekey, prekey_shared
     prekey_id, prekey_private = prekey.create(
         peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        group_id=group_id,
-        key_id=key_id,
         t_ms=t_ms + 1,  # Slightly later timestamp
         db=db
     )
 
-    return user_id, prekey_id
+    # Create shareable prekey_shared (shareable, only public key)
+    prekey_shared_id = prekey_shared.create(
+        prekey_id=prekey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        group_id=group_id,
+        key_id=key_id,
+        t_ms=t_ms + 2,  # Slightly later than prekey
+        db=db
+    )
+
+    return user_id, prekey_shared_id
 
 
 def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
@@ -158,16 +167,9 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
         )
     )
 
-    # Insert into shareable_events
-    db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            user_id,
-            event_data['created_by'],
-            event_data['created_at']
-        )
-    )
+    # Insert into shareable_events with window_id
+    from events import sync
+    sync.add_shareable_event(user_id, event_data['created_by'], event_data['created_at'], db)
 
     # Mark as valid for this peer
     db.execute(

@@ -100,7 +100,7 @@ def assert_idempotency(db: Any, num_trials: int = 10, max_repetitions: int = 5) 
 
 def assert_convergence(
     db: Any,
-    num_trials: int = 10,
+    num_trials: int = 1000,
     save_failures: bool = True,
     stop_on_first_failure: bool = True
 ) -> None:
@@ -108,7 +108,7 @@ def assert_convergence(
 
     Args:
         db: Database connection (in-memory for tests)
-        num_trials: Number of random orderings to test (default 10)
+        num_trials: Number of random orderings to test (default 1000)
                    If total events <= 8, tests ALL permutations instead
         save_failures: Whether to save failed orderings to disk (default True)
         stop_on_first_failure: Whether to stop on first failure or continue testing (default True)
