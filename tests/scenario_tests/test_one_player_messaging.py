@@ -23,18 +23,20 @@ def test_alice_sends_to_herself():
 
     # Test flow: Alice creates identity and messaging infrastructure
 
-    # 1. Create peer (Alice's local keypair)
-    alice_peer_id = peer.create(t_ms=1000, db=db)
-    assert len(alice_peer_id) == 24  # base64 encoded 16-byte hash (~22 chars + padding)
+    # 1. Create peer (Alice's local keypair) - returns (peer_id, peer_shared_id)
+    alice_peer_id, alice_peer_shared_id = peer.create(t_ms=1000, db=db)
+    assert len(alice_peer_id) == 24  # base64 encoded 16-byte hash
+    assert len(alice_peer_shared_id) == 24  # base64 encoded 16-byte hash
 
     # 2. Create key (symmetric encryption key)
-    alice_key_id = key.create(t_ms=2000, db=db)
+    alice_key_id = key.create(alice_peer_id, t_ms=2000, db=db)
     assert len(alice_key_id) == 24
 
     # 3. Create group
     alice_group_id = group.create(
         name='My Group',
-        created_by_peer_id=alice_peer_id,
+        peer_id=alice_peer_id,
+        peer_shared_id=alice_peer_shared_id,
         key_id=alice_key_id,
         t_ms=3000,
         db=db
@@ -45,7 +47,8 @@ def test_alice_sends_to_herself():
     alice_channel_id = channel.create(
         name='general',
         group_id=alice_group_id,
-        created_by_peer_id=alice_peer_id,
+        peer_id=alice_peer_id,
+        peer_shared_id=alice_peer_shared_id,
         key_id=alice_key_id,
         t_ms=4000,
         db=db
@@ -58,7 +61,8 @@ def test_alice_sends_to_herself():
             'content': 'Hello',
             'channel_id': alice_channel_id,
             'group_id': alice_group_id,
-            'created_by': alice_peer_id,
+            'peer_id': alice_peer_id,
+            'peer_shared_id': alice_peer_shared_id,
             'key_id': alice_key_id
         },
         t_ms=5000,
@@ -71,7 +75,7 @@ def test_alice_sends_to_herself():
     assert 'latest' in result1
     assert len(result1['latest']) == 1
     assert result1['latest'][0]['content'] == 'Hello'
-    assert result1['latest'][0]['author_id'] == alice_peer_id
+    assert result1['latest'][0]['author_id'] == alice_peer_shared_id  # author_id is peer_shared_id
 
     # 6. Send second message
     result2 = message.create_message(
@@ -79,7 +83,8 @@ def test_alice_sends_to_herself():
             'content': 'World',
             'channel_id': alice_channel_id,
             'group_id': alice_group_id,
-            'created_by': alice_peer_id,
+            'peer_id': alice_peer_id,
+            'peer_shared_id': alice_peer_shared_id,
             'key_id': alice_key_id
         },
         t_ms=6000,
@@ -100,7 +105,7 @@ def test_alice_sends_to_herself():
     assert messages_list[0]['content'] == 'World'
     assert messages_list[1]['content'] == 'Hello'
     assert all(m['channel_id'] == alice_channel_id for m in messages_list)
-    assert all(m['seen_by_peer_id'] == alice_peer_id for m in messages_list)
+    assert all(m['seen_by_peer_id'] == alice_peer_id for m in messages_list)  # seen_by is peer_id
 
     # 8. Verify channels are queryable
     channels_list = channel.list_channels(alice_peer_id, db)
@@ -115,6 +120,14 @@ def test_alice_sends_to_herself():
     assert groups_list[0]['group_id'] == alice_group_id
 
     print("✓ All tests passed! Alice can send messages to herself and see them.")
+
+    # Re-projection test: verify we can restore from event store
+    from tests.utils import assert_reprojection
+    assert_reprojection(db)
+
+    # Idempotency test: verify projection can be repeated without changing state
+    from tests.utils import assert_idempotency
+    assert_idempotency(db, num_trials=10, max_repetitions=5)
 
     # Convergence test: verify projection is order-independent
     from tests.utils import assert_convergence

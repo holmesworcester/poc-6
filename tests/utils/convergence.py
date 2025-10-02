@@ -1,9 +1,99 @@
-"""Convergence testing utility for event projection order independence."""
+"""Convergence and idempotency testing utilities for event projection."""
 from typing import Any
 import json
-import base64
 import random
 import itertools
+import crypto
+
+
+def assert_reprojection(db: Any) -> None:
+    """Test that projection state can be restored from event store.
+
+    This is the purest test: proves that the event store is the complete
+    source of truth and projection tables can be rebuilt from scratch.
+
+    Args:
+        db: Database connection (in-memory for tests)
+
+    Raises:
+        AssertionError: If restored state differs from original
+    """
+    # Get all first_seen event IDs in original order
+    event_ids = _get_projectable_event_ids(db)
+
+    if not event_ids:
+        print("⚠ No first_seen events found, skipping re-projection test")
+        return
+
+    print(f"Testing re-projection of {len(event_ids)} events from blank slate")
+
+    # Capture current state
+    baseline_state = _dump_projection_state(db)
+
+    # Drop and recreate all projection tables (blank slate)
+    _recreate_projection_tables(db)
+
+    # Re-project all events in original order
+    _replay_events(event_ids, db)
+
+    # Compare states
+    current_state = _dump_projection_state(db)
+    equal, diff_msg = _states_equal(baseline_state, current_state)
+
+    if not equal:
+        print(f"\n❌ Re-projection FAILED")
+        print(f"Difference: {diff_msg}")
+        raise AssertionError(f"Cannot restore state from event store! {diff_msg}")
+
+    print(f"✓ Re-projection test passed: restored {len(event_ids)} events from blank slate")
+
+
+def assert_idempotency(db: Any, num_trials: int = 10, max_repetitions: int = 5) -> None:
+    """Test that projecting events multiple times produces identical final state.
+
+    Args:
+        db: Database connection (in-memory for tests)
+        num_trials: Number of different repetition patterns to test (default 10)
+        max_repetitions: Maximum times to project each event (default 5)
+
+    Raises:
+        AssertionError: If any repetition pattern produces different final state
+    """
+    # Get all first_seen event IDs in original order
+    event_ids = _get_projectable_event_ids(db)
+
+    if not event_ids:
+        print("⚠ No first_seen events found, skipping idempotency test")
+        return
+
+    print(f"Testing {num_trials} repetition patterns of {len(event_ids)} events")
+
+    # Capture baseline state (events already projected once)
+    baseline_state = _dump_projection_state(db)
+
+    # Test different repetition patterns
+    for trial in range(num_trials):
+        # Reset projection tables
+        _recreate_projection_tables(db)
+
+        # Generate random repetition counts for each event (1 to max_repetitions)
+        repetitions = [random.randint(1, max_repetitions) for _ in event_ids]
+
+        # Project each event the specified number of times
+        _project_with_repetitions(event_ids, repetitions, db)
+
+        # Compare state
+        current_state = _dump_projection_state(db)
+        equal, diff_msg = _states_equal(baseline_state, current_state)
+
+        if not equal:
+            print(f"\n❌ Idempotency FAILED on trial #{trial + 1}")
+            print(f"Event order: {event_ids}")
+            print(f"Repetitions: {repetitions}")
+            print(f"Difference: {diff_msg}")
+            raise AssertionError(f"Projection is not idempotent! {diff_msg}")
+
+    print(f"✓ Idempotency test passed: {num_trials} repetition patterns produced identical state")
 
 
 def assert_convergence(db: Any, num_trials: int = 10) -> None:
@@ -18,7 +108,7 @@ def assert_convergence(db: Any, num_trials: int = 10) -> None:
         AssertionError: If any ordering produces different final state
     """
     # Get all first_seen event IDs
-    event_ids = _get_all_first_seen_ids(db)
+    event_ids = _get_projectable_event_ids(db)
 
     if not event_ids:
         print("⚠ No first_seen events found, skipping convergence test")
@@ -47,7 +137,7 @@ def assert_convergence(db: Any, num_trials: int = 10) -> None:
         _recreate_projection_tables(db)
 
         # Project in this order
-        _project_in_order(ordering, db)
+        _replay_events(ordering, db)
 
         # Compare state
         current_state = _dump_projection_state(db)
@@ -63,24 +153,40 @@ def assert_convergence(db: Any, num_trials: int = 10) -> None:
     print(f"✓ Convergence test passed: {len(orderings)} orderings produced identical state")
 
 
-def _get_all_first_seen_ids(db: Any) -> list[str]:
-    """Find all first_seen events by parsing blobs."""
+def _find_first_seen_for_ref(ref_id: str, db: Any) -> str | None:
+    """Find the first_seen event ID that references the given ref_id."""
     rows = db.query("SELECT id, blob FROM store")
-    first_seen_ids = []
+    for row in rows:
+        try:
+            event_data = json.loads(row['blob'].decode('utf-8'))
+            if event_data.get('type') == 'first_seen' and event_data.get('ref_id') == ref_id:
+                return crypto.b64encode(row['id'])
+        except:
+            continue
+    return None
+
+
+def _get_projectable_event_ids(db: Any) -> list[str]:
+    """Find all first_seen events for re-projection."""
+    rows = db.query("SELECT id, blob FROM store ORDER BY rowid")
+    event_ids = []
 
     for row in rows:
         try:
             blob = row['blob']
             # Try to parse as JSON
             event_data = json.loads(blob.decode('utf-8'))
-            if event_data.get('type') == 'first_seen':
+            event_type = event_data.get('type')
+
+            # Only first_seen events (all events now have first_seen wrappers)
+            if event_type == 'first_seen':
                 # Encode id as base64 (matching store.py format)
-                event_id = base64.b64encode(row['id']).decode('ascii')
-                first_seen_ids.append(event_id)
+                event_id = crypto.b64encode(row['id'])
+                event_ids.append(event_id)
         except:
             continue  # Skip encrypted/non-JSON blobs
 
-    return first_seen_ids
+    return event_ids
 
 
 def _get_projection_tables(db: Any) -> list[str]:
@@ -118,12 +224,47 @@ def _recreate_projection_tables(db: Any) -> None:
     schema.create_all(db)
 
 
-def _project_in_order(event_ids: list[str], db: Any) -> None:
-    """Project first_seen events in the given order."""
+def _replay_events(event_ids: list[str], db: Any) -> None:
+    """Replay first_seen events in order, then process blocked queue."""
     from events import first_seen
+    import queues
 
+    # Project all events
     for event_id in event_ids:
         first_seen.project(event_id, db)
+
+    # Process blocked events until queue is empty
+    max_iterations = 100
+    for iteration in range(max_iterations):
+        peer_rows = db.query("SELECT DISTINCT seen_by_peer_id FROM blocked_events")
+        if not peer_rows:
+            break
+
+        had_progress = False
+        for peer_row in peer_rows:
+            unblocked = queues.blocked.process(peer_row['seen_by_peer_id'], db)
+            if unblocked:
+                had_progress = True
+                # Re-project unblocked events by finding their first_seen wrappers
+                for ref_id in unblocked:
+                    # Find first_seen event for this ref_id
+                    first_seen_id = _find_first_seen_for_ref(ref_id, db)
+                    if first_seen_id:
+                        first_seen.project(first_seen_id, db)
+
+        if not had_progress:
+            break
+
+    db.commit()
+
+
+def _project_with_repetitions(event_ids: list[str], repetitions: list[int], db: Any) -> None:
+    """Project first_seen events with repetitions."""
+    from events import first_seen
+
+    for event_id, count in zip(event_ids, repetitions):
+        for _ in range(count):
+            first_seen.project(event_id, db)
 
     db.commit()
 

@@ -1,5 +1,6 @@
 """Crypto functions for wrapping and unwrapping."""
 from typing import Any, Tuple
+import base64
 import json
 
 import nacl.secret
@@ -84,6 +85,16 @@ def unseal(ciphertext: bytes, private_key: bytes) -> bytes:
     return SealedBox(private).decrypt(ciphertext)
 
 
+def b64encode(data: bytes) -> str:
+    """Encode bytes to base64 ASCII string."""
+    return base64.b64encode(data).decode('ascii')
+
+
+def b64decode(data: str) -> bytes:
+    """Decode base64 ASCII string to bytes."""
+    return base64.b64decode(data)
+
+
 def canonicalize_json(obj: dict[str, Any]) -> bytes:
     """Canonicalize a JSON object to bytes for deterministic encryption."""
     return json.dumps(obj, sort_keys=True, separators=(',', ':')).encode('utf-8')
@@ -91,15 +102,13 @@ def canonicalize_json(obj: dict[str, Any]) -> bytes:
 
 def sign_event(event_data: dict[str, Any], private_key: bytes) -> dict[str, Any]:
     """Add signature to event dict. Signature is computed over all fields except itself."""
-    import base64
     canonical = canonicalize_json(event_data)
     sig = sign(canonical, private_key)
-    return {**event_data, 'signature': base64.b64encode(sig).decode('ascii')}
+    return {**event_data, 'signature': b64encode(sig)}
 
 
 def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
     """Verify event signature. Returns False if signature missing or invalid."""
-    import base64
     sig_b64 = event_data.get('signature')
     if not sig_b64:
         return False
@@ -109,7 +118,7 @@ def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
     canonical = canonicalize_json(event_without_sig)
 
     try:
-        return verify(canonical, base64.b64decode(sig_b64), public_key)
+        return verify(canonical, b64decode(sig_b64), public_key)
     except Exception:
         return False
 
@@ -160,8 +169,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
     # Get the key using the id
     key_data = key.get_key_by_id(id_bytes, db)
     if not key_data:
-        import base64
-        key_id_b64 = base64.b64encode(id_bytes).decode('ascii')
+        key_id_b64 = b64encode(id_bytes)
         log.warning(f"Key not found for id: {key_id_b64} (may arrive later)")
         return (None, [key_id_b64])
 
@@ -187,8 +195,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
             log.error(f"Unknown key type: {key_type}")
             return (None, [])
     except Exception as e:
-        import base64
-        log.error(f"Decryption failed for id {base64.b64encode(id_bytes).decode('ascii')}: {e}")
+        log.error(f"Decryption failed for id {b64encode(id_bytes)}: {e}")
         return (None, [])
 
     # Parse and verify JSON is canonical
@@ -201,8 +208,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
     # Verify canonicalization
     canonical_check = canonicalize_json(event_data)
     if canonical_check != plaintext:
-        import base64
-        log.error(f"Non-canonical JSON detected in blob (id: {base64.b64encode(id_bytes).decode('ascii')})")
+        log.error(f"Non-canonical JSON detected in blob (id: {b64encode(id_bytes)})")
         return (None, [])
 
     return (plaintext, [])

@@ -1,4 +1,4 @@
 """Test utilities for scenario tests."""
-from .convergence import assert_convergence
+from .convergence import assert_convergence, assert_idempotency, assert_reprojection
 
-__all__ = ['assert_convergence']
+__all__ = ['assert_convergence', 'assert_idempotency', 'assert_reprojection']

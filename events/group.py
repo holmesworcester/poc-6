@@ -7,15 +7,9 @@ from events import key, peer
 
 
 def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any) -> str:
-    """Create a group event (shareable, encrypted), store with first_seen, return event_id.
+    """Create a shareable, encrypted group event.
 
-    Args:
-        name: Group name
-        peer_id: Local peer ID (for signing and seen_by)
-        peer_shared_id: Shareable identity ID (for created_by field)
-        key_id: Encryption key ID
-        t_ms: Timestamp
-        db: Database connection
+    Note: peer_id (local) signs and sees the event; peer_shared_id (public) is the creator identity.
     """
     # Create event dict
     event_data = {
@@ -36,8 +30,8 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
     # Wrap (canonicalize + encrypt)
     blob = crypto.wrap(signed_event, key_data, db)
 
-    # Store with first_seen (shareable event) - seen_by is the LOCAL peer_id
-    event_id = store.store_with_first_seen(blob, peer_id, t_ms, db)
+    # Store event with first_seen wrapper and projection
+    event_id = store.event(blob, peer_id, t_ms, db)
 
     return event_id
 

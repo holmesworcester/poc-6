@@ -6,14 +6,17 @@ import store
 from events import key
 
 
-def create(name: str, group_id: str, created_by_peer_id: str, key_id: str, t_ms: int, db: Any) -> str:
-    """Create a channel event (shareable, encrypted), store with first_seen, return event_id."""
+def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any) -> str:
+    """Create a shareable, encrypted channel event in the given group.
+
+    Note: peer_id (local) sees the event; peer_shared_id (public) is the creator identity.
+    """
     # Create event dict
     event_data = {
         'type': 'channel',
         'name': name,
         'group_id': group_id,
-        'created_by': created_by_peer_id,
+        'created_by': peer_shared_id,  # References shareable peer identity
         'created_at': t_ms
     }
 
@@ -23,8 +26,8 @@ def create(name: str, group_id: str, created_by_peer_id: str, key_id: str, t_ms:
     # Wrap (canonicalize + encrypt)
     blob = crypto.wrap(event_data, key_data, db)
 
-    # Store with first_seen (shareable event)
-    event_id = store.store_with_first_seen(blob, created_by_peer_id, t_ms, db)
+    # Store event with first_seen wrapper and projection
+    event_id = store.event(blob, peer_id, t_ms, db)
 
     return event_id
 
@@ -37,9 +40,9 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> N
         return
 
     # Unwrap (decrypt)
-    unwrapped = crypto.unwrap(blob, db)
+    unwrapped, _ = crypto.unwrap(blob, db)
     if not unwrapped:
-        return
+        return  # Already blocked by first_seen.project() if keys missing
 
     # Parse JSON
     event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)

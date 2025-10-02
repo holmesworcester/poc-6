@@ -5,10 +5,36 @@ import store
 import json
 
 
+def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> str:
+    """Unwrap an incoming transit blob and store it, with its corresponding "first_seen" event blob.
+
+    The seen_by_peer_id is determined by the transit_key (the receiving peer).
+    Returns empty string if unwrap fails (missing key, decryption error, etc.).
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    hint = key.extract_id(blob)
+    # For incoming blobs: seen_by_peer_id = peer who owns the transit_key (the receiving peer)
+    seen_by_peer_id = network.get_peer_id_for_transit_key(hint, db)
+
+    unwrapped_blob, missing_keys = crypto.unwrap(blob, db)
+    if unwrapped_blob is None:
+        hint_b64 = crypto.b64encode(hint)
+        if missing_keys:
+            log.info(f"Skipping storage for blob with id {hint_b64}: missing keys {missing_keys}")
+        else:
+            log.info(f"Skipping storage for blob with id {hint_b64}: unwrap failed")
+        return ""
+
+    first_seen_id = store.event(unwrapped_blob, seen_by_peer_id, t_ms, db)
+    return first_seen_id
+
+
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
     transit_blobs = incoming.drain(batch_size, db)
-    new_first_seen_ids = [crypto.unwrap_and_store(blob, t_ms, db) for blob in transit_blobs]
+    new_first_seen_ids = [unwrap_and_store(blob, t_ms, db) for blob in transit_blobs]
     first_seen.project_ids(new_first_seen_ids, db)
     db.commit()
 
