@@ -151,3 +151,71 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
     )
 
     return user_id
+
+
+def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
+                          invite_data: dict[str, Any], t_ms: int, db: Any) -> None:
+    """Send peer, user, address events to invite address for bootstrap.
+
+    Called repeatedly until sync is established (job pattern).
+    Uses invite key from invite_data for encryption.
+
+    Args:
+        peer_id: Local peer ID (private)
+        peer_shared_id: Public peer ID
+        user_id: User event ID
+        invite_data: Decoded invite link data containing invite_key_secret, ip, port
+        t_ms: Timestamp
+        db: Database connection
+    """
+    import queues
+
+    # Get invite address from invite_data (parsed from link)
+    invite_ip = invite_data.get('ip', '127.0.0.1')
+    invite_port = invite_data.get('port', 6100)
+    invite_key_secret_hex = invite_data['invite_key_secret']
+    invite_key_secret = bytes.fromhex(invite_key_secret_hex)
+
+    # Create invite key dict for wrapping
+    invite_key = {
+        'id': crypto.hash(invite_key_secret, size=16),
+        'key': invite_key_secret,
+        'type': 'symmetric'
+    }
+
+    # Get peer_shared blob
+    peer_shared_blob = store.get(peer_shared_id, db)
+    if not peer_shared_blob:
+        return  # Can't send if blob not found
+
+    # Wrap with invite key for transit
+    wrapped_peer = crypto.wrap(peer_shared_blob, invite_key, db)
+
+    # Get user blob
+    user_blob = store.get(user_id, db)
+    if not user_blob:
+        return  # Can't send if blob not found
+
+    # Wrap with invite key for transit
+    wrapped_user = crypto.wrap(user_blob, invite_key, db)
+
+    # Create address event (plaintext, will be wrapped)
+    # TODO: Get actual address from somewhere instead of hardcoding
+    address_data = {
+        'type': 'address',
+        'peer_id': peer_shared_id,
+        'ip': '127.0.0.1',  # Bob's address (hardcoded for now)
+        'port': 6100,
+        'created_at': t_ms
+    }
+
+    # Sign and wrap address event
+    private_key = peer.get_private_key(peer_id, db)
+    signed_address = crypto.sign_event(address_data, private_key)
+    canonical_address = crypto.canonicalize_json(signed_address)
+    wrapped_address = crypto.wrap(canonical_address, invite_key, db)
+
+    # Add all three to incoming queue (simulates sending to invite address)
+    queues.incoming.add(wrapped_peer, t_ms, db)
+    queues.incoming.add(wrapped_user, t_ms, db)
+    queues.incoming.add(wrapped_address, t_ms, db)

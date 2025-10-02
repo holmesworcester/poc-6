@@ -1,8 +1,11 @@
 """Message event type."""
 from typing import Any
+import logging
 import crypto
 import store
 from events import group, peer
+
+log = logging.getLogger(__name__)
 
 
 def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
@@ -16,6 +19,8 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     peer_shared_id = params['peer_shared_id']  # Shareable identity ID
     content = params.get('content', '')
     key_id = params['key_id']
+
+    log.info(f"message.create_message() creating message in channel_id={channel_id}, content='{content[:50]}...'")
 
     # Build standardized event structure
     event_data = {
@@ -35,10 +40,13 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     key_data = group.pick_key(group_id, db)
 
     # Wrap (canonicalize + encrypt)
-    blob = crypto.wrap(signed_event, key_data, db)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, key_data, db)
 
     # Store event with first_seen wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"message.create_message() created message_id={event_id}")
 
     # Get latest messages
     latest = list_messages(channel_id, peer_id, db)
@@ -63,17 +71,21 @@ def list_messages(channel_id: int, seen_by_peer_id: str, db: Any) -> list[dict[s
 def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
     """Project a single message event into the database."""
     import json
+    log.debug(f"message.project() projecting message_id={event_id}, seen_by={seen_by_peer_id}")
 
     # Get and unwrap event
     event_blob = store.get(event_id, db)
     if not event_blob:
+        log.warning(f"message.project() blob not found for message_id={event_id}")
         return None
 
     unwrapped, _ = crypto.unwrap(event_blob, db)
     if not unwrapped:
+        log.warning(f"message.project() unwrap failed for message_id={event_id}")
         return None  # Already blocked by first_seen.project() if keys missing
 
     event_data = crypto.parse_json(unwrapped)
+    log.info(f"message.project() projected message content='{event_data.get('content', '')[:50]}...', id={event_id}")
 
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared

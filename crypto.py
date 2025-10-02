@@ -116,15 +116,30 @@ def canonicalize_json(obj: dict[str, Any]) -> bytes:
 
 def sign_event(event_data: dict[str, Any], private_key: bytes) -> dict[str, Any]:
     """Add signature to event dict. Signature is computed over all fields except itself."""
+    import logging
+    log = logging.getLogger(__name__)
+
+    event_type = event_data.get('type', 'unknown')
+    log.debug(f"crypto.sign_event() signing event type={event_type}")
+
     canonical = canonicalize_json(event_data)
     sig = sign(canonical, private_key)
-    return {**event_data, 'signature': b64encode(sig)}
+    result = {**event_data, 'signature': b64encode(sig)}
+
+    log.debug(f"crypto.sign_event() signed event type={event_type}, canonical_size={len(canonical)}B")
+    return result
 
 
 def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
     """Verify event signature. Returns False if signature missing or invalid."""
+    import logging
+    log = logging.getLogger(__name__)
+
+    event_type = event_data.get('type', 'unknown')
     sig_b64 = event_data.get('signature')
+
     if not sig_b64:
+        log.warning(f"crypto.verify_event() missing signature for event type={event_type}")
         return False
 
     # Remove signature from dict for verification
@@ -132,8 +147,14 @@ def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
     canonical = canonicalize_json(event_without_sig)
 
     try:
-        return verify(canonical, b64decode(sig_b64), public_key)
-    except Exception:
+        result = verify(canonical, b64decode(sig_b64), public_key)
+        if result:
+            log.debug(f"crypto.verify_event() signature valid for event type={event_type}")
+        else:
+            log.warning(f"crypto.verify_event() signature INVALID for event type={event_type}")
+        return result
+    except Exception as e:
+        log.error(f"crypto.verify_event() verification failed for event type={event_type}: {e}")
         return False
 
 
@@ -165,32 +186,32 @@ def derive_invite_pubkey(invite_secret: str) -> str:
     return pubkey_bytes.hex()
 
 
-def derive_invite_signature(invite_secret: str, public_key: str, network_id: str) -> str:
+def derive_invite_signature(invite_secret: str, public_key: str, group_id: str) -> str:
     """Derive invite signature proving possession of invite secret.
 
     Args:
         invite_secret: URL-safe base64 string
         public_key: Hex-encoded public key of the joiner
-        network_id: Base64-encoded network ID
+        group_id: Base64-encoded group ID (serves as network identifier)
 
     Returns:
         Hex-encoded signature (64 chars = 32 bytes, truncated from hash)
     """
-    # Commitment: hash of invite_secret + public_key + network_id
-    commitment_data = f"{invite_secret}:{public_key}:{network_id}"
+    # Commitment: hash of invite_secret + public_key + group_id
+    commitment_data = f"{invite_secret}:{public_key}:{group_id}"
     signature_hash = hash(commitment_data.encode('utf-8'), size=32)
     # Return first 64 hex chars (32 bytes)
     return signature_hash.hex()[:64]
 
 
-def verify_invite_proof(invite_secret: str, public_key: str, network_id: str,
+def verify_invite_proof(invite_secret: str, public_key: str, group_id: str,
                        claimed_pubkey: str, claimed_signature: str) -> bool:
     """Verify that invite proof fields match the invite secret.
 
     Args:
         invite_secret: The invite secret from the link
         public_key: Hex-encoded public key of the joiner
-        network_id: Base64-encoded network ID
+        group_id: Base64-encoded group ID (serves as network identifier)
         claimed_pubkey: The invite_pubkey from the user event
         claimed_signature: The invite_signature from the user event
 
@@ -198,7 +219,7 @@ def verify_invite_proof(invite_secret: str, public_key: str, network_id: str,
         True if both pubkey and signature are valid
     """
     expected_pubkey = derive_invite_pubkey(invite_secret)
-    expected_signature = derive_invite_signature(invite_secret, public_key, network_id)
+    expected_signature = derive_invite_signature(invite_secret, public_key, group_id)
 
     return (claimed_pubkey == expected_pubkey and
             claimed_signature == expected_signature)
@@ -221,11 +242,14 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
     import logging
     log = logging.getLogger(__name__)
 
+    log.debug(f"crypto.unwrap() called with blob size={len(wrapped_blob)}B")
+
     # Check if blob is plaintext JSON (starts with '{' or '[')
     if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
         try:
             # Verify it's valid JSON
             json.loads(wrapped_blob.decode('utf-8'))
+            log.debug(f"crypto.unwrap() blob is plaintext JSON, returning as-is")
             return (wrapped_blob, [])
         except Exception:
             # Not valid JSON, continue with decrypt attempt
@@ -234,15 +258,17 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
     # Extract id from blob
     try:
         id_bytes = key.extract_id(wrapped_blob)
+        key_id_b64 = b64encode(id_bytes)
+        log.debug(f"crypto.unwrap() extracted key_id={key_id_b64}")
     except Exception as e:
-        log.error(f"Failed to extract id from blob: {e}")
+        log.error(f"crypto.unwrap() failed to extract id from blob: {e}")
         return (None, [])
 
     # Get the key using the id
     key_data = key.get_key_by_id(id_bytes, db)
     if not key_data:
         key_id_b64 = b64encode(id_bytes)
-        log.warning(f"Key not found for id: {key_id_b64} (may arrive later)")
+        log.warning(f"crypto.unwrap() key not found for id={key_id_b64} (will block until key arrives)")
         return (None, [key_id_b64])
 
     # Extract the encrypted portion (after the id)
@@ -251,6 +277,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
 
     # Determine if symmetric or asymmetric based on key_data type
     key_type = key_data.get('type') if isinstance(key_data, dict) else None
+    log.debug(f"crypto.unwrap() key_type={key_type}, encrypted_data_size={len(encrypted_data)}B")
 
     # Decrypt/unseal
     try:
@@ -259,55 +286,65 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
             nonce = encrypted_data[:NONCE_SIZE]
             ciphertext = encrypted_data[NONCE_SIZE:]
             plaintext = decrypt(ciphertext, key_data['key'], nonce)
+            log.debug(f"crypto.unwrap() symmetric decrypt SUCCESS, plaintext_size={len(plaintext)}B")
         elif key_type == 'asymmetric':
             # Asymmetric unsealing
             private_key = key_data['private_key']
             plaintext = unseal(encrypted_data, private_key)
+            log.debug(f"crypto.unwrap() asymmetric unseal SUCCESS, plaintext_size={len(plaintext)}B")
         else:
-            log.error(f"Unknown key type: {key_type}")
+            log.error(f"crypto.unwrap() unknown key type: {key_type}")
             return (None, [])
     except Exception as e:
-        log.error(f"Decryption failed for id {b64encode(id_bytes)}: {e}")
+        log.error(f"crypto.unwrap() decryption FAILED for id={b64encode(id_bytes)}: {e}")
         return (None, [])
 
-    # Parse and verify JSON is canonical
-    try:
-        event_data = json.loads(plaintext.decode('utf-8'))
-    except Exception as e:
-        log.error(f"Invalid JSON after decryption: {e}")
-        return (None, [])
-
-    # Verify canonicalization
-    canonical_check = canonicalize_json(event_data)
-    if canonical_check != plaintext:
-        log.error(f"Non-canonical JSON detected in blob (id: {b64encode(id_bytes)})")
-        return (None, [])
-
+    # Return decrypted bytes (caller handles JSON parsing if needed)
     return (plaintext, [])
 
 
-def wrap(plaintext: dict[str, Any], key_data: Any, db: Any) -> bytes:
-    """Deterministically wrap plaintext with key. Same plaintext + key → same blob."""
-    # Canonicalize plaintext for deterministic encryption
-    canonical_bytes = canonicalize_json(plaintext)
+def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
+    """Deterministically wrap plaintext bytes with key. Same plaintext + key → same blob.
+
+    Args:
+        plaintext_bytes: Raw bytes to encrypt (caller must canonicalize JSON if needed)
+        key_data: Key dict with 'id', 'type', and 'key' or 'public_key'
+        db: Database connection
+
+    Returns:
+        Encrypted blob: id + encrypted_data (nonce + ciphertext for symmetric)
+
+    Note: This function ONLY handles encryption. Caller must handle JSON canonicalization.
+    For double-wrapping, simply call wrap() again on the output bytes.
+    """
+    import logging
+    log = logging.getLogger(__name__)
 
     # Get the key id from key_data
     id_bytes = key_data['id'] if isinstance(key_data, dict) else b''
+    key_id_b64 = b64encode(id_bytes)
 
     # Determine if symmetric or asymmetric based on key_data type
     key_type = key_data.get('type') if isinstance(key_data, dict) else None
 
+    log.debug(f"crypto.wrap() called: key_id={key_id_b64}, key_type={key_type}, plaintext_size={len(plaintext_bytes)}B")
+
     if key_type == 'symmetric':
         # Symmetric encryption with deterministic nonce
-        nonce = deterministic_nonce(id_bytes, canonical_bytes)
-        ciphertext = encrypt(canonical_bytes, key_data['key'], nonce)
+        nonce = deterministic_nonce(id_bytes, plaintext_bytes)
+        ciphertext = encrypt(plaintext_bytes, key_data['key'], nonce)
         encrypted_data = nonce + ciphertext
+        log.debug(f"crypto.wrap() symmetric encrypt SUCCESS, encrypted_size={len(encrypted_data)}B")
     elif key_type == 'asymmetric':
         # Asymmetric sealing (inherently non-deterministic, but used for one-time messages)
         public_key = key_data['public_key']
-        encrypted_data = seal(canonical_bytes, public_key)
+        encrypted_data = seal(plaintext_bytes, public_key)
+        log.debug(f"crypto.wrap() asymmetric seal SUCCESS, encrypted_size={len(encrypted_data)}B")
     else:
+        log.error(f"crypto.wrap() unknown key type: {key_type}")
         raise ValueError(f"Unknown key type: {key_type}")
 
     # Return id + encrypted data
-    return id_bytes + encrypted_data
+    result = id_bytes + encrypted_data
+    log.debug(f"crypto.wrap() returning blob size={len(result)}B")
+    return result

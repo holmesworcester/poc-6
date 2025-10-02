@@ -99,7 +99,9 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
         'invite_secret': invite_secret,
         'invite_key_secret': invite_key_secret_hex,
         'transit_secret': transit_secret.hex(),
-        'transit_secret_id': transit_secret_id
+        'transit_secret_id': transit_secret_id,
+        'ip': inviter_ip,
+        'port': inviter_port
     }
 
     # Encode invite link as base64-urlsafe JSON

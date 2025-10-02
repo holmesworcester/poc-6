@@ -1,9 +1,12 @@
 """Group event type (shareable, encrypted)."""
 from typing import Any
 import json
+import logging
 import crypto
 import store
 from events import key, peer
+
+log = logging.getLogger(__name__)
 
 
 def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any) -> str:
@@ -11,6 +14,8 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
 
     Note: peer_id (local) signs and sees the event; peer_shared_id (public) is the creator identity.
     """
+    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}")
+
     # Create event dict
     event_data = {
         'type': 'group',
@@ -28,24 +33,30 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
     key_data = key.get_key(key_id, db)
 
     # Wrap (canonicalize + encrypt)
-    blob = crypto.wrap(signed_event, key_data, db)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, key_data, db)
 
     # Store event with first_seen wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
+    log.info(f"group.create() created group_id={event_id}")
     return event_id
 
 
 def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
     """Project group event into groups table and shareable_events table."""
+    log.debug(f"group.project() projecting group_id={event_id}, seen_by={seen_by_peer_id}")
+
     # Get blob from store
     blob = store.get(event_id, db)
     if not blob:
+        log.warning(f"group.project() blob not found for group_id={event_id}")
         return None
 
     # Unwrap (decrypt)
     unwrapped, _ = crypto.unwrap(blob, db)
     if not unwrapped:
+        log.warning(f"group.project() unwrap failed for group_id={event_id}")
         return None  # Already blocked by first_seen.project() if keys missing
 
     # Parse JSON
@@ -56,6 +67,7 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
     created_by = event_data['created_by']
     public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
     if not crypto.verify_event(event_data, public_key):
+        log.warning(f"group.project() signature verification FAILED for group_id={event_id}")
         return None  # Reject unsigned or invalid signature
 
     # Insert into groups table

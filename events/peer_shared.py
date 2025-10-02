@@ -1,13 +1,18 @@
 """Peer shared event type (shareable public identity)."""
 from typing import Any
 import json
+import logging
 import crypto
 import store
 from events import peer
 
+log = logging.getLogger(__name__)
+
 
 def create(peer_id: str, t_ms: int, db: Any) -> str:
     """Create a shareable peer_shared event from a local peer."""
+    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}")
+
     # Get public key from local peer
     public_key = peer.get_public_key(peer_id, db)
 
@@ -25,14 +30,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     # Store event with first_seen wrapper and projection
     peer_shared_id = store.event(blob, peer_id, t_ms, db)
 
+    log.info(f"peer_shared.create() created peer_shared_id={peer_shared_id}")
     return peer_shared_id
 
 
 def project(peer_shared_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
     """Project peer_shared event into peers_shared and shareable_events tables."""
+    log.debug(f"peer_shared.project() projecting peer_shared_id={peer_shared_id}, seen_by={seen_by_peer_id}")
+
     # Get blob from store
     blob = store.get(peer_shared_id, db)
     if not blob:
+        log.warning(f"peer_shared.project() blob not found for peer_shared_id={peer_shared_id}")
         return None
 
     # Parse JSON (plaintext for now)
@@ -53,12 +62,13 @@ def project(peer_shared_id: str, seen_by_peer_id: str, received_at: int, db: Any
     )
 
     # Insert into shareable_events
+    # peer_shared events use the peer_shared_id as both event_id and peer_id (shareable identifier)
     db.execute(
         """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
            VALUES (?, ?, ?)""",
         (
             peer_shared_id,
-            seen_by_peer_id,  # The peer who created/shared this
+            peer_shared_id,  # Use peer_shared_id as the shareable identifier
             event_data['created_at']
         )
     )

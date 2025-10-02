@@ -115,6 +115,16 @@ All projected state is scoped per-peer via `seen_by_peer_id`:
   - `list_all_groups(seen_by_peer_id, db)` - filters by peer only (groups aren't scoped to channels)
 - The `db` parameter always comes last for consistency across the codebase
 
+### Invite Link Design
+
+Invite links encode 3 secrets (invite_secret, invite_key_secret, transit_secret) rather than including the full signed invite event blob.
+
+**Tradeoff:** Smaller invite links (~400 bytes) but requires dependency checking exemption for self-created user events with invite proofs. The exemption logic in `first_seen.py` detects when a user creates their own user event (by checking if the event's peer_id references the local peer) and skips dependency checking.
+
+**Alternative considered:** Include full signed invite event blob in link so invitee can store it locally as a dependency. This would still require an exemption (invitee doesn't have inviter's peer_shared event yet to validate the invite signature) and makes links larger (600+ bytes).
+
+**Current solution:** Self-created user events with invite proofs skip dependency checking. Validation still occurs in `user.project()` by verifying the invite proof matches an entry in the invites table.
+
 ### Testing Requirements
 
 - **No `time.time()` calls** - all timestamps must be explicit parameters for deterministic testing

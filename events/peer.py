@@ -1,8 +1,11 @@
 """Peer event type (local-only identity keypair)."""
 from typing import Any
 import json
+import logging
 import crypto
 import store
+
+log = logging.getLogger(__name__)
 
 
 def create(t_ms: int, db: Any) -> tuple[str, str]:
@@ -11,6 +14,8 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     Returns (peer_id, peer_shared_id): peer_id is local (for signing), peer_shared_id is public (for created_by).
     """
     from events import peer_shared
+
+    log.info(f"peer.create() creating new peer at t_ms={t_ms}")
 
     # Generate keypair
     private_key, public_key = crypto.generate_keypair()
@@ -27,6 +32,7 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
 
     # First store the blob to get the peer_id
     peer_id = store.blob(blob, t_ms, return_dupes=True, db=db)
+    log.info(f"peer.create() generated peer_id={peer_id}")
 
     # Then create first_seen wrapper where peer sees itself
     from events import first_seen
@@ -35,15 +41,19 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
 
     # Create shareable peer_shared event
     peer_shared_id = peer_shared.create(peer_id, t_ms, db)
+    log.info(f"peer.create() created peer_shared_id={peer_shared_id}")
 
     return (peer_id, peer_shared_id)
 
 
 def project(peer_id: str, seen_by_peer_id: str, db: Any) -> None:
     """Project peer event into peers table (for local peers, both IDs are the same)."""
+    log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={seen_by_peer_id}")
+
     # Get blob from store
     blob = store.get(peer_id, db)
     if not blob:
+        log.warning(f"peer.project() blob not found for peer_id={peer_id}")
         return
 
     # Parse JSON
@@ -66,6 +76,8 @@ def project(peer_id: str, seen_by_peer_id: str, db: Any) -> None:
         "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
         (peer_id, seen_by_peer_id)
     )
+
+    log.info(f"peer.project() projected peer_id={peer_id} into peers table")
 
 
 def get_private_key(peer_id: str, db: Any) -> bytes:

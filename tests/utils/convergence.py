@@ -153,19 +153,6 @@ def assert_convergence(db: Any, num_trials: int = 10) -> None:
     print(f"✓ Convergence test passed: {len(orderings)} orderings produced identical state")
 
 
-def _find_first_seen_for_ref(ref_id: str, db: Any) -> str | None:
-    """Find the first_seen event ID that references the given ref_id."""
-    rows = db.query("SELECT id, blob FROM store")
-    for row in rows:
-        try:
-            event_data = crypto.parse_json(row['blob'])
-            if event_data.get('type') == 'first_seen' and event_data.get('ref_id') == ref_id:
-                return crypto.b64encode(row['id'])
-        except:
-            continue
-    return None
-
-
 def _get_projectable_event_ids(db: Any) -> list[str]:
     """Find all first_seen events for re-projection."""
     rows = db.query("SELECT id, blob FROM store ORDER BY rowid")
@@ -190,11 +177,11 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
 
 
 def _get_projection_tables(db: Any) -> list[str]:
-    """Query sqlite_master for all tables except store and incoming_blobs."""
+    """Query sqlite_master for all tables except store, incoming_blobs, and test fixtures."""
     rows = db.query("""
         SELECT name FROM sqlite_master
         WHERE type='table'
-        AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence')
+        AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence', 'pre_keys')
         ORDER BY name
     """)
     return [row['name'] for row in rows]
@@ -242,15 +229,12 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
 
         had_progress = False
         for peer_row in peer_rows:
-            unblocked = queues.blocked.process(peer_row['seen_by_peer_id'], db)
-            if unblocked:
+            unblocked_first_seen_ids = queues.blocked.process(peer_row['seen_by_peer_id'], db)
+            if unblocked_first_seen_ids:
                 had_progress = True
-                # Re-project unblocked events by finding their first_seen wrappers
-                for ref_id in unblocked:
-                    # Find first_seen event for this ref_id
-                    first_seen_id = _find_first_seen_for_ref(ref_id, db)
-                    if first_seen_id:
-                        first_seen.project(first_seen_id, db)
+                # Re-project unblocked first_seen events
+                for first_seen_id in unblocked_first_seen_ids:
+                    first_seen.project(first_seen_id, db)
 
         if not had_progress:
             break
