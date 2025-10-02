@@ -125,6 +125,33 @@ Invite links encode 3 secrets (invite_secret, invite_key_secret, transit_secret)
 
 **Current solution:** Self-created user events with invite proofs skip dependency checking. Validation still occurs in `user.project()` by verifying the invite proof matches an entry in the invites table.
 
+### Dependency Resolution: Local vs Network Dependencies
+
+Event dependencies fall into two categories based on **whose perspective** is processing the event:
+
+**Network Dependencies** (always checked):
+- References to shared events that should arrive via sync
+- Examples: `group_id`, `channel_id`, `created_by` (peer_shared IDs)
+- If missing, event is blocked until dependency arrives
+
+**Local Dependencies** (perspective-dependent):
+- References to creator's private data (never shared over network)
+- Examples: `peer_shared.peer_id` → creator's local peer, `key.peer_id` → owner's local peer
+- **When creator processes:** checked normally (should exist locally)
+- **When others process:** skipped (foreign local dep, will never arrive)
+
+**Implementation** (`events/first_seen.py::is_foreign_local_dep()`):
+```python
+# Skip peer_id check only if we're NOT the creator
+if event_type in {'peer_shared', 'key'} and field == 'peer_id':
+    return seen_by_peer_id != created_by
+```
+
+This enables:
+- **More precise validation** - catches missing network deps
+- **Works during reprojection** - decision based on event schema + seen_by_peer_id (no DB state needed)
+- **Simpler special cases** - most event types use normal dependency checking
+
 ### Testing Requirements
 
 - **No `time.time()` calls** - all timestamps must be explicit parameters for deterministic testing
