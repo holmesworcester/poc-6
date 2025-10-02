@@ -91,15 +91,17 @@ def canonicalize_json(obj: dict[str, Any]) -> bytes:
 
 def sign_event(event_data: dict[str, Any], private_key: bytes) -> dict[str, Any]:
     """Add signature to event dict. Signature is computed over all fields except itself."""
+    import base64
     canonical = canonicalize_json(event_data)
     sig = sign(canonical, private_key)
-    return {**event_data, 'signature': sig.hex()}
+    return {**event_data, 'signature': base64.b64encode(sig).decode('ascii')}
 
 
 def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
     """Verify event signature. Returns False if signature missing or invalid."""
-    sig_hex = event_data.get('signature')
-    if not sig_hex:
+    import base64
+    sig_b64 = event_data.get('signature')
+    if not sig_b64:
         return False
 
     # Remove signature from dict for verification
@@ -107,7 +109,7 @@ def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
     canonical = canonicalize_json(event_without_sig)
 
     try:
-        return verify(canonical, bytes.fromhex(sig_hex), public_key)
+        return verify(canonical, base64.b64decode(sig_b64), public_key)
     except Exception:
         return False
 
@@ -133,20 +135,20 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> str:
     import logging
     log = logging.getLogger(__name__)
 
-    hint = key.extract_hint(blob)
+    hint = key.extract_id(blob)
     # For incoming blobs: seen_by_peer_id = peer who owns the transit_key (the receiving peer)
     seen_by_peer_id = network.get_peer_id_for_transit_key(hint, db)
 
     unwrapped_blob = unwrap(blob, db)
     if unwrapped_blob is None:
-        log.info(f"Skipping storage for blob with hint {hint.hex()}: unwrap failed")
+        log.info(f"Skipping storage for blob with id {hint.hex()}: unwrap failed")
         return ""
 
     first_seen_id = store.store_with_first_seen(unwrapped_blob, seen_by_peer_id, t_ms, db)
     return first_seen_id
 
 def unwrap(wrapped_blob: bytes, db: Any) -> bytes | None:
-    """Extract key hint from blob, determine if sym or asym, fetch key, then unseal or decrypt.
+    """Extract key id from blob, determine if sym or asym, fetch key, then unseal or decrypt.
 
     Returns None on non-critical errors (missing key, decryption failure, invalid JSON, non-canonical).
     Logs errors for debugging. Blob remains in store for future retry/recovery.
@@ -154,22 +156,22 @@ def unwrap(wrapped_blob: bytes, db: Any) -> bytes | None:
     import logging
     log = logging.getLogger(__name__)
 
-    # Extract hint from blob
+    # Extract id from blob
     try:
-        hint = key.extract_hint(wrapped_blob)
+        id_bytes = key.extract_id(wrapped_blob)
     except Exception as e:
-        log.error(f"Failed to extract hint from blob: {e}")
+        log.error(f"Failed to extract id from blob: {e}")
         return None
 
-    # Get the key using the hint
-    key_data = key.get_key(hint, db)
+    # Get the key using the id
+    key_data = key.get_key_by_id(id_bytes, db)
     if not key_data:
-        log.warning(f"Key not found for hint: {hint.hex()} (may arrive later)")
+        log.warning(f"Key not found for id: {id_bytes.hex()} (may arrive later)")
         return None
 
-    # Extract the encrypted portion (after the hint)
-    hint_length = len(hint)
-    encrypted_data = wrapped_blob[hint_length:]
+    # Extract the encrypted portion (after the id)
+    id_length = len(id_bytes)
+    encrypted_data = wrapped_blob[id_length:]
 
     # Determine if symmetric or asymmetric based on key_data type
     key_type = key_data.get('type') if isinstance(key_data, dict) else None
@@ -189,7 +191,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> bytes | None:
             log.error(f"Unknown key type: {key_type}")
             return None
     except Exception as e:
-        log.error(f"Decryption failed for hint {hint.hex()}: {e}")
+        log.error(f"Decryption failed for id {id_bytes.hex()}: {e}")
         return None
 
     # Parse and verify JSON is canonical
@@ -202,7 +204,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> bytes | None:
     # Verify canonicalization
     canonical_check = canonicalize_json(event_data)
     if canonical_check != plaintext:
-        log.error(f"Non-canonical JSON detected in blob (hint: {hint.hex()})")
+        log.error(f"Non-canonical JSON detected in blob (id: {id_bytes.hex()})")
         return None
 
     return plaintext
@@ -213,15 +215,15 @@ def wrap(plaintext: dict[str, Any], key_data: Any, db: Any) -> bytes:
     # Canonicalize plaintext for deterministic encryption
     canonical_bytes = canonicalize_json(plaintext)
 
-    # Get the key hint from key_data
-    hint = key_data['hint'] if isinstance(key_data, dict) else b''
+    # Get the key id from key_data
+    id_bytes = key_data['id'] if isinstance(key_data, dict) else b''
 
     # Determine if symmetric or asymmetric based on key_data type
     key_type = key_data.get('type') if isinstance(key_data, dict) else None
 
     if key_type == 'symmetric':
         # Symmetric encryption with deterministic nonce
-        nonce = deterministic_nonce(hint, canonical_bytes)
+        nonce = deterministic_nonce(id_bytes, canonical_bytes)
         ciphertext = encrypt(canonical_bytes, key_data['key'], nonce)
         encrypted_data = nonce + ciphertext
     elif key_type == 'asymmetric':
@@ -231,5 +233,5 @@ def wrap(plaintext: dict[str, Any], key_data: Any, db: Any) -> bytes:
     else:
         raise ValueError(f"Unknown key type: {key_type}")
 
-    # Return hint + encrypted data
-    return hint + encrypted_data
+    # Return id + encrypted data
+    return id_bytes + encrypted_data

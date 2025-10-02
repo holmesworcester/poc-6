@@ -2,36 +2,50 @@
 from typing import Any
 import crypto
 import store
-from events import group
+from events import group, peer
 
 
 def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages."""
     import json
-    import first_seen
 
-    creator = params['creator']
+    # Extract params
+    channel_id = params['channel_id']
+    group_id = params['group_id']
+    created_by = params['created_by']
+    content = params.get('content', '')
+    key_id = params['key_id']
 
     # Build standardized event structure
     event_data = {
         'type': 'message',
-        'channel_id': params['channel'],
-        'group_id': params['group']['id'],
-        'created_by': creator,
-        'content': params.get('content', ''),
+        'channel_id': channel_id,
+        'group_id': group_id,
+        'created_by': created_by,
+        'content': content,
         'created_at': t_ms
     }
 
-    plaintext = json.dumps(event_data).encode()
-    key = group.pick_key(params['group']['id'], db)
-    blob = crypto.wrap(plaintext, key, db)
-    first_seen_id = store.store_with_first_seen(blob, creator, t_ms, db)
-    projected_first_seen = first_seen.project(first_seen_id, db)
-    channel = params['channel']
-    latest = list_messages(channel, creator, db)
+    # Sign the event
+    private_key = peer.get_private_key(created_by, db)
+    signed_event = crypto.sign_event(event_data, private_key)
+
+    # Get key_data for encryption
+    key_data = group.pick_key(group_id, db)
+
+    # Wrap (canonicalize + encrypt)
+    blob = crypto.wrap(signed_event, key_data, db)
+
+    # Store with first_seen (shareable event) - returns event_id
+    event_id = store.store_with_first_seen(blob, created_by, t_ms, db)
+
+    # Get latest messages
+    latest = list_messages(channel_id, created_by, db)
+
     db.commit()
+
     return {
-        'id': first_seen_id,
+        'id': event_id,
         'latest': latest
     }
 
@@ -55,7 +69,16 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
         return None
 
     unwrapped = crypto.unwrap(event_blob, db)
-    event_data = json.loads(unwrapped)
+    if not unwrapped:
+        return None
+
+    event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
+
+    # Verify signature - get public key from created_by peer
+    created_by = event_data.get('created_by')
+    public_key = peer.get_public_key(created_by, db)
+    if not crypto.verify_event(event_data, public_key):
+        return None  # Reject unsigned or invalid signature
 
     # Extract fields from event
     message_id = event_id
@@ -71,6 +94,17 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
            (message_id, channel_id, group_id, author_id, content, created_at, seen_by_peer_id, received_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (message_id, channel_id, group_id, author_id, content, created_at, seen_by_peer_id, received_at)
+    )
+
+    # Insert into shareable_events
+    db.execute(
+        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
+           VALUES (?, ?, ?)""",
+        (
+            event_id,
+            author_id,
+            created_at
+        )
     )
 
     return event_id

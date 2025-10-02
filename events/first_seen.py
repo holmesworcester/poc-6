@@ -14,40 +14,72 @@ def project_ids(first_seen_ids: list[str], db: Any) -> list[list[str | None]]:
 
 
 def project(first_seen_id: str, db: Any) -> list[str | None]:
-    """If we have a first_seen event id both are already in the store"""
-    """Get the first_seen event by id from the store and extract the event id it references"""
+    """Project a first_seen event by dispatching to the referenced event's projector."""
+    from events import peer, channel
 
-    first_seen_event_blob = store.get(first_seen_id, db)
-    unwrapped_first_seen_event = crypto.unwrap(first_seen_event_blob, db)
-    first_seen_event = json.loads(unwrapped_first_seen_event)
-    referenced_event_id = first_seen_event['ref_id']
+    # Get first_seen blob from store
+    first_seen_blob = store.get(first_seen_id, db)
+    if not first_seen_blob:
+        return [None, None]
 
-    # Extract peer and timestamp from first_seen event
-    seen_by_peer_id = first_seen_event['created_by']  # Who saw this event (for local: creator, for incoming: receiving peer from transit_key)
-    received_at = first_seen_event['created_at']  # When they saw it (for first_seen events: created_at = stored_at)
+    # Parse first_seen event (plaintext JSON, no unwrap needed)
+    first_seen_event = json.loads(first_seen_blob.decode())
+    ref_id = first_seen_event['ref_id']
+    seen_by_peer_id = first_seen_event['seen_by']
 
-    """Update our tables mapping first_seen events to the events they reference"""
-    db.execute(
-        "INSERT INTO first_seen (first_seen_id, event_id, seen_by_peer_id, received_at) VALUES (?, ?, ?, ?)",
-        (first_seen_id, referenced_event_id, seen_by_peer_id, received_at)
-    )
+    # Get stored_at from store table as received_at
+    import base64
+    store_row = db.query_one("SELECT stored_at FROM store WHERE id = ?", (base64.b64decode(first_seen_id),))
+    received_at = store_row['stored_at'] if store_row else 0
 
-    """Call the appropriate project function based on the event type"""
-    event = store.get(referenced_event_id, db)
-    unwrapped_event = crypto.unwrap(event, db)
-    event_data = json.loads(unwrapped_event)
-    """Project based on event type for all in events/ directory except first_seen"""
-    event_type = event_data['type']  # e.g., 'message', 'group', etc.
+    # Get referenced event blob
+    event_blob = store.get(ref_id, db)
+    if not event_blob:
+        return [None, first_seen_id]
+
+    # Try to unwrap (for encrypted events) or parse as plaintext
+    try:
+        unwrapped = crypto.unwrap(event_blob, db)
+        if unwrapped:
+            event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
+        else:
+            # If unwrap failed, try plaintext
+            event_data = json.loads(event_blob.decode())
+    except:
+        # Fallback to plaintext parsing
+        event_data = json.loads(event_blob.decode())
+
+    # Dispatch to type-specific projector
+    event_type = event_data.get('type')
+    projected_id = None
+
     if event_type == 'message':
-        projected_id = message.project(referenced_event_id, seen_by_peer_id, received_at, db)
+        projected_id = message.project(ref_id, seen_by_peer_id, received_at, db)
     elif event_type == 'group':
-        projected_id = group.project(referenced_event_id, seen_by_peer_id, received_at, db)
-    else:
-        projected_id = None  # No projection needed for this event type
+        projected_id = group.project(ref_id, seen_by_peer_id, received_at, db)
+    elif event_type == 'peer':
+        peer.project(ref_id, seen_by_peer_id, received_at, db)
+        projected_id = ref_id
+    elif event_type == 'channel':
+        channel.project(ref_id, seen_by_peer_id, received_at, db)
+        projected_id = ref_id
+
     return [projected_id, first_seen_id]
 
 
-def create(event_id: str, creator: str, t_ms: int, db: Any, return_dupes: bool) -> str:
-    """Create a first_seen event for the given event_id and return the first_seen_id."""
-    # TODO: implement - create a first_seen event blob, store it
-    return ""
+def create(ref_id: str, seen_by_peer_id: str, t_ms: int, db: Any, return_dupes: bool) -> str:
+    """Create a first_seen event for the given ref_id and return the first_seen_id."""
+    # Build first_seen event (no created_by, no created_at - deterministic per peer+event)
+    event_data = {
+        'type': 'first_seen',
+        'ref_id': ref_id,
+        'seen_by': seen_by_peer_id
+    }
+
+    blob = json.dumps(event_data).encode()
+
+    # Store the first_seen blob
+    first_seen_id = store.store(blob, t_ms, return_dupes, db)
+
+    # Projection happens later via explicit project() call
+    return first_seen_id
