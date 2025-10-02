@@ -53,7 +53,7 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
         return [None, None]
 
     # Parse first_seen event (plaintext JSON, no unwrap needed)
-    first_seen_event = json.loads(first_seen_blob.decode())
+    first_seen_event = crypto.parse_json(first_seen_blob)
     ref_id = first_seen_event['ref_id']
     seen_by_peer_id = first_seen_event['seen_by']
 
@@ -77,12 +77,12 @@ def project(first_seen_id: str, db: Any) -> list[str | None]:
     if plaintext is None:
         try:
             plaintext = event_blob
-            event_data = json.loads(plaintext.decode())
+            event_data = crypto.parse_json(plaintext)
         except:
             # Can't parse - skip projection
             return [None, first_seen_id]
     else:
-        event_data = json.loads(plaintext.decode() if isinstance(plaintext, bytes) else plaintext)
+        event_data = crypto.parse_json(plaintext)
 
     # Phase 2: Check semantic dependencies
     missing_deps = check_deps(event_data, seen_by_peer_id, db)

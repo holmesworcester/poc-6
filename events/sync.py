@@ -79,7 +79,7 @@ def receive_request(request_blob: bytes, db: Any) -> dict[str, Any] | None:
         return None
 
     # Parse JSON
-    request_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
+    request_data = crypto.parse_json(unwrapped)
 
     # Verify signature - get public key from peer_id
     peer_id = request_data.get('peer_id')

@@ -36,7 +36,7 @@ def project(key_id: str, seen_by_peer_id: str, db: Any) -> None:
         return
 
     # Parse JSON
-    event_data = json.loads(blob.decode())
+    event_data = crypto.parse_json(blob)
 
     # Insert into keys table (local-only, not shareable)
     db.execute(

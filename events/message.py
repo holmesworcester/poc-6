@@ -73,7 +73,7 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
     if not unwrapped:
         return None  # Already blocked by first_seen.project() if keys missing
 
-    event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
+    event_data = crypto.parse_json(unwrapped)
 
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared

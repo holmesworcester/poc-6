@@ -158,7 +158,7 @@ def _find_first_seen_for_ref(ref_id: str, db: Any) -> str | None:
     rows = db.query("SELECT id, blob FROM store")
     for row in rows:
         try:
-            event_data = json.loads(row['blob'].decode('utf-8'))
+            event_data = crypto.parse_json(row['blob'])
             if event_data.get('type') == 'first_seen' and event_data.get('ref_id') == ref_id:
                 return crypto.b64encode(row['id'])
         except:
@@ -175,7 +175,7 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
         try:
             blob = row['blob']
             # Try to parse as JSON
-            event_data = json.loads(blob.decode('utf-8'))
+            event_data = crypto.parse_json(blob)
             event_type = event_data.get('type')
 
             # Only first_seen events (all events now have first_seen wrappers)

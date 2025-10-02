@@ -8,6 +8,11 @@ import nacl.hash
 import nacl.signing
 import nacl.encoding
 import nacl.utils
+
+
+def parse_json(data: bytes) -> dict[str, Any]:
+    """Parse JSON from bytes."""
+    return json.loads(data.decode('utf-8'))
 from nacl.public import SealedBox
 
 from events import key

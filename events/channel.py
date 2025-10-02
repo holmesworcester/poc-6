@@ -45,7 +45,7 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> N
         return  # Already blocked by first_seen.project() if keys missing
 
     # Parse JSON
-    event_data = json.loads(unwrapped.decode() if isinstance(unwrapped, bytes) else unwrapped)
+    event_data = crypto.parse_json(unwrapped)
 
     # Insert into channels table
     db.execute(

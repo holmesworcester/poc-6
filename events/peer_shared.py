@@ -36,7 +36,7 @@ def project(peer_shared_id: str, seen_by_peer_id: str, received_at: int, db: Any
         return None
 
     # Parse JSON (plaintext for now)
-    event_data = json.loads(blob.decode())
+    event_data = crypto.parse_json(blob)
 
     # Insert into peers_shared table
     db.execute(
@@ -91,7 +91,7 @@ def get_peer_id_for_signing(peer_shared_id: str, db: Any) -> str:
     if not blob:
         raise ValueError(f"peer_shared not found: {peer_shared_id}")
 
-    event_data = json.loads(blob.decode())
+    event_data = crypto.parse_json(blob)
     peer_id = event_data.get('peer_id')
     if not peer_id:
         raise ValueError(f"peer_id not found in peer_shared event: {peer_shared_id}")
