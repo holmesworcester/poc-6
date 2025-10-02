@@ -1,31 +1,195 @@
 """Sync implementation with bloom-based window protocol."""
-from typing import Any
+from typing import Any, Iterator
 from events import first_seen, key, prekey, peer
 import queues
 import crypto
 import store
-import json
-from . import bloom, windows, state, helpers
+import hashlib
+import struct
+
+# Bloom filter parameters
+BLOOM_SIZE_BITS = 512  # 512 bits = 64 bytes
+BLOOM_SIZE_BYTES = 64
+K_HASHES = 5  # Number of hash functions
+
+# Window parameters
+DEFAULT_W = 12  # Default window parameter: 2^12 = 4096 windows
+STORAGE_W = 20  # Storage window parameter: 2^20 = 1M windows (future-proof)
+EVENTS_PER_WINDOW_TARGET = 450  # Target events per window for optimal FPR
+
+# False Positive Rate target (informational)
+TARGET_FPR = 0.025  # ~2.5% wasted bandwidth from false positives
+
+
+# ============================================================================
+# Bloom Filter Functions
+# ============================================================================
+
+def create_bloom(event_ids: list[bytes], salt: bytes) -> bytes:
+    """Create bloom filter from list of event IDs requester HAS."""
+    bloom = bytearray(BLOOM_SIZE_BYTES)
+    for event_id in event_ids:
+        for k in range(K_HASHES):
+            bit_index = _hash_to_bit_index(event_id, salt, k)
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            bloom[byte_index] |= (1 << bit_offset)
+    return bytes(bloom)
+
+
+def check_bloom(event_id: bytes, bloom: bytes, salt: bytes) -> bool:
+    """Check if event ID is in bloom (True=probably in, False=definitely not in)."""
+    for k in range(K_HASHES):
+        bit_index = _hash_to_bit_index(event_id, salt, k)
+        byte_index = bit_index // 8
+        bit_offset = bit_index % 8
+        if not (bloom[byte_index] & (1 << bit_offset)):
+            return False
+    return True
+
+
+def _hash_to_bit_index(event_id: bytes, salt: bytes, k: int) -> int:
+    """Hash event_id with salt and k to get bit index in [0, 512)."""
+    h = hashlib.blake2b(
+        event_id + salt,
+        digest_size=8,
+        person=f"bloom-k{k}".encode()[:16]
+    )
+    hash_val = int.from_bytes(h.digest(), byteorder='little')
+    return hash_val % BLOOM_SIZE_BITS
+
+
+# ============================================================================
+# Window Functions
+# ============================================================================
+
+def compute_window_id(event_id: bytes, w: int) -> int:
+    """Compute window ID: high-order w bits of BLAKE2b-256(event_id)."""
+    h = hashlib.blake2b(event_id, digest_size=32)
+    hash_int = int.from_bytes(h.digest(), byteorder='big')
+    return hash_int >> (256 - w)
+
+
+def compute_storage_window_id(event_id_bytes: bytes) -> int:
+    """Compute window ID for storage at w=20 to support large event counts."""
+    return compute_window_id(event_id_bytes, STORAGE_W)
+
+
+def derive_salt(peer_pk: bytes, window_id: int) -> bytes:
+    """Derive 16-byte bloom salt: BLAKE2b-128(peer_pk || window_id)."""
+    window_id_bytes = window_id.to_bytes(4, byteorder='big')
+    h = hashlib.blake2b(peer_pk + window_id_bytes, digest_size=16)
+    return h.digest()
+
+
+def compute_w_for_event_count(total_events: int) -> int:
+    """Compute optimal w for event count (target ~450 events/window)."""
+    if total_events == 0:
+        return DEFAULT_W
+    import math
+    target_windows = max(1, total_events // EVENTS_PER_WINDOW_TARGET)
+    return max(1, math.ceil(math.log2(target_windows)))
+
+
+def compute_window_count(w: int) -> int:
+    """Compute total number of windows: 2^w."""
+    return 2 ** w
+
+
+def walk_windows(w: int, last_window: int = -1, peer_pk: bytes = b'') -> Iterator[int]:
+    """Generate window IDs to sync in order, starting after last_window."""
+    total_windows = 2 ** w
+    start = (last_window + 1) % total_windows
+    for i in range(total_windows):
+        yield (start + i) % total_windows
+
+
+# ============================================================================
+# Sync State Functions
+# ============================================================================
+
+def get_sync_state(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
+    """Get sync state for peer pair (last_window, w_param, total_events_seen)."""
+    row = db.query_one(
+        "SELECT last_window, w_param, total_events_seen FROM sync_state WHERE from_peer_id = ? AND to_peer_id = ?",
+        (from_peer_id, to_peer_id)
+    )
+    if row:
+        return {
+            'last_window': row['last_window'],
+            'w_param': row['w_param'],
+            'total_events_seen': row['total_events_seen']
+        }
+    return {
+        'last_window': -1,
+        'w_param': DEFAULT_W,
+        'total_events_seen': 0
+    }
+
+
+def update_sync_state(
+    from_peer_id: str,
+    to_peer_id: str,
+    last_window: int,
+    w_param: int,
+    total_events_seen: int,
+    t_ms: int,
+    db: Any
+) -> None:
+    """Update sync state for peer pair."""
+    db.execute(
+        """INSERT INTO sync_state (from_peer_id, to_peer_id, last_window, w_param, total_events_seen, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (from_peer_id, to_peer_id)
+           DO UPDATE SET
+               last_window = excluded.last_window,
+               w_param = excluded.w_param,
+               total_events_seen = excluded.total_events_seen,
+               updated_at = excluded.updated_at""",
+        (from_peer_id, to_peer_id, last_window, w_param, total_events_seen, t_ms)
+    )
+
+
+def get_next_window(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> tuple[int, int]:
+    """Get next window to sync for peer pair (window_id, w_param)."""
+    state = get_sync_state(from_peer_id, to_peer_id, t_ms, db)
+    total_windows = compute_window_count(state['w_param'])
+    next_window = (state['last_window'] + 1) % total_windows
+    return next_window, state['w_param']
+
+
+def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms: int, db: Any) -> None:
+    """Mark window as synced and increase w_param if events exceed W × 450 threshold."""
+    state = get_sync_state(from_peer_id, to_peer_id, t_ms, db)
+    state['last_window'] = window_id
+
+    # Dynamic w adjustment based on event count
+    current_w = state['w_param']
+    current_windows = compute_window_count(current_w)
+    threshold = current_windows * EVENTS_PER_WINDOW_TARGET
+    if state['total_events_seen'] > threshold:
+        state['w_param'] = current_w + 1
+
+    update_sync_state(
+        from_peer_id,
+        to_peer_id,
+        state['last_window'],
+        state['w_param'],
+        state['total_events_seen'],
+        t_ms,
+        db
+    )
+
+
+# ============================================================================
+# Core Sync Functions
+# ============================================================================
 
 
 def add_shareable_event(event_id: str, peer_id: str, created_at: int, db: Any) -> None:
-    """Add an event to shareable_events table with computed window_id.
-
-    This is the main external API for other event types to register shareable events.
-
-    Args:
-        event_id: Base64-encoded event ID
-        peer_id: Peer who created this event
-        created_at: Event creation timestamp (ms)
-        db: Database connection
-    """
-    # Decode event_id to get bytes for window computation
+    """Add shareable event to table with computed window_id."""
     event_id_bytes = crypto.b64decode(event_id)
-
-    # Compute window_id for storage
-    window_id = helpers.compute_storage_window_id(event_id_bytes)
-
-    # Insert with window_id
+    window_id = compute_storage_window_id(event_id_bytes)
     db.execute(
         """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at, window_id)
            VALUES (?, ?, ?, ?)""",
@@ -34,11 +198,7 @@ def add_shareable_event(event_id: str, peer_id: str, created_at: int, db: Any) -
 
 
 def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> str:
-    """Unwrap an incoming transit blob and store it, with its corresponding "first_seen" event blob.
-
-    The seen_by_peer_id is determined by the transit_key (the receiving peer).
-    Returns empty string if unwrap fails (missing key, decryption error, etc.).
-    """
+    """Unwrap transit blob, store event, create first_seen; returns first_seen_id or empty string."""
     import logging
     log = logging.getLogger(__name__)
 
@@ -100,21 +260,13 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     db.commit()
 
 def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send a bloom-based sync request to a peer for a specific window.
-
-    Args:
-        to_peer_id: Recipient's peer_id
-        from_peer_id: Sender's peer_id (for creating transit key and signing)
-        from_peer_shared_id: Sender's peer_shared_id (included in request so recipient knows which events to send)
-        t_ms: Timestamp
-        db: Database connection
-    """
+    """Send bloom-based sync request to peer for specific window."""
     # Get next window to sync
-    window_id, w_param = state.get_next_window(from_peer_id, to_peer_id, t_ms, db)
+    window_id, w_param = get_next_window(from_peer_id, to_peer_id, t_ms, db)
 
     # Convert storage window_ids to query window_ids for this w_param
-    window_min = window_id << (helpers.constants.STORAGE_W - w_param)
-    window_max = (window_id + 1) << (helpers.constants.STORAGE_W - w_param)
+    window_min = window_id << (STORAGE_W - w_param)
+    window_max = (window_id + 1) << (STORAGE_W - w_param)
 
     # Query events requester HAS in this window (created by requester)
     my_events_in_window = db.query(
@@ -131,10 +283,10 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
 
     # Derive salt for this window (from requester's peer public key)
     requester_public_key = peer.get_public_key(from_peer_id, db)
-    salt = windows.derive_salt(requester_public_key, window_id)
+    salt = derive_salt(requester_public_key, window_id)
 
     # Create bloom filter of events requester HAS
-    bloom_filter = bloom.create_bloom(event_id_bytes_list, salt)
+    bloom_filter = create_bloom(event_id_bytes_list, salt)
 
     # Create a transit key for the response (owned by requester so they can decrypt response)
     response_transit_key_id = key.create(from_peer_id, t_ms, db)
@@ -170,7 +322,7 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
     queues.incoming.add(request_blob, t_ms, db)
 
     # Mark window as synced (optimistically - in production might wait for response)
-    state.mark_window_synced(from_peer_id, to_peer_id, window_id, t_ms, db)
+    mark_window_synced(from_peer_id, to_peer_id, window_id, t_ms, db)
 
 
 def receive_request(request_blob: bytes, db: Any) -> dict[str, Any] | None:
@@ -193,14 +345,7 @@ def receive_request(request_blob: bytes, db: Any) -> dict[str, Any] | None:
 
 
 def project(sync_event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> None:
-    """Project sync event by sending a response with all shareable events.
-
-    Args:
-        sync_event_id: ID of the sync request event
-        seen_by_peer_id: Peer who received the sync request
-        received_at: Timestamp when sync request was received
-        db: Database connection
-    """
+    """Handle sync request by sending bloom-filtered response."""
     import logging
     log = logging.getLogger(__name__)
     log.info(f"sync.project() called for event {sync_event_id} seen by {seen_by_peer_id}")
@@ -312,8 +457,8 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         return
 
     # Convert query window_id to storage window range
-    window_min = window_id << (helpers.constants.STORAGE_W - w_param)
-    window_max = (window_id + 1) << (helpers.constants.STORAGE_W - w_param)
+    window_min = window_id << (STORAGE_W - w_param)
+    window_max = (window_id + 1) << (STORAGE_W - w_param)
 
     # Query shareable events in this window created by responder (NOT by requester)
     shareable_rows = db.query(
@@ -329,7 +474,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
     log.info(f"Found {len(shareable_rows)} candidate events in window {window_id}")
 
     # Derive salt for bloom checking (same salt requester used)
-    salt = windows.derive_salt(requester_public_key, window_id)
+    salt = derive_salt(requester_public_key, window_id)
 
     # Filter events using bloom: send only events that FAIL bloom check
     # (requester doesn't have them)
@@ -339,7 +484,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         event_id_bytes = crypto.b64decode(event_id_str)
 
         # Check if event is in requester's bloom
-        in_bloom = bloom.check_bloom(event_id_bytes, bloom_filter, salt)
+        in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
 
         if not in_bloom:
             # Event NOT in bloom -> requester doesn't have it -> send it
