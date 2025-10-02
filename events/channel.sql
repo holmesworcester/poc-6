@@ -1,12 +1,14 @@
 -- Channels table for storing channel information
+-- Each peer has their own view of channels they've seen
 CREATE TABLE IF NOT EXISTS channels (
-    channel_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
     name TEXT NOT NULL,
     group_id TEXT NOT NULL,
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     seen_by_peer_id TEXT NOT NULL,
-    received_at INTEGER NOT NULL
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, seen_by_peer_id)
 );
 
 -- Index for querying channels in a group

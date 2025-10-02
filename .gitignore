@@ -28,3 +28,6 @@ Thumbs.db
 *.log
 *.tmp
 *.zip
+
+# Test failures (saved for debugging, not committed)
+tests/failures/

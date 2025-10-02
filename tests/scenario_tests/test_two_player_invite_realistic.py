@@ -70,6 +70,35 @@ def test_two_player_invite_realistic():
     )
     print(f"Invite created: {invite_link[:50]}...")
 
+    # Alice stores the invite key secret locally (she'll need it to decrypt Bob's bootstrap events)
+    # IMPORTANT: Create a proper key EVENT so get_peer_id_for_key() can find the owner
+    alice_invite_key_secret = bytes.fromhex(invite_data['invite_key_secret'])
+
+    # Create key event for invite key (owned by Alice)
+    invite_key_event_data = {
+        'type': 'key',
+        'key': crypto.b64encode(alice_invite_key_secret),
+        'peer_id': alice_peer_id,
+        'created_at': t_ms + 5500
+    }
+    invite_key_event_blob = json.dumps(invite_key_event_data).encode()
+
+    # Use deterministic ID based on key secret
+    alice_invite_key_id_bytes = crypto.hash(alice_invite_key_secret, size=16)
+    alice_invite_key_id = crypto.b64encode(alice_invite_key_id_bytes)
+
+    # Store the event blob
+    db.execute(
+        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+        (alice_invite_key_id_bytes, invite_key_event_blob, t_ms + 5500)
+    )
+
+    # Also store in keys table for unwrapping
+    db.execute(
+        "INSERT OR IGNORE INTO keys (key_id, key, created_at) VALUES (?, ?, ?)",
+        (alice_invite_key_id, alice_invite_key_secret, t_ms + 5500)
+    )
+
     db.commit()
 
     # === PHASE 2: BOB RECEIVES INVITE (OUT OF BAND) ===
@@ -91,8 +120,6 @@ def test_two_player_invite_realistic():
     bob_peer_id, bob_peer_shared_id = peer.create(t_ms=t_ms + 6000, db=db)
     print(f"Bob peer_id: {bob_peer_id[:16]}...")
 
-    bob_key_id = key.create(bob_peer_id, t_ms=t_ms + 7000, db=db)
-
     # Bob stores invite blob and projects it
     bob_invite_blob_b64 = decoded_invite_data['invite_blob']
     bob_invite_secret = decoded_invite_data['invite_secret']
@@ -109,13 +136,28 @@ def test_two_player_invite_realistic():
     bob_group_id = invite_row['group_id']
     print(f"Bob got group_id from invite: {bob_group_id[:16]}...")
 
-    # Bob creates user event with invite proof
+    # Bob creates invite key locally (for encrypting bootstrap events)
+    # IMPORTANT: Use deterministic ID so Alice can unwrap events
+    invite_key_secret_hex = decoded_invite_data['invite_key_secret']
+    invite_key_secret = bytes.fromhex(invite_key_secret_hex)
+    bob_invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
+    bob_invite_key_id = crypto.b64encode(bob_invite_key_id_bytes)
+
+    # Store the invite key with deterministic ID (key_id should be base64 string, not bytes)
+    db.execute(
+        "INSERT OR IGNORE INTO keys (key_id, key, created_at) VALUES (?, ?, ?)",
+        (bob_invite_key_id, invite_key_secret, t_ms + 7000)
+    )
+    db.commit()
+
+    # Bob creates user event with invite proof, encrypted with INVITE KEY (not personal key)
+    # This way Alice can decrypt it using the invite key from the invite link
     bob_user_id = user.create(
         peer_id=bob_peer_id,
         peer_shared_id=bob_peer_shared_id,
         group_id=bob_group_id,
         name="Bob",
-        key_id=bob_key_id,
+        key_id=bob_invite_key_id,  # Use invite key, not personal key!
         t_ms=t_ms + 9000,
         db=db,
         invite_secret=bob_invite_secret
