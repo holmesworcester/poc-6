@@ -120,3 +120,28 @@ All projected state is scoped per-peer via `seen_by_peer_id`:
 - `received_at` comes from `first_seen.created_at` (which equals the `t_ms` passed to `store_with_first_seen()`)
 - Tests can control time progression by passing explicit `t_ms` values to all event creation and storage functions
 
+## Scenario Tests
+
+Scenario tests validate end-to-end functionality by simulating realistic API usage patterns. These tests are critical for ensuring the system works correctly from a user/frontend perspective.
+
+### Principles
+
+1. **API-Only Testing**: Scenario tests must ONLY interact with the system through command and query functions (e.g., `peer_secret.create()`, `message.list_messages()`, etc.). Treat these as if they were API endpoints being called by a frontend.
+
+2. **No Direct Database Inspection**: Test assertions must NEVER use direct database queries (e.g., `SELECT * FROM messages`). All verification must be done via:
+   - Returned data from command functions (e.g., the `{id, latest}` dict from `message.create_message()`)
+   - Query function results (e.g., `message.list_messages()`, `channel.list_channels()`)
+
+3. **Realistic Flows**: Tests should follow realistic user workflows, creating all necessary prerequisites (identity, groups, channels) before performing the main test action.
+
+### Example
+
+See `test_one_player_messaging.py` for a complete scenario test where Alice:
+1. Creates her identity (`peer_secret`, `peer`)
+2. Creates encryption keys (`key_secret`)
+3. Creates a group and channel
+4. Sends messages to herself
+5. Verifies messages are visible via query functions
+
+All verification is done through returned IDs and query results - no direct DB access.
+

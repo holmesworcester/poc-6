@@ -14,13 +14,15 @@ def store(blob: bytes, t_ms: int, return_dupes: bool, db: Any) -> str:
         else:
             return ""
 
-def store_with_first_seen(blob: bytes, creator: str, t_ms: int, db: Any) -> str:
-    """Store a blob and create a first_seen event. For local events, creator=creating peer. For incoming, creator=receiving peer (from transit_key)."""
+def store_with_first_seen(blob: bytes, seen_by_peer_secret_id: str, t_ms: int, db: Any) -> str:
+    """Store a blob and create a first_seen event. For local events, seen_by=creating peer. For incoming, seen_by=receiving peer (from transit_key)."""
     from events import first_seen
-    id = store(blob, t_ms, return_dupes=True, db=db)
-    """Create and store a first_seen event for the blob and return the first_seen_id."""
-    first_seen_id = first_seen.create(id, creator, t_ms, db, return_dupes=False)
-    return first_seen_id
+    event_id = store(blob, t_ms, return_dupes=True, db=db)
+    # Create and store a first_seen event for the blob
+    first_seen_id = first_seen.create(event_id, seen_by_peer_secret_id, t_ms, db, return_dupes=False)
+    # Project the first_seen event (which will dispatch to the referenced event's projector)
+    first_seen.project(first_seen_id, db)
+    return event_id
 
 
 def get(blob_id: str, db: Any) -> bytes:

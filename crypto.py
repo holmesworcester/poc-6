@@ -89,6 +89,29 @@ def canonicalize_json(obj: dict[str, Any]) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(',', ':')).encode('utf-8')
 
 
+def sign_event(event_data: dict[str, Any], private_key: bytes) -> dict[str, Any]:
+    """Add signature to event dict. Signature is computed over all fields except itself."""
+    canonical = canonicalize_json(event_data)
+    sig = sign(canonical, private_key)
+    return {**event_data, 'signature': sig.hex()}
+
+
+def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
+    """Verify event signature. Returns False if signature missing or invalid."""
+    sig_hex = event_data.get('signature')
+    if not sig_hex:
+        return False
+
+    # Remove signature from dict for verification
+    event_without_sig = {k: v for k, v in event_data.items() if k != 'signature'}
+    canonical = canonicalize_json(event_without_sig)
+
+    try:
+        return verify(canonical, bytes.fromhex(sig_hex), public_key)
+    except Exception:
+        return False
+
+
 def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
     """Derive a deterministic nonce from hint and canonical plaintext.
 
