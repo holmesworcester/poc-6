@@ -508,7 +508,7 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         window_max,
         bloom_filter,
         requester_public_key,
-        received_at,
+        recorded_at,
         db
     )
 

@@ -59,12 +59,11 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
         (invite_key_id, invite_key_secret, t_ms)
     )
 
-    # Store a mapping so get_peer_id_for_key() can find the owner
+    # Track key ownership for routing (supports multiple local peers with same key)
     # (Also restored via invite.project() for reprojection)
-    invite_key_mapping = json.dumps({"peer_ids": [inviter_peer_id]})
     db.execute(
-        "INSERT OR REPLACE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-        (invite_key_id_bytes, invite_key_mapping.encode(), t_ms)
+        "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
+        (invite_key_id, inviter_peer_id, t_ms)
     )
 
     # Get inviter's prekey for Bob to send sync requests
@@ -192,12 +191,11 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             (invite_key_id, invite_key_secret, event_data['created_at'])
         )
 
-        # Also restore the mapping for get_peer_id_for_key()
-        import json
-        invite_key_mapping = json.dumps({"peer_ids": [recorded_by]})
+        # Track key ownership for routing (supports multiple local peers with same key)
+        # INSERT OR IGNORE is safe for reprojection - idempotent
         db.execute(
-            "INSERT OR REPLACE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-            (invite_key_id_bytes, invite_key_mapping.encode(), event_data['created_at'])
+            "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
+            (invite_key_id, recorded_by, event_data['created_at'])
         )
 
     return invite_id

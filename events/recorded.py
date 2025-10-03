@@ -140,38 +140,60 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
 
     # Phase 1: Try to unwrap (for encrypted events)
     plaintext, missing_key_ids = crypto.unwrap(event_blob, recorded_by, db)
-    if missing_key_ids:
-        # Crypto keys missing - block this event for this peer
-        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, db)
-        return [None, recorded_id]
 
-    # If unwrap returned None but no missing keys, try plaintext parsing
-    if plaintext is None:
+    # Parse event data to determine type (needed for shareable check)
+    event_data = None
+    event_type = None
+
+    if plaintext:
+        # Successfully decrypted or was plaintext
+        event_data = crypto.parse_json(plaintext)
+        event_type = event_data.get('type')
+    elif not missing_key_ids:
+        # Not encrypted, try plaintext parsing
         try:
             plaintext = event_blob
             event_data = crypto.parse_json(plaintext)
+            event_type = event_data.get('type')
         except:
             # Can't parse - skip projection
             return [None, recorded_id]
-    else:
-        event_data = crypto.parse_json(plaintext)
 
-    event_type = event_data.get('type')
     log.info(f"Parsed event data, type={event_type}")
 
     # Mark non-local-only events as shareable (centralized marking)
-    # This happens early so blocked events (crypto or semantic deps) are still shareable
+    # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
     LOCAL_ONLY_TYPES = {'peer', 'key', 'prekey', 'recorded'}
-    if event_type not in LOCAL_ONLY_TYPES:
+
+    should_mark_shareable = False
+    if event_type:
+        # We know the type - check if it's shareable
+        should_mark_shareable = event_type not in LOCAL_ONLY_TYPES
+    elif missing_key_ids:
+        # Encrypted blob we can't decrypt - but local events are never encrypted!
+        # So this must be shareable
+        should_mark_shareable = True
+
+    if should_mark_shareable:
         from events import sync
         sync.add_shareable_event(
             ref_id,
             recorded_by,  # This peer recorded the event and can share it
-            event_data.get('created_at', recorded_at),
+            event_data.get('created_at', recorded_at) if event_data else recorded_at,
             recorded_at,
             db
         )
+
+    # Handle crypto blocking (after shareable marking)
+    # Block events we can't decrypt - they'll still be shareable and sent during sync
+    if missing_key_ids:
+        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, db)
+        return [None, recorded_id]
+
+    # If we got here without event_data, something went wrong
+    if not event_data:
+        return [None, recorded_id]
 
     # Phase 2: Check semantic dependencies
     # Special case: Self-created user events with invite proof - creator doesn't have invite as valid event

@@ -58,6 +58,12 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
         )
     )
 
+    # Track key ownership for routing
+    db.execute(
+        "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
+        (key_id, recorded_by, event_data['created_at'])
+    )
+
     # Mark as valid for this peer
     db.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
@@ -178,21 +184,14 @@ def get_peer_ids_for_key(key_id: str, db: Any) -> list[str]:
     Returns:
         List of peer IDs (may be empty if key not found)
     """
-    # First check if this is a symmetric key with a mapping in the store
-    key_blob = store.get(key_id, db)
-    if key_blob:
-        try:
-            mapping_data = crypto.parse_json(key_blob)
-
-            # Handle new format: {"peer_ids": ["id1", "id2"]}
-            if 'peer_ids' in mapping_data:
-                return mapping_data['peer_ids']
-
-            # Handle old format: {"peer_id": "id1"} (backward compatibility)
-            if 'peer_id' in mapping_data:
-                return [mapping_data['peer_id']]
-        except:
-            pass
+    # First check key_ownership table for symmetric key routing
+    # Supports multiple local peers having the same symmetric key
+    ownership_rows = db.query(
+        "SELECT peer_id FROM key_ownership WHERE key_id = ?",
+        (key_id,)
+    )
+    if ownership_rows:
+        return [row['peer_id'] for row in ownership_rows]
 
     # If not found in store, check if this key_id IS a peer_id (for asymmetric prekeys)
     # Prekey-wrapped blobs use peer_id as the hint

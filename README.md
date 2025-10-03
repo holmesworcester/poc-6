@@ -4,6 +4,7 @@
 
 # TODO:
 
+- 
 - get check for deps out of crypto unwrap. 
 - ongoing group encryption, adding members
 - deletion

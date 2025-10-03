@@ -138,6 +138,12 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         )
     )
 
+    # Track key ownership for routing (recipient now has this key)
+    db.execute(
+        "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
+        (original_key_id, recorded_by, event_data['created_at'])
+    )
+
     log.info(f"key_shared.project() added key {original_key_id} to local keys table")
 
     # Insert into keys_shared table to track this event

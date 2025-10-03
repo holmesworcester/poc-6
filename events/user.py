@@ -81,6 +81,14 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         event_data['invite_pubkey'] = invite_pubkey_b64
         event_data['invite_signature'] = invite_signature_b64
 
+        # Store invite prekey in local_prekeys so Bob can decrypt invite_key_shared
+        # Use the invite prekey_id from invite link (hash of public key)
+        invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key, size=16))
+        db.execute(
+            "INSERT OR REPLACE INTO local_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+            (invite_prekey_id, peer_id, invite_public_key, invite_private_key, t_ms)
+        )
+
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
