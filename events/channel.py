@@ -13,6 +13,11 @@ def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: 
     """Create a shareable, encrypted channel event in the given group.
 
     Note: peer_id (local) sees the event; peer_shared_id (public) is the creator identity.
+
+    SECURITY: This function trusts that peer_id is correct and owned by the caller.
+    In production, the API authentication layer should validate that the authenticated session
+    owns this peer_id before calling this function. This is safe for local-only apps where
+    the user controls all peers on the device.
     """
     log.info(f"channel.create() creating channel name='{name}', group_id={group_id}, peer_id={peer_id}")
 
@@ -26,22 +31,22 @@ def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: 
     }
 
     # Get key_data for encryption
-    key_data = key.get_key(key_id, db)
+    key_data = key.get_key(key_id, peer_id, db)
 
     # Wrap (canonicalize + encrypt)
     canonical = crypto.canonicalize_json(event_data)
     blob = crypto.wrap(canonical, key_data, db)
 
-    # Store event with first_seen wrapper and projection
+    # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"channel.create() created channel_id={event_id}")
     return event_id
 
 
-def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project channel event into channels table and shareable_events table."""
-    log.debug(f"channel.project() projecting channel_id={event_id}, seen_by={seen_by_peer_id}")
+    log.debug(f"channel.project() projecting channel_id={event_id}, seen_by={recorded_by}")
 
     # Get blob from store
     blob = store.get(event_id, db)
@@ -50,19 +55,19 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> N
         return
 
     # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, db)
+    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
     if not unwrapped:
         log.warning(f"channel.project() unwrap failed for channel_id={event_id}")
-        return  # Already blocked by first_seen.project() if keys missing
+        return  # Already blocked by recorded.project() if keys missing
 
     # Parse JSON
     event_data = crypto.parse_json(unwrapped)
     log.info(f"channel.project() projected channel name='{event_data.get('name')}', id={event_id}")
 
-    # Insert into channels table
+    # Insert into channels table (use REPLACE to overwrite stubs from user.project())
     db.execute(
-        """INSERT OR IGNORE INTO channels
-           (channel_id, name, group_id, created_by, created_at, seen_by_peer_id, received_at)
+        """INSERT OR REPLACE INTO channels
+           (channel_id, name, group_id, created_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
@@ -70,22 +75,18 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> N
             event_data['group_id'],
             event_data['created_by'],
             event_data['created_at'],
-            seen_by_peer_id,
-            received_at
+            recorded_by,
+            recorded_at
         )
     )
 
-    # Insert into shareable_events with window_id
-    from events import sync
-    sync.add_shareable_event(event_id, event_data['created_by'], event_data['created_at'], db)
 
-
-def list_channels(seen_by_peer_id: str, db: Any) -> list[dict[str, Any]]:
+def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     return db.query(
         """SELECT channel_id, name, group_id, created_by, created_at
            FROM channels
-           WHERE seen_by_peer_id = ?
+           WHERE recorded_by = ?
            ORDER BY created_at DESC""",
-        (seen_by_peer_id,)
+        (recorded_by,)
     )

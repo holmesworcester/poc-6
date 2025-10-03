@@ -34,81 +34,81 @@ class blocked:
     """Queue for events blocked on missing dependencies."""
 
     @staticmethod
-    def add(first_seen_id: str, seen_by_peer_id: str, missing_deps: list[str], db: Any) -> None:
-        """Block first_seen_id for seen_by_peer_id until missing_deps are satisfied (blob already in store)."""
+    def add(recorded_id: str, recorded_by: str, missing_deps: list[str], db: Any) -> None:
+        """Block recorded_id for recorded_by until missing_deps are satisfied (blob already in store)."""
         if not missing_deps:
             return
 
-        log.warning(f"queues.blocked.add() blocking first_seen_id={first_seen_id}, peer={seen_by_peer_id}, missing_deps={missing_deps}")
+        log.warning(f"queues.blocked.add() blocking recorded_id={recorded_id}, peer={recorded_by}, missing_deps={missing_deps}")
 
         # Count dependencies for Kahn's algorithm
         deps_remaining = len(missing_deps)
 
         # Store blocked event with dependency counter
         db.execute(
-            """INSERT OR REPLACE INTO blocked_events (first_seen_id, seen_by_peer_id, missing_deps, deps_remaining)
+            """INSERT OR REPLACE INTO blocked_events_ephemeral (recorded_id, recorded_by, missing_deps, deps_remaining)
                VALUES (?, ?, ?, ?)""",
-            (first_seen_id, seen_by_peer_id, json.dumps(missing_deps), deps_remaining)
+            (recorded_id, recorded_by, json.dumps(missing_deps), deps_remaining)
         )
 
         # Clear and re-insert dependency tracking
         db.execute(
-            "DELETE FROM blocked_event_deps WHERE first_seen_id = ? AND seen_by_peer_id = ?",
-            (first_seen_id, seen_by_peer_id)
+            "DELETE FROM blocked_event_deps_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
+            (recorded_id, recorded_by)
         )
 
         for dep_id in missing_deps:
             db.execute(
-                """INSERT OR IGNORE INTO blocked_event_deps (first_seen_id, seen_by_peer_id, dep_id)
+                """INSERT OR IGNORE INTO blocked_event_deps_ephemeral (recorded_id, recorded_by, dep_id)
                    VALUES (?, ?, ?)""",
-                (first_seen_id, seen_by_peer_id, dep_id)
+                (recorded_id, recorded_by, dep_id)
             )
 
         db.commit()
 
     @staticmethod
-    def process(seen_by_peer_id: str, db: Any) -> list[str]:
-        """Unblock events for peer where all deps now satisfied. Returns first_seen_ids to re-project."""
-        log.debug(f"queues.blocked.process() checking blocked events for peer={seen_by_peer_id}")
+    def process(recorded_by: str, db: Any) -> list[str]:
+        """Unblock events for peer where all deps now satisfied. Returns recorded_ids to re-project."""
+        log.debug(f"queues.blocked.process() checking blocked events for peer={recorded_by}")
 
         unblocked = []
 
         # Get all blocked events for this peer
         blocked_rows = db.query(
-            "SELECT first_seen_id FROM blocked_events WHERE seen_by_peer_id = ?",
-            (seen_by_peer_id,)
+            "SELECT recorded_id FROM blocked_events_ephemeral WHERE recorded_by = ?",
+            (recorded_by,)
         )
 
-        log.debug(f"queues.blocked.process() found {len(blocked_rows)} blocked events for peer={seen_by_peer_id}")
+        log.debug(f"queues.blocked.process() found {len(blocked_rows)} blocked events for peer={recorded_by}")
 
         for row in blocked_rows:
-            first_seen_id = row['first_seen_id']
+            recorded_id = row['recorded_id']
 
             # Check if all deps are now satisfied
-            if blocked._all_deps_satisfied(first_seen_id, seen_by_peer_id, db):
-                log.info(f"queues.blocked.process() UNBLOCKING first_seen_id={first_seen_id}, peer={seen_by_peer_id}")
-                unblocked.append(first_seen_id)
+            if blocked._all_deps_satisfied(recorded_id, recorded_by, db):
+                log.info(f"queues.blocked.process() UNBLOCKING recorded_id={recorded_id}, peer={recorded_by}")
+                unblocked.append(recorded_id)
 
                 # Remove from blocked tables
                 db.execute(
-                    "DELETE FROM blocked_events WHERE first_seen_id = ? AND seen_by_peer_id = ?",
-                    (first_seen_id, seen_by_peer_id)
+                    "DELETE FROM blocked_events_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
+                    (recorded_id, recorded_by)
                 )
-                # blocked_event_deps will be cascade deleted
+                # blocked_event_deps_ephemeral will be cascade deleted
 
         if unblocked:
             db.commit()
-            log.info(f"queues.blocked.process() unblocked {len(unblocked)} events for peer={seen_by_peer_id}")
+            log.info(f"queues.blocked.process() unblocked {len(unblocked)} events for peer={recorded_by}")
 
         return unblocked
 
     @staticmethod
-    def _all_deps_satisfied(first_seen_id: str, seen_by_peer_id: str, db: Any) -> bool:
+    def _all_deps_satisfied(recorded_id: str, recorded_by: str, db: Any) -> bool:
         """Check if all dependencies for a blocked event are now satisfied.
 
         Args:
-            first_seen_id: The blocked first_seen event to check
-            seen_by_peer_id: Which peer's view to check
+            recorded_id: The blocked recorded event to check
+            recorded_by: Which peer's view to check
             db: Database connection
 
         Returns:
@@ -116,48 +116,48 @@ class blocked:
         """
         # Get all dependency IDs for this blocked event
         dep_rows = db.query(
-            "SELECT dep_id FROM blocked_event_deps WHERE first_seen_id = ? AND seen_by_peer_id = ?",
-            (first_seen_id, seen_by_peer_id)
+            "SELECT dep_id FROM blocked_event_deps_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
+            (recorded_id, recorded_by)
         )
 
-        log.debug(f"queues.blocked._all_deps_satisfied() checking {len(dep_rows)} deps for first_seen_id={first_seen_id}")
+        log.debug(f"queues.blocked._all_deps_satisfied() checking {len(dep_rows)} deps for recorded_id={recorded_id}")
 
         for dep_row in dep_rows:
             dep_id = dep_row['dep_id']
 
             # Check if this dep is valid for this peer
             valid = db.query_one(
-                "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ? LIMIT 1",
-                (dep_id, seen_by_peer_id)
+                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (dep_id, recorded_by)
             )
 
             if not valid:
-                log.debug(f"queues.blocked._all_deps_satisfied() dep {dep_id} still missing for first_seen_id={first_seen_id}")
+                log.debug(f"queues.blocked._all_deps_satisfied() dep {dep_id} still missing for recorded_id={recorded_id}")
                 return False
 
-        log.debug(f"queues.blocked._all_deps_satisfied() ALL deps satisfied for first_seen_id={first_seen_id}")
+        log.debug(f"queues.blocked._all_deps_satisfied() ALL deps satisfied for recorded_id={recorded_id}")
         return True
 
     @staticmethod
-    def notify_event_valid(event_id: str, seen_by_peer_id: str, db: Any) -> list[str]:
+    def notify_event_valid(event_id: str, recorded_by: str, db: Any) -> list[str]:
         """Notify that an event became valid - decrements counters and unblocks ready events (Kahn's algorithm).
 
         Args:
             event_id: The event that just became valid
-            seen_by_peer_id: Which peer saw this event
+            recorded_by: Which peer recorded this event
             db: Database connection
 
         Returns:
-            List of first_seen_ids that were unblocked and need re-projection
+            List of recorded_ids that were unblocked and need re-projection
         """
-        log.debug(f"queues.blocked.notify_event_valid() event_id={event_id}, peer={seen_by_peer_id}")
+        log.debug(f"queues.blocked.notify_event_valid() event_id={event_id}, peer={recorded_by}")
 
-        # Find all events waiting for this dependency (uses idx_blocked_deps_lookup)
+        # Find all events waiting for this dependency (uses idx_blocked_deps_ephemeral_lookup)
         waiting_events = db.query("""
-            SELECT DISTINCT first_seen_id, seen_by_peer_id
-            FROM blocked_event_deps
-            WHERE dep_id = ? AND seen_by_peer_id = ?
-        """, (event_id, seen_by_peer_id))
+            SELECT DISTINCT recorded_id, recorded_by
+            FROM blocked_event_deps_ephemeral
+            WHERE dep_id = ? AND recorded_by = ?
+        """, (event_id, recorded_by))
 
         if not waiting_events:
             log.debug(f"queues.blocked.notify_event_valid() no events waiting for {event_id}")
@@ -170,19 +170,19 @@ class blocked:
         placeholders = ','.join(['(?, ?)' for _ in waiting_events])
         params = []
         for evt in waiting_events:
-            params.extend([evt['first_seen_id'], evt['seen_by_peer_id']])
+            params.extend([evt['recorded_id'], evt['recorded_by']])
 
         try:
             # Try atomic UPDATE...RETURNING (SQLite 3.35+)
             decremented = db.execute_returning(f"""
-                UPDATE blocked_events
+                UPDATE blocked_events_ephemeral
                 SET deps_remaining = deps_remaining - 1
-                WHERE (first_seen_id, seen_by_peer_id) IN (VALUES {placeholders})
-                RETURNING first_seen_id, deps_remaining
+                WHERE (recorded_id, recorded_by) IN (VALUES {placeholders})
+                RETURNING recorded_id, deps_remaining
             """, tuple(params))
 
             # Find which hit zero
-            unblocked = [row['first_seen_id'] for row in decremented if row['deps_remaining'] == 0]
+            unblocked = [row['recorded_id'] for row in decremented if row['deps_remaining'] == 0]
 
         except Exception as e:
             # Fallback: manual decrement and check
@@ -190,30 +190,30 @@ class blocked:
             unblocked = []
             for evt in waiting_events:
                 db.execute("""
-                    UPDATE blocked_events
+                    UPDATE blocked_events_ephemeral
                     SET deps_remaining = deps_remaining - 1
-                    WHERE first_seen_id = ? AND seen_by_peer_id = ?
-                """, (evt['first_seen_id'], evt['seen_by_peer_id']))
+                    WHERE recorded_id = ? AND recorded_by = ?
+                """, (evt['recorded_id'], evt['recorded_by']))
 
                 # Check if it hit zero
                 result = db.query_one("""
-                    SELECT deps_remaining FROM blocked_events
-                    WHERE first_seen_id = ? AND seen_by_peer_id = ?
-                """, (evt['first_seen_id'], evt['seen_by_peer_id']))
+                    SELECT deps_remaining FROM blocked_events_ephemeral
+                    WHERE recorded_id = ? AND recorded_by = ?
+                """, (evt['recorded_id'], evt['recorded_by']))
 
                 if result and result['deps_remaining'] == 0:
-                    unblocked.append(evt['first_seen_id'])
+                    unblocked.append(evt['recorded_id'])
 
-        # Cleanup: delete unblocked events from blocked_events
+        # Cleanup: delete unblocked events from blocked_events_ephemeral
         if unblocked:
             log.info(f"queues.blocked.notify_event_valid() UNBLOCKING {len(unblocked)} events: {unblocked}")
 
             # Build DELETE with IN clause
             placeholders_del = ','.join(['?' for _ in unblocked])
             db.execute(f"""
-                DELETE FROM blocked_events
-                WHERE first_seen_id IN ({placeholders_del}) AND seen_by_peer_id = ?
-            """, tuple(unblocked) + (seen_by_peer_id,))
+                DELETE FROM blocked_events_ephemeral
+                WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
+            """, tuple(unblocked) + (recorded_by,))
 
             db.commit()
 

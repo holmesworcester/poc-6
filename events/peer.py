@@ -34,10 +34,10 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     peer_id = store.blob(blob, t_ms, return_dupes=True, db=db)
     log.info(f"peer.create() generated peer_id={peer_id}")
 
-    # Then create first_seen wrapper where peer sees itself
-    from events import first_seen
-    first_seen_id = first_seen.create(peer_id, peer_id, t_ms, db, return_dupes=False)
-    first_seen.project(first_seen_id, db)
+    # Then create recorded wrapper where peer sees itself
+    from events import recorded
+    recorded_id = recorded.create(peer_id, peer_id, t_ms, db, return_dupes=False)
+    recorded.project(recorded_id, db)
 
     # Create shareable peer_shared event
     peer_shared_id = peer_shared.create(peer_id, t_ms, db)
@@ -46,9 +46,9 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     return (peer_id, peer_shared_id)
 
 
-def project(peer_id: str, seen_by_peer_id: str, db: Any) -> None:
+def project(peer_id: str, recorded_by: str, db: Any) -> None:
     """Project peer event into peers table (for local peers, both IDs are the same)."""
-    log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={seen_by_peer_id}")
+    log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
 
     # Get blob from store
     blob = store.get(peer_id, db)
@@ -59,9 +59,9 @@ def project(peer_id: str, seen_by_peer_id: str, db: Any) -> None:
     # Parse JSON
     event_data = crypto.parse_json(blob)
 
-    # Insert into peers table (local-only, not shareable)
+    # Insert into local_peers table (local-only, not shareable)
     db.execute(
-        """INSERT OR IGNORE INTO peers (peer_id, public_key, private_key, created_at)
+        """INSERT OR IGNORE INTO local_peers (peer_id, public_key, private_key, created_at)
            VALUES (?, ?, ?, ?)""",
         (
             peer_id,
@@ -73,24 +73,57 @@ def project(peer_id: str, seen_by_peer_id: str, db: Any) -> None:
 
     # Mark as valid for this peer
     db.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
-        (peer_id, seen_by_peer_id)
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (peer_id, recorded_by)
     )
 
     log.info(f"peer.project() projected peer_id={peer_id} into peers table")
 
 
-def get_private_key(peer_id: str, db: Any) -> bytes:
-    """Get private key for a peer_id."""
-    row = db.query_one("SELECT private_key FROM peers WHERE peer_id = ?", (peer_id,))
+def get_private_key(peer_id: str, recorded_by: str, db: Any) -> bytes:
+    """Get private key for a peer_id.
+
+    Args:
+        peer_id: Peer ID to get private key for
+        recorded_by: Peer ID requesting access (for access control)
+        db: Database connection
+
+    Returns:
+        Private key bytes
+
+    Raises:
+        ValueError: If peer not found or recorded_by != peer_id (can only access your own private key)
+    """
+    # Security: Only allow a peer to access their own private key
+    if peer_id != recorded_by:
+        raise ValueError(f"access denied: peer {recorded_by} cannot access private key for peer {peer_id}")
+
+    row = db.query_one("SELECT private_key FROM local_peers WHERE peer_id = ?", (peer_id,))
     if not row:
         raise ValueError(f"peer not found: {peer_id}")
     return row['private_key']
 
 
-def get_public_key(peer_id: str, db: Any) -> bytes:
-    """Get public key for a peer_id from peers table."""
-    row = db.query_one("SELECT public_key FROM peers WHERE peer_id = ?", (peer_id,))
+def get_public_key(peer_id: str, recorded_by: str, db: Any) -> bytes:
+    """Get public key for a peer_id from local_peers table.
+
+    Args:
+        peer_id: Peer ID to get public key for
+        recorded_by: Peer ID requesting access (for access control)
+        db: Database connection
+
+    Returns:
+        Public key bytes
+
+    Raises:
+        ValueError: If peer not found or recorded_by != peer_id (can only access your own peer's public key from local_peers)
+    """
+    # Security: Only allow a peer to access their own local peer's public key
+    # (Public keys for other peers should come from peer_shared events, not local_peers)
+    if peer_id != recorded_by:
+        raise ValueError(f"access denied: peer {recorded_by} cannot access local peer public key for peer {peer_id}")
+
+    row = db.query_one("SELECT public_key FROM local_peers WHERE peer_id = ?", (peer_id,))
     if not row:
         raise ValueError(f"peer not found: {peer_id}")
     # public_key is stored as base64 string in the table

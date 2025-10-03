@@ -170,8 +170,13 @@ def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
 # ===== Wrap/Unwrap Functions =====
 
 
-def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
+def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
     """Extract key id from blob, determine if sym or asym, fetch key, then unseal or decrypt.
+
+    Args:
+        wrapped_blob: Encrypted blob to unwrap
+        recorded_by: Peer ID attempting to unwrap (for access control)
+        db: Database connection
 
     Returns tuple of (plaintext, missing_key_ids).
     - If plaintext JSON: (plaintext_bytes, [])
@@ -184,7 +189,7 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
     import logging
     log = logging.getLogger(__name__)
 
-    log.debug(f"crypto.unwrap() called with blob size={len(wrapped_blob)}B")
+    log.debug(f"crypto.unwrap() called with blob size={len(wrapped_blob)}B, recorded_by={recorded_by[:20]}...")
 
     # Check if blob is plaintext JSON (starts with '{' or '[')
     if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
@@ -206,8 +211,8 @@ def unwrap(wrapped_blob: bytes, db: Any) -> tuple[bytes | None, list[str]]:
         log.error(f"crypto.unwrap() failed to extract id from blob: {e}")
         return (None, [])
 
-    # Get the key using the id
-    key_data = key.get_key_by_id(id_bytes, db)
+    # Get the key using the id (filtered by recorded_by for access control)
+    key_data = key.get_key_by_id(id_bytes, recorded_by, db)
     if not key_data:
         key_id_b64 = b64encode(id_bytes)
         log.warning(f"crypto.unwrap() key not found for id={key_id_b64} (will block until key arrives)")

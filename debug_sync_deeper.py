@@ -44,8 +44,8 @@ hint = sync_module.key.extract_id(blob)
 hint_b64 = crypto.b64encode(hint)
 print(f"Hint: {hint_b64}")
 
-seen_by_peer_id = sync_module.key.get_peer_id_for_key(hint_b64, db)
-print(f"Seen by peer: {seen_by_peer_id}")
+recorded_by = sync_module.key.get_peer_id_for_key(hint_b64, db)
+print(f"Seen by peer: {recorded_by}")
 
 unwrapped_blob, missing_keys = crypto.unwrap(blob, db)
 if unwrapped_blob:
@@ -57,20 +57,20 @@ if unwrapped_blob:
     event_id = store.blob(unwrapped_blob, 22000, True, db)
     print(f"\nStored event with ID: {event_id}")
 
-    # Create first_seen
-    from events import first_seen
-    first_seen_id = first_seen.create(event_id, seen_by_peer_id, 22000, db, True)
-    print(f"Created first_seen with ID: {first_seen_id}")
+    # Create recorded
+    from events import recorded
+    recorded_id = recorded.create(event_id, recorded_by, 22000, db, True)
+    print(f"Created recorded with ID: {recorded_id}")
 
-    # Get the first_seen blob
-    fs_blob = store.get(first_seen_id, db)
+    # Get the recorded blob
+    fs_blob = store.get(recorded_id, db)
     if fs_blob:
         fs_data = crypto.parse_json(fs_blob)
         print(f"First_seen data: {fs_data}")
 
     # Now project it
-    print(f"\nProjecting first_seen event...")
-    result = first_seen.project(first_seen_id, db)
+    print(f"\nProjecting recorded event...")
+    result = recorded.project(recorded_id, db)
     print(f"Project result: {result}")
 
     # Check incoming queue again

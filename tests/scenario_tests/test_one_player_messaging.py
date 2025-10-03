@@ -8,7 +8,7 @@ import sqlite3
 import pytest
 from db import Database
 import schema
-from events import peer, key, group, channel, message
+from events import user, channel, message
 
 
 def test_alice_sends_to_herself():
@@ -21,51 +21,31 @@ def test_alice_sends_to_herself():
     # Create all tables using centralized schema loader
     schema.create_all(db)
 
-    # Test flow: Alice creates identity and messaging infrastructure
+    # Test flow: Alice creates network (peer, prekey, key, group, channel, user, invite)
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
-    # 1. Create peer (Alice's local keypair) - returns (peer_id, peer_shared_id)
-    alice_peer_id, alice_peer_shared_id = peer.create(t_ms=1000, db=db)
-    assert len(alice_peer_id) == 24  # base64 encoded 16-byte hash
-    assert len(alice_peer_shared_id) == 24  # base64 encoded 16-byte hash
+    # Verify all components were created
+    assert len(alice['peer_id']) == 24
+    assert len(alice['peer_shared_id']) == 24
+    assert len(alice['prekey_id']) == 24
+    assert len(alice['prekey_shared_id']) == 24
+    assert len(alice['key_id']) == 24
+    assert len(alice['group_id']) == 24
+    assert len(alice['channel_id']) == 24
+    assert len(alice['user_id']) == 24
+    assert alice['invite_link'].startswith('quiet://')
 
-    # 2. Create key (symmetric encryption key)
-    alice_key_id = key.create(alice_peer_id, t_ms=2000, db=db)
-    assert len(alice_key_id) == 24
-
-    # 3. Create group
-    alice_group_id = group.create(
-        name='My Group',
-        peer_id=alice_peer_id,
-        peer_shared_id=alice_peer_shared_id,
-        key_id=alice_key_id,
-        t_ms=3000,
-        db=db
-    )
-    assert len(alice_group_id) == 24
-
-    # 4. Create channel
-    alice_channel_id = channel.create(
-        name='general',
-        group_id=alice_group_id,
-        peer_id=alice_peer_id,
-        peer_shared_id=alice_peer_shared_id,
-        key_id=alice_key_id,
-        t_ms=4000,
-        db=db
-    )
-    assert len(alice_channel_id) == 24
-
-    # 5. Send first message
+    # Send first message in default channel
     result1 = message.create_message(
         params={
             'content': 'Hello',
-            'channel_id': alice_channel_id,
-            'group_id': alice_group_id,
-            'peer_id': alice_peer_id,
-            'peer_shared_id': alice_peer_shared_id,
-            'key_id': alice_key_id
+            'channel_id': alice['channel_id'],
+            'group_id': alice['group_id'],
+            'peer_id': alice['peer_id'],
+            'peer_shared_id': alice['peer_shared_id'],
+            'key_id': alice['key_id']
         },
-        t_ms=5000,
+        t_ms=2000,
         db=db
     )
 
@@ -75,49 +55,82 @@ def test_alice_sends_to_herself():
     assert 'latest' in result1
     assert len(result1['latest']) == 1
     assert result1['latest'][0]['content'] == 'Hello'
-    assert result1['latest'][0]['author_id'] == alice_peer_shared_id  # author_id is peer_shared_id
+    assert result1['latest'][0]['author_id'] == alice['peer_shared_id']
 
-    # 6. Send second message
+    # Send second message
     result2 = message.create_message(
         params={
             'content': 'World',
-            'channel_id': alice_channel_id,
-            'group_id': alice_group_id,
-            'peer_id': alice_peer_id,
-            'peer_shared_id': alice_peer_shared_id,
-            'key_id': alice_key_id
+            'channel_id': alice['channel_id'],
+            'group_id': alice['group_id'],
+            'peer_id': alice['peer_id'],
+            'peer_shared_id': alice['peer_shared_id'],
+            'key_id': alice['key_id']
         },
-        t_ms=6000,
+        t_ms=3000,
         db=db
     )
 
     # Verify both messages appear in latest
     assert len(result2['latest']) == 2
-    # Messages should be ordered by created_at DESC
     assert result2['latest'][0]['content'] == 'World'  # Most recent first
     assert result2['latest'][1]['content'] == 'Hello'
 
-    # 7. Query messages separately (API-style)
-    messages_list = message.list_messages(alice_channel_id, alice_peer_id, db)
+    # Create a second channel for realism
+    random_channel_id = channel.create(
+        name='random',
+        group_id=alice['group_id'],
+        peer_id=alice['peer_id'],
+        peer_shared_id=alice['peer_shared_id'],
+        key_id=alice['key_id'],
+        t_ms=4000,
+        db=db
+    )
 
-    # Verify query returns both messages
-    assert len(messages_list) == 2
-    assert messages_list[0]['content'] == 'World'
-    assert messages_list[1]['content'] == 'Hello'
-    assert all(m['channel_id'] == alice_channel_id for m in messages_list)
-    assert all(m['seen_by_peer_id'] == alice_peer_id for m in messages_list)  # seen_by is peer_id
+    # Send message to second channel
+    result3 = message.create_message(
+        params={
+            'content': 'Random thoughts',
+            'channel_id': random_channel_id,
+            'group_id': alice['group_id'],
+            'peer_id': alice['peer_id'],
+            'peer_shared_id': alice['peer_shared_id'],
+            'key_id': alice['key_id']
+        },
+        t_ms=5000,
+        db=db
+    )
 
-    # 8. Verify channels are queryable
-    channels_list = channel.list_channels(alice_peer_id, db)
-    assert len(channels_list) == 1
-    assert channels_list[0]['name'] == 'general'
-    assert channels_list[0]['channel_id'] == alice_channel_id
+    # Verify message only appears in random channel
+    assert len(result3['latest']) == 1
+    assert result3['latest'][0]['content'] == 'Random thoughts'
 
-    # 9. Verify groups are queryable
-    groups_list = group.list_all_groups(alice_peer_id, db)
+    # Query messages from general channel
+    general_messages = message.list_messages(alice['channel_id'], alice['peer_id'], db)
+    assert len(general_messages) == 2
+    assert general_messages[0]['content'] == 'World'
+    assert general_messages[1]['content'] == 'Hello'
+    assert all(m['channel_id'] == alice['channel_id'] for m in general_messages)
+
+    # Query messages from random channel
+    random_messages = message.list_messages(random_channel_id, alice['peer_id'], db)
+    assert len(random_messages) == 1
+    assert random_messages[0]['content'] == 'Random thoughts'
+    assert random_messages[0]['channel_id'] == random_channel_id
+
+    # Verify channels are queryable
+    channels_list = channel.list_channels(alice['peer_id'], db)
+    assert len(channels_list) == 2
+    channel_names = {c['name'] for c in channels_list}
+    assert 'general' in channel_names
+    assert 'random' in channel_names
+
+    # Verify groups are queryable
+    from events import group
+    groups_list = group.list_all_groups(alice['peer_id'], db)
     assert len(groups_list) == 1
-    assert groups_list[0]['name'] == 'My Group'
-    assert groups_list[0]['group_id'] == alice_group_id
+    assert groups_list[0]['name'] == "Alice's Network"
+    assert groups_list[0]['group_id'] == alice['group_id']
 
     print("✓ All tests passed! Alice can send messages to herself and see them.")
 

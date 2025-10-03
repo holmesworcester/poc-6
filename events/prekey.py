@@ -12,10 +12,10 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     """Create a local-only prekey event (like peer.create).
 
     Generates Ed25519 keypair, stores both public and private keys in event.
-    Projects prekey_private to peers table.
+    Projects to local_prekeys table with owner_peer_id.
 
     Args:
-        peer_id: Local peer ID (for projection and storage)
+        peer_id: Local peer ID (owner of this prekey)
         t_ms: Timestamp
         db: Database connection
 
@@ -42,18 +42,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     prekey_id = store.blob(blob, t_ms, return_dupes=True, db=db)
     log.info(f"prekey.create() generated prekey_id={prekey_id}")
 
-    # Create first_seen wrapper where peer sees itself
-    from events import first_seen
-    first_seen_id = first_seen.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
-    first_seen.project(first_seen_id, db)
+    # Create recorded wrapper where peer sees itself
+    from events import recorded
+    recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
+    recorded.project(recorded_id, db)
 
     log.info(f"prekey.create() projected prekey_id={prekey_id}")
     return prekey_id, prekey_private
 
 
-def project(prekey_id: str, seen_by_peer_id: str, db: Any) -> None:
-    """Project prekey event into peers table (sets prekey_private column)."""
-    log.info(f"prekey.project() prekey_id={prekey_id}, seen_by={seen_by_peer_id}")
+def project(prekey_id: str, recorded_by: str, db: Any) -> None:
+    """Project prekey event into local_prekeys table with owner_peer_id."""
+    log.info(f"prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
 
     # Get blob from store
     blob = store.get(prekey_id, db)
@@ -63,31 +63,42 @@ def project(prekey_id: str, seen_by_peer_id: str, db: Any) -> None:
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
+    owner_peer_id = event_data['peer_id']
 
-    # Update peers table with prekey_private
+    # Delete old prekeys for this owner (keep only one active prekey per peer)
+    db.execute("DELETE FROM local_prekeys WHERE owner_peer_id = ?", (owner_peer_id,))
+
+    # Insert into local_prekeys table with owner
     db.execute(
-        "UPDATE peers SET prekey_private = ? WHERE peer_id = ?",
-        (crypto.b64decode(event_data['private_key']), event_data['peer_id'])
+        "INSERT INTO local_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+        (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
+         crypto.b64decode(event_data['private_key']), event_data['created_at'])
     )
 
     # Insert into pre_keys table with public key (for others to encrypt sync requests)
+    # Use owner_peer_id as the identifier (pre_keys maps peer_id -> public_key)
     db.execute(
         "INSERT OR REPLACE INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (event_data['peer_id'], crypto.b64decode(event_data['public_key']), event_data['created_at'])
+        (owner_peer_id, crypto.b64decode(event_data['public_key']), event_data['created_at'])
     )
 
     # Mark as valid for this peer
     db.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
-        (prekey_id, seen_by_peer_id)
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (prekey_id, recorded_by)
     )
 
 
-def get_transit_prekey_for_peer(peer_id: str, db: Any) -> dict[str, Any] | None:
+def get_transit_prekey_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get the transit pre-key for a specific peer in format expected by crypto.wrap().
+
+    Prekeys are public and meant to be shared for encryption, but we add recorded_by
+    for consistency with other access patterns. No strict access control is enforced since
+    prekeys are intentionally public for anyone to encrypt messages.
 
     Args:
         peer_id: Peer ID to get prekey for
+        recorded_by: Peer ID requesting access (for logging/consistency, not enforced)
         db: Database connection
 
     Returns:

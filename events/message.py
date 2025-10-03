@@ -9,7 +9,13 @@ log = logging.getLogger(__name__)
 
 
 def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
-    """Create a message event, add it to the store, project it, and return the id and a list of recent messages."""
+    """Create a message event, add it to the store, project it, and return the id and a list of recent messages.
+
+    SECURITY: This function trusts that params['peer_id'] is correct and owned by the caller.
+    In production, the API authentication layer should validate that the authenticated session
+    owns this peer_id before calling this function. This is safe for local-only apps where
+    the user controls all peers on the device.
+    """
     import json
 
     # Extract params
@@ -33,17 +39,17 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     }
 
     # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
-    key_data = group.pick_key(group_id, db)
+    key_data = group.pick_key(group_id, peer_id, db)
 
     # Wrap (canonicalize + encrypt)
     canonical = crypto.canonicalize_json(signed_event)
     blob = crypto.wrap(canonical, key_data, db)
 
-    # Store event with first_seen wrapper and projection
+    # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message.create_message() created message_id={event_id}")
@@ -59,19 +65,19 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     }
 
 
-def list_messages(channel_id: int, seen_by_peer_id: str, db: Any) -> list[dict[str, Any]]:
+def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer."""
     messages = db.query(
-        "SELECT * FROM messages WHERE channel_id = ? AND seen_by_peer_id = ? ORDER BY created_at DESC LIMIT 50",
-        (channel_id, seen_by_peer_id)
+        "SELECT * FROM messages WHERE channel_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 50",
+        (channel_id, recorded_by)
     )
     return messages
 
 
-def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a single message event into the database."""
     import json
-    log.debug(f"message.project() projecting message_id={event_id}, seen_by={seen_by_peer_id}")
+    log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
 
     # Get and unwrap event
     event_blob = store.get(event_id, db)
@@ -79,10 +85,10 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
         log.warning(f"message.project() blob not found for message_id={event_id}")
         return None
 
-    unwrapped, _ = crypto.unwrap(event_blob, db)
+    unwrapped, _ = crypto.unwrap(event_blob, recorded_by, db)
     if not unwrapped:
         log.warning(f"message.project() unwrap failed for message_id={event_id}")
-        return None  # Already blocked by first_seen.project() if keys missing
+        return None  # Already blocked by recorded.project() if keys missing
 
     event_data = crypto.parse_json(unwrapped)
     log.info(f"message.project() projected message content='{event_data.get('content', '')[:50]}...', id={event_id}")
@@ -90,7 +96,7 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared
     created_by = event_data.get('created_by')
-    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
+    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         return None  # Reject unsigned or invalid signature
 
@@ -102,16 +108,12 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
-    # Insert into messages table with peer and timestamp from first_seen
+    # Insert into messages table with peer and timestamp from recorded
     db.execute(
         """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, content, created_at, seen_by_peer_id, received_at)
+           (message_id, channel_id, group_id, author_id, content, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, content, created_at, seen_by_peer_id, received_at)
+        (message_id, channel_id, group_id, author_id, content, created_at, recorded_by, recorded_at)
     )
-
-    # Insert into shareable_events with window_id
-    from events import sync
-    sync.add_shareable_event(event_id, author_id, created_at, db)
 
     return event_id

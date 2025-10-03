@@ -13,6 +13,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
     """Create a shareable, encrypted group event.
 
     Note: peer_id (local) signs and sees the event; peer_shared_id (public) is the creator identity.
+
+    SECURITY: This function trusts that peer_id is correct and owned by the caller.
+    In production, the API authentication layer should validate that the authenticated session
+    owns this peer_id before calling this function. This is safe for local-only apps where
+    the user controls all peers on the device.
     """
     log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}")
 
@@ -26,26 +31,26 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
     }
 
     # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
-    key_data = key.get_key(key_id, db)
+    key_data = key.get_key(key_id, peer_id, db)
 
     # Wrap (canonicalize + encrypt)
     canonical = crypto.canonicalize_json(signed_event)
     blob = crypto.wrap(canonical, key_data, db)
 
-    # Store event with first_seen wrapper and projection
+    # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group.create() created group_id={event_id}")
     return event_id
 
 
-def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group event into groups table and shareable_events table."""
-    log.debug(f"group.project() projecting group_id={event_id}, seen_by={seen_by_peer_id}")
+    log.debug(f"group.project() projecting group_id={event_id}, seen_by={recorded_by}")
 
     # Get blob from store
     blob = store.get(event_id, db)
@@ -54,10 +59,10 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
         return None
 
     # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, db)
+    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
     if not unwrapped:
         log.warning(f"group.project() unwrap failed for group_id={event_id}")
-        return None  # Already blocked by first_seen.project() if keys missing
+        return None  # Already blocked by recorded.project() if keys missing
 
     # Parse JSON
     event_data = crypto.parse_json(unwrapped)
@@ -65,15 +70,15 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared
     created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
+    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"group.project() signature verification FAILED for group_id={event_id}")
         return None  # Reject unsigned or invalid signature
 
-    # Insert into groups table
+    # Insert into groups table (use REPLACE to overwrite stubs from user.project())
     db.execute(
-        """INSERT OR IGNORE INTO groups
-           (group_id, name, created_by, created_at, key_id, seen_by_peer_id, received_at)
+        """INSERT OR REPLACE INTO groups
+           (group_id, name, created_by, created_at, key_id, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
@@ -81,32 +86,43 @@ def project(event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> s
             event_data['created_by'],
             event_data['created_at'],
             event_data['key_id'],
-            seen_by_peer_id,
-            received_at
+            recorded_by,
+            recorded_at
         )
     )
-
-    # Insert into shareable_events with window_id
-    from events import sync
-    sync.add_shareable_event(event_id, event_data['created_by'], event_data['created_at'], db)
 
     return event_id
 
 
-def pick_key(group_id: str, db: Any) -> dict[str, Any]:
-    """Get the key_data for a group."""
-    # Query groups table for key_id
-    row = db.query_one("SELECT key_id FROM groups WHERE group_id = ?", (group_id,))
+def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
+    """Get the key_data for a group.
+
+    Args:
+        group_id: Group ID to get key for
+        recorded_by: Peer ID requesting access (for access control)
+        db: Database connection
+
+    Returns:
+        Key dict for crypto operations
+
+    Raises:
+        ValueError: If group not found or peer doesn't have access
+    """
+    # Query groups table for key_id, verifying peer has access
+    row = db.query_one(
+        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (group_id, recorded_by)
+    )
     if not row:
-        raise ValueError(f"group not found: {group_id}")
+        raise ValueError(f"group not found or access denied: {group_id} for peer {recorded_by}")
 
-    # Get key_data from key
-    return key.get_key(row['key_id'], db)
+    # Get key_data from key (with access control)
+    return key.get_key(row['key_id'], recorded_by, db)
 
 
-def list_all_groups(seen_by_peer_id: str, db: Any) -> list[dict[str, Any]]:
+def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all groups for a specific peer."""
     return db.query(
-        "SELECT group_id, name, created_by, created_at FROM groups WHERE seen_by_peer_id = ? ORDER BY created_at DESC",
-        (seen_by_peer_id,)
+        "SELECT group_id, name, created_by, created_at FROM groups WHERE recorded_by = ? ORDER BY created_at DESC",
+        (recorded_by,)
     )

@@ -4,7 +4,7 @@
 import sqlite3
 from db import Database
 import schema
-from events import peer, key, group, sync, prekey, first_seen
+from events import peer, key, group, sync, prekey, recorded
 import store
 import crypto
 
@@ -41,18 +41,18 @@ if bob_ps_blob:
 # Now simulate pre-sharing Alice's peer_shared with Bob
 print("\n=== Pre-sharing Alice's peer_shared with Bob ===")
 alice_sees_bob = store.blob(bob_ps_blob, 3000, True, db)
-bob_ps_fs = first_seen.create(alice_sees_bob, alice_peer_id, 3000, db, True)
-first_seen.project(bob_ps_fs, db)
+bob_ps_fs = recorded.create(alice_sees_bob, alice_peer_id, 3000, db, True)
+recorded.project(bob_ps_fs, db)
 
 bob_sees_alice = store.blob(alice_ps_blob, 3100, True, db)
-alice_ps_fs = first_seen.create(bob_sees_alice, bob_peer_id, 3100, db, True)
-first_seen.project(alice_ps_fs, db)
+alice_ps_fs = recorded.create(bob_sees_alice, bob_peer_id, 3100, db, True)
+recorded.project(alice_ps_fs, db)
 
 # Check peers_shared table
 print("\n=== Checking peers_shared table ===")
-peers_shared_rows = db.query("SELECT * FROM peers_shared ORDER BY seen_by_peer_id")
+peers_shared_rows = db.query("SELECT * FROM peers_shared ORDER BY recorded_by")
 for row in peers_shared_rows:
-    print(f"seen_by: {row['seen_by_peer_id'][:16]}... peer_shared_id: {row['peer_shared_id'][:16]}...")
+    print(f"seen_by: {row['recorded_by'][:16]}... peer_shared_id: {row['peer_shared_id'][:16]}...")
 
 # Now test the lookup logic from sync.py
 print("\n=== Testing sync.py lookup logic ===")
@@ -61,7 +61,7 @@ for test_peer_id in [alice_peer_id, bob_peer_id]:
 
     from_peer_shared_id = ""
     candidate_rows = db.query(
-        "SELECT peer_shared_id FROM peers_shared WHERE seen_by_peer_id = ?",
+        "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
         (test_peer_id,)
     )
     print(f"  Found {len(candidate_rows)} candidates in peers_shared")

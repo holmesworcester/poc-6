@@ -25,23 +25,23 @@ def blob(blob: bytes, t_ms: int, return_dupes: bool, db: Any) -> str:
             log.debug(f"store.blob() duplicate blob skipped: id={id_str}")
             return ""
 
-def event(event_blob: bytes, seen_by_peer_id: str, t_ms: int, db: Any) -> str:
-    """Store an event with first_seen wrapper and project it.
+def event(event_blob: bytes, recorded_by: str, t_ms: int, db: Any) -> str:
+    """Store an event with recorded wrapper and project it.
 
-    For local events, seen_by=creating peer. For incoming, seen_by=receiving peer.
+    For local events, recorded_by=creating peer. For incoming, recorded_by=receiving peer.
     """
-    from events import first_seen
-    log.info(f"store.event() called: seen_by_peer_id={seen_by_peer_id}, t_ms={t_ms}")
+    from events import recorded
+    log.info(f"store.event() called: recorded_by={recorded_by}, t_ms={t_ms}")
 
     event_id = blob(event_blob, t_ms, return_dupes=True, db=db)
     log.debug(f"store.event() blob stored with event_id={event_id}")
 
-    # Create and store a first_seen event for the blob
-    first_seen_id = first_seen.create(event_id, seen_by_peer_id, t_ms, db, return_dupes=False)
-    log.debug(f"store.event() first_seen created: first_seen_id={first_seen_id}")
+    # Create and store a recorded event for the blob
+    recorded_id = recorded.create(event_id, recorded_by, t_ms, db, return_dupes=False)
+    log.debug(f"store.event() recorded event created: recorded_id={recorded_id}")
 
-    # Project the first_seen event (which will dispatch to the referenced event's projector)
-    first_seen.project(first_seen_id, db)
+    # Project the recorded event (which will dispatch to the referenced event's projector)
+    recorded.project(recorded_id, db)
     log.info(f"store.event() completed projection for event_id={event_id}")
 
     return event_id

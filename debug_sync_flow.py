@@ -136,8 +136,8 @@ incoming_count = db.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs", ())
 print(f"Incoming queue now has {incoming_count['cnt']} blobs (should have responses)")
 
 # Check valid events
-alice_valid = db.query("SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?", (alice_peer_id,))
-bob_valid = db.query("SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?", (bob_peer_id,))
+alice_valid = db.query("SELECT event_id FROM valid_events WHERE recorded_by = ?", (alice_peer_id,))
+bob_valid = db.query("SELECT event_id FROM valid_events WHERE recorded_by = ?", (bob_peer_id,))
 print(f"Alice has {len(alice_valid)} valid events")
 print(f"Bob has {len(bob_valid)} valid events")
 
@@ -150,18 +150,18 @@ incoming_count = db.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs", ())
 print(f"Incoming queue now has {incoming_count['cnt']} blobs")
 
 # Final check
-alice_valid = db.query("SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?", (alice_peer_id,))
-bob_valid = db.query("SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?", (bob_peer_id,))
+alice_valid = db.query("SELECT event_id FROM valid_events WHERE recorded_by = ?", (alice_peer_id,))
+bob_valid = db.query("SELECT event_id FROM valid_events WHERE recorded_by = ?", (bob_peer_id,))
 print(f"Alice has {len(alice_valid)} valid events")
 print(f"Bob has {len(bob_valid)} valid events")
 
 # Check if messages are visible
 bob_msg_for_alice = db.query_one(
-    "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
+    "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
     (bob_msg['id'], alice_peer_id)
 )
 alice_msg_for_bob = db.query_one(
-    "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
+    "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
     (alice_msg['id'], bob_peer_id)
 )
 

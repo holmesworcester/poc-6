@@ -20,11 +20,11 @@ def assert_reprojection(db: Any) -> None:
     Raises:
         AssertionError: If restored state differs from original
     """
-    # Get all first_seen event IDs in original order
+    # Get all recorded event IDs in original order
     event_ids = _get_projectable_event_ids(db)
 
     if not event_ids:
-        print("⚠ No first_seen events found, skipping re-projection test")
+        print("⚠ No recorded events found, skipping re-projection test")
         return
 
     print(f"Testing re-projection of {len(event_ids)} events from blank slate")
@@ -61,11 +61,11 @@ def assert_idempotency(db: Any, num_trials: int = 10, max_repetitions: int = 5) 
     Raises:
         AssertionError: If any repetition pattern produces different final state
     """
-    # Get all first_seen event IDs in original order
+    # Get all recorded event IDs in original order
     event_ids = _get_projectable_event_ids(db)
 
     if not event_ids:
-        print("⚠ No first_seen events found, skipping idempotency test")
+        print("⚠ No recorded events found, skipping idempotency test")
         return
 
     print(f"Testing {num_trials} repetition patterns of {len(event_ids)} events")
@@ -116,11 +116,11 @@ def assert_convergence(
     Raises:
         AssertionError: If any ordering produces different final state
     """
-    # Get all first_seen event IDs
+    # Get all recorded event IDs
     event_ids = _get_projectable_event_ids(db)
 
     if not event_ids:
-        print("⚠ No first_seen events found, skipping convergence test")
+        print("⚠ No recorded events found, skipping convergence test")
         return
 
     # Generate orderings
@@ -188,7 +188,7 @@ def assert_convergence(
 
 
 def _get_projectable_event_ids(db: Any) -> list[str]:
-    """Find all first_seen events for re-projection."""
+    """Find all recorded events for re-projection."""
     rows = db.query("SELECT id, blob FROM store ORDER BY rowid")
     event_ids = []
 
@@ -199,8 +199,8 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
             event_data = crypto.parse_json(blob)
             event_type = event_data.get('type')
 
-            # Only first_seen events (all events now have first_seen wrappers)
-            if event_type == 'first_seen':
+            # Only recorded events (all events now have recorded wrappers)
+            if event_type == 'recorded':
                 # Encode id as base64 (matching store.py format)
                 event_id = crypto.b64encode(row['id'])
                 event_ids.append(event_id)
@@ -211,11 +211,12 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
 
 
 def _get_projection_tables(db: Any) -> list[str]:
-    """Query sqlite_master for all tables except store, incoming_blobs, and test fixtures."""
+    """Query sqlite_master for all tables except store, incoming_blobs, ephemeral state, and test fixtures."""
     rows = db.query("""
         SELECT name FROM sqlite_master
         WHERE type='table'
         AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence', 'pre_keys')
+        AND name NOT LIKE '%_ephemeral'
         ORDER BY name
     """)
     return [row['name'] for row in rows]
@@ -235,10 +236,12 @@ def _recreate_projection_tables(db: Any) -> None:
     """Drop and recreate all projection tables using schema.create_all()."""
     import schema
 
-    # Drop all projection tables
+    # Drop all projection tables (disable foreign keys to avoid constraint errors)
+    db.execute("PRAGMA foreign_keys = OFF")
     tables = _get_projection_tables(db)
     for table in tables:
         db.execute(f"DROP TABLE IF EXISTS {table}")
+    db.execute("PRAGMA foreign_keys = ON")
 
     # Recreate using schema.create_all()
     # This will skip creating 'store' (already exists)
@@ -246,15 +249,15 @@ def _recreate_projection_tables(db: Any) -> None:
 
 
 def _replay_events(event_ids: list[str], db: Any) -> None:
-    """Replay first_seen events in order. Event-driven unblocking happens automatically."""
-    from events import first_seen
+    """Replay recorded events in order. Event-driven unblocking happens automatically."""
+    from events import recorded
 
     # Project all events - unblocking happens automatically via notify_event_valid()
     for event_id in event_ids:
-        first_seen.project(event_id, db)
+        recorded.project(event_id, db)
 
     # Safety check: verify no events remain blocked (would indicate a bug)
-    remaining = db.query("SELECT COUNT(*) as count FROM blocked_events")
+    remaining = db.query("SELECT COUNT(*) as count FROM blocked_events_ephemeral")
     if remaining and remaining[0]['count'] > 0:
         print(f"⚠️  Warning: {remaining[0]['count']} events still blocked after replay")
 
@@ -262,12 +265,12 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
 
 
 def _project_with_repetitions(event_ids: list[str], repetitions: list[int], db: Any) -> None:
-    """Project first_seen events with repetitions."""
-    from events import first_seen
+    """Project recorded events with repetitions."""
+    from events import recorded
 
     for event_id, count in zip(event_ids, repetitions):
         for _ in range(count):
-            first_seen.project(event_id, db)
+            recorded.project(event_id, db)
 
     db.commit()
 
@@ -392,7 +395,7 @@ def replay_ordering(db: Any, ordering: list[str], expected_state: dict = None) -
 
     Args:
         db: Database connection
-        ordering: List of first_seen event IDs in desired order
+        ordering: List of recorded event IDs in desired order
         expected_state: Optional expected state to compare against
 
     Returns:

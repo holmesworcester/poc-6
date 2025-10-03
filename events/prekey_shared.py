@@ -9,7 +9,8 @@ log = logging.getLogger(__name__)
 
 
 def create(prekey_id: str, peer_id: str, peer_shared_id: str,
-           group_id: str, key_id: str, t_ms: int, db: Any) -> str:
+           group_id: str, key_id: str, t_ms: int, db: Any,
+           wrap_key_data: dict | None = None) -> str:
     """Create a shareable prekey_shared event from a local prekey.
 
     Args:
@@ -20,6 +21,7 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
         key_id: Key to encrypt the prekey_shared event with
         t_ms: Timestamp
         db: Database connection
+        wrap_key_data: Optional key dict for wrapping (used when network key not available yet)
 
     Returns:
         prekey_shared_id: The stored prekey_shared event ID
@@ -46,26 +48,29 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
     }
 
     # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
-    # Get key_data for encryption
-    key_data = key.get_key(key_id, db)
+    # Get key_data for encryption (use provided wrap_key_data or fetch from keys table)
+    if wrap_key_data:
+        key_data = wrap_key_data
+    else:
+        key_data = key.get_key(key_id, peer_id, db)
 
     # Wrap (canonicalize + encrypt)
     canonical = crypto.canonicalize_json(signed_event)
     blob = crypto.wrap(canonical, key_data, db)
 
-    # Store event with first_seen wrapper and projection
+    # Store event with recorded wrapper and projection
     prekey_shared_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"prekey_shared.create() created prekey_shared_id={prekey_shared_id}")
     return prekey_shared_id
 
 
-def project(prekey_shared_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
+def project(prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project prekey_shared event into pre_keys table and shareable_events."""
-    log.info(f"prekey_shared.project() prekey_shared_id={prekey_shared_id}, seen_by={seen_by_peer_id}")
+    log.info(f"prekey_shared.project() prekey_shared_id={prekey_shared_id}, seen_by={recorded_by}")
 
     # Get blob from store
     blob = store.get(prekey_shared_id, db)
@@ -74,7 +79,7 @@ def project(prekey_shared_id: str, seen_by_peer_id: str, received_at: int, db: A
         return None
 
     # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, db)
+    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
     if not unwrapped:
         log.warning(f"prekey_shared.project() failed to unwrap prekey_shared_id={prekey_shared_id}")
         return None
@@ -85,7 +90,7 @@ def project(prekey_shared_id: str, seen_by_peer_id: str, received_at: int, db: A
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared
     created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
+    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"prekey_shared.project() signature verification failed for prekey_shared_id={prekey_shared_id}")
         return None
@@ -103,21 +108,10 @@ def project(prekey_shared_id: str, seen_by_peer_id: str, received_at: int, db: A
         )
     )
 
-    # Insert into shareable_events
-    db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at)
-           VALUES (?, ?, ?)""",
-        (
-            prekey_shared_id,
-            event_data['created_by'],
-            event_data['created_at']
-        )
-    )
-
     # Mark as valid for this peer
     db.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
-        (prekey_shared_id, seen_by_peer_id)
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (prekey_shared_id, recorded_by)
     )
 
     return prekey_shared_id

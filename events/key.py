@@ -27,16 +27,16 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 
     blob = json.dumps(event_data).encode()
 
-    # Store event with first_seen wrapper and projection
+    # Store event with recorded wrapper and projection
     key_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"key.create() created key_id={key_id}")
     return key_id
 
 
-def project(key_id: str, seen_by_peer_id: str, db: Any) -> None:
+def project(key_id: str, recorded_by: str, db: Any) -> None:
     """Project key event into keys table and mark valid for owning peer."""
-    log.debug(f"key.project() projecting key_id={key_id}, seen_by={seen_by_peer_id}")
+    log.debug(f"key.project() projecting key_id={key_id}, seen_by={recorded_by}")
 
     # Get blob from store
     blob = store.get(key_id, db)
@@ -60,8 +60,8 @@ def project(key_id: str, seen_by_peer_id: str, db: Any) -> None:
 
     # Mark as valid for this peer
     db.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
-        (key_id, seen_by_peer_id)
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (key_id, recorded_by)
     )
 
     log.info(f"key.project() projected key_id={key_id} into keys table")
@@ -75,19 +75,20 @@ def extract_id(blob: bytes) -> bytes:
     return blob[:ID_SIZE]
 
 
-def get_key_by_id(id_bytes: bytes, db: Any) -> dict[str, Any] | None:
+def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get key from database by id bytes. Checks both symmetric keys and asymmetric prekeys.
 
     Args:
         id_bytes: Key ID bytes (16 bytes)
+        recorded_by: Peer ID attempting to access this key (for ownership filtering)
         db: Database connection
 
     Returns:
-        Key dict for crypto.unwrap(), or None if not found
+        Key dict for crypto.unwrap(), or None if not found or not owned by recorded_by
     """
     key_id = crypto.b64encode(id_bytes)
 
-    # First try symmetric keys table
+    # First try symmetric keys table (no ownership check - keys are global)
     row = db.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
     if row:
         return {
@@ -96,21 +97,57 @@ def get_key_by_id(id_bytes: bytes, db: Any) -> dict[str, Any] | None:
             'type': 'symmetric'
         }
 
-    # Then try asymmetric prekeys table (id_bytes = peer_id for prekeys)
-    # Note: For prekeys to work with unwrap, the blob must be prefixed with the peer_id
-    prekey_row = db.query_one("SELECT private_key FROM peers WHERE peer_id = ?", (key_id,))
-    if prekey_row:
+    # Then try asymmetric keys from local_prekeys (with ownership filter)
+    # The hint (key_id) might be either:
+    # 1. A peer_id (for peer prekeys) - query by owner_peer_id
+    # 2. A prekey_id (for invite prekeys) - query by prekey_id
+    # Check ownership: only return key if recorded_by owns it
+    prekey_row = db.query_one(
+        "SELECT private_key, owner_peer_id FROM local_prekeys WHERE prekey_id = ? OR owner_peer_id = ? LIMIT 1",
+        (key_id, key_id)
+    )
+    if prekey_row and prekey_row['private_key'] and prekey_row['owner_peer_id'] == recorded_by:
         return {
             'id': id_bytes,
             'private_key': prekey_row['private_key'],
             'type': 'asymmetric'
         }
 
+    # Finally, try main peer private key from local_peers (with ownership filter)
+    # The hint (key_id) is the peer_id, so check if it matches recorded_by
+    peer_row = db.query_one(
+        "SELECT private_key FROM local_peers WHERE peer_id = ?",
+        (key_id,)
+    )
+    if peer_row and peer_row['private_key'] and key_id == recorded_by:
+        return {
+            'id': id_bytes,
+            'private_key': peer_row['private_key'],
+            'type': 'asymmetric'
+        }
+
     return None
 
 
-def get_key(key_id: str, db: Any) -> dict[str, Any]:
-    """Get key from database in format expected by crypto.wrap()."""
+def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
+    """Get key from database in format expected by crypto.wrap().
+
+    NOTE: This function is ONLY used for wrapping/encrypting events (see usage in user.py,
+    group.py, channel.py, etc.). Wrapping is a "public" operation - anyone with the key
+    material can encrypt to it. Access control for unwrapping/decrypting happens in
+    get_key_by_id() via crypto.unwrap().
+
+    Args:
+        key_id: Base64-encoded key ID
+        recorded_by: Peer ID requesting access (for logging, not enforced for wrapping)
+        db: Database connection
+
+    Returns:
+        Key dict for crypto.wrap()
+
+    Raises:
+        ValueError: If key not found in keys table
+    """
     row = db.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
     if not row:
         raise ValueError(f"key not found: {key_id}")
@@ -122,8 +159,56 @@ def get_key(key_id: str, db: Any) -> dict[str, Any]:
     }
 
 
+def get_peer_ids_for_key(key_id: str, db: Any) -> list[str]:
+    """Get ALL peer_ids that have access to a specific key.
+
+    SECURITY NOTE: This function intentionally lacks recorded_by parameter because
+    it's used for ROUTING, not access control. Called by sync.unwrap_and_store() to
+    determine which local peer(s) can decrypt incoming blobs. The key_id comes from
+    network data (blob headers), not user input. Does not expose private data TO the
+    caller - determines WHO should receive data. Safe for internal routing logic.
+
+    This handles the edge case where multiple local peers have the same symmetric key
+    (e.g., two peers in the same network both accepted the same invite).
+
+    Args:
+        key_id: Base64-encoded key ID (hint from wrapped blob)
+        db: Database connection
+
+    Returns:
+        List of peer IDs (may be empty if key not found)
+    """
+    # First check if this is a symmetric key with a mapping in the store
+    key_blob = store.get(key_id, db)
+    if key_blob:
+        try:
+            mapping_data = crypto.parse_json(key_blob)
+
+            # Handle new format: {"peer_ids": ["id1", "id2"]}
+            if 'peer_ids' in mapping_data:
+                return mapping_data['peer_ids']
+
+            # Handle old format: {"peer_id": "id1"} (backward compatibility)
+            if 'peer_id' in mapping_data:
+                return [mapping_data['peer_id']]
+        except:
+            pass
+
+    # If not found in store, check if this key_id IS a peer_id (for asymmetric prekeys)
+    # Prekey-wrapped blobs use peer_id as the hint
+    peer_row = db.query_one("SELECT peer_id FROM local_peers WHERE peer_id = ?", (key_id,))
+    if peer_row:
+        return [peer_row['peer_id']]
+
+    return []
+
+
 def get_peer_id_for_key(key_id: str, db: Any) -> str:
     """Get the peer_id that owns a specific key.
+
+    SECURITY NOTE: Like get_peer_ids_for_key(), this function is used for internal
+    routing logic, not access control. Safe because it doesn't expose private data
+    to the caller - just determines ownership for routing purposes.
 
     Args:
         key_id: Base64-encoded key ID (hint from wrapped blob)
@@ -132,21 +217,5 @@ def get_peer_id_for_key(key_id: str, db: Any) -> str:
     Returns:
         Peer ID string, or empty string if not found
     """
-    # First check if this is a symmetric key event in the store
-    key_blob = store.get(key_id, db)
-    if key_blob:
-        try:
-            event_data = crypto.parse_json(key_blob)
-            peer_id = event_data.get('peer_id')
-            if peer_id:
-                return peer_id
-        except:
-            pass
-
-    # If not found in store, check if this key_id IS a peer_id (for asymmetric prekeys)
-    # Prekey-wrapped blobs use peer_id as the hint
-    peer_row = db.query_one("SELECT peer_id FROM peers WHERE peer_id = ?", (key_id,))
-    if peer_row:
-        return peer_row['peer_id']
-
-    return ""
+    peer_ids = get_peer_ids_for_key(key_id, db)
+    return peer_ids[0] if peer_ids else ""

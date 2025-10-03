@@ -1,6 +1,6 @@
 """Sync implementation with bloom-based window protocol."""
 from typing import Any, Iterator
-from events import first_seen, key, prekey, peer
+from events import recorded, key, prekey, peer
 import queues
 import crypto
 import store
@@ -111,7 +111,7 @@ def walk_windows(w: int, last_window: int = -1, peer_pk: bytes = b'') -> Iterato
 def get_sync_state(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Get sync state for peer pair (last_window, w_param, total_events_seen)."""
     row = db.query_one(
-        "SELECT last_window, w_param, total_events_seen FROM sync_state WHERE from_peer_id = ? AND to_peer_id = ?",
+        "SELECT last_window, w_param, total_events_seen FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
         (from_peer_id, to_peer_id)
     )
     if row:
@@ -120,9 +120,12 @@ def get_sync_state(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> di
             'w_param': row['w_param'],
             'total_events_seen': row['total_events_seen']
         }
+
+    # Start with w=1 (2 windows) for small networks
+    # This will auto-adjust upward as events are synced
     return {
         'last_window': -1,
-        'w_param': DEFAULT_W,
+        'w_param': 1,
         'total_events_seen': 0
     }
 
@@ -138,7 +141,7 @@ def update_sync_state(
 ) -> None:
     """Update sync state for peer pair."""
     db.execute(
-        """INSERT INTO sync_state (from_peer_id, to_peer_id, last_window, w_param, total_events_seen, updated_at)
+        """INSERT INTO sync_state_ephemeral (from_peer_id, to_peer_id, last_window, w_param, total_events_seen, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (from_peer_id, to_peer_id)
            DO UPDATE SET
@@ -159,16 +162,21 @@ def get_next_window(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> t
 
 
 def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms: int, db: Any) -> None:
-    """Mark window as synced and increase w_param if events exceed W × 450 threshold."""
+    """Mark window as synced and adjust w_param based on requester's total event count."""
     state = get_sync_state(from_peer_id, to_peer_id, t_ms, db)
     state['last_window'] = window_id
 
-    # Dynamic w adjustment based on event count
-    current_w = state['w_param']
-    current_windows = compute_window_count(current_w)
-    threshold = current_windows * EVENTS_PER_WINDOW_TARGET
-    if state['total_events_seen'] > threshold:
-        state['w_param'] = current_w + 1
+    # Count total shareable events for requester (events they've seen and can share)
+    total_events_row = db.query_one(
+        "SELECT COUNT(*) as count FROM shareable_events WHERE can_share_peer_id = ?",
+        (from_peer_id,)
+    )
+    total_events = total_events_row['count'] if total_events_row else 0
+
+    # Compute optimal w_param for this event count
+    optimal_w = compute_w_for_event_count(total_events)
+    state['w_param'] = max(state['w_param'], optimal_w)
+    state['total_events_seen'] = total_events
 
     update_sync_state(
         from_peer_id,
@@ -186,47 +194,83 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
 # ============================================================================
 
 
-def add_shareable_event(event_id: str, peer_id: str, created_at: int, db: Any) -> None:
-    """Add shareable event to table with computed window_id."""
+def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any) -> None:
+    """Add shareable event to table with computed window_id.
+
+    Args:
+        event_id: The event being marked as shareable
+        can_share_peer_id: The peer who recorded/has this event and can share it (typically recorded_by)
+        created_at: When the event was originally created
+        recorded_at: When this peer recorded the event
+        db: Database connection
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
     event_id_bytes = crypto.b64decode(event_id)
     window_id = compute_storage_window_id(event_id_bytes)
+
+    log.info(f"add_shareable_event: event={event_id[:20]}..., can_share_peer_id={can_share_peer_id[:20]}..., window={window_id}")
+
+    # Map parameter to column: can_share_peer_id -> can_share_peer_id
     db.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, peer_id, created_at, window_id)
-           VALUES (?, ?, ?, ?)""",
-        (event_id, peer_id, created_at, window_id)
+        """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+           VALUES (?, ?, ?, ?, ?)""",
+        (event_id, can_share_peer_id, created_at, recorded_at, window_id)
     )
 
 
-def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> str:
-    """Unwrap transit blob, store event, create first_seen; returns first_seen_id or empty string."""
+def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
+    """Unwrap transit blob, store event, create recorded events for all peers with access.
+
+    Edge case: If multiple local peers have the same key (e.g., two peers in the same network
+    both accepted the same invite), this creates a separate recorded event for each peer.
+
+    Returns:
+        List of recorded_ids (one per peer who can decrypt), or empty list if unwrap fails
+    """
     import logging
     log = logging.getLogger(__name__)
 
     hint = key.extract_id(blob)
     hint_b64 = crypto.b64encode(hint)
 
-    # For incoming blobs: seen_by_peer_id = peer who owns the transit_key (the receiving peer)
-    seen_by_peer_id = key.get_peer_id_for_key(hint_b64, db)
+    # For incoming blobs: get ALL peers who own this transit_key
+    # This handles the edge case where multiple peers have the same key
+    recorded_by_peers = key.get_peer_ids_for_key(hint_b64, db)
 
-    if not seen_by_peer_id:
+    log.info(f"unwrap_and_store: hint={hint_b64[:20]}..., peers_who_can_decrypt={[p[:20]+'...' for p in recorded_by_peers]}")
+
+    if not recorded_by_peers:
         log.info(f"Skipping storage for blob with id {hint_b64}: transit key not found (peer unknown)")
-        return ""
+        return []
 
-    unwrapped_blob, missing_keys = crypto.unwrap(blob, db)
+    # Try to unwrap with each peer who has access (for prekeys, only owner can decrypt)
+    unwrapped_blob = None
+    for peer_id in recorded_by_peers:
+        unwrapped_blob, missing_keys = crypto.unwrap(blob, peer_id, db)
+        if unwrapped_blob is not None:
+            break
+
     if unwrapped_blob is None:
         if missing_keys:
             log.info(f"Skipping storage for blob with id {hint_b64}: missing keys {missing_keys}")
         else:
-            log.info(f"Skipping storage for blob with id {hint_b64}: unwrap failed")
-        return ""
+            log.info(f"Skipping storage for blob with id {hint_b64}: unwrap failed for all {len(recorded_by_peers)} peers")
+        return []
 
-    # Store the unwrapped event blob
+    # Store the unwrapped event blob (once)
     event_id = store.blob(unwrapped_blob, t_ms, True, db)
 
-    # Create first_seen event for it (don't auto-project yet)
-    first_seen_id = first_seen.create(event_id, seen_by_peer_id, t_ms, db, True)
+    # Create recorded event for EACH peer who can decrypt
+    # This ensures each peer gets their own view of when they recorded the event
+    recorded_ids = []
+    for recorded_by in recorded_by_peers:
+        recorded_id = recorded.create(event_id, recorded_by, t_ms, db, True)
+        recorded_ids.append(recorded_id)
+        log.info(f"Created recorded event {recorded_id} for peer {recorded_by}")
 
-    return first_seen_id
+    return recorded_ids
 
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
@@ -237,52 +281,118 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
     transit_blobs = queues.incoming.drain(batch_size, db)
     log.info(f"Drained {len(transit_blobs)} blobs from incoming queue")
 
-    new_first_seen_ids = [unwrap_and_store(blob, t_ms, db) for blob in transit_blobs]
-    log.info(f"Unwrapped {len(new_first_seen_ids)} blobs, got first_seen_ids: {new_first_seen_ids}")
+    # unwrap_and_store now returns a list of recorded_ids (one per peer who can decrypt)
+    new_recorded_id_lists = [unwrap_and_store(blob, t_ms, db) for blob in transit_blobs]
+    log.info(f"Unwrapped {len(new_recorded_id_lists)} blobs, got recorded_id lists: {new_recorded_id_lists}")
 
-    # Filter out empty strings (failed unwraps)
-    valid_first_seen_ids = [id for id in new_first_seen_ids if id]
-    log.info(f"Valid first_seen_ids to project: {valid_first_seen_ids}")
+    # Flatten the list of lists to get all recorded_ids
+    valid_recorded_ids = [id for id_list in new_recorded_id_lists for id in id_list]
+    log.info(f"Valid recorded_ids to project: {valid_recorded_ids}")
 
-    first_seen.project_ids(valid_first_seen_ids, db)
+    recorded.project_ids(valid_recorded_ids, db)
 
-    # Event-driven unblocking now happens automatically in first_seen.project()
+    # Event-driven unblocking now happens automatically in recorded.project()
     # via queues.blocked.notify_event_valid() - no need for scan-all loop
 
     db.commit()
 
 
+def sync_all(t_ms: int, db: Any) -> None:
+    """All local peers send sync requests to all peers they've seen."""
+    import logging
+    log = logging.getLogger(__name__)
+
+    # Query all local peers
+    local_peer_rows = db.query("SELECT peer_id FROM local_peers")
+
+    for peer_row in local_peer_rows:
+        peer_id = peer_row['peer_id']
+
+        # Find this peer's peer_shared_id
+        peer_shared_id = None
+        candidate_rows = db.query(
+            "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
+            (peer_id,)
+        )
+        for row in candidate_rows:
+            ps_id = row['peer_shared_id']
+            try:
+                ps_blob = store.get(ps_id, db)
+                if not ps_blob:
+                    continue
+                ps_data = crypto.parse_json(ps_blob)
+                if ps_data.get('type') == 'peer_shared' and ps_data.get('peer_id') == peer_id:
+                    peer_shared_id = ps_id
+                    break
+            except Exception:
+                continue
+
+        if not peer_shared_id:
+            log.debug(f"sync_all: skipping peer {peer_id[:10]}... (no peer_shared_id)")
+            continue  # Skip if we can't find peer_shared_id
+
+        log.debug(f"sync_all: peer {peer_id[:10]}... sending requests")
+        # Send sync requests from this peer to all peers they've seen
+        send_requests(peer_id, peer_shared_id, t_ms, db)
+
+
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send sync requests to all peers."""
-    peer_rows = db.query("SELECT peer_id FROM peers WHERE peer_id != ?", (from_peer_id,))
-    for row in peer_rows:
-        send_request(row['peer_id'], from_peer_id, from_peer_shared_id, t_ms, db)
+    """Send sync requests to all peers this peer has seen."""
+    # Query all peer_shared events seen by this peer
+    peer_shared_rows = db.query(
+        "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
+        (from_peer_id,)
+    )
+
+    for row in peer_shared_rows:
+        ps_id = row['peer_shared_id']
+        # Skip self (don't sync with yourself)
+        if ps_id == from_peer_shared_id:
+            continue
+
+        # Get the peer_id from the peer_shared blob (for single-DB simulation)
+        try:
+            ps_blob = store.get(ps_id, db)
+            if not ps_blob:
+                continue
+            ps_data = crypto.parse_json(ps_blob)
+            to_peer_id = ps_data.get('peer_id')
+            if not to_peer_id:
+                continue
+            send_request(to_peer_id, from_peer_id, from_peer_shared_id, t_ms, db)
+        except Exception:
+            continue
+
     db.commit()
 
 def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
     """Send bloom-based sync request to peer for specific window."""
+    import logging
+    log = logging.getLogger(__name__)
+
     # Get next window to sync
     window_id, w_param = get_next_window(from_peer_id, to_peer_id, t_ms, db)
+    log.info(f"send_request: from={from_peer_id[:10]}... to={to_peer_id[:10]}... window_id={window_id}, w_param={w_param}")
 
     # Convert storage window_ids to query window_ids for this w_param
     window_min = window_id << (STORAGE_W - w_param)
     window_max = (window_id + 1) << (STORAGE_W - w_param)
 
-    # Query events requester HAS in this window (created by requester)
+    # Query events the requester has seen (can share) in this window
     my_events_in_window = db.query(
         """SELECT event_id FROM shareable_events
-           WHERE peer_id = ?
+           WHERE can_share_peer_id = ?
              AND window_id >= ?
              AND window_id < ?
            ORDER BY created_at ASC""",
-        (from_peer_shared_id, window_min, window_max)
+        (from_peer_id, window_min, window_max)
     )
 
     # Build list of event_id bytes for bloom
     event_id_bytes_list = [crypto.b64decode(row['event_id']) for row in my_events_in_window]
 
     # Derive salt for this window (from requester's peer public key)
-    requester_public_key = peer.get_public_key(from_peer_id, db)
+    requester_public_key = peer.get_public_key(from_peer_id, from_peer_id, db)
     salt = derive_salt(requester_public_key, window_id)
 
     # Create bloom filter of events requester HAS
@@ -290,7 +400,7 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
 
     # Create a transit key for the response (owned by requester so they can decrypt response)
     response_transit_key_id = key.create(from_peer_id, t_ms, db)
-    response_transit_key = key.get_key(response_transit_key_id, db)
+    response_transit_key = key.get_key(response_transit_key_id, from_peer_id, db)
 
     # Encode transit key for JSON serialization (recipient needs the actual key to wrap responses)
     request_data = {
@@ -298,8 +408,9 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
         'peer_id': from_peer_id,
         'peer_shared_id': from_peer_shared_id,  # Include so recipient knows which events to send
         'address': '127.0.0.1:8000',
-        'window_id': window_id,  # Which window we're requesting
-        'w_param': w_param,  # Window parameter (for converting storage window_ids)
+        'window_id': window_id,  # Which window we're requesting (for salt derivation and state tracking)
+        'window_min': window_min,  # Concrete storage window range start
+        'window_max': window_max,  # Concrete storage window range end
         'bloom': crypto.b64encode(bloom_filter),  # Bloom of events requester HAS
         'transit_key': {
             'id': crypto.b64encode(response_transit_key['id']),
@@ -310,11 +421,11 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
     }
 
     # Sign the request
-    private_key = peer.get_private_key(from_peer_id, db)
+    private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
     signed_request = crypto.sign_event(request_data, private_key)
 
     # Wrap with recipient's prekey
-    to_key = prekey.get_transit_prekey_for_peer(to_peer_id, db)
+    to_key = prekey.get_transit_prekey_for_peer(to_peer_id, from_peer_id, db)
     canonical = crypto.canonicalize_json(signed_request)
     request_blob = crypto.wrap(canonical, to_key, db)
 
@@ -325,30 +436,11 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
     mark_window_synced(from_peer_id, to_peer_id, window_id, t_ms, db)
 
 
-def receive_request(request_blob: bytes, db: Any) -> dict[str, Any] | None:
-    """Receive and verify a sync request. Returns request data if valid, None otherwise."""
-    # Unwrap the request
-    unwrapped = crypto.unwrap(request_blob, db)
-    if not unwrapped:
-        return None
-
-    # Parse JSON
-    request_data = crypto.parse_json(unwrapped)
-
-    # Verify signature - get public key from peer_id
-    peer_id = request_data.get('peer_id')
-    public_key = peer.get_public_key(peer_id, db)
-    if not crypto.verify_event(request_data, public_key):
-        return None  # Reject unsigned or invalid signature
-
-    return request_data
-
-
-def project(sync_event_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> None:
+def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Handle sync request by sending bloom-filtered response."""
     import logging
     log = logging.getLogger(__name__)
-    log.info(f"sync.project() called for event {sync_event_id} seen by {seen_by_peer_id}")
+    log.info(f"sync.project() called for event {sync_event_id} recorded by {recorded_by}")
 
     # Get the sync event data from store
     sync_blob = store.get(sync_event_id, db)
@@ -364,23 +456,28 @@ def project(sync_event_id: str, seen_by_peer_id: str, received_at: int, db: Any)
     requester_peer_shared_id = sync_data.get('peer_shared_id')
     transit_key_encoded = sync_data.get('transit_key')
     window_id = sync_data.get('window_id')
-    w_param = sync_data.get('w_param')
+    window_min = sync_data.get('window_min')
+    window_max = sync_data.get('window_max')
     bloom_b64 = sync_data.get('bloom')
 
+    log.info(f"sync.project() processing sync request: window_id={window_id}, window_range={window_min}-{window_max}")
+
     if not requester_peer_id or not requester_peer_shared_id or not transit_key_encoded:
+        log.info(f"Invalid sync request: missing requester info")
         return  # Invalid sync request
 
-    if window_id is None or w_param is None or not bloom_b64:
+    if window_id is None or window_min is None or window_max is None or not bloom_b64:
         log.info(f"Missing bloom/window data in sync request")
         return  # Invalid bloom-based sync request
 
-    # Only respond to sync requests from peers we recognize (have their peer_shared)
+    # Only respond to sync requests from peers we recognize (have their peer_shared valid)
+    # If not valid, discard - the requester will send another sync request in the next round
     requester_known = db.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
-        (requester_peer_shared_id, seen_by_peer_id)
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (requester_peer_shared_id, recorded_by)
     )
     if not requester_known:
-        log.info(f"Rejecting sync request from unrecognized peer {requester_peer_shared_id}")
+        log.info(f"Rejecting sync request from unrecognized peer {requester_peer_shared_id} (will retry in next round)")
         return
 
     log.info(f"Accepting sync request from recognized peer {requester_peer_shared_id} for window {window_id}")
@@ -396,16 +493,19 @@ def project(sync_event_id: str, seen_by_peer_id: str, received_at: int, db: Any)
     bloom_filter = crypto.b64decode(bloom_b64)
 
     # Get requester's public key (for deriving bloom salt)
-    requester_public_key = peer.get_public_key(requester_peer_id, db)
+    # Use peer_shared since requester is a remote peer (not in local_peers)
+    from events import peer_shared
+    requester_public_key = peer_shared.get_public_key(requester_peer_shared_id, recorded_by, db)
 
     # Send bloom-filtered response
     send_response(
         requester_peer_id,
         requester_peer_shared_id,
-        seen_by_peer_id,
+        recorded_by,
         transit_key_dict,
         window_id,
-        w_param,
+        window_min,
+        window_max,
         bloom_filter,
         requester_public_key,
         received_at,
@@ -414,17 +514,18 @@ def project(sync_event_id: str, seen_by_peer_id: str, received_at: int, db: Any)
 
 
 def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, transit_key_dict: dict[str, Any],
-                  window_id: int, w_param: int, bloom_filter: bytes, requester_public_key: bytes,
+                  window_id: int, window_min: int, window_max: int, bloom_filter: bytes, requester_public_key: bytes,
                   t_ms: int, db: Any) -> None:
     """Send a bloom-filtered sync response for a specific window.
 
     Args:
         to_peer_id: Requester's peer_id (for logging)
-        to_peer_shared_id: Requester's peer_shared_id (which events to send - events NOT created by requester)
+        to_peer_shared_id: Requester's peer_shared_id (unused, kept for API compatibility)
         from_peer_id: Responder's peer_id (which peer is sending the response)
         transit_key_dict: Transit key dict from the sync request
-        window_id: Window ID being synced
-        w_param: Window parameter from request
+        window_id: Window ID being synced (for salt derivation)
+        window_min: Storage window range start
+        window_max: Storage window range end
         bloom_filter: Bloom filter of events requester HAS (64 bytes)
         requester_public_key: Requester's public key (for deriving salt)
         t_ms: Current timestamp
@@ -433,45 +534,19 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
     import logging
     log = logging.getLogger(__name__)
 
-    # Get responder's own peer_shared_id deterministically
-    from_peer_shared_id = ""
-    candidate_rows = db.query(
-        "SELECT peer_shared_id FROM peers_shared WHERE seen_by_peer_id = ?",
-        (from_peer_id,)
-    )
-    for row in candidate_rows:
-        ps_id = row['peer_shared_id']
-        try:
-            ps_blob = store.get(ps_id, db)
-            if not ps_blob:
-                continue
-            ps_data = crypto.parse_json(ps_blob)
-            if ps_data.get('type') == 'peer_shared' and ps_data.get('peer_id') == from_peer_id:
-                from_peer_shared_id = ps_id
-                break
-        except Exception:
-            continue
+    log.info(f"send_response: from_peer_id={from_peer_id[:10]}..., to_peer_id={to_peer_id[:10]}..., window={window_min}-{window_max}")
 
-    if not from_peer_shared_id:
-        log.info(f"No self peer_shared_id found for responder {from_peer_id}")
-        return
-
-    # Convert query window_id to storage window range
-    window_min = window_id << (STORAGE_W - w_param)
-    window_max = (window_id + 1) << (STORAGE_W - w_param)
-
-    # Query shareable events in this window created by responder (NOT by requester)
+    # Query events the responder can share in this window
+    # The bloom filter handles deduplication, so we don't need to exclude requester's events
     shareable_rows = db.query(
         """SELECT event_id FROM shareable_events
-           WHERE peer_id = ?
-             AND peer_id != ?
+           WHERE can_share_peer_id = ?
              AND window_id >= ?
              AND window_id < ?
            ORDER BY created_at ASC""",
-        (from_peer_shared_id, to_peer_shared_id, window_min, window_max)
+        (from_peer_id, window_min, window_max)
     )
-
-    log.info(f"Found {len(shareable_rows)} candidate events in window {window_id}")
+    log.info(f"send_response: found {len(shareable_rows)} shareable events for peer {from_peer_id[:10]}...")
 
     # Derive salt for bloom checking (same salt requester used)
     salt = derive_salt(requester_public_key, window_id)
@@ -489,14 +564,26 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         if not in_bloom:
             # Event NOT in bloom -> requester doesn't have it -> send it
             events_to_send.append(event_id_str)
+            log.info(f"send_response: will send event {event_id_str[:20]}... (not in bloom)")
+        else:
+            log.info(f"send_response: skipping event {event_id_str[:20]}... (in bloom)")
 
-    log.info(f"Sending {len(events_to_send)} events after bloom filtering (FPR caused {len(shareable_rows) - len(events_to_send)} to be skipped)")
+    log.info(f"send_response: sending {len(events_to_send)} events to requester")
 
     # Send filtered events
     for event_id in events_to_send:
         event_blob = store.get(event_id, db)
         if not event_blob:
+            log.warning(f"send_response: event {event_id[:20]}... not found in store")
             continue
+
+        # Log event type
+        try:
+            event_data = crypto.parse_json(event_blob)
+            event_type = event_data.get('type', 'unknown')
+            log.info(f"send_response: sending {event_type} event {event_id[:20]}...")
+        except:
+            log.info(f"send_response: sending encrypted event {event_id[:20]}...")
 
         # Double-wrap with transit key
         wrapped_blob = crypto.wrap(event_blob, transit_key_dict, db)

@@ -1,218 +1,154 @@
 """
 Scenario test: Three players with message transit via sync.
 
-Alice and Bob can communicate (have each other's prekeys).
-Charlie is isolated (no prekeys registered).
+Alice creates a network. Bob joins Alice's network via invite.
+Charlie creates his own separate network.
 
 Tests:
 - Alice and Bob exchange sync requests and receive each other's messages
-- Charlie's sync requests fail (no prekeys)
+- Charlie is isolated (separate network)
 - Charlie only sees their own messages
 """
 import sqlite3
 import pytest
 from db import Database
 import schema
-from events import peer, key, group, channel, message, sync
-import crypto
+from events import message, sync, recorded
+from events import user
 import store
+import crypto
 
 
 def test_three_player_messaging():
-    """Three peers: Alice and Bob can sync, Charlie is isolated."""
+    """Three peers: Alice creates network, Bob joins, Charlie separate."""
 
     # Setup: Initialize in-memory database
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
     schema.create_all(db)
 
-    # Create three peers
-    alice_peer_id, alice_peer_shared_id = peer.create(t_ms=1000, db=db)
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
-    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=3000, db=db)
+    # Alice creates a network (implicit network via first group)
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
-    # Register prekeys in shared test database
-    # Get public keys from peers table
-    alice_public_key = peer.get_public_key(alice_peer_id, db)
-    bob_public_key = peer.get_public_key(bob_peer_id, db)
+    # Bob joins Alice's network via invite
+    bob = user.join(invite_link=alice['invite_link'], name='Bob', t_ms=2000, db=db)
 
-    # Register prekeys for Alice and Bob (all peers can use them in this shared test db)
-    db.execute(
-        "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (bob_peer_id, bob_public_key, 4000)
+    # Charlie creates his own separate network
+    charlie = user.new_network(name='Charlie', t_ms=3000, db=db)
+
+    # Bootstrap: Fully realistic protocol
+    # Bob sends bootstrap events + sync request (all wrapped with invite key / Alice's prekey)
+    user.send_bootstrap_events(
+        peer_id=bob['peer_id'],
+        peer_shared_id=bob['peer_shared_id'],
+        user_id=bob['user_id'],
+        prekey_shared_id=bob['prekey_shared_id'],
+        invite_data=bob['invite_data'],
+        t_ms=4000,
+        db=db
     )
-    db.execute(
-        "INSERT INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (alice_peer_id, alice_public_key, 5000)
-    )
 
-    # NOTE: Charlie can send sync requests (has prekeys), but Alice/Bob should reject them
-    # because they don't recognize Charlie's peer_shared_id
+    # Alice receives Bob's bootstrap events, learns about Bob
+    sync.receive(batch_size=20, t_ms=4100, db=db)
+
+    # Process any unblocked events (sync requests that were waiting for peer_shared)
+    sync.receive(batch_size=20, t_ms=4150, db=db)
+
+    # Alice receives Bob's sync request, sends sync response with her events
+    sync.receive(batch_size=20, t_ms=4200, db=db)
+
+    # Bob receives Alice's sync response with her peer_shared, prekey_shared, etc.
+    sync.receive(batch_size=20, t_ms=4300, db=db)
+
+    # Continue with bloom sync to exchange remaining events (group, channel, keys)
+    sync.sync_all(t_ms=4400, db=db)
+    sync.receive(batch_size=20, t_ms=4500, db=db)
+    sync.receive(batch_size=20, t_ms=4600, db=db)
+
+    # Additional sync rounds to ensure all events flow through
+    sync.sync_all(t_ms=4700, db=db)
+    sync.receive(batch_size=20, t_ms=4800, db=db)
+    sync.receive(batch_size=20, t_ms=4900, db=db)
 
     db.commit()
-
-    # Pre-share peer_shared events between Alice and Bob (favorable initial conditions)
-    # Alice receives Bob's peer_shared
-    from events import first_seen
-    bob_peer_shared_blob = store.get(bob_peer_shared_id, db)
-    alice_sees_bob_peer_shared = store.blob(bob_peer_shared_blob, 5500, True, db)
-    bob_peer_shared_fs_id = first_seen.create(alice_sees_bob_peer_shared, alice_peer_id, 5500, db, True)
-    first_seen.project(bob_peer_shared_fs_id, db)
-
-    # Bob receives Alice's peer_shared
-    alice_peer_shared_blob = store.get(alice_peer_shared_id, db)
-    bob_sees_alice_peer_shared = store.blob(alice_peer_shared_blob, 5600, True, db)
-    alice_peer_shared_fs_id = first_seen.create(bob_sees_alice_peer_shared, bob_peer_id, 5600, db, True)
-    first_seen.project(alice_peer_shared_fs_id, db)
-
-    db.commit()
-
-    # Each peer creates their own group, channel setup (like single-player test)
-    # Alice's setup
-    alice_key_id = key.create(alice_peer_id, t_ms=6000, db=db)
-
-    # Pre-share Alice's key with Bob
-    alice_key_blob = store.get(alice_key_id, db)
-    bob_sees_alice_key = store.blob(alice_key_blob, 6500, True, db)
-    alice_key_fs_id = first_seen.create(bob_sees_alice_key, bob_peer_id, 6500, db, True)
-    first_seen.project(alice_key_fs_id, db)
-
-    alice_group_id = group.create(
-        name='Alice Group',
-        peer_id=alice_peer_id,
-        peer_shared_id=alice_peer_shared_id,
-        key_id=alice_key_id,
-        t_ms=7000,
-        db=db
-    )
-    alice_channel_id = channel.create(
-        name='general',
-        group_id=alice_group_id,
-        peer_id=alice_peer_id,
-        peer_shared_id=alice_peer_shared_id,
-        key_id=alice_key_id,
-        t_ms=8000,
-        db=db
-    )
-
-    # Bob's setup
-    bob_key_id = key.create(bob_peer_id, t_ms=9000, db=db)
-
-    # Pre-share Bob's key with Alice
-    bob_key_blob = store.get(bob_key_id, db)
-    alice_sees_bob_key = store.blob(bob_key_blob, 9500, True, db)
-    bob_key_fs_id = first_seen.create(alice_sees_bob_key, alice_peer_id, 9500, db, True)
-    first_seen.project(bob_key_fs_id, db)
-
-    bob_group_id = group.create(
-        name='Bob Group',
-        peer_id=bob_peer_id,
-        peer_shared_id=bob_peer_shared_id,
-        key_id=bob_key_id,
-        t_ms=10000,
-        db=db
-    )
-    bob_channel_id = channel.create(
-        name='general',
-        group_id=bob_group_id,
-        peer_id=bob_peer_id,
-        peer_shared_id=bob_peer_shared_id,
-        key_id=bob_key_id,
-        t_ms=11000,
-        db=db
-    )
-
-    # Charlie's setup
-    charlie_key_id = key.create(charlie_peer_id, t_ms=12000, db=db)
-    charlie_group_id = group.create(
-        name='Charlie Group',
-        peer_id=charlie_peer_id,
-        peer_shared_id=charlie_peer_shared_id,
-        key_id=charlie_key_id,
-        t_ms=13000,
-        db=db
-    )
-    charlie_channel_id = channel.create(
-        name='general',
-        group_id=charlie_group_id,
-        peer_id=charlie_peer_id,
-        peer_shared_id=charlie_peer_shared_id,
-        key_id=charlie_key_id,
-        t_ms=14000,
-        db=db
-    )
 
     # Each peer creates a message
     alice_msg = message.create_message(
         params={
             'content': 'Hello from Alice',
-            'channel_id': alice_channel_id,
-            'group_id': alice_group_id,
-            'peer_id': alice_peer_id,
-            'peer_shared_id': alice_peer_shared_id,
-            'key_id': alice_key_id
+            'channel_id': alice['channel_id'],
+            'group_id': alice['group_id'],
+            'peer_id': alice['peer_id'],
+            'peer_shared_id': alice['peer_shared_id'],
+            'key_id': alice['key_id']
         },
-        t_ms=15000,
+        t_ms=5000,
         db=db
     )
 
     bob_msg = message.create_message(
         params={
             'content': 'Hello from Bob',
-            'channel_id': bob_channel_id,
-            'group_id': bob_group_id,
-            'peer_id': bob_peer_id,
-            'peer_shared_id': bob_peer_shared_id,
-            'key_id': bob_key_id
+            'channel_id': alice['channel_id'],  # Bob joined Alice's network, uses same channel
+            'group_id': alice['group_id'],      # Same group
+            'peer_id': bob['peer_id'],
+            'peer_shared_id': bob['peer_shared_id'],
+            'key_id': alice['key_id']           # Same key
         },
-        t_ms=16000,
+        t_ms=6000,
         db=db
     )
 
     charlie_msg = message.create_message(
         params={
             'content': 'Hello from Charlie',
-            'channel_id': charlie_channel_id,
-            'group_id': charlie_group_id,
-            'peer_id': charlie_peer_id,
-            'peer_shared_id': charlie_peer_shared_id,
-            'key_id': charlie_key_id
+            'channel_id': charlie['channel_id'],
+            'group_id': charlie['group_id'],
+            'peer_id': charlie['peer_id'],
+            'peer_shared_id': charlie['peer_shared_id'],
+            'key_id': charlie['key_id']
         },
-        t_ms=17000,
+        t_ms=7000,
         db=db
     )
 
-    # Round 1: Send sync requests
-    sync.send_request(to_peer_id=bob_peer_id, from_peer_id=alice_peer_id, from_peer_shared_id=alice_peer_shared_id, t_ms=18000, db=db)
-    sync.send_request(to_peer_id=alice_peer_id, from_peer_id=bob_peer_id, from_peer_shared_id=bob_peer_shared_id, t_ms=19000, db=db)
-    sync.send_request(to_peer_id=alice_peer_id, from_peer_id=charlie_peer_id, from_peer_shared_id=charlie_peer_shared_id, t_ms=20000, db=db)
-    sync.send_request(to_peer_id=bob_peer_id, from_peer_id=charlie_peer_id, from_peer_shared_id=charlie_peer_shared_id, t_ms=21000, db=db)
+    # Round 1: Send sync requests (all peers sync with peers they've seen)
+    sync.sync_all(t_ms=8000, db=db)
 
     # Receive sync requests - this unwraps requests and auto-sends responses
-    sync.receive(batch_size=10, t_ms=22000, db=db)
+    sync.receive(batch_size=10, t_ms=9000, db=db)
 
     # Round 2: Receive sync responses
-    sync.receive(batch_size=100, t_ms=23000, db=db)
+    sync.receive(batch_size=100, t_ms=10000, db=db)
+
+    # Round 3: Sync window 1 (with w=1, there are 2 windows: 0 and 1)
+    sync.sync_all(t_ms=11000, db=db)
+
+    # Receive sync requests for window 1
+    sync.receive(batch_size=10, t_ms=12000, db=db)
+
+    # Receive sync responses for window 1
+    sync.receive(batch_size=100, t_ms=13000, db=db)
 
     # Verify event visibility via valid_events table
     # Alice should have received Bob's events (peer_shared, group, channel, message)
     alice_valid_events = db.query(
-        "SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?",
-        (alice_peer_id,)
+        "SELECT event_id FROM valid_events WHERE recorded_by = ?",
+        (alice['peer_id'],)
     )
     print(f"Alice has {len(alice_valid_events)} valid events")
 
     # Bob should have received Alice's events
     bob_valid_events = db.query(
-        "SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?",
-        (bob_peer_id,)
+        "SELECT event_id FROM valid_events WHERE recorded_by = ?",
+        (bob['peer_id'],)
     )
     print(f"Bob has {len(bob_valid_events)} valid events")
 
     # Charlie should only have his own events
     charlie_valid_events = db.query(
-        "SELECT event_id FROM valid_events WHERE seen_by_peer_id = ?",
-        (charlie_peer_id,)
+        "SELECT event_id FROM valid_events WHERE recorded_by = ?",
+        (charlie['peer_id'],)
     )
     print(f"Charlie has {len(charlie_valid_events)} valid events")
 
@@ -223,26 +159,26 @@ def test_three_player_messaging():
 
     # Alice should have Bob's message event
     bob_msg_valid_for_alice = db.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
-        (bob_msg['id'], alice_peer_id)
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (bob_msg['id'], alice['peer_id'])
     )
     print(f"Bob's message valid for Alice: {bob_msg_valid_for_alice is not None}")
 
     # Bob should have Alice's message event
     alice_msg_valid_for_bob = db.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
-        (alice_msg['id'], bob_peer_id)
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (alice_msg['id'], bob['peer_id'])
     )
     print(f"Alice's message valid for Bob: {alice_msg_valid_for_bob is not None}")
 
     # Charlie should NOT have Alice's or Bob's messages
     alice_msg_valid_for_charlie = db.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
-        (alice_msg['id'], charlie_peer_id)
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (alice_msg['id'], charlie['peer_id'])
     )
     bob_msg_valid_for_charlie = db.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND seen_by_peer_id = ?",
-        (bob_msg['id'], charlie_peer_id)
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (bob_msg['id'], charlie['peer_id'])
     )
     print(f"Alice's message valid for Charlie: {alice_msg_valid_for_charlie is not None}")
     print(f"Bob's message valid for Charlie: {bob_msg_valid_for_charlie is not None}")

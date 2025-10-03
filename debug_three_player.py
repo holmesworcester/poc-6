@@ -29,23 +29,23 @@ def run():
     db.commit()
 
     # Pre-share peer_shared between Alice and Bob
-    from events import first_seen
+    from events import recorded
     bob_peer_shared_blob = store.get(bob_peer_shared_id, db)
     alice_sees_bob_peer_shared = store.blob(bob_peer_shared_blob, 5500, True, db)
-    bob_peer_shared_fs_id = first_seen.create(alice_sees_bob_peer_shared, alice_peer_id, 5500, db, True)
-    first_seen.project(bob_peer_shared_fs_id, db)
+    bob_peer_shared_fs_id = recorded.create(alice_sees_bob_peer_shared, alice_peer_id, 5500, db, True)
+    recorded.project(bob_peer_shared_fs_id, db)
     alice_peer_shared_blob = store.get(alice_peer_shared_id, db)
     bob_sees_alice_peer_shared = store.blob(alice_peer_shared_blob, 5600, True, db)
-    alice_peer_shared_fs_id = first_seen.create(bob_sees_alice_peer_shared, bob_peer_id, 5600, db, True)
-    first_seen.project(alice_peer_shared_fs_id, db)
+    alice_peer_shared_fs_id = recorded.create(bob_sees_alice_peer_shared, bob_peer_id, 5600, db, True)
+    recorded.project(alice_peer_shared_fs_id, db)
     db.commit()
 
     # Alice setup
     alice_key_id = key.create(alice_peer_id, t_ms=6000, db=db)
     alice_key_blob = store.get(alice_key_id, db)
     bob_sees_alice_key = store.blob(alice_key_blob, 6500, True, db)
-    alice_key_fs_id = first_seen.create(bob_sees_alice_key, bob_peer_id, 6500, db, True)
-    first_seen.project(alice_key_fs_id, db)
+    alice_key_fs_id = recorded.create(bob_sees_alice_key, bob_peer_id, 6500, db, True)
+    recorded.project(alice_key_fs_id, db)
     alice_group_id = group.create('Alice Group', alice_peer_id, alice_peer_shared_id, alice_key_id, 7000, db)
     alice_channel_id = channel.create('general', alice_group_id, alice_peer_id, alice_peer_shared_id, alice_key_id, 8000, db)
 
@@ -53,8 +53,8 @@ def run():
     bob_key_id = key.create(bob_peer_id, t_ms=9000, db=db)
     bob_key_blob = store.get(bob_key_id, db)
     alice_sees_bob_key = store.blob(bob_key_blob, 9500, True, db)
-    bob_key_fs_id = first_seen.create(alice_sees_bob_key, alice_peer_id, 9500, db, True)
-    first_seen.project(bob_key_fs_id, db)
+    bob_key_fs_id = recorded.create(alice_sees_bob_key, alice_peer_id, 9500, db, True)
+    recorded.project(bob_key_fs_id, db)
     bob_group_id = group.create('Bob Group', bob_peer_id, bob_peer_shared_id, bob_key_id, 10000, db)
     bob_channel_id = channel.create('general', bob_group_id, bob_peer_id, bob_peer_shared_id, bob_key_id, 11000, db)
 
@@ -76,16 +76,16 @@ def run():
 
     def print_state(label):
         print(f"\n--- {label} ---")
-        print("Alice valid count:", len(db.query("SELECT 1 FROM valid_events WHERE seen_by_peer_id=?", (alice_peer_id,))))
-        print("Bob valid count:", len(db.query("SELECT 1 FROM valid_events WHERE seen_by_peer_id=?", (bob_peer_id,))))
+        print("Alice valid count:", len(db.query("SELECT 1 FROM valid_events WHERE recorded_by=?", (alice_peer_id,))))
+        print("Bob valid count:", len(db.query("SELECT 1 FROM valid_events WHERE recorded_by=?", (bob_peer_id,))))
         print("Shareable events by Alice:", len(db.query("SELECT 1 FROM shareable_events WHERE peer_id=?", (alice_peer_shared_id,))))
         print("Shareable events by Bob:", len(db.query("SELECT 1 FROM shareable_events WHERE peer_id=?", (bob_peer_shared_id,))))
-        print("Blocked for Alice:", db.query("SELECT * FROM blocked_events WHERE seen_by_peer_id=?", (alice_peer_id,)))
-        print("Blocked deps for Alice:", db.query("SELECT * FROM blocked_event_deps WHERE seen_by_peer_id=?", (alice_peer_id,)))
-        print("Blocked for Bob:", db.query("SELECT * FROM blocked_events WHERE seen_by_peer_id=?", (bob_peer_id,)))
-        print("Blocked deps for Bob:", db.query("SELECT * FROM blocked_event_deps WHERE seen_by_peer_id=?", (bob_peer_id,)))
-        print("Bob msg valid for Alice:", db.query_one("SELECT 1 FROM valid_events WHERE event_id=? AND seen_by_peer_id=?", (bob_msg['id'], alice_peer_id)))
-        print("Alice msg valid for Bob:", db.query_one("SELECT 1 FROM valid_events WHERE event_id=? AND seen_by_peer_id=?", (alice_msg['id'], bob_peer_id)))
+        print("Blocked for Alice:", db.query("SELECT * FROM blocked_events WHERE recorded_by=?", (alice_peer_id,)))
+        print("Blocked deps for Alice:", db.query("SELECT * FROM blocked_event_deps WHERE recorded_by=?", (alice_peer_id,)))
+        print("Blocked for Bob:", db.query("SELECT * FROM blocked_events WHERE recorded_by=?", (bob_peer_id,)))
+        print("Blocked deps for Bob:", db.query("SELECT * FROM blocked_event_deps WHERE recorded_by=?", (bob_peer_id,)))
+        print("Bob msg valid for Alice:", db.query_one("SELECT 1 FROM valid_events WHERE event_id=? AND recorded_by=?", (bob_msg['id'], alice_peer_id)))
+        print("Alice msg valid for Bob:", db.query_one("SELECT 1 FROM valid_events WHERE event_id=? AND recorded_by=?", (alice_msg['id'], bob_peer_id)))
 
     print_state("after sync")
     # Inspect shareable events types

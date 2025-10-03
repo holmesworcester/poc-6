@@ -37,4 +37,4 @@ sync.receive(batch_size=100, t_ms=23000, db=db)
 blocked = db.query('SELECT * FROM blocked_events', ())
 print(f'\nBlocked events: {len(blocked)}')
 for b in blocked:
-    print(f'  Event {b["event_id"]} for peer {b["seen_by_peer_id"]}: missing {b["missing_deps"]}')
+    print(f'  Event {b["event_id"]} for peer {b["recorded_by"]}: missing {b["missing_deps"]}')

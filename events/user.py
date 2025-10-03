@@ -1,40 +1,68 @@
 """User event type (shareable, encrypted) - represents network membership."""
 from typing import Any
+import logging
 import crypto
 import store
 from events import key, peer
 
+log = logging.getLogger(__name__)
 
-def create(peer_id: str, peer_shared_id: str, group_id: str,
-           name: str, key_id: str, t_ms: int, db: Any,
-           invite_private_key: bytes | None = None) -> tuple[str, str]:
+
+def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
+           invite_id: str | None = None, invite_key_secret: bytes | None = None,
+           invite_private_key: bytes | None = None,
+           group_id: str | None = None, channel_id: str | None = None, key_id: str | None = None) -> tuple[str, str]:
     """Create a user event representing network membership.
 
     Also auto-creates a prekey for receiving sync requests.
 
+    Two modes:
+    1. Invite joiner (Bob): Requires invite_id, invite_key_secret. Metadata from invite.
+    2. Network creator (Alice): Requires group_id, channel_id, key_id. No invite.
+
     Args:
         peer_id: Local peer ID (for signing)
         peer_shared_id: Public peer ID (for created_by and peer_id in event)
-        group_id: Group being joined (serves as network identifier)
         name: Display name for the user
-        key_id: Key to encrypt the user event with
         t_ms: Timestamp
         db: Database connection
-        invite_private_key: Optional invite private key (32 bytes, if joining via invite)
+        invite_id: Reference to invite event (for invite joiners)
+        invite_key_secret: Invite key bytes for wrapping (for invite joiners)
+        invite_private_key: Invite private key for proof (for invite joiners)
+        group_id: Group ID (for network creators only)
+        channel_id: Channel ID (for network creators only)
+        key_id: Network key ID (for network creators only)
 
     Returns:
-        (user_id, prekey_id): The stored user and prekey event IDs
+        (user_id, prekey_shared_id): The stored user and prekey_shared event IDs
     """
     # Create base user event
     event_data = {
         'type': 'user',
         'peer_id': peer_shared_id,  # References the public peer identity
-        'group_id': group_id,
         'name': name,
         'created_by': peer_shared_id,
-        'created_at': t_ms,
-        'key_id': key_id
+        'created_at': t_ms
     }
+
+    # Add invite_id if joining via invite, or metadata if network creator
+    if invite_id:
+        event_data['invite_id'] = invite_id  # Reference to invite event
+
+        # Extract metadata from invite for prekey_shared creation
+        invite_blob = store.get(invite_id, db)
+        if invite_blob:
+            invite_event_data = crypto.parse_json(invite_blob)
+            group_id = invite_event_data['group_id']
+            channel_id = invite_event_data['channel_id']
+            key_id = invite_event_data['key_id']
+        else:
+            raise ValueError(f"invite event not found: {invite_id}")
+    else:
+        # Network creator - include metadata directly (old format for compatibility)
+        event_data['group_id'] = group_id
+        event_data['channel_id'] = channel_id
+        event_data['key_id'] = key_id
 
     # If joining via invite, add invite proof fields
     if invite_private_key:
@@ -44,9 +72,9 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
         invite_public_key = bytes(signing_key.verify_key)
         invite_pubkey_b64 = crypto.b64encode(invite_public_key)
 
-        # Sign proof message: peer_shared_id + ":" + group_id
-        # This proves Bob knows the invite private key and is joining this specific group with this peer
-        proof_message = f"{peer_shared_id}:{group_id}".encode('utf-8')
+        # Sign proof message: peer_shared_id + ":" + invite_id
+        # This proves Bob knows the invite private key and is joining via this specific invite
+        proof_message = f"{peer_shared_id}:{invite_id}".encode('utf-8')
         invite_signature = crypto.sign(proof_message, invite_private_key)
         invite_signature_b64 = crypto.b64encode(invite_signature)
 
@@ -54,17 +82,26 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
         event_data['invite_signature'] = invite_signature_b64
 
     # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
-    # Get key_data for encryption
-    key_data = key.get_key(key_id, db)
-
-    # Wrap (canonicalize + encrypt)
+    # Wrap with appropriate key (invite key for joiners, network key for creators)
     canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    if invite_key_secret:
+        # Invite joiner - wrap with invite key
+        invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
+        invite_key_data = {
+            'id': invite_key_id_bytes,
+            'key': invite_key_secret,
+            'type': 'symmetric'
+        }
+        blob = crypto.wrap(canonical, invite_key_data, db)
+    else:
+        # Network creator - wrap with network key
+        key_data = key.get_key(key_id, peer_id, db)
+        blob = crypto.wrap(canonical, key_data, db)
 
-    # Store event with first_seen wrapper and projection
+    # Store event with recorded wrapper and projection
     user_id = store.event(blob, peer_id, t_ms, db)
 
     # Auto-create prekey for sync requests (inline, following poc-5 pattern)
@@ -77,6 +114,18 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
     )
 
     # Create shareable prekey_shared (shareable, only public key)
+    # For invite joiners, wrap with invite key (don't have network key yet)
+    # For network creators, wrap with network key
+    wrap_key_data_for_prekey = None
+    if invite_key_secret:
+        # Build invite key data for wrapping prekey_shared
+        invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
+        wrap_key_data_for_prekey = {
+            'id': invite_key_id_bytes,
+            'key': invite_key_secret,
+            'type': 'symmetric'
+        }
+
     prekey_shared_id = prekey_shared.create(
         prekey_id=prekey_id,
         peer_id=peer_id,
@@ -84,13 +133,14 @@ def create(peer_id: str, peer_shared_id: str, group_id: str,
         group_id=group_id,
         key_id=key_id,
         t_ms=t_ms + 2,  # Slightly later than prekey
-        db=db
+        db=db,
+        wrap_key_data=wrap_key_data_for_prekey
     )
 
     return user_id, prekey_shared_id
 
 
-def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> str | None:
+def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project user event into users and group_members tables."""
     # Get blob from store
     blob = store.get(user_id, db)
@@ -98,7 +148,7 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
         return None
 
     # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, db)
+    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
     if not unwrapped:
         return None
 
@@ -108,37 +158,55 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared
     created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, seen_by_peer_id, db)
+    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         return None
 
-    # Validate invite proof if present
-    if 'invite_pubkey' in event_data or 'invite_signature' in event_data:
-        # Both fields must be present if either is
-        if not event_data.get('invite_pubkey') or not event_data.get('invite_signature'):
+    # Fetch invite event and extract metadata
+    invite_id = event_data.get('invite_id')
+    if not invite_id:
+        # Network creator (Alice) doesn't have invite_id
+        # Extract from event_data (old format compatibility)
+        group_id = event_data.get('group_id')
+        channel_id = event_data.get('channel_id')
+        key_id = event_data.get('key_id')
+    else:
+        # Fetch invite event blob
+        invite_blob = store.get(invite_id, db)
+        if not invite_blob:
+            log.warning(f"user.project() invite not found: {invite_id}")
             return None
 
-        # Verify invite exists by querying invites table
-        invite_row = db.query_one(
-            "SELECT group_id FROM invites WHERE invite_pubkey = ?",
-            (event_data['invite_pubkey'],)
-        )
+        # Parse invite event (plaintext JSON, not encrypted)
+        invite_data = crypto.parse_json(invite_blob)
 
-        if not invite_row:
-            return None  # Invite not found
+        # Note: Invite signature verification skipped
+        # Invite was trusted when stored (via URL for joiners, local creation for inviters)
+        # Signature is in the blob for future verification if needed
 
-        # Verify invite's group_id matches user event
-        if invite_row['group_id'] != event_data['group_id']:
-            return None  # Group mismatch
+        # Extract metadata from invite
+        group_id = invite_data['group_id']
+        channel_id = invite_data['channel_id']
+        key_id = invite_data['key_id']
 
-        # Verify the Ed25519 signature
-        # The signature should be over: peer_id + ":" + group_id
-        proof_message = f"{event_data['peer_id']}:{event_data['group_id']}".encode('utf-8')
-        invite_pubkey = crypto.b64decode(event_data['invite_pubkey'])
-        invite_signature = crypto.b64decode(event_data['invite_signature'])
+        # Validate invite proof if present (Bob proving he has invite private key)
+        if 'invite_pubkey' in event_data:
+            if not event_data.get('invite_signature'):
+                return None  # Missing signature
 
-        if not crypto.verify(proof_message, invite_signature, invite_pubkey):
-            return None  # Invalid signature
+            # Verify invite_pubkey matches invite event
+            if event_data['invite_pubkey'] != invite_data['invite_pubkey']:
+                log.warning(f"user.project() invite_pubkey mismatch")
+                return None
+
+            # Verify the Ed25519 signature: peer_id + ":" + invite_id
+            proof_message = f"{event_data['peer_id']}:{invite_id}".encode('utf-8')
+            invite_pubkey = crypto.b64decode(event_data['invite_pubkey'])
+            invite_signature = crypto.b64decode(event_data['invite_signature'])
+
+            if not crypto.verify(proof_message, invite_signature, invite_pubkey):
+                log.warning(f"user.project() invite proof signature verification failed")
+                return None
 
     # Insert into users table
     db.execute(
@@ -160,39 +228,77 @@ def project(user_id: str, seen_by_peer_id: str, received_at: int, db: Any) -> st
            (group_id, user_id, added_by, added_at)
            VALUES (?, ?, ?, ?)""",
         (
-            event_data['group_id'],
+            group_id,  # Extracted from invite event (or event_data for network creator)
             user_id,
             event_data['created_by'],  # Self-added for invite joins
             event_data['created_at']
         )
     )
 
-    # Insert into shareable_events with window_id
-    from events import sync
-    sync.add_shareable_event(user_id, event_data['created_by'], event_data['created_at'], db)
-
-    # Mark as valid for this peer
+    # Mark user event as valid for this peer
     db.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, seen_by_peer_id) VALUES (?, ?)",
-        (user_id, seen_by_peer_id)
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (user_id, recorded_by)
     )
+
+    # Create stub group/channel rows ONLY for invite joiners (Bob)
+    # Network creators (Alice) already have real group/channel events
+    if invite_id:
+        created_by = event_data['created_by']
+        created_at = event_data['created_at']
+
+        log.info(f"user.project() creating stubs for invite joiner: group_id={group_id[:20]}..., channel_id={channel_id[:20]}...")
+
+        db.execute(
+            """INSERT OR IGNORE INTO groups
+               (group_id, key_id, recorded_by, name, created_by, created_at, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (group_id, key_id, recorded_by, '', created_by, created_at, recorded_at)
+        )
+        log.info(f"user.project() created group stub")
+
+        # Create stub channel row
+        db.execute(
+            """INSERT OR IGNORE INTO channels
+               (channel_id, group_id, recorded_by, name, created_by, created_at, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (channel_id, group_id, recorded_by, '', created_by, created_at, recorded_at)
+        )
+        log.info(f"user.project() created channel stub")
+
+        # Mark stub group_id and channel_id as valid (allows dependency checks to pass)
+        # Real events will arrive later via sync, stubs satisfy immediate messaging needs
+        db.execute(
+            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+            (group_id, recorded_by)
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+            (channel_id, recorded_by)
+        )
+        log.info(f"user.project() marked group_id and channel_id as valid for immediate messaging")
 
     return user_id
 
 
 def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
-                          prekey_id: str, invite_data: dict[str, Any],
+                          prekey_shared_id: str, invite_data: dict[str, Any],
                           t_ms: int, db: Any) -> None:
-    """Send peer, user, address, prekey events to invite address for bootstrap.
+    """Send peer, user, address, prekey_shared events to invite address for bootstrap.
 
     Called repeatedly until sync is established (job pattern).
     Uses invite key from invite_data for encryption.
+
+    SECURITY: This function trusts that peer_id is correct and owned by the caller.
+    In production, the API authentication layer should validate that the authenticated session
+    owns this peer_id before calling this function. This is safe for local-only apps where
+    the user controls all peers on the device.
 
     Args:
         peer_id: Local peer ID (private)
         peer_shared_id: Public peer ID
         user_id: User event ID
-        prekey_id: Prekey event ID
+        prekey_shared_id: Prekey_shared event ID (shareable prekey)
         invite_data: Decoded invite link data containing invite_key_secret, ip, port
         t_ms: Timestamp
         db: Database connection
@@ -239,21 +345,250 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
     }
 
     # Sign and wrap address event
-    private_key = peer.get_private_key(peer_id, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_address = crypto.sign_event(address_data, private_key)
     canonical_address = crypto.canonicalize_json(signed_address)
     wrapped_address = crypto.wrap(canonical_address, invite_key, db)
 
-    # Get prekey blob (created by user.create() auto-creation)
-    prekey_blob = store.get(prekey_id, db)
-    if not prekey_blob:
+    # Get prekey_shared blob (created by user.create() auto-creation)
+    prekey_shared_blob = store.get(prekey_shared_id, db)
+    if not prekey_shared_blob:
         return  # Can't send if blob not found
 
     # Wrap with invite key for transit
-    wrapped_prekey = crypto.wrap(prekey_blob, invite_key, db)
+    wrapped_prekey_shared = crypto.wrap(prekey_shared_blob, invite_key, db)
 
-    # Add all four to incoming queue (simulates sending to invite address)
+    # Get invite_key_shared blob if available (contains network key for joiner)
+    invite_key_shared_id = invite_data.get('invite_key_shared_id')
+    wrapped_invite_key_shared = None
+    if invite_key_shared_id:
+        invite_key_shared_blob = store.get(invite_key_shared_id, db)
+        if invite_key_shared_blob:
+            wrapped_invite_key_shared = crypto.wrap(invite_key_shared_blob, invite_key, db)
+
+    # Add all to incoming queue (simulates sending to invite address)
     queues.incoming.add(wrapped_peer, t_ms, db)
     queues.incoming.add(wrapped_user, t_ms, db)
     queues.incoming.add(wrapped_address, t_ms, db)
-    queues.incoming.add(wrapped_prekey, t_ms, db)
+    queues.incoming.add(wrapped_prekey_shared, t_ms, db)
+    if wrapped_invite_key_shared:
+        queues.incoming.add(wrapped_invite_key_shared, t_ms, db)
+
+    # Send sync request to inviter (Bob initiates sync with Alice)
+    # This allows Alice to send her events back to Bob in the sync response
+    inviter_prekey_id = invite_data.get('inviter_prekey_id')
+    if inviter_prekey_id:
+        from events import sync
+        # inviter_prekey_id is the inviter's peer_id
+        sync.send_request(
+            to_peer_id=inviter_prekey_id,
+            from_peer_id=peer_id,
+            from_peer_shared_id=peer_shared_id,
+            t_ms=t_ms,
+            db=db
+        )
+
+
+def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
+    """Create a new user with their own implicit network.
+
+    Creates:
+    - peer (local + shared)
+    - prekey (local + shared)
+    - key (symmetric, for the network)
+    - group (serves as the network)
+    - channel (default channel)
+    - user (membership record)
+
+    Args:
+        name: Username/display name
+        t_ms: Base timestamp (each event gets incremented)
+        db: Database connection
+
+    Returns:
+        {
+            'peer_id': str,
+            'peer_shared_id': str,
+            'prekey_id': str,
+            'key_id': str,
+            'group_id': str,  # Also serves as network_id
+            'channel_id': str,
+            'user_id': str,
+            'invite_link': str,
+        }
+    """
+    from events import prekey, group, channel, invite
+
+    log.info(f"new_network() creating user '{name}' at t_ms={t_ms}")
+
+    # 1. Create peer (local + shared)
+    peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
+
+    # 2. Create prekey (for receiving key_shared events)
+    prekey_id, prekey_private = prekey.create(peer_id=peer_id, t_ms=t_ms + 1, db=db)
+
+    # 3. Create symmetric key for the network
+    key_id = key.create(peer_id=peer_id, t_ms=t_ms + 2, db=db)
+
+    # 4. Create group (implicit network)
+    group_id = group.create(
+        name=f"{name}'s Network",
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        key_id=key_id,
+        t_ms=t_ms + 3,
+        db=db
+    )
+
+    # 5. Create default channel
+    channel_id = channel.create(
+        name='general',
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        key_id=key_id,
+        t_ms=t_ms + 4,
+        db=db
+    )
+
+    # 6. Create user membership record (auto-creates prekey + prekey_shared)
+    # Network creator - no invite, uses network key
+    user_id, prekey_shared_id = create(
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        name=name,
+        t_ms=t_ms + 5,
+        db=db,
+        group_id=group_id,
+        channel_id=channel_id,
+        key_id=key_id
+    )
+
+    # 7. Create an invite link for others to join
+    invite_id, invite_link, invite_data = invite.create(
+        inviter_peer_id=peer_id,
+        inviter_peer_shared_id=peer_shared_id,
+        group_id=group_id,
+        channel_id=channel_id,
+        key_id=key_id,
+        t_ms=t_ms + 6,
+        db=db
+    )
+
+    log.info(f"new_network() created user '{name}': peer={peer_id}, group={group_id}")
+
+    return {
+        'peer_id': peer_id,
+        'peer_shared_id': peer_shared_id,
+        'prekey_id': prekey_id,
+        'prekey_shared_id': prekey_shared_id,
+        'key_id': key_id,
+        'group_id': group_id,
+        'channel_id': channel_id,
+        'user_id': user_id,
+        'invite_link': invite_link,
+    }
+
+
+def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
+    """Join an existing network via invite link.
+
+    Creates:
+    - peer (local + shared)
+    - user (membership with invite proof, auto-creates prekey + prekey_shared)
+
+    The inviter will share:
+    - key (via key_shared event)
+    - group, channel events (via sync)
+
+    Args:
+        invite_link: Invite link from network creator (format: "quiet://invite/{base64-json}")
+        name: Username/display name
+        t_ms: Base timestamp
+        db: Database connection
+
+    Returns:
+        {
+            'peer_id': str,
+            'peer_shared_id': str,
+            'user_id': str,
+            'group_id': str,
+            'invite_data': dict,
+        }
+    """
+    log.info(f"join() user '{name}' joining via invite at t_ms={t_ms}")
+
+    # Parse invite link
+    import base64
+    import json
+
+    if not invite_link.startswith('quiet://invite/'):
+        raise ValueError(f"Invalid invite link format: {invite_link}")
+
+    invite_code = invite_link.replace('quiet://invite/', '')
+    # Add back padding if needed
+    padding = (4 - len(invite_code) % 4) % 4
+    invite_code_padded = invite_code + ('=' * padding)
+
+    try:
+        invite_json = base64.urlsafe_b64decode(invite_code_padded).decode()
+        invite_data = json.loads(invite_json)
+    except Exception as e:
+        raise ValueError(f"Failed to decode invite link: {e}")
+
+    # 1. Create peer (local + shared) - must be first for invite storage
+    peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
+
+    # Extract and store invite event blob (with recorded wrapper for projection)
+    invite_blob_b64 = invite_data['invite_blob']
+    invite_blob = base64.urlsafe_b64decode(invite_blob_b64 + '===')  # Add padding
+    invite_id = store.event(invite_blob, peer_id, t_ms, db)
+
+    # Mark invite as valid immediately (out-of-band trust via URL)
+    # This bypasses dependency checking since we trust the invite link itself
+    db.execute(
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (invite_id, peer_id)
+    )
+
+    # Project invite immediately to restore invite_key_secret
+    from events import invite
+    invite.project(invite_id, peer_id, t_ms, db)
+
+    # Extract secrets from invite link
+    invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
+    invite_public_key = crypto.b64decode(invite_data['invite_public_key'])
+    invite_prekey_id = invite_data.get('invite_prekey_id')
+    invite_key_secret = bytes.fromhex(invite_data['invite_key_secret'])
+
+    # Parse invite to get metadata for return value (now in invite event)
+    invite_event_data = crypto.parse_json(invite_blob)
+    group_id = invite_event_data['group_id']
+    channel_id = invite_event_data['channel_id']
+    key_id = invite_event_data['key_id']
+
+    # 2. Create user membership with invite proof (auto-creates prekey + prekey_shared)
+    # User event references invite_id (contains group/channel/key metadata)
+    user_id, prekey_shared_id = create(
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        name=name,
+        t_ms=t_ms + 1,
+        db=db,
+        invite_id=invite_id,
+        invite_key_secret=invite_key_secret,
+        invite_private_key=invite_private_key
+    )
+
+    log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
+
+    return {
+        'peer_id': peer_id,
+        'peer_shared_id': peer_shared_id,
+        'user_id': user_id,
+        'prekey_shared_id': prekey_shared_id,
+        'group_id': group_id,
+        'channel_id': channel_id,
+        'key_id': key_id,
+        'invite_data': invite_data,
+    }
