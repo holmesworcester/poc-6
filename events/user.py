@@ -4,6 +4,7 @@ import logging
 import crypto
 import store
 from events import key, peer
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -81,11 +82,12 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         event_data['invite_pubkey'] = invite_pubkey_b64
         event_data['invite_signature'] = invite_signature_b64
 
-        # Store invite prekey in local_prekeys so Bob can decrypt invite_key_shared
+        # Store invite prekey in prekeys so Bob can decrypt invite_key_shared
         # Use the invite prekey_id from invite link (hash of public key)
         invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key, size=16))
-        db.execute(
-            "INSERT OR REPLACE INTO local_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+        unsafedb = create_unsafe_db(db)
+        unsafedb.execute(
+            "INSERT OR REPLACE INTO prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
             (invite_prekey_id, peer_id, invite_public_key, invite_private_key, t_ms)
         )
 
@@ -145,7 +147,7 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         wrap_key_data=wrap_key_data_for_prekey
     )
 
-    return user_id, prekey_shared_id
+    return user_id, prekey_shared_id, prekey_id
 
 
 def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -166,7 +168,15 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # Verify signature - get public key from created_by peer_shared
     from events import peer_shared
     created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    try:
+        public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    except ValueError:
+        # peer_shared not projected yet - return None without blocking
+        # (peer_shared_id is not an event_id, so we can't block on it directly)
+        # The recorded.project() will handle crypto dependencies via unwrap()
+        log.debug(f"user.project() user_id={user_id} skipping - peer_shared {created_by} not available yet")
+        return None
+
     if not crypto.verify_event(event_data, public_key):
         return None
 
@@ -182,7 +192,8 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         # Fetch invite event blob
         invite_blob = store.get(invite_id, db)
         if not invite_blob:
-            log.warning(f"user.project() invite not found: {invite_id}")
+            # invite not projected yet - return None, will retry later
+            log.debug(f"user.project() user_id={user_id} skipping - invite_id={invite_id} not in store yet")
             return None
 
         # Parse invite event (plaintext JSON, not encrypted)
@@ -217,34 +228,39 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
                 return None
 
     # Insert into users table
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
         """INSERT OR IGNORE INTO users
-           (user_id, peer_id, name, joined_at, invite_pubkey)
-           VALUES (?, ?, ?, ?, ?)""",
+           (user_id, peer_id, name, joined_at, invite_pubkey, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
             event_data['peer_id'],
             event_data['name'],
             event_data['created_at'],
-            event_data.get('invite_pubkey', '')
+            event_data.get('invite_pubkey', ''),
+            recorded_by,
+            recorded_at
         )
     )
 
     # Insert into group_members table
-    db.execute(
+    safedb.execute(
         """INSERT OR IGNORE INTO group_members
-           (group_id, user_id, added_by, added_at)
-           VALUES (?, ?, ?, ?)""",
+           (group_id, user_id, added_by, added_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
         (
             group_id,  # Extracted from invite event (or event_data for network creator)
             user_id,
             event_data['created_by'],  # Self-added for invite joins
-            event_data['created_at']
+            event_data['created_at'],
+            recorded_by,
+            recorded_at
         )
     )
 
     # Mark user event as valid for this peer
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (user_id, recorded_by)
     )
@@ -257,7 +273,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
         log.info(f"user.project() creating stubs for invite joiner: group_id={group_id[:20]}..., channel_id={channel_id[:20]}...")
 
-        db.execute(
+        safedb.execute(
             """INSERT OR IGNORE INTO groups
                (group_id, key_id, recorded_by, name, created_by, created_at, recorded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -266,7 +282,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         log.info(f"user.project() created group stub")
 
         # Create stub channel row
-        db.execute(
+        safedb.execute(
             """INSERT OR IGNORE INTO channels
                (channel_id, group_id, recorded_by, name, created_by, created_at, recorded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -276,11 +292,11 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
         # Mark stub group_id and channel_id as valid (allows dependency checks to pass)
         # Real events will arrive later via sync, stubs satisfy immediate messaging needs
-        db.execute(
+        safedb.execute(
             "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
             (group_id, recorded_by)
         )
-        db.execute(
+        safedb.execute(
             "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
             (channel_id, recorded_by)
         )
@@ -432,15 +448,23 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # 1. Create peer (local + shared)
     peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
 
-    # 2. Create prekey (for receiving key_shared events)
-    prekey_id, prekey_private = prekey.create(peer_id=peer_id, t_ms=t_ms + 1, db=db)
+    # 2. Create symmetric key for the network
+    key_id = key.create(peer_id=peer_id, t_ms=t_ms + 1, db=db)
 
-    # 3. Create symmetric key for the network
-    key_id = key.create(peer_id=peer_id, t_ms=t_ms + 2, db=db)
-
-    # 4. Create group (implicit network)
+    # 3. Create group (implicit network)
     group_id = group.create(
         name=f"{name}'s Network",
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        key_id=key_id,
+        t_ms=t_ms + 2,
+        db=db
+    )
+
+    # 4. Create default channel
+    channel_id = channel.create(
+        name='general',
+        group_id=group_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         key_id=key_id,
@@ -448,39 +472,17 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db
     )
 
-    # 5. Create default channel
-    channel_id = channel.create(
-        name='general',
-        group_id=group_id,
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        key_id=key_id,
-        t_ms=t_ms + 4,
-        db=db
-    )
-
-    # 6. Create user membership record (auto-creates prekey + prekey_shared)
+    # 5. Create user membership record (auto-creates prekey + prekey_shared)
     # Network creator - no invite, uses network key
-    user_id, prekey_shared_id = create(
+    user_id, prekey_shared_id, prekey_id = create(
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         name=name,
-        t_ms=t_ms + 5,
+        t_ms=t_ms + 4,
         db=db,
         group_id=group_id,
         channel_id=channel_id,
         key_id=key_id
-    )
-
-    # 7. Create an invite link for others to join
-    invite_id, invite_link, invite_data = invite.create(
-        inviter_peer_id=peer_id,
-        inviter_peer_shared_id=peer_shared_id,
-        group_id=group_id,
-        channel_id=channel_id,
-        key_id=key_id,
-        t_ms=t_ms + 6,
-        db=db
     )
 
     log.info(f"new_network() created user '{name}': peer={peer_id}, group={group_id}")
@@ -494,7 +496,6 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'group_id': group_id,
         'channel_id': channel_id,
         'user_id': user_id,
-        'invite_link': invite_link,
     }
 
 
@@ -554,7 +555,8 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     # Mark invite as valid immediately (out-of-band trust via URL)
     # This bypasses dependency checking since we trust the invite link itself
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (invite_id, peer_id)
     )
@@ -577,7 +579,7 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     # 2. Create user membership with invite proof (auto-creates prekey + prekey_shared)
     # User event references invite_id (contains group/channel/key metadata)
-    user_id, prekey_shared_id = create(
+    user_id, prekey_shared_id, prekey_id = create(
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         name=name,
@@ -594,6 +596,7 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
         'user_id': user_id,
+        'prekey_id': prekey_id,
         'prekey_shared_id': prekey_shared_id,
         'group_id': group_id,
         'channel_id': channel_id,
