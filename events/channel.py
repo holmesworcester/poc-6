@@ -5,6 +5,7 @@ import logging
 import crypto
 import store
 from events import key
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -48,8 +49,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project channel event into channels table and shareable_events table."""
     log.debug(f"channel.project() projecting channel_id={event_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get blob from store
-    blob = store.get(event_id, db)
+    blob = store.get(event_id, unsafedb)
     if not blob:
         log.warning(f"channel.project() blob not found for channel_id={event_id}")
         return
@@ -65,7 +69,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     log.info(f"channel.project() projected channel name='{event_data.get('name')}', id={event_id}")
 
     # Insert into channels table (use REPLACE to overwrite stubs from user.project())
-    db.execute(
+    safedb.execute(
         """INSERT OR REPLACE INTO channels
            (channel_id, name, group_id, created_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -83,7 +87,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
 
 def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
-    return db.query(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query(
         """SELECT channel_id, name, group_id, created_by, created_at
            FROM channels
            WHERE recorded_by = ?

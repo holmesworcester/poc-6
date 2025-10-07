@@ -5,6 +5,7 @@ import json
 from events import group, message
 import store
 import crypto
+from db import create_safe_db, create_unsafe_db
 
 
 def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: str) -> bool:
@@ -52,6 +53,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     import logging
     log = logging.getLogger(__name__)
 
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Common dependency fields across event types
     # Note: 'key_id' is intentionally excluded because symmetric keys are local-only
     # and not shared between peers. Events encrypted with a key are sent as plaintext
@@ -78,7 +81,7 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             continue
 
         # Check if this dep is valid for this peer
-        valid = db.query_one(
+        valid = safedb.query_one(
             "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
             (dep_id, recorded_by)
         )
@@ -115,8 +118,10 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
     from events import peer, channel
     import queues
 
+    unsafedb = create_unsafe_db(db)
+
     # Get recorded blob from store
-    recorded_blob = store.get(recorded_id, db)
+    recorded_blob = store.get(recorded_id, unsafedb)
     if not recorded_blob:
         return [None, None]
 
@@ -129,12 +134,14 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
     log = logging.getLogger(__name__)
     log.info(f"recorded.project(): ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..., recorded_id={recorded_id[:20]}...")
 
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get stored_at from store table as recorded_at
-    store_row = db.query_one("SELECT stored_at FROM store WHERE id = ?", (crypto.b64decode(recorded_id),))
+    store_row = unsafedb.query_one("SELECT stored_at FROM store WHERE id = ?", (crypto.b64decode(recorded_id),))
     recorded_at = store_row['stored_at'] if store_row else 0
 
     # Get referenced event blob
-    event_blob = store.get(ref_id, db)
+    event_blob = store.get(ref_id, unsafedb)
     if not event_blob:
         return [None, recorded_id]
 
@@ -188,7 +195,7 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
     if missing_key_ids:
-        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, db)
+        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
         return [None, recorded_id]
 
     # If we got here without event_data, something went wrong
@@ -213,7 +220,7 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
         if missing_deps:
             # Event dependencies missing - block this event for this peer
             log.info(f"Blocking {event_type} event {ref_id} due to missing deps: {missing_deps}")
-            queues.blocked.add(recorded_id, recorded_by, missing_deps, db)
+            queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
 
     # All dependencies satisfied - proceed with projection
@@ -249,7 +256,7 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
         projected_id = user.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'prekey':
         from events import prekey
-        prekey.project(ref_id, recorded_by, db)
+        prekey.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
     elif event_type == 'prekey_shared':
         from events import prekey_shared
@@ -260,16 +267,19 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
     elif event_type == 'invite_key_shared':
         from events import invite_key_shared
         projected_id = invite_key_shared.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'group_member':
+        from events import group_member
+        projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)
 
     # Mark event as valid for this peer
     log.info(f"Marking {event_type} event {ref_id} as valid for peer {recorded_by}")
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (ref_id, recorded_by)
     )
 
     # Notify blocked queue - unblock events that were waiting for this event
-    unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, db)
+    unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
     if unblocked_ids:
         log.info(f"Unblocked {len(unblocked_ids)} events after {ref_id} became valid")
         # Re-project unblocked events recursively
@@ -297,8 +307,10 @@ def create(ref_id: str, recorded_by: str, t_ms: int, db: Any, return_dupes: bool
 
     blob = json.dumps(event_data).encode()
 
+    unsafedb = create_unsafe_db(db)
+
     # Store the recorded blob
-    recorded_id = store.blob(blob, t_ms, return_dupes, db)
+    recorded_id = store.blob(blob, t_ms, return_dupes, unsafedb)
 
     log.debug(f"recorded.create() stored recorded_id={recorded_id}")
 

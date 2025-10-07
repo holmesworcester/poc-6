@@ -1,6 +1,7 @@
 """Sync implementation with bloom-based window protocol."""
 from typing import Any, Iterator
 from events import recorded, key, prekey, peer
+from db import create_safe_db, create_unsafe_db
 import queues
 import crypto
 import store
@@ -110,7 +111,8 @@ def walk_windows(w: int, last_window: int = -1, peer_pk: bytes = b'') -> Iterato
 
 def get_sync_state(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Get sync state for peer pair (last_window, w_param, total_events_seen)."""
-    row = db.query_one(
+    unsafedb = create_unsafe_db(db)
+    row = unsafedb.query_one(
         "SELECT last_window, w_param, total_events_seen FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
         (from_peer_id, to_peer_id)
     )
@@ -140,7 +142,8 @@ def update_sync_state(
     db: Any
 ) -> None:
     """Update sync state for peer pair."""
-    db.execute(
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute(
         """INSERT INTO sync_state_ephemeral (from_peer_id, to_peer_id, last_window, w_param, total_events_seen, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (from_peer_id, to_peer_id)
@@ -167,7 +170,8 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
     state['last_window'] = window_id
 
     # Count total shareable events for requester (events they've seen and can share)
-    total_events_row = db.query_one(
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    total_events_row = safedb.query_one(
         "SELECT COUNT(*) as count FROM shareable_events WHERE can_share_peer_id = ?",
         (from_peer_id,)
     )
@@ -213,7 +217,8 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
     log.info(f"add_shareable_event: event={event_id[:20]}..., can_share_peer_id={can_share_peer_id[:20]}..., window={window_id}")
 
     # Map parameter to column: can_share_peer_id -> can_share_peer_id
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=can_share_peer_id)
+    safedb.execute(
         """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
            VALUES (?, ?, ?, ?, ?)""",
         (event_id, can_share_peer_id, created_at, recorded_at, window_id)
@@ -303,14 +308,16 @@ def sync_all(t_ms: int, db: Any) -> None:
     log = logging.getLogger(__name__)
 
     # Query all local peers
-    local_peer_rows = db.query("SELECT peer_id FROM local_peers")
+    unsafedb = create_unsafe_db(db)
+    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
 
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
 
         # Find this peer's peer_shared_id
         peer_shared_id = None
-        candidate_rows = db.query(
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        candidate_rows = safedb.query(
             "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
             (peer_id,)
         )
@@ -339,7 +346,8 @@ def sync_all(t_ms: int, db: Any) -> None:
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
     """Send sync requests to all peers this peer has seen."""
     # Query all peer_shared events seen by this peer
-    peer_shared_rows = db.query(
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    peer_shared_rows = safedb.query(
         "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
         (from_peer_id,)
     )
@@ -379,7 +387,8 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
     window_max = (window_id + 1) << (STORAGE_W - w_param)
 
     # Query events the requester has seen (can share) in this window
-    my_events_in_window = db.query(
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    my_events_in_window = safedb.query(
         """SELECT event_id FROM shareable_events
            WHERE can_share_peer_id = ?
              AND window_id >= ?
@@ -472,7 +481,8 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
 
     # Only respond to sync requests from peers we recognize (have their peer_shared valid)
     # If not valid, discard - the requester will send another sync request in the next round
-    requester_known = db.query_one(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    requester_known = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
         (requester_peer_shared_id, recorded_by)
     )
@@ -538,7 +548,8 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
 
     # Query events the responder can share in this window
     # The bloom filter handles deduplication, so we don't need to exclude requester's events
-    shareable_rows = db.query(
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    shareable_rows = safedb.query(
         """SELECT event_id FROM shareable_events
            WHERE can_share_peer_id = ?
              AND window_id >= ?

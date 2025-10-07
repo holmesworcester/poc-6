@@ -4,6 +4,7 @@ import logging
 import crypto
 import store
 from events import peer, key, prekey
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -85,14 +86,16 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         hint_bytes = crypto_module.key.extract_id(blob)
         hint_id = crypto.b64encode(hint_bytes)
 
-        # Check if this is in pre_keys (invite prekeys are added there)
-        invite_prekey = db.query_one("SELECT peer_id FROM pre_keys WHERE peer_id = ?", (hint_id,))
+        # Check if this is in prekeys_shared (invite prekeys are added there)
+        safedb_check = create_safe_db(db, recorded_by=recorded_by)
+        invite_prekey = safedb_check.query_one("SELECT peer_id FROM prekeys_shared WHERE peer_id = ? AND recorded_by = ?", (hint_id, recorded_by))
         if invite_prekey:
             # This is a key_shared to an invite prekey - mark as shareable even though we can't decrypt
             # We need to extract created_by and created_at from the wrapped data if possible
             # For now, mark with current peer as creator
             log.info(f"key_shared.project() can't decrypt (wrapped to invite prekey {hint_id}), marking as valid anyway")
-            db.execute(
+            safedb = create_safe_db(db, recorded_by=recorded_by)
+            safedb.execute(
                 "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
                 (key_shared_id, recorded_by)
             )
@@ -109,7 +112,8 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     if event_data.get('recipient_peer_id') != recorded_by:
         log.info(f"key_shared.project() not for this peer (recipient={event_data.get('recipient_peer_id')}, peer={recorded_by}), skipping key projection")
         # Still mark as valid, but don't add key to keys table (shareable marking handled by recorded.py)
-        db.execute(
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        safedb.execute(
             "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
             (key_shared_id, recorded_by)
         )
@@ -128,7 +132,8 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     original_key_id = event_data['key_id']
     symmetric_key = crypto.b64decode(event_data['symmetric_key'])
 
-    db.execute(
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute(
         """INSERT OR IGNORE INTO keys (key_id, key, created_at)
            VALUES (?, ?, ?)""",
         (
@@ -139,7 +144,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     )
 
     # Track key ownership for routing (recipient now has this key)
-    db.execute(
+    unsafedb.execute(
         "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
         (original_key_id, recorded_by, event_data['created_at'])
     )
@@ -147,7 +152,8 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     log.info(f"key_shared.project() added key {original_key_id} to local keys table")
 
     # Insert into keys_shared table to track this event
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
         """INSERT OR IGNORE INTO keys_shared
            (key_shared_id, original_key_id, created_by, created_at, recipient_peer_id, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -163,13 +169,13 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     )
 
     # Mark event as valid for this peer (shareable marking handled by recorded.py)
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (key_shared_id, recorded_by)
     )
 
     # Also mark the original key_id as valid since we now have it
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (original_key_id, recorded_by)
     )
@@ -195,12 +201,13 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
     log.info(f"key_shared.share_key_with_group_members() key={key_id}, group={group_id}")
 
     # Get all members of the group (excluding self)
-    members = db.query(
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    members = safedb.query(
         """SELECT DISTINCT u.peer_id
            FROM group_members gm
-           JOIN users u ON gm.user_id = u.user_id
-           WHERE gm.group_id = ? AND u.peer_id != ?""",
-        (group_id, peer_shared_id)
+           JOIN users u ON gm.user_id = u.user_id AND u.recorded_by = gm.recorded_by
+           WHERE gm.group_id = ? AND u.peer_id != ? AND gm.recorded_by = ?""",
+        (group_id, peer_shared_id, peer_id)
     )
 
     key_shared_ids = []

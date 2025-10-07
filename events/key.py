@@ -4,6 +4,7 @@ import json
 import logging
 import crypto
 import store
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +49,9 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     event_data = crypto.parse_json(blob)
 
     # Insert into keys table (local-only, not shareable)
-    db.execute(
+    unsafedb = create_unsafe_db(db)
+    log.debug(f"key.project() inserting key_id={key_id} into keys table")
+    unsafedb.execute(
         """INSERT OR IGNORE INTO keys (key_id, key, created_at)
            VALUES (?, ?, ?)""",
         (
@@ -59,13 +62,14 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     )
 
     # Track key ownership for routing
-    db.execute(
+    unsafedb.execute(
         "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
         (key_id, recorded_by, event_data['created_at'])
     )
 
     # Mark as valid for this peer
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (key_id, recorded_by)
     )
@@ -95,7 +99,8 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
     key_id = crypto.b64encode(id_bytes)
 
     # First try symmetric keys table (no ownership check - keys are global)
-    row = db.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
+    unsafedb = create_unsafe_db(db)
+    row = unsafedb.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
     if row:
         return {
             'id': id_bytes,
@@ -103,13 +108,13 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
             'type': 'symmetric'
         }
 
-    # Then try asymmetric keys from local_prekeys (with ownership filter)
+    # Then try asymmetric keys from prekeys (with ownership filter)
     # The hint (key_id) might be either:
     # 1. A peer_id (for peer prekeys) - query by owner_peer_id
     # 2. A prekey_id (for invite prekeys) - query by prekey_id
     # Check ownership: only return key if recorded_by owns it
-    prekey_row = db.query_one(
-        "SELECT private_key, owner_peer_id FROM local_prekeys WHERE prekey_id = ? OR owner_peer_id = ? LIMIT 1",
+    prekey_row = unsafedb.query_one(
+        "SELECT private_key, owner_peer_id FROM prekeys WHERE prekey_id = ? OR owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (key_id, key_id)
     )
     if prekey_row and prekey_row['private_key'] and prekey_row['owner_peer_id'] == recorded_by:
@@ -121,7 +126,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     # Finally, try main peer private key from local_peers (with ownership filter)
     # The hint (key_id) is the peer_id, so check if it matches recorded_by
-    peer_row = db.query_one(
+    peer_row = unsafedb.query_one(
         "SELECT private_key FROM local_peers WHERE peer_id = ?",
         (key_id,)
     )
@@ -154,7 +159,8 @@ def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     Raises:
         ValueError: If key not found in keys table
     """
-    row = db.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
+    unsafedb = create_unsafe_db(db)
+    row = unsafedb.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
     if not row:
         raise ValueError(f"key not found: {key_id}")
 
@@ -186,7 +192,8 @@ def get_peer_ids_for_key(key_id: str, db: Any) -> list[str]:
     """
     # First check key_ownership table for symmetric key routing
     # Supports multiple local peers having the same symmetric key
-    ownership_rows = db.query(
+    unsafedb = create_unsafe_db(db)
+    ownership_rows = unsafedb.query(
         "SELECT peer_id FROM key_ownership WHERE key_id = ?",
         (key_id,)
     )
@@ -195,7 +202,7 @@ def get_peer_ids_for_key(key_id: str, db: Any) -> list[str]:
 
     # If not found in store, check if this key_id IS a peer_id (for asymmetric prekeys)
     # Prekey-wrapped blobs use peer_id as the hint
-    peer_row = db.query_one("SELECT peer_id FROM local_peers WHERE peer_id = ?", (key_id,))
+    peer_row = unsafedb.query_one("SELECT peer_id FROM local_peers WHERE peer_id = ?", (key_id,))
     if peer_row:
         return [peer_row['peer_id']]
 

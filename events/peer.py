@@ -4,6 +4,7 @@ import json
 import logging
 import crypto
 import store
+from db import create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +17,8 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     from events import peer_shared
 
     log.info(f"peer.create() creating new peer at t_ms={t_ms}")
+
+    unsafedb = create_unsafe_db(db)
 
     # Generate keypair
     private_key, public_key = crypto.generate_keypair()
@@ -31,7 +34,7 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     blob = json.dumps(event_data).encode()
 
     # First store the blob to get the peer_id
-    peer_id = store.blob(blob, t_ms, return_dupes=True, db=db)
+    peer_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
     log.info(f"peer.create() generated peer_id={peer_id}")
 
     # Then create recorded wrapper where peer sees itself
@@ -50,8 +53,12 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
     """Project peer event into peers table (for local peers, both IDs are the same)."""
     log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get blob from store
-    blob = store.get(peer_id, db)
+    blob = store.get(peer_id, unsafedb)
     if not blob:
         log.warning(f"peer.project() blob not found for peer_id={peer_id}")
         return
@@ -60,7 +67,7 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
     event_data = crypto.parse_json(blob)
 
     # Insert into local_peers table (local-only, not shareable)
-    db.execute(
+    unsafedb.execute(
         """INSERT OR IGNORE INTO local_peers (peer_id, public_key, private_key, created_at)
            VALUES (?, ?, ?, ?)""",
         (
@@ -72,7 +79,7 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
     )
 
     # Mark as valid for this peer
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (peer_id, recorded_by)
     )
@@ -98,7 +105,8 @@ def get_private_key(peer_id: str, recorded_by: str, db: Any) -> bytes:
     if peer_id != recorded_by:
         raise ValueError(f"access denied: peer {recorded_by} cannot access private key for peer {peer_id}")
 
-    row = db.query_one("SELECT private_key FROM local_peers WHERE peer_id = ?", (peer_id,))
+    unsafedb = create_unsafe_db(db)
+    row = unsafedb.query_one("SELECT private_key FROM local_peers WHERE peer_id = ?", (peer_id,))
     if not row:
         raise ValueError(f"peer not found: {peer_id}")
     return row['private_key']
@@ -123,7 +131,8 @@ def get_public_key(peer_id: str, recorded_by: str, db: Any) -> bytes:
     if peer_id != recorded_by:
         raise ValueError(f"access denied: peer {recorded_by} cannot access local peer public key for peer {peer_id}")
 
-    row = db.query_one("SELECT public_key FROM local_peers WHERE peer_id = ?", (peer_id,))
+    unsafedb = create_unsafe_db(db)
+    row = unsafedb.query_one("SELECT public_key FROM local_peers WHERE peer_id = ?", (peer_id,))
     if not row:
         raise ValueError(f"peer not found: {peer_id}")
     # public_key is stored as base64 string in the table

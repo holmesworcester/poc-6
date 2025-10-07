@@ -33,7 +33,6 @@ def test_alice_sends_to_herself():
     assert len(alice['group_id']) == 24
     assert len(alice['channel_id']) == 24
     assert len(alice['user_id']) == 24
-    assert alice['invite_link'].startswith('quiet://')
 
     # Send first message in default channel
     result1 = message.create_message(

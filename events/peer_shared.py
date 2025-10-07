@@ -5,6 +5,7 @@ import logging
 import crypto
 import store
 from events import peer
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +39,11 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     """Project peer_shared event into peers_shared and shareable_events tables."""
     log.debug(f"peer_shared.project() projecting peer_shared_id={peer_shared_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get blob from store
-    blob = store.get(peer_shared_id, db)
+    blob = store.get(peer_shared_id, unsafedb)
     if not blob:
         log.warning(f"peer_shared.project() blob not found for peer_shared_id={peer_shared_id}")
         return None
@@ -48,7 +52,7 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     event_data = crypto.parse_json(blob)
 
     # Insert into peers_shared table
-    db.execute(
+    safedb.execute(
         """INSERT OR IGNORE INTO peers_shared
            (peer_shared_id, public_key, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?)""",
@@ -62,7 +66,7 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     )
 
     # Mark as valid for this peer
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (peer_shared_id, recorded_by)
     )
@@ -72,7 +76,8 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
 def get_public_key(peer_shared_id: str, recorded_by: str, db: Any) -> bytes:
     """Get public key for a peer_shared_id from the perspective of recorded_by."""
-    row = db.query_one(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
         "SELECT public_key FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, recorded_by)
     )
@@ -96,8 +101,10 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
     Raises:
         ValueError: If peer_shared not found or peer doesn't have access
     """
+    unsafedb = create_unsafe_db(db)
+
     # Get the event blob
-    blob = store.get(peer_shared_id, db)
+    blob = store.get(peer_shared_id, unsafedb)
     if not blob:
         raise ValueError(f"peer_shared not found: {peer_shared_id}")
 

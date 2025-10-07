@@ -5,6 +5,7 @@ import json
 import crypto
 import store
 from events import key, peer
+from db import create_safe_db, create_unsafe_db
 
 
 def create(inviter_peer_id: str, inviter_peer_shared_id: str,
@@ -37,11 +38,13 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # This allows key_shared to wrap to it like any other peer's prekey
     invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key, size=16))
 
-    # Insert invite public key into pre_keys table so key_shared can find it immediately
+    # Insert invite public key into prekeys_shared table so key_shared can find it immediately
     # (Also restored via invite.project() for reprojection)
-    db.execute(
-        "INSERT OR REPLACE INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (invite_prekey_id, invite_public_key, t_ms)
+    unsafedb = create_unsafe_db(db)
+    safedb_prekey = create_safe_db(db, recorded_by=inviter_peer_id)
+    safedb_prekey.execute(
+        "INSERT OR REPLACE INTO prekeys_shared (peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
+        (invite_prekey_id, invite_public_key, t_ms, inviter_peer_id, t_ms)
     )
 
     # Generate invite-scoped key_secret for initial event encryption
@@ -54,22 +57,22 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
 
     # Store invite key_secret in keys table for immediate use
     # (Also restored via invite.project() for reprojection)
-    db.execute(
+    unsafedb.execute(
         "INSERT OR REPLACE INTO keys (key_id, key, created_at) VALUES (?, ?, ?)",
         (invite_key_id, invite_key_secret, t_ms)
     )
 
     # Track key ownership for routing (supports multiple local peers with same key)
     # (Also restored via invite.project() for reprojection)
-    db.execute(
+    unsafedb.execute(
         "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
         (invite_key_id, inviter_peer_id, t_ms)
     )
 
     # Get inviter's prekey for Bob to send sync requests
-    # Check if this peer has a prekey registered (query from local_prekeys)
-    inviter_prekey_row = db.query_one(
-        "SELECT prekey_id FROM local_prekeys WHERE owner_peer_id = ? LIMIT 1",
+    # Check if this peer has a prekey registered (query from prekeys)
+    inviter_prekey_row = unsafedb.query_one(
+        "SELECT prekey_id FROM prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (inviter_peer_id,)
     )
     # inviter_prekey_id is the peer_id (pre_keys table maps peer_id -> public_key)
@@ -158,26 +161,30 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     created_by = event_data['created_by']
 
     # Insert into invites table
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
+    safedb.execute(
         """INSERT OR IGNORE INTO invites
-           (invite_id, invite_pubkey, group_id, inviter_id, created_at)
-           VALUES (?, ?, ?, ?, ?)""",
+           (invite_id, invite_pubkey, group_id, inviter_id, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             invite_id,
             event_data['invite_pubkey'],
             event_data['group_id'],
             created_by,  # Use created_by (inviter's peer_shared_id)
-            event_data['created_at']
+            event_data['created_at'],
+            recorded_by,
+            recorded_at
         )
     )
 
-    # Restore invite prekey to pre_keys table (needed for invite_key_shared.project())
+    # Restore invite prekey to prekeys_shared table (needed for invite_key_shared.project())
     # The invite prekey is a pseudo-prekey used for wrapping the invite_key_shared event
     invite_pubkey_bytes = crypto.b64decode(event_data['invite_pubkey'])
     invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey_bytes, size=16))
-    db.execute(
-        "INSERT OR REPLACE INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (invite_prekey_id, invite_pubkey_bytes, event_data['created_at'])
+    safedb.execute(
+        "INSERT OR REPLACE INTO prekeys_shared (peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
+        (invite_prekey_id, invite_pubkey_bytes, event_data['created_at'], recorded_by, recorded_at)
     )
 
     # Restore invite_key_secret for event-sourcing (Alice needs this to unwrap Bob's bootstrap events)
@@ -186,14 +193,14 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
         invite_key_id = crypto.b64encode(invite_key_id_bytes)
 
-        db.execute(
+        unsafedb.execute(
             "INSERT OR REPLACE INTO keys (key_id, key, created_at) VALUES (?, ?, ?)",
             (invite_key_id, invite_key_secret, event_data['created_at'])
         )
 
         # Track key ownership for routing (supports multiple local peers with same key)
         # INSERT OR IGNORE is safe for reprojection - idempotent
-        db.execute(
+        unsafedb.execute(
             "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
             (invite_key_id, recorded_by, event_data['created_at'])
         )

@@ -4,6 +4,7 @@ import json
 import logging
 import crypto
 import store
+from db import create_unsafe_db, create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +39,10 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 
     blob = json.dumps(event_data).encode()
 
+    unsafedb = create_unsafe_db(db)
+
     # Store the blob to get prekey_id
-    prekey_id = store.blob(blob, t_ms, return_dupes=True, db=db)
+    prekey_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
     log.info(f"prekey.create() generated prekey_id={prekey_id}")
 
     # Create recorded wrapper where peer sees itself
@@ -51,12 +54,15 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return prekey_id, prekey_private
 
 
-def project(prekey_id: str, recorded_by: str, db: Any) -> None:
+def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project prekey event into local_prekeys table with owner_peer_id."""
     log.info(f"prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get blob from store
-    blob = store.get(prekey_id, db)
+    blob = store.get(prekey_id, unsafedb)
     if not blob:
         log.warning(f"prekey.project() blob not found for prekey_id={prekey_id}")
         return
@@ -65,25 +71,23 @@ def project(prekey_id: str, recorded_by: str, db: Any) -> None:
     event_data = crypto.parse_json(blob)
     owner_peer_id = event_data['peer_id']
 
-    # Delete old prekeys for this owner (keep only one active prekey per peer)
-    db.execute("DELETE FROM local_prekeys WHERE owner_peer_id = ?", (owner_peer_id,))
-
-    # Insert into local_prekeys table with owner
-    db.execute(
-        "INSERT INTO local_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+    # Insert into prekeys table with owner (append-only, keep all prekeys)
+    # Queries will use ORDER BY created_at DESC LIMIT 1 to get most recent
+    unsafedb.execute(
+        "INSERT OR IGNORE INTO prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
         (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
          crypto.b64decode(event_data['private_key']), event_data['created_at'])
     )
 
-    # Insert into pre_keys table with public key (for others to encrypt sync requests)
-    # Use owner_peer_id as the identifier (pre_keys maps peer_id -> public_key)
-    db.execute(
-        "INSERT OR REPLACE INTO pre_keys (peer_id, public_key, created_at) VALUES (?, ?, ?)",
-        (owner_peer_id, crypto.b64decode(event_data['public_key']), event_data['created_at'])
+    # Insert into prekeys_shared table with public key (for others to encrypt sync requests)
+    # Append-only for convergence (queries use ORDER BY created_at DESC LIMIT 1)
+    safedb.execute(
+        "INSERT OR IGNORE INTO prekeys_shared (peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
+        (owner_peer_id, crypto.b64decode(event_data['public_key']), event_data['created_at'], recorded_by, recorded_at)
     )
 
     # Mark as valid for this peer
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (prekey_id, recorded_by)
     )
@@ -105,7 +109,11 @@ def get_transit_prekey_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict
         Key dict with format {'id': bytes, 'public_key': bytes, 'type': 'asymmetric'}
         or None if prekey not found
     """
-    result = db.query_one("SELECT public_key FROM pre_keys WHERE peer_id = ?", (peer_id,))
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    result = safedb.query_one(
+        "SELECT public_key FROM prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        (peer_id, recorded_by)
+    )
     if not result:
         return None
 

@@ -4,6 +4,7 @@ import logging
 import crypto
 import store
 from events import group, peer
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,9 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     # Get latest messages
     latest = list_messages(channel_id, peer_id, db)
 
-    db.commit()
+    # Commit through unsafedb (commit is device-wide, not peer-scoped)
+    unsafedb = create_unsafe_db(db)
+    unsafedb.commit()
 
     return {
         'id': event_id,
@@ -67,7 +70,8 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
 
 def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer."""
-    messages = db.query(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    messages = safedb.query(
         "SELECT * FROM messages WHERE channel_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 50",
         (channel_id, recorded_by)
     )
@@ -79,8 +83,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     import json
     log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get and unwrap event
-    event_blob = store.get(event_id, db)
+    event_blob = store.get(event_id, unsafedb)
     if not event_blob:
         log.warning(f"message.project() blob not found for message_id={event_id}")
         return None
@@ -109,7 +116,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     created_at = event_data.get('created_at')
 
     # Insert into messages table with peer and timestamp from recorded
-    db.execute(
+    safedb.execute(
         """INSERT OR IGNORE INTO messages
            (message_id, channel_id, group_id, author_id, content, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",

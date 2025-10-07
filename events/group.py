@@ -5,6 +5,7 @@ import logging
 import crypto
 import store
 from events import key, peer
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +53,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     """Project group event into groups table and shareable_events table."""
     log.debug(f"group.project() projecting group_id={event_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get blob from store
-    blob = store.get(event_id, db)
+    blob = store.get(event_id, unsafedb)
     if not blob:
         log.warning(f"group.project() blob not found for group_id={event_id}")
         return None
@@ -76,7 +80,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         return None  # Reject unsigned or invalid signature
 
     # Insert into groups table (use REPLACE to overwrite stubs from user.project())
-    db.execute(
+    safedb.execute(
         """INSERT OR REPLACE INTO groups
            (group_id, name, created_by, created_at, key_id, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -108,8 +112,10 @@ def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     Raises:
         ValueError: If group not found or peer doesn't have access
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Query groups table for key_id, verifying peer has access
-    row = db.query_one(
+    row = safedb.query_one(
         "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
         (group_id, recorded_by)
     )
@@ -122,7 +128,8 @@ def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
 
 def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all groups for a specific peer."""
-    return db.query(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query(
         "SELECT group_id, name, created_by, created_at FROM groups WHERE recorded_by = ? ORDER BY created_at DESC",
         (recorded_by,)
     )

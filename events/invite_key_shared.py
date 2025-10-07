@@ -4,6 +4,7 @@ import logging
 import crypto
 import store
 from events import peer, key
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -92,14 +93,16 @@ def project(invite_key_shared_id: str, recorded_by: str, recorded_at: int, db: A
         hint_bytes = key.extract_id(blob)
         hint_id = crypto.b64encode(hint_bytes)
 
-        invite_prekey = db.query_one("SELECT peer_id FROM pre_keys WHERE peer_id = ?", (hint_id,))
+        unsafedb = create_unsafe_db(db)
+        invite_prekey = unsafedb.query_one("SELECT peer_id FROM pre_keys WHERE peer_id = ?", (hint_id,))
         if invite_prekey:
             # This is expected - creator can't decrypt invite_key_shared events
             # Mark as shareable and valid anyway so recipient can receive it
             log.info(f"invite_key_shared.project() creator can't decrypt (expected), marking shareable")
             # Will be marked shareable by centralized logic in recorded.py
             # Just mark as valid here
-            db.execute(
+            safedb = create_safe_db(db, recorded_by=recorded_by)
+            safedb.execute(
                 "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
                 (invite_key_shared_id, recorded_by)
             )
@@ -123,7 +126,8 @@ def project(invite_key_shared_id: str, recorded_by: str, recorded_at: int, db: A
     original_key_id = event_data['key_id']
     symmetric_key = crypto.b64decode(event_data['symmetric_key'])
 
-    db.execute(
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute(
         """INSERT OR IGNORE INTO keys (key_id, key, created_at)
            VALUES (?, ?, ?)""",
         (
@@ -134,7 +138,7 @@ def project(invite_key_shared_id: str, recorded_by: str, recorded_at: int, db: A
     )
 
     # Track key ownership for routing (invitee now has this key)
-    db.execute(
+    unsafedb.execute(
         "INSERT OR IGNORE INTO key_ownership (key_id, peer_id, created_at) VALUES (?, ?, ?)",
         (original_key_id, recorded_by, event_data['created_at'])
     )
@@ -143,7 +147,8 @@ def project(invite_key_shared_id: str, recorded_by: str, recorded_at: int, db: A
 
     # Track this in invite_keys_shared table
     log.info(f">>> INSERTING into invite_keys_shared: event={invite_key_shared_id[:20]}..., seen_by={recorded_by[:20]}..., recipient={event_data['recipient_invite_prekey_id'][:20]}...")
-    db.execute(
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
         """INSERT OR IGNORE INTO invite_keys_shared
            (invite_key_shared_id, original_key_id, created_by, created_at,
             recipient_invite_prekey_id, recorded_by, recorded_at)
@@ -160,13 +165,13 @@ def project(invite_key_shared_id: str, recorded_by: str, recorded_at: int, db: A
     )
 
     # Log if insert actually happened
-    if db.changes() > 0:
+    if safedb.changes() > 0:
         log.info(f">>> Row INSERTED (new row)")
     else:
         log.info(f">>> Row IGNORED (duplicate)")
 
     # Mark the original key_id as valid since we now have it
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (original_key_id, recorded_by)
     )

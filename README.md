@@ -4,12 +4,36 @@
 
 # TODO:
 
-- 
-- get check for deps out of crypto unwrap. 
+- make group-member depend on the group-member of the person adding, so that missing deps will block and we can rely on our projections to be queryable synchronously. (and think about this.) --and generally review group-member and group events.
+- make a safedb way to query blobs e.g. in channel.py
+- reduce the number of non-subjective tables and events (break out transit keys/prekeys from group keys e.g.)
+- try to use unsafedb as rarely as possible 
+- have a look at invite key and prekey creation to make sure it makes sense
+- is there anywhere i should *not* be using INSERT OR IGNORE? 
+- get check for deps out of crypto unwrap.
 - ongoing group encryption, adding members
 - deletion
 - removal
-- files 
+- files
+
+# Testing
+
+Run all tests:
+```bash
+./run_tests.sh
+```
+
+Run specific test file:
+```bash
+./run_tests.sh tests/test_safe_scoping.py
+```
+
+Run tests matching a pattern:
+```bash
+./run_tests.sh -k test_peer_isolation
+```
+
+**For LLMs:** Always use `./run_tests.sh` to run tests for consistency.
 
 # Quiet Protocol Proof of Concept #6
 

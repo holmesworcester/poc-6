@@ -2,6 +2,7 @@
 from typing import Any
 import json
 import logging
+from db import UnsafeDB, SafeDB
 
 log = logging.getLogger(__name__)
 
@@ -12,17 +13,17 @@ class incoming:
     """Queue for incoming transit blobs."""
 
     @staticmethod
-    def add(blob: bytes, t_ms: int, db: Any) -> None:
+    def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB) -> None:
         """Add an incoming transit blob to the queue."""
         log.debug(f"queues.incoming.add() adding blob size={len(blob)}B, t_ms={t_ms}")
-        db.execute("INSERT INTO incoming_blobs (blob, sent_at) VALUES (?, ?)", (blob, t_ms))
+        unsafedb.execute("INSERT INTO incoming_blobs (blob, sent_at) VALUES (?, ?)", (blob, t_ms))
 
     @staticmethod
-    def drain(batch_size: int, db: Any) -> list[bytes]:
+    def drain(batch_size: int, unsafedb: UnsafeDB) -> list[bytes]:
         """Drain (select and delete) incoming transit blobs up to batch_size."""
         log.debug(f"queues.incoming.drain() draining up to {batch_size} blobs")
-        blobs = db.query("SELECT blob FROM incoming_blobs LIMIT ?", (batch_size,))
-        db.execute("DELETE FROM incoming_blobs WHERE id IN (SELECT id FROM incoming_blobs LIMIT ?)", (batch_size,))
+        blobs = unsafedb.query("SELECT blob FROM incoming_blobs LIMIT ?", (batch_size,))
+        unsafedb.execute("DELETE FROM incoming_blobs WHERE id IN (SELECT id FROM incoming_blobs LIMIT ?)", (batch_size,))
         result = [row['blob'] for row in blobs]
         log.info(f"queues.incoming.drain() drained {len(result)} blobs")
         return result
@@ -34,47 +35,48 @@ class blocked:
     """Queue for events blocked on missing dependencies."""
 
     @staticmethod
-    def add(recorded_id: str, recorded_by: str, missing_deps: list[str], db: Any) -> None:
+    def add(recorded_id: str, recorded_by: str, missing_deps: list[str], safedb: SafeDB) -> None:
         """Block recorded_id for recorded_by until missing_deps are satisfied (blob already in store)."""
         if not missing_deps:
             return
 
         log.warning(f"queues.blocked.add() blocking recorded_id={recorded_id}, peer={recorded_by}, missing_deps={missing_deps}")
 
-        # Count dependencies for Kahn's algorithm
-        deps_remaining = len(missing_deps)
+        # Deduplicate dependencies before counting (INSERT OR IGNORE dedupes, so count must match)
+        missing_deps_unique = list(set(missing_deps))
+        deps_remaining = len(missing_deps_unique)
 
         # Store blocked event with dependency counter
-        db.execute(
+        safedb.execute(
             """INSERT OR REPLACE INTO blocked_events_ephemeral (recorded_id, recorded_by, missing_deps, deps_remaining)
                VALUES (?, ?, ?, ?)""",
-            (recorded_id, recorded_by, json.dumps(missing_deps), deps_remaining)
+            (recorded_id, recorded_by, json.dumps(missing_deps_unique), deps_remaining)
         )
 
         # Clear and re-insert dependency tracking
-        db.execute(
+        safedb.execute(
             "DELETE FROM blocked_event_deps_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
             (recorded_id, recorded_by)
         )
 
-        for dep_id in missing_deps:
-            db.execute(
+        for dep_id in missing_deps_unique:
+            safedb.execute(
                 """INSERT OR IGNORE INTO blocked_event_deps_ephemeral (recorded_id, recorded_by, dep_id)
                    VALUES (?, ?, ?)""",
                 (recorded_id, recorded_by, dep_id)
             )
 
-        db.commit()
+        safedb.commit()
 
     @staticmethod
-    def process(recorded_by: str, db: Any) -> list[str]:
+    def process(recorded_by: str, safedb: SafeDB) -> list[str]:
         """Unblock events for peer where all deps now satisfied. Returns recorded_ids to re-project."""
         log.debug(f"queues.blocked.process() checking blocked events for peer={recorded_by}")
 
         unblocked = []
 
         # Get all blocked events for this peer
-        blocked_rows = db.query(
+        blocked_rows = safedb.query(
             "SELECT recorded_id FROM blocked_events_ephemeral WHERE recorded_by = ?",
             (recorded_by,)
         )
@@ -85,37 +87,37 @@ class blocked:
             recorded_id = row['recorded_id']
 
             # Check if all deps are now satisfied
-            if blocked._all_deps_satisfied(recorded_id, recorded_by, db):
+            if blocked._all_deps_satisfied(recorded_id, recorded_by, safedb):
                 log.info(f"queues.blocked.process() UNBLOCKING recorded_id={recorded_id}, peer={recorded_by}")
                 unblocked.append(recorded_id)
 
                 # Remove from blocked tables
-                db.execute(
+                safedb.execute(
                     "DELETE FROM blocked_events_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
                     (recorded_id, recorded_by)
                 )
                 # blocked_event_deps_ephemeral will be cascade deleted
 
         if unblocked:
-            db.commit()
+            safedb.commit()
             log.info(f"queues.blocked.process() unblocked {len(unblocked)} events for peer={recorded_by}")
 
         return unblocked
 
     @staticmethod
-    def _all_deps_satisfied(recorded_id: str, recorded_by: str, db: Any) -> bool:
+    def _all_deps_satisfied(recorded_id: str, recorded_by: str, safedb: SafeDB) -> bool:
         """Check if all dependencies for a blocked event are now satisfied.
 
         Args:
             recorded_id: The blocked recorded event to check
             recorded_by: Which peer's view to check
-            db: Database connection
+            safedb: SafeDB scoped to recorded_by
 
         Returns:
             True if all deps are in valid_events for this peer
         """
         # Get all dependency IDs for this blocked event
-        dep_rows = db.query(
+        dep_rows = safedb.query(
             "SELECT dep_id FROM blocked_event_deps_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
             (recorded_id, recorded_by)
         )
@@ -126,7 +128,7 @@ class blocked:
             dep_id = dep_row['dep_id']
 
             # Check if this dep is valid for this peer
-            valid = db.query_one(
+            valid = safedb.query_one(
                 "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
                 (dep_id, recorded_by)
             )
@@ -139,13 +141,13 @@ class blocked:
         return True
 
     @staticmethod
-    def notify_event_valid(event_id: str, recorded_by: str, db: Any) -> list[str]:
+    def notify_event_valid(event_id: str, recorded_by: str, safedb: SafeDB) -> list[str]:
         """Notify that an event became valid - decrements counters and unblocks ready events (Kahn's algorithm).
 
         Args:
             event_id: The event that just became valid
             recorded_by: Which peer recorded this event
-            db: Database connection
+            safedb: SafeDB scoped to recorded_by
 
         Returns:
             List of recorded_ids that were unblocked and need re-projection
@@ -153,7 +155,7 @@ class blocked:
         log.debug(f"queues.blocked.notify_event_valid() event_id={event_id}, peer={recorded_by}")
 
         # Find all events waiting for this dependency (uses idx_blocked_deps_ephemeral_lookup)
-        waiting_events = db.query("""
+        waiting_events = safedb.query("""
             SELECT DISTINCT recorded_id, recorded_by
             FROM blocked_event_deps_ephemeral
             WHERE dep_id = ? AND recorded_by = ?
@@ -174,7 +176,7 @@ class blocked:
 
         try:
             # Try atomic UPDATE...RETURNING (SQLite 3.35+)
-            decremented = db.execute_returning(f"""
+            decremented = safedb.execute_returning(f"""
                 UPDATE blocked_events_ephemeral
                 SET deps_remaining = deps_remaining - 1
                 WHERE (recorded_id, recorded_by) IN (VALUES {placeholders})
@@ -189,14 +191,14 @@ class blocked:
             log.debug(f"queues.blocked.notify_event_valid() RETURNING failed, using fallback: {e}")
             unblocked = []
             for evt in waiting_events:
-                db.execute("""
+                safedb.execute("""
                     UPDATE blocked_events_ephemeral
                     SET deps_remaining = deps_remaining - 1
                     WHERE recorded_id = ? AND recorded_by = ?
                 """, (evt['recorded_id'], evt['recorded_by']))
 
                 # Check if it hit zero
-                result = db.query_one("""
+                result = safedb.query_one("""
                     SELECT deps_remaining FROM blocked_events_ephemeral
                     WHERE recorded_id = ? AND recorded_by = ?
                 """, (evt['recorded_id'], evt['recorded_by']))
@@ -210,11 +212,11 @@ class blocked:
 
             # Build DELETE with IN clause
             placeholders_del = ','.join(['?' for _ in unblocked])
-            db.execute(f"""
+            safedb.execute(f"""
                 DELETE FROM blocked_events_ephemeral
                 WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
             """, tuple(unblocked) + (recorded_by,))
 
-            db.commit()
+            safedb.commit()
 
         return unblocked

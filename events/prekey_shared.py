@@ -4,6 +4,7 @@ import logging
 import crypto
 import store
 from events import peer, key
+from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -72,8 +73,11 @@ def project(prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) 
     """Project prekey_shared event into pre_keys table and shareable_events."""
     log.info(f"prekey_shared.project() prekey_shared_id={prekey_shared_id}, seen_by={recorded_by}")
 
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get blob from store
-    blob = store.get(prekey_shared_id, db)
+    blob = store.get(prekey_shared_id, unsafedb)
     if not blob:
         log.warning(f"prekey_shared.project() blob not found for prekey_shared_id={prekey_shared_id}")
         return None
@@ -95,21 +99,23 @@ def project(prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) 
         log.warning(f"prekey_shared.project() signature verification failed for prekey_shared_id={prekey_shared_id}")
         return None
 
-    # Insert into pre_keys table
+    # Insert into prekeys_shared table
     prekey_public = crypto.b64decode(event_data['public_key'])
-    db.execute(
-        """INSERT OR IGNORE INTO pre_keys
-           (peer_id, public_key, created_at)
-           VALUES (?, ?, ?)""",
+    safedb.execute(
+        """INSERT OR IGNORE INTO prekeys_shared
+           (peer_id, public_key, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?)""",
         (
             event_data['peer_id'],
             prekey_public,
-            event_data['created_at']
+            event_data['created_at'],
+            recorded_by,
+            recorded_at
         )
     )
 
     # Mark as valid for this peer
-    db.execute(
+    safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (prekey_shared_id, recorded_by)
     )
