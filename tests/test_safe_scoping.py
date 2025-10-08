@@ -346,3 +346,74 @@ def test_no_direct_db_access():
             error_msg += f"\n... and {len(violations) - 20} more"
 
         pytest.fail(error_msg)
+
+
+def test_safedb_get_blob_enforces_scoping():
+    """SafeDB.get_blob() should only return blobs for events in valid_events."""
+    conn = sqlite3.Connection(":memory:")
+    db = Database(conn)
+    schema.create_all(db)
+
+    alice_id = 'alice_peer_id'
+    bob_id = 'bob_peer_id'
+
+    # Create some test blobs in store
+    import crypto
+    alice_blob = b'alice secret data'
+    bob_blob = b'bob secret data'
+
+    alice_event_id = crypto.b64encode(crypto.hash(alice_blob))
+    bob_event_id = crypto.b64encode(crypto.hash(bob_blob))
+
+    # Store blobs (device-wide)
+    db.execute("INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+               (crypto.b64decode(alice_event_id), alice_blob, 1000))
+    db.execute("INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+               (crypto.b64decode(bob_event_id), bob_blob, 2000))
+
+    # Mark Alice's event as valid for Alice only
+    db.execute("INSERT INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+               (alice_event_id, alice_id))
+
+    # Mark Bob's event as valid for Bob only
+    db.execute("INSERT INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+               (bob_event_id, bob_id))
+
+    db.commit()
+
+    alice_db = create_safe_db(db, recorded_by=alice_id)
+    bob_db = create_safe_db(db, recorded_by=bob_id)
+
+    # Alice can get her own blob
+    alice_result = alice_db.get_blob(alice_event_id)
+    assert alice_result == alice_blob
+
+    # Bob can get his own blob
+    bob_result = bob_db.get_blob(bob_event_id)
+    assert bob_result == bob_blob
+
+    # Alice CANNOT get Bob's blob (should raise ScopingViolation)
+    with pytest.raises(ScopingViolation, match="doesn't have access"):
+        alice_db.get_blob(bob_event_id)
+
+    # Bob CANNOT get Alice's blob (should raise ScopingViolation)
+    with pytest.raises(ScopingViolation, match="doesn't have access"):
+        bob_db.get_blob(alice_event_id)
+
+
+def test_safedb_get_blob_nonexistent_event():
+    """SafeDB.get_blob() should raise ScopingViolation for nonexistent events."""
+    conn = sqlite3.Connection(":memory:")
+    db = Database(conn)
+    schema.create_all(db)
+
+    alice_id = 'alice_peer_id'
+    alice_db = create_safe_db(db, recorded_by=alice_id)
+
+    # Try to get a blob that doesn't exist at all
+    # Use a valid base64 string that represents a non-existent event
+    import crypto
+    fake_event_id = crypto.b64encode(b'nonexistent_event_id_bytes')
+
+    with pytest.raises(ScopingViolation, match="doesn't have access"):
+        alice_db.get_blob(fake_event_id)

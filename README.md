@@ -5,7 +5,6 @@
 # TODO:
 
 - make group-member depend on the group-member of the person adding, so that missing deps will block and we can rely on our projections to be queryable synchronously. (and think about this.) --and generally review group-member and group events.
-- make a safedb way to query blobs e.g. in channel.py
 - reduce the number of non-subjective tables and events (break out transit keys/prekeys from group keys e.g.)
 - try to use unsafedb as rarely as possible 
 - have a look at invite key and prekey creation to make sure it makes sense

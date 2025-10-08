@@ -244,6 +244,42 @@ class SafeDB:
         self._validate_returned_rows(results, sql)
         return results
 
+    def get_blob(self, event_id: str) -> bytes:
+        """Get blob from store only if this peer has validated this event.
+
+        Joins store table with valid_events to enforce scoping.
+
+        Args:
+            event_id: The event ID (base64 encoded string)
+
+        Returns:
+            The blob bytes
+
+        Raises:
+            ScopingViolation: If this peer doesn't have access to this event
+        """
+        import crypto
+
+        # Decode event_id for store lookup
+        id_bytes = crypto.b64decode(event_id)
+
+        # Join store with valid_events to verify access
+        result = self._db.query_one("""
+            SELECT s.blob
+            FROM store s
+            INNER JOIN valid_events v
+              ON v.event_id = ? AND v.recorded_by = ?
+            WHERE s.id = ?
+        """, (event_id, self.recorded_by, id_bytes))
+
+        if result is None:
+            raise ScopingViolation(
+                f"SCOPING VIOLATION: Peer {self.recorded_by} doesn't have access to event {event_id}\n"
+                f"Event not found in valid_events for this peer."
+            )
+
+        return result['blob']
+
     def commit(self) -> None:
         """Commit the current transaction."""
         self._db.commit()
