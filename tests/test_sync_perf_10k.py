@@ -32,9 +32,21 @@ def test_sync_perf_10k():
     alice_group_id = alice['group_id']
     alice_channel_id = alice['channel_id']
 
+    # Alice creates an invite for Bob
+    from events import invite
+    invite_id, invite_link, invite_data = invite.create(
+        inviter_peer_id=alice['peer_id'],
+        inviter_peer_shared_id=alice['peer_shared_id'],
+        group_id=alice['group_id'],
+        channel_id=alice['channel_id'],
+        key_id=alice['key_id'],
+        t_ms=1500,
+        db=db
+    )
+
     # Bob joins Alice's network via invite
     log.info("Bob joining Alice's network...")
-    bob = user.join(invite_link=alice['invite_link'], name='Bob', t_ms=2000, db=db)
+    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     bob_peer_id = bob['peer_id']
     bob_peer_shared_id = bob['peer_shared_id']
     bob_user_id = bob['user_id']

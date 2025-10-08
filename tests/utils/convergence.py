@@ -251,15 +251,77 @@ def _recreate_projection_tables(db: Any) -> None:
 def _replay_events(event_ids: list[str], db: Any) -> None:
     """Replay recorded events in order. Event-driven unblocking happens automatically."""
     from events import recorded
+    import crypto
 
     # Project all events - unblocking happens automatically via notify_event_valid()
-    for event_id in event_ids:
+    for i, event_id in enumerate(event_ids):
+        # Log event type for debugging
+        try:
+            blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(event_id),))
+            if blob:
+                data = crypto.parse_json(blob['blob'])
+                event_type = data.get('type', 'unknown')
+                ref_id = data.get('ref_id', 'N/A') if event_type == 'recorded' else event_id
+                if event_type == 'recorded' and ref_id != 'N/A':
+                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                    if ref_blob:
+                        try:
+                            ref_data = crypto.parse_json(ref_blob['blob'])
+                            wrapped_type = ref_data.get('type', 'unknown')
+                            if i < 3 or i >= len(event_ids) - 3:  # Log first and last few TODO: understand this part
+                                print(f"  [{i+1}/{len(event_ids)}] Projecting {event_id[:12]}... (recorded→{wrapped_type})")
+                        except:
+                            if i < 3 or i >= len(event_ids) - 3:
+                                print(f"  [{i+1}/{len(event_ids)}] Projecting {event_id[:12]}... (recorded→encrypted)")
+        except:
+            pass
         recorded.project(event_id, db)
 
-    # Safety check: verify no events remain blocked (would indicate a bug)
+    # Safety check: verify no events remain blocked (would indicate a bug) TODO: fix this: sometimes it will be normal for events to remain blocked, but unblockable events should unblock naturally
     remaining = db.query("SELECT COUNT(*) as count FROM blocked_events_ephemeral")
     if remaining and remaining[0]['count'] > 0:
         print(f"⚠️  Warning: {remaining[0]['count']} events still blocked after replay")
+        blocked = db.query("SELECT recorded_id, recorded_by, missing_deps FROM blocked_events_ephemeral")
+        for b in blocked:
+            # Get event type for debugging
+            import crypto
+            import json
+            deps = json.loads(b['missing_deps'])
+            try:
+                blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(b['recorded_id']),))
+                if blob:
+                    try:
+                        data = crypto.parse_json(blob['blob'])
+                        event_type = data.get('type', 'unknown')
+                        if event_type == 'recorded':
+                            ref_id = data.get('ref_id', 'N/A')
+                            ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                            if ref_blob:
+                                try:
+                                    ref_data = crypto.parse_json(ref_blob['blob'])
+                                    wrapped_type = ref_data.get('type', 'unknown')
+                                    print(f"   - {b['recorded_id']} (recorded→{wrapped_type}) waiting for {len(deps)} deps:")
+                                except:
+                                    print(f"   - {b['recorded_id']} (recorded→encrypted) waiting for {len(deps)} deps:")
+                            else:
+                                print(f"   - {b['recorded_id']} (recorded→missing_ref) waiting for {len(deps)} deps:")
+                        else:
+                            print(f"   - {b['recorded_id']} ({event_type}) waiting for {len(deps)} deps:")
+                    except:
+                        print(f"   - {b['recorded_id']} (encrypted/unparseable) waiting for {len(deps)} deps:")
+                else:
+                    print(f"   - {b['recorded_id']} (not in store!) waiting for {len(deps)} deps:")
+
+                # Check each dependency
+                for dep_id in deps:
+                    dep_in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (crypto.b64decode(dep_id),))
+                    dep_is_valid = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (dep_id, b['recorded_by']))
+                    status = "✓valid" if dep_is_valid else ("in_store" if dep_in_store else "MISSING")
+                    print(f"      {dep_id}: {status}")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"   - {b['recorded_id']} (exception: {e}) waiting for: {b['missing_deps']}")
 
     db.commit()
 

@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 
 def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
            invite_id: str | None = None, invite_key_secret: bytes | None = None,
+           invite_key_id: str | None = None,
            invite_private_key: bytes | None = None,
            group_id: str | None = None, channel_id: str | None = None, key_id: str | None = None) -> tuple[str, str]:
     """Create a user event representing network membership.
@@ -18,7 +19,7 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     Also auto-creates a prekey for receiving sync requests.
 
     Two modes:
-    1. Invite joiner (Bob): Requires invite_id, invite_key_secret. Metadata from invite.
+    1. Invite joiner (Bob): Requires invite_id, invite_key_secret, invite_key_id. Metadata from invite.
     2. Network creator (Alice): Requires group_id, channel_id, key_id. No invite.
 
     Args:
@@ -28,7 +29,8 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         t_ms: Timestamp
         db: Database connection
         invite_id: Reference to invite event (for invite joiners)
-        invite_key_secret: Invite key bytes for wrapping (for invite joiners)
+        invite_key_secret: Invite group key bytes for wrapping (for invite joiners)
+        invite_key_id: Pre-computed key ID from Alice (for invite joiners)
         invite_private_key: Invite private key for proof (for invite joiners)
         group_id: Group ID (for network creators only)
         channel_id: Channel ID (for network creators only)
@@ -98,8 +100,11 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     # Wrap with appropriate key (invite key for joiners, network key for creators)
     canonical = crypto.canonicalize_json(signed_event)
     if invite_key_secret:
-        # Invite joiner - wrap with invite key
-        invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
+        # Invite joiner - wrap with invite key (use Alice's pre-computed ID if provided)
+        invite_key_id_bytes = crypto.b64decode(invite_key_id) if invite_key_id else crypto.hash(invite_key_secret, size=16)
+        import logging
+        log = logging.getLogger(__name__)
+        log.info(f"user.create() wrapping with invite_key_id={crypto.b64encode(invite_key_id_bytes) if invite_key_id else 'computed'}")
         invite_key_data = {
             'id': invite_key_id_bytes,
             'key': invite_key_secret,
@@ -128,8 +133,9 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     # For network creators, wrap with network key
     wrap_key_data_for_prekey = None
     if invite_key_secret:
-        # Build invite key data for wrapping prekey_shared
-        invite_key_id_bytes = crypto.hash(invite_key_secret, size=16)
+        # Build invite key data for wrapping prekey_shared (use Alice's pre-computed ID if provided)
+        invite_key_id_bytes = crypto.b64decode(invite_key_id) if invite_key_id else crypto.hash(invite_key_secret, size=16)
+        log.info(f"user.create() wrapping prekey_shared with invite_key_id={crypto.b64encode(invite_key_id_bytes) if invite_key_id else 'computed'}")
         wrap_key_data_for_prekey = {
             'id': invite_key_id_bytes,
             'key': invite_key_secret,
@@ -146,6 +152,27 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         db=db,
         wrap_key_data=wrap_key_data_for_prekey
     )
+
+    # Link prekey_shared_id to local prekey for lookups
+    import logging
+    link_log = logging.getLogger(__name__)
+    unsafedb = create_unsafe_db(db)
+    cursor = unsafedb.execute(
+        "UPDATE prekeys SET prekey_shared_id = ? WHERE prekey_id = ? AND owner_peer_id = ?",
+        (prekey_shared_id, prekey_id, peer_id)
+    )
+    rows_updated = cursor.rowcount if hasattr(cursor, 'rowcount') else 'unknown'
+    link_log.info(f"user.create() linked prekey_shared_id={prekey_shared_id} to prekey_id={prekey_id}, rows_updated={rows_updated}")
+
+    # Verify the update worked
+    verify_row = unsafedb.query_one(
+        "SELECT prekey_shared_id FROM prekeys WHERE prekey_id = ? AND owner_peer_id = ?",
+        (prekey_id, peer_id)
+    )
+    if verify_row and verify_row['prekey_shared_id']:
+        link_log.info(f"user.create() VERIFIED: prekey now has prekey_shared_id={verify_row['prekey_shared_id']}")
+    else:
+        link_log.error(f"user.create() VERIFICATION FAILED: prekey_shared_id not set for prekey_id={prekey_id}")
 
     return user_id, prekey_shared_id, prekey_id
 
@@ -311,7 +338,7 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
     """Send peer, user, address, prekey_shared events to invite address for bootstrap.
 
     Called repeatedly until sync is established (job pattern).
-    Uses invite key from invite_data for encryption.
+    Uses invite transit key from invite_data for outer encryption.
 
     SECURITY: This function trusts that peer_id is correct and owned by the caller.
     In production, the API authentication layer should validate that the authenticated session
@@ -323,40 +350,47 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
         peer_shared_id: Public peer ID
         user_id: User event ID
         prekey_shared_id: Prekey_shared event ID (shareable prekey)
-        invite_data: Decoded invite link data containing invite_key_secret, ip, port
+        invite_data: Decoded invite link data containing invite_transit_key_secret, ip, port
         t_ms: Timestamp
         db: Database connection
     """
     import queues
+    from db import create_unsafe_db
+
+    unsafedb = create_unsafe_db(db)
 
     # Get invite address from invite_data (parsed from link)
     invite_ip = invite_data.get('ip', '127.0.0.1')
     invite_port = invite_data.get('port', 6100)
-    invite_key_secret_hex = invite_data['invite_key_secret']
-    invite_key_secret = bytes.fromhex(invite_key_secret_hex)
+    invite_transit_key_secret = crypto.b64decode(invite_data['invite_transit_key'])
+    invite_transit_key_id = invite_data['invite_transit_key_id']  # Alice's pre-computed ID
 
-    # Create invite key dict for wrapping
-    invite_key = {
-        'id': crypto.hash(invite_key_secret, size=16),
-        'key': invite_key_secret,
+    # Create invite transit key dict for outer wrapping (use Alice's pre-computed ID)
+    import logging
+    log = logging.getLogger(__name__)
+    log.info(f"send_bootstrap_events() using invite_transit_key_id={invite_transit_key_id}")
+
+    invite_transit_key = {
+        'id': crypto.b64decode(invite_transit_key_id),
+        'key': invite_transit_key_secret,
         'type': 'symmetric'
     }
 
     # Get peer_shared blob
-    peer_shared_blob = store.get(peer_shared_id, db)
+    peer_shared_blob = store.get(peer_shared_id, unsafedb)
     if not peer_shared_blob:
         return  # Can't send if blob not found
 
-    # Wrap with invite key for transit
-    wrapped_peer = crypto.wrap(peer_shared_blob, invite_key, db)
+    # Wrap with invite transit key for outer encryption
+    wrapped_peer = crypto.wrap(peer_shared_blob, invite_transit_key, db)
 
     # Get user blob
-    user_blob = store.get(user_id, db)
+    user_blob = store.get(user_id, unsafedb)
     if not user_blob:
         return  # Can't send if blob not found
 
-    # Wrap with invite key for transit
-    wrapped_user = crypto.wrap(user_blob, invite_key, db)
+    # Wrap with invite transit key for outer encryption
+    wrapped_user = crypto.wrap(user_blob, invite_transit_key, db)
 
     # Create address event (plaintext, will be wrapped)
     # TODO: Get actual address from somewhere instead of hardcoding
@@ -372,40 +406,30 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_address = crypto.sign_event(address_data, private_key)
     canonical_address = crypto.canonicalize_json(signed_address)
-    wrapped_address = crypto.wrap(canonical_address, invite_key, db)
+    wrapped_address = crypto.wrap(canonical_address, invite_transit_key, db)
 
     # Get prekey_shared blob (created by user.create() auto-creation)
-    prekey_shared_blob = store.get(prekey_shared_id, db)
+    prekey_shared_blob = store.get(prekey_shared_id, unsafedb)
     if not prekey_shared_blob:
         return  # Can't send if blob not found
 
-    # Wrap with invite key for transit
-    wrapped_prekey_shared = crypto.wrap(prekey_shared_blob, invite_key, db)
-
-    # Get invite_key_shared blob if available (contains network key for joiner)
-    invite_key_shared_id = invite_data.get('invite_key_shared_id')
-    wrapped_invite_key_shared = None
-    if invite_key_shared_id:
-        invite_key_shared_blob = store.get(invite_key_shared_id, db)
-        if invite_key_shared_blob:
-            wrapped_invite_key_shared = crypto.wrap(invite_key_shared_blob, invite_key, db)
+    # Wrap with invite transit key for outer encryption
+    wrapped_prekey_shared = crypto.wrap(prekey_shared_blob, invite_transit_key, db)
 
     # Add all to incoming queue (simulates sending to invite address)
     queues.incoming.add(wrapped_peer, t_ms, db)
     queues.incoming.add(wrapped_user, t_ms, db)
     queues.incoming.add(wrapped_address, t_ms, db)
     queues.incoming.add(wrapped_prekey_shared, t_ms, db)
-    if wrapped_invite_key_shared:
-        queues.incoming.add(wrapped_invite_key_shared, t_ms, db)
 
     # Send sync request to inviter (Bob initiates sync with Alice)
     # This allows Alice to send her events back to Bob in the sync response
-    inviter_prekey_id = invite_data.get('inviter_prekey_id')
-    if inviter_prekey_id:
+    inviter_peer_shared_id = invite_data.get('inviter_peer_shared_id')
+    if inviter_peer_shared_id:
         from events import sync
-        # inviter_prekey_id is the inviter's peer_id
+        # inviter_peer_shared_id is the inviter's public identity
         sync.send_request(
-            to_peer_id=inviter_prekey_id,
+            to_peer_shared_id=inviter_peer_shared_id,
             from_peer_id=peer_id,
             from_peer_shared_id=peer_shared_id,
             t_ms=t_ms,
@@ -561,17 +585,29 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         (invite_id, peer_id)
     )
 
-    # Project invite immediately to restore invite_key_secret
+    # Project invite immediately to restore invite_key_secret and invite prekey to prekeys_shared
+    # The invite prekey is reconstructed from invite event data (doesn't require decryption)
     from events import invite
     invite.project(invite_id, peer_id, t_ms, db)
 
-    # Extract secrets from invite link
+    # Extract secrets from invite link (all b64 encoded)
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
-    invite_public_key = crypto.b64decode(invite_data['invite_public_key'])
-    invite_prekey_id = invite_data.get('invite_prekey_id')
-    invite_key_secret = bytes.fromhex(invite_data['invite_key_secret'])
 
-    # Parse invite to get metadata for return value (now in invite event)
+    # Extract keys and their pre-computed IDs from invite link
+    invite_transit_key = crypto.b64decode(invite_data['invite_transit_key'])
+    invite_transit_key_id = invite_data['invite_transit_key_id']  # Alice's pre-computed ID
+
+    invite_group_key = crypto.b64decode(invite_data['invite_group_key'])
+    invite_group_key_id = invite_data['invite_group_key_id']  # Alice's pre-computed ID
+
+    network_key = crypto.b64decode(invite_data['network_key'])
+    network_key_id = invite_data['network_key_id']  # Alice's pre-computed ID
+
+    log.info(f"join() extracted invite_transit_key_id={invite_transit_key_id} from invite link")
+    log.info(f"join() extracted invite_group_key_id={invite_group_key_id} from invite link")
+    log.info(f"join() extracted network_key_id={network_key_id} from invite link")
+
+    # Get metadata from invite event
     invite_event_data = crypto.parse_json(invite_blob)
     group_id = invite_event_data['group_id']
     channel_id = invite_event_data['channel_id']
@@ -586,11 +622,38 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         t_ms=t_ms + 1,
         db=db,
         invite_id=invite_id,
-        invite_key_secret=invite_key_secret,
+        invite_key_secret=invite_group_key,  # Inner encryption for bootstrap events
+        invite_key_id=invite_group_key_id,  # Alice's pre-computed ID
         invite_private_key=invite_private_key
     )
 
     log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
+
+    # Get invite_prekey_shared_id from projected invite event
+    invite_prekey_shared_id = invite_event_data.get('invite_prekey_shared_id')
+    if not invite_prekey_shared_id:
+        raise ValueError("invite_prekey_shared_id missing from invite event")
+
+    # Create invite_accepted event to capture ALL invite link data for event-sourcing
+    # This allows reprojection to work without the original invite link
+    from events import invite_accepted
+    invite_accepted_id = invite_accepted.create(
+        invite_id=invite_id,
+        invite_private_key=invite_private_key,
+        invite_prekey_shared_id=invite_prekey_shared_id,
+        invite_transit_key=invite_transit_key,
+        invite_transit_key_id=invite_transit_key_id,  # Alice's pre-computed ID
+        invite_group_key=invite_group_key,
+        invite_group_key_id=invite_group_key_id,  # Alice's pre-computed ID
+        network_key=network_key,
+        network_key_id=network_key_id,  # Alice's pre-computed ID
+        peer_id=peer_id,
+        t_ms=t_ms + 2,  # After user creation
+        db=db
+    )
+
+    # Add invite_transit_key_id to invite_data for send_bootstrap_events
+    invite_data['invite_transit_key_id'] = invite_transit_key_id
 
     return {
         'peer_id': peer_id,
@@ -602,4 +665,5 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'channel_id': channel_id,
         'key_id': key_id,
         'invite_data': invite_data,
+        'invite_accepted_id': invite_accepted_id,
     }

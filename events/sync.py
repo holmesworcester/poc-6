@@ -358,29 +358,27 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
         if ps_id == from_peer_shared_id:
             continue
 
-        # Get the peer_id from the peer_shared blob (for single-DB simulation)
-        try:
-            ps_blob = store.get(ps_id, db)
-            if not ps_blob:
-                continue
-            ps_data = crypto.parse_json(ps_blob)
-            to_peer_id = ps_data.get('peer_id')
-            if not to_peer_id:
-                continue
-            send_request(to_peer_id, from_peer_id, from_peer_shared_id, t_ms, db)
-        except Exception:
-            continue
+        # Use peer_shared_id directly for prekey lookup (public identity)
+        send_request(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
 
-def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send bloom-based sync request to peer for specific window."""
+def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
+    """Send bloom-based sync request to peer for specific window.
+
+    Args:
+        to_peer_shared_id: Recipient's peer_shared_id (public identity)
+        from_peer_id: Sender's local peer_id
+        from_peer_shared_id: Sender's peer_shared_id (public identity)
+        t_ms: Timestamp
+        db: Database connection
+    """
     import logging
     log = logging.getLogger(__name__)
 
     # Get next window to sync
-    window_id, w_param = get_next_window(from_peer_id, to_peer_id, t_ms, db)
-    log.info(f"send_request: from={from_peer_id[:10]}... to={to_peer_id[:10]}... window_id={window_id}, w_param={w_param}")
+    window_id, w_param = get_next_window(from_peer_id, to_peer_shared_id, t_ms, db)
+    log.info(f"send_request: from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}... window_id={window_id}, w_param={w_param}")
 
     # Convert storage window_ids to query window_ids for this w_param
     window_min = window_id << (STORAGE_W - w_param)
@@ -433,8 +431,8 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
     private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
     signed_request = crypto.sign_event(request_data, private_key)
 
-    # Wrap with recipient's prekey
-    to_key = prekey.get_transit_prekey_for_peer(to_peer_id, from_peer_id, db)
+    # Wrap with recipient's prekey (lookup by peer_shared_id)
+    to_key = prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
     canonical = crypto.canonicalize_json(signed_request)
     request_blob = crypto.wrap(canonical, to_key, db)
 
@@ -442,7 +440,7 @@ def send_request(to_peer_id: str, from_peer_id: str, from_peer_shared_id: str, t
     queues.incoming.add(request_blob, t_ms, db)
 
     # Mark window as synced (optimistically - in production might wait for response)
-    mark_window_synced(from_peer_id, to_peer_id, window_id, t_ms, db)
+    mark_window_synced(from_peer_id, to_peer_shared_id, window_id, t_ms, db)
 
 
 def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:

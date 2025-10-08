@@ -21,7 +21,7 @@ SUBJECTIVE_TABLES = {
     'groups',
     'channels',
     'keys_shared',
-    'invite_keys_shared',
+    'invite_acceptances',
     'users',
     'group_members',
     'group_members_wip',

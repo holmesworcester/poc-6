@@ -86,7 +86,7 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             (dep_id, recorded_by)
         )
         if not valid:
-            log.debug(f"recorded.check_deps() missing dep: {field}={dep_id} for peer={recorded_by}")
+            log.info(f"recorded.check_deps() missing dep: {field}={dep_id[:20]}... for peer={recorded_by[:20]}...")
             missing_deps.append(dep_id)
 
     if missing_deps:
@@ -194,11 +194,32 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
+    # EXCEPT: invite_key_shared events wrapped to invite prekeys - let them proceed to projection
+    is_invite_key_shared_wrapped_to_invite_prekey = False
     if missing_key_ids:
-        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
-        return [None, recorded_id]
+        # Check if this is an invite_key_shared event wrapped to an invite prekey
+        # These events can't be decrypted by the creator (expected), but should still be projected
+        if len(missing_key_ids) == 1:
+            from events import key
+            hint_bytes = key.extract_id(event_blob)
+            hint_id = crypto.b64encode(hint_bytes)
 
-    # If we got here without event_data, something went wrong
+            # Check if hint matches an invite prekey in prekeys_shared
+            # Hint is now prekey_shared_id (event ID) instead of peer_id
+            invite_prekey_row = safedb.query_one(
+                "SELECT public_key FROM prekeys_shared WHERE prekey_shared_id = ? AND recorded_by = ? LIMIT 1",
+                (hint_id, recorded_by)
+            )
+            if invite_prekey_row:
+                # This blob is wrapped to an invite prekey - let invite_key_shared.project() handle it
+                log.info(f"Event wrapped to invite prekey {hint_id[:20]}... - skipping crypto block")
+                is_invite_key_shared_wrapped_to_invite_prekey = True
+
+        if not is_invite_key_shared_wrapped_to_invite_prekey:
+            queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
+            return [None, recorded_id]
+
+    # If we got here without event_data, return early
     if not event_data:
         return [None, recorded_id]
 
@@ -264,9 +285,9 @@ def project(recorded_id: str, db: Any) -> list[str | None]:
     elif event_type == 'key_shared':
         from events import key_shared
         projected_id = key_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'invite_key_shared':
-        from events import invite_key_shared
-        projected_id = invite_key_shared.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'invite_accepted':
+        from events import invite_accepted
+        invite_accepted.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'group_member':
         from events import group_member
         projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)

@@ -79,12 +79,8 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
          crypto.b64decode(event_data['private_key']), event_data['created_at'])
     )
 
-    # Insert into prekeys_shared table with public key (for others to encrypt sync requests)
-    # Append-only for convergence (queries use ORDER BY created_at DESC LIMIT 1)
-    safedb.execute(
-        "INSERT OR IGNORE INTO prekeys_shared (peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
-        (owner_peer_id, crypto.b64decode(event_data['public_key']), event_data['created_at'], recorded_by, recorded_at)
-    )
+    # Note: prekeys_shared is populated by prekey_shared.project(), not here
+    # The prekey event is local-only; the prekey_shared event is shareable
 
     # Mark as valid for this peer
     safedb.execute(
@@ -93,35 +89,41 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
     )
 
 
-def get_transit_prekey_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get_transit_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get the transit pre-key for a specific peer in format expected by crypto.wrap().
 
-    Prekeys are public and meant to be shared for encryption, but we add recorded_by
-    for consistency with other access patterns. No strict access control is enforced since
-    prekeys are intentionally public for anyone to encrypt messages.
+    Prekeys are public and meant to be shared for encryption, indexed by peer_shared_id
+    (public identity) rather than local peer_id.
 
     Args:
-        peer_id: Peer ID to get prekey for
-        recorded_by: Peer ID requesting access (for logging/consistency, not enforced)
+        peer_shared_id: Peer's peer_shared_id (public identity) to get prekey for
+        recorded_by: Local peer_id requesting access (for subjective view)
         db: Database connection
 
     Returns:
         Key dict with format {'id': bytes, 'public_key': bytes, 'type': 'asymmetric'}
         or None if prekey not found
     """
+    import logging
+    lookup_log = logging.getLogger(__name__)
     safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    lookup_log.info(f"get_transit_prekey_for_peer() looking for prekey of peer_shared_id={peer_shared_id[:20]}..., requested_by={recorded_by[:20]}...")
     result = safedb.query_one(
-        "SELECT public_key FROM prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
-        (peer_id, recorded_by)
+        "SELECT prekey_shared_id, public_key FROM prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        (peer_shared_id, recorded_by)
     )
+
     if not result:
+        lookup_log.warning(f"get_transit_prekey_for_peer() NO PREKEY FOUND for peer_shared_id={peer_shared_id[:20]}...")
         return None
 
-    # Use peer_id as the hint/id for asymmetric keys
-    peer_id_bytes = crypto.b64decode(peer_id)
+    # Use prekey_shared_id as the hint/id for asymmetric keys
+    prekey_shared_id_bytes = crypto.b64decode(result['prekey_shared_id'])
+    lookup_log.info(f"get_transit_prekey_for_peer() FOUND prekey_shared_id={result['prekey_shared_id']} for peer_shared_id={peer_shared_id[:20]}...")
 
     return {
-        'id': peer_id_bytes,
+        'id': prekey_shared_id_bytes,
         'public_key': result['public_key'],
         'type': 'asymmetric'
     }

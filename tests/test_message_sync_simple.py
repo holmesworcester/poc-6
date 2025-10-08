@@ -13,7 +13,20 @@ def test_alice_bob_message_sync():
 
     # Setup
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    bob = user.join(invite_link=alice['invite_link'], name='Bob', t_ms=2000, db=db)
+
+    # Alice creates an invite for Bob
+    from events import invite
+    invite_id, invite_link, invite_data = invite.create(
+        inviter_peer_id=alice['peer_id'],
+        inviter_peer_shared_id=alice['peer_shared_id'],
+        group_id=alice['group_id'],
+        channel_id=alice['channel_id'],
+        key_id=alice['key_id'],
+        t_ms=1500,
+        db=db
+    )
+
+    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 
     # Bootstrap
     user.send_bootstrap_events(

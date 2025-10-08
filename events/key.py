@@ -35,6 +35,34 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     return key_id
 
 
+def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) -> str:
+    """Create key event with provided key material (for invite keys).
+
+    Args:
+        key_material: The symmetric key bytes
+        peer_id: Peer ID that owns this key
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Event ID (to use as hint when wrapping)
+    """
+    log.info(f"key.create_with_material() creating key for peer_id={peer_id}, t_ms={t_ms}")
+
+    event_data = {
+        'type': 'key',
+        'key': crypto.b64encode(key_material),
+        'peer_id': peer_id,
+        'created_at': t_ms
+    }
+
+    blob = json.dumps(event_data).encode()
+    key_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"key.create_with_material() created key_id={key_id}")
+    return key_id
+
+
 def project(key_id: str, recorded_by: str, db: Any) -> None:
     """Project key event into keys table and mark valid for owning peer."""
     log.debug(f"key.project() projecting key_id={key_id}, seen_by={recorded_by}")
@@ -49,6 +77,7 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     event_data = crypto.parse_json(blob)
 
     # Insert into keys table (local-only, not shareable)
+    # Store event ID as key_id for lookups
     unsafedb = create_unsafe_db(db)
     log.debug(f"key.project() inserting key_id={key_id} into keys table")
     unsafedb.execute(
@@ -89,7 +118,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
     """Get key from database by id bytes. Checks both symmetric keys and asymmetric prekeys.
 
     Args:
-        id_bytes: Key ID bytes (16 bytes)
+        id_bytes: Key ID bytes (16 bytes) - hint ID (hash of key material)
         recorded_by: Peer ID attempting to access this key (for ownership filtering)
         db: Database connection
 
@@ -98,45 +127,57 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
     """
     key_id = crypto.b64encode(id_bytes)
 
+    log.debug(f"get_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
+
     # First try symmetric keys table (no ownership check - keys are global)
+    # Direct lookup by event ID (hint is event ID, not hash of key material)
     unsafedb = create_unsafe_db(db)
     row = unsafedb.query_one("SELECT key FROM keys WHERE key_id = ?", (key_id,))
     if row:
+        log.debug(f"get_key_by_id() found symmetric key for key_id={key_id}")
         return {
             'id': id_bytes,
             'key': row['key'],
             'type': 'symmetric'
         }
 
+    log.debug(f"get_key_by_id() key_id={key_id} not found in keys table")
+
     # Then try asymmetric keys from prekeys (with ownership filter)
-    # The hint (key_id) might be either:
-    # 1. A peer_id (for peer prekeys) - query by owner_peer_id
-    # 2. A prekey_id (for invite prekeys) - query by prekey_id
-    # Check ownership: only return key if recorded_by owns it
+    # The hint (key_id) is now always a prekey_shared_id (event ID)
+    # Look up the private key by prekey_shared_id
+    log.debug(f"get_key_by_id() checking prekeys table for prekey_shared_id={key_id}, owner={recorded_by[:20]}...")
     prekey_row = unsafedb.query_one(
-        "SELECT private_key, owner_peer_id FROM prekeys WHERE prekey_id = ? OR owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
-        (key_id, key_id)
+        "SELECT private_key FROM prekeys WHERE prekey_shared_id = ? AND owner_peer_id = ? LIMIT 1",
+        (key_id, recorded_by)
     )
-    if prekey_row and prekey_row['private_key'] and prekey_row['owner_peer_id'] == recorded_by:
+    if prekey_row and prekey_row['private_key']:
+        log.debug(f"get_key_by_id() found prekey private key for prekey_shared_id={key_id}")
         return {
             'id': id_bytes,
             'private_key': prekey_row['private_key'],
             'type': 'asymmetric'
         }
 
+    log.debug(f"get_key_by_id() prekey not found for prekey_shared_id={key_id}")
+
     # Finally, try main peer private key from local_peers (with ownership filter)
     # The hint (key_id) is the peer_id, so check if it matches recorded_by
+    log.debug(f"get_key_by_id() checking local_peers for peer_id={key_id}")
     peer_row = unsafedb.query_one(
         "SELECT private_key FROM local_peers WHERE peer_id = ?",
         (key_id,)
     )
     if peer_row and peer_row['private_key'] and key_id == recorded_by:
+        log.debug(f"get_key_by_id() found peer private key for peer_id={key_id}")
         return {
             'id': id_bytes,
             'private_key': peer_row['private_key'],
             'type': 'asymmetric'
         }
 
+    log.debug(f"get_key_by_id() peer private key not found for peer_id={key_id}")
+    log.warning(f"get_key_by_id() NO KEY FOUND ANYWHERE for key_id={key_id}, recorded_by={recorded_by[:20]}...")
     return None
 
 
@@ -149,7 +190,7 @@ def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     get_key_by_id() via crypto.unwrap().
 
     Args:
-        key_id: Base64-encoded key ID
+        key_id: Base64-encoded key ID (event ID for regular keys)
         recorded_by: Peer ID requesting access (for logging, not enforced for wrapping)
         db: Database connection
 
@@ -164,9 +205,13 @@ def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     if not row:
         raise ValueError(f"key not found: {key_id}")
 
+    # Use event ID as hint (not hash of key material)
+    # The hint is prepended to wrapped blobs for lookup during unwrap
+    key_material = row['key']
+
     return {
-        'id': crypto.b64decode(key_id),  # Decode base64 key_id to bytes for use as blob prefix
-        'key': row['key'],  # Already bytes from DB
+        'id': crypto.b64decode(key_id),  # Event ID as hint (for blob prefix)
+        'key': key_material,  # Already bytes from DB
         'type': 'symmetric'
     }
 
@@ -200,11 +245,17 @@ def get_peer_ids_for_key(key_id: str, db: Any) -> list[str]:
     if ownership_rows:
         return [row['peer_id'] for row in ownership_rows]
 
-    # If not found in store, check if this key_id IS a peer_id (for asymmetric prekeys)
-    # Prekey-wrapped blobs use peer_id as the hint
-    peer_row = unsafedb.query_one("SELECT peer_id FROM local_peers WHERE peer_id = ?", (key_id,))
-    if peer_row:
-        return [peer_row['peer_id']]
+    # If not found in store, check if this key_id IS a prekey_shared_id (for asymmetric prekeys)
+    # Prekey-wrapped blobs use prekey_shared_id (event ID) as the hint
+    # Look up which local peer OWNS this prekey (has the private key)
+    # NOTE: Only the owner can decrypt blobs wrapped to this prekey
+    # Use raw connection to get cross-peer routing info (safe for routing)
+    prekey_owners = db._conn.execute(
+        "SELECT owner_peer_id FROM prekeys WHERE prekey_shared_id = ?",
+        (key_id,)
+    ).fetchall()
+    if prekey_owners:
+        return [row[0] for row in prekey_owners]
 
     return []
 

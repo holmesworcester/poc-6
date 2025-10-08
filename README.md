@@ -11,6 +11,7 @@
 - have a look at invite key and prekey creation to make sure it makes sense
 - is there anywhere i should *not* be using INSERT OR IGNORE?
 - user verification looks squirrelly in user.project ( # Verify signature in particular)
+- read through the convergence test and make sure it is simple and clear
 - get check for deps out of crypto unwrap.
 - ongoing group encryption, adding members
 - deletion
