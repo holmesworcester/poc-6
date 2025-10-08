@@ -583,9 +583,10 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
 
     # Send filtered events
     for event_id in events_to_send:
-        event_blob = store.get(event_id, db)
-        if not event_blob:
-            log.warning(f"send_response: event {event_id[:20]}... not found in store")
+        try:
+            event_blob = safedb.get_blob(event_id)
+        except Exception as e:
+            log.warning(f"send_response: failed to get blob for {event_id[:20]}...: {e}")
             continue
 
         # Log event type
