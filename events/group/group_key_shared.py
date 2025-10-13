@@ -67,6 +67,58 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     return key_shared_id
 
 
+def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
+                      recipient_prekey_dict: dict[str, Any], t_ms: int, db: Any) -> str:
+    """Create a shareable key_shared event sealed to an arbitrary prekey (for invites).
+
+    Unlike create(), this takes a prekey dict directly instead of looking up via peer_id.
+    Used when sharing network key via invite (sealed to invite prekey).
+
+    Args:
+        key_id: Local key event ID (symmetric key to share)
+        peer_id: Local peer ID (for signing)
+        peer_shared_id: Public peer ID (for created_by)
+        recipient_prekey_dict: Prekey dict with {id, public_key, type} for sealing
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        key_shared_id: The stored key_shared event ID
+    """
+    log.info(f"key_shared.create_for_invite() creating key_shared for key_id={key_id}, t_ms={t_ms}")
+
+    # Get symmetric key from local key event
+    key_blob = store.get(key_id, db)
+    if not key_blob:
+        raise ValueError(f"key not found: {key_id}")
+
+    key_data = crypto.parse_json(key_blob)
+    symmetric_key_b64 = key_data['key']
+
+    # Create inner event (use prekey id as recipient marker)
+    recipient_marker = crypto.b64encode(recipient_prekey_dict['id'])
+    inner_event_data = {
+        'type': 'key_shared',
+        'key_id': key_id,
+        'symmetric_key': symmetric_key_b64,
+        'recipient_peer_id': recipient_marker,  # Invite prekey ID
+        'created_by': peer_shared_id,
+        'created_at': t_ms
+    }
+
+    # Sign and wrap
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    signed_inner_event = crypto.sign_event(inner_event_data, private_key)
+    canonical = crypto.canonicalize_json(signed_inner_event)
+    wrapped_blob = crypto.wrap(canonical, recipient_prekey_dict, db)
+
+    # Store with recorded wrapper
+    key_shared_id = store.event(wrapped_blob, peer_id, t_ms, db)
+
+    log.info(f"key_shared.create_for_invite() created key_shared_id={key_shared_id}")
+    return key_shared_id
+
+
 def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project key_shared event into keys table and shareable_events."""
     log.info(f"key_shared.project() key_shared_id={key_shared_id}, seen_by={recorded_by}")
@@ -108,17 +160,11 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     # Parse JSON
     event_data = crypto.parse_json(plaintext)
 
-    # Only project the key if we're the intended recipient
-    # Creator sees the event but doesn't get the key added to their keys table
-    if event_data.get('recipient_peer_id') != recorded_by:
-        log.info(f"key_shared.project() not for this peer (recipient={event_data.get('recipient_peer_id')}, peer={recorded_by}), skipping key projection")
-        # Still mark as valid, but don't add key to keys table (shareable marking handled by recorded.py)
-        safedb = create_safe_db(db, recorded_by=recorded_by)
-        safedb.execute(
-            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-            (key_shared_id, recorded_by)
-        )
-        return key_shared_id
+    # If we successfully decrypted it, we should add the key to our group_keys table
+    # This handles both:
+    # 1. Regular case: recipient_peer_id matches our peer_id
+    # 2. Invite case: recipient_peer_id is invite prekey ID, but we have invite private key
+    # The ability to decrypt is the authorization, not the recipient_peer_id field
 
     # Verify signature - get public key from created_by peer_shared
     from events.identity import peer_shared

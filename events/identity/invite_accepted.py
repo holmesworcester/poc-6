@@ -13,7 +13,6 @@ def create(invite_id: str, invite_private_key: bytes,
            invite_transit_prekey_shared_id: str,
            invite_transit_key: bytes, invite_transit_key_id: str,
            invite_group_key: bytes, invite_group_key_id: str,
-           network_key: bytes, network_key_id: str,
            peer_id: str, t_ms: int, db: Any) -> str:
     """Create local invite_accepted event (not shareable).
 
@@ -28,8 +27,6 @@ def create(invite_id: str, invite_private_key: bytes,
         invite_transit_key_id: Pre-computed ID for invite_transit_key (from Alice)
         invite_group_key: Inner encryption key for Bob's bootstrap events
         invite_group_key_id: Pre-computed ID for invite_group_key (from Alice)
-        network_key: Long-term group symmetric key
-        network_key_id: Pre-computed ID for network_key (from Alice)
         peer_id: Bob's peer_id (local)
         t_ms: Timestamp
         db: Database connection
@@ -48,8 +45,6 @@ def create(invite_id: str, invite_private_key: bytes,
         'invite_transit_key_id': invite_transit_key_id,  # Alice's pre-computed ID
         'invite_group_key': crypto.b64encode(invite_group_key),
         'invite_group_key_id': invite_group_key_id,  # Alice's pre-computed ID
-        'network_key': crypto.b64encode(network_key),
-        'network_key_id': network_key_id,  # Alice's pre-computed ID
         'created_by': peer_id,
         'created_at': t_ms
     }
@@ -151,25 +146,6 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         # Verify insertion worked
         verify = safedb.query_one("SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?", (invite_group_key_id, recorded_by))
         log.info(f"invite_accepted.project() invite_group_key insertion verified: {verify is not None}")
-
-    # Restore network_key (long-term group key)
-    # Alice created a key event with this ID, Bob needs to restore it with the same ID
-    if 'network_key' in event_data and 'network_key_id' in event_data:
-        network_key = crypto.b64decode(event_data['network_key'])
-        network_key_id = event_data['network_key_id']  # Alice's event ID
-
-        log.info(f"invite_accepted.project() restoring network_key with key_id={network_key_id}, recorded_by={recorded_by[:20]}...")
-
-        # Store directly in group_keys table with Alice's event ID
-        # (Bob doesn't create a new key event, he uses Alice's ID)
-        safedb.execute(
-            "INSERT OR REPLACE INTO group_keys (key_id, key, recorded_by, created_at) VALUES (?, ?, ?, ?)",
-            (network_key_id, network_key, recorded_by, event_data['created_at'])
-        )
-
-        # Verify insertion worked
-        verify = safedb.query_one("SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?", (network_key_id, recorded_by))
-        log.info(f"invite_accepted.project() network_key insertion verified: {verify is not None}")
 
     # Track in invite_acceptances table for audit/debugging (simplified - no invite_group_key_shared_id)
     safedb.execute(

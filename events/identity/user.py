@@ -557,12 +557,8 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     invite_group_key = crypto.b64decode(invite_data['invite_group_key'])
     invite_group_key_id = invite_data['invite_group_key_id']  # Alice's pre-computed ID
 
-    network_key = crypto.b64decode(invite_data['network_key'])
-    network_key_id = invite_data['network_key_id']  # Alice's pre-computed ID
-
     log.info(f"join() extracted invite_transit_key_id={invite_transit_key_id} from invite link")
     log.info(f"join() extracted invite_group_key_id={invite_group_key_id} from invite link")
-    log.info(f"join() extracted network_key_id={network_key_id} from invite link")
 
     # Get metadata from invite event
     invite_event_data = crypto.parse_json(invite_blob)
@@ -602,8 +598,6 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         invite_transit_key_id=invite_transit_key_id,  # Alice's pre-computed ID
         invite_group_key=invite_group_key,
         invite_group_key_id=invite_group_key_id,  # Alice's pre-computed ID
-        network_key=network_key,
-        network_key_id=network_key_id,  # Alice's pre-computed ID
         peer_id=peer_id,
         t_ms=t_ms + 2,  # After user creation
         db=db

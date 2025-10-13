@@ -4,6 +4,10 @@
 
 # TODO:
 
+- bootstrap_status.sql should be in transit not identity? what events correspond to it? 
+- break out the logic for detecting bootstrap from sync.receive into its own function.  
+- stop manually sending bootstrap events in the test. this should happen automatically on sync.
+- add dropped packets to network sim
 - look at how key_lookup is used. it seems like transit and group key lookup should be separated and built into unwrap. we should probably have separate unwraps for transit (device-wide) and group (safe)
 - it would be useful to have local graph style tests where we can force project some set of events as valid, and then test if a subsequent event is valid. like a "graph_neighborhood" test or something. this would make it easier to break up the scenario tests into smaller pieces and focus on key invariants. 
 - make a sync receive test that includes lots of invalid events of different kinds and ensures we get the right behavior

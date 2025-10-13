@@ -155,18 +155,27 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     invite_blob = crypto.canonicalize_json(signed_invite_event)
     invite_id = store.event(invite_blob, inviter_peer_id, t_ms, db)
 
-    # Get network key to include in invite link (Bob gets it directly via invite_accepted)
-    # Network keys are group keys (subjective), so use safedb
-    safedb = create_safe_db(db, recorded_by=inviter_peer_id)
-    network_key_row = safedb.query_one(
-        "SELECT key FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (key_id, inviter_peer_id)
-    )
-    if not network_key_row:
-        raise ValueError(f"Network key {key_id} not found. Cannot create invite.")
-    network_key = network_key_row['key']
+    # Create group_key_shared for network key, sealed to invite prekey
+    # Anyone with invite private key can unseal this
+    from events.group import group_key_shared
 
-    # key_id is already an event ID (from transit_key.create()), use it directly as hint
+    # Build invite prekey dict for wrapping
+    invite_prekey_dict = {
+        'id': crypto.b64decode(invite_transit_prekey_shared_id),
+        'public_key': invite_public_key,
+        'type': 'asymmetric'
+    }
+
+    group_key_shared_id = group_key_shared.create_for_invite(
+        key_id=key_id,  # Network key
+        peer_id=inviter_peer_id,
+        peer_shared_id=inviter_peer_shared_id,
+        recipient_prekey_dict=invite_prekey_dict,
+        t_ms=t_ms + 3,
+        db=db
+    )
+
+    log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for network key")
 
     # Note: invite_group_key is only used by Alice to validate Bob's bootstrap events
     # It doesn't need to be shared to other members - they receive Bob's events
@@ -193,8 +202,6 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
         'invite_transit_key_id': invite_transit_key_id,  # Pre-computed ID (b64)
         'invite_group_key': invite_group_key_b64,  # Inner encryption key (b64)
         'invite_group_key_id': invite_group_key_id,  # Pre-computed ID (b64)
-        'network_key': crypto.b64encode(network_key),  # Long-term group key (b64)
-        'network_key_id': key_id,  # Network key event ID (b64)
         'inviter_peer_shared_id': inviter_peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
         'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
         'ip': inviter_ip,
@@ -209,7 +216,6 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
 
     log.info(f"invite.create() invite link contains transit_key_id={invite_transit_key_id}")
     log.info(f"invite.create() invite link contains group_key_id={invite_group_key_id}")
-    log.info(f"invite.create() invite link contains network_key_id={key_id}")
 
     return (invite_id, invite_link, invite_link_data)
 
