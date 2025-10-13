@@ -8,7 +8,8 @@ import sqlite3
 import pytest
 from db import Database
 import schema
-from events import user, channel, message
+from events.identity import user
+from events.content import channel, message
 
 
 def test_alice_sends_to_herself():
@@ -28,7 +29,7 @@ def test_alice_sends_to_herself():
     assert len(alice['peer_id']) == 24
     assert len(alice['peer_shared_id']) == 24
     assert len(alice['prekey_id']) == 24
-    assert len(alice['prekey_shared_id']) == 24
+    assert len(alice['transit_prekey_shared_id']) == 24
     assert len(alice['key_id']) == 24
     assert len(alice['group_id']) == 24
     assert len(alice['channel_id']) == 24
@@ -125,7 +126,7 @@ def test_alice_sends_to_herself():
     assert 'random' in channel_names
 
     # Verify groups are queryable
-    from events import group
+    from events.group import group
     groups_list = group.list_all_groups(alice['peer_id'], db)
     assert len(groups_list) == 1
     assert groups_list[0]['name'] == "Alice's Network"

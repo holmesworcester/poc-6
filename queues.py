@@ -162,7 +162,9 @@ class blocked:
         """, (event_id, recorded_by))
 
         if not waiting_events:
-            log.debug(f"queues.blocked.notify_event_valid() no events waiting for {event_id}")
+            # Debug: show what deps ARE being waited for
+            all_deps = safedb.query("SELECT DISTINCT dep_id FROM blocked_event_deps_ephemeral WHERE recorded_by = ? LIMIT 5", (recorded_by,))
+            log.warning(f"queues.blocked.notify_event_valid() no events waiting for event_id={event_id[:20]}..., peer={recorded_by[:20]}... (other deps being waited for: {[d['dep_id'][:20] for d in all_deps]})")
             return []
 
         log.debug(f"queues.blocked.notify_event_valid() found {len(waiting_events)} events waiting for {event_id}")

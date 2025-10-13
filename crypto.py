@@ -15,7 +15,7 @@ def parse_json(data: bytes) -> dict[str, Any]:
     return json.loads(data.decode('utf-8'))
 from nacl.public import SealedBox
 
-from events import key
+import key_lookup
 import store
 
 # ===== Constants =====
@@ -204,7 +204,7 @@ def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None
 
     # Extract id from blob
     try:
-        id_bytes = key.extract_id(wrapped_blob)
+        id_bytes = key_lookup.extract_id(wrapped_blob)
         key_id_b64 = b64encode(id_bytes)
         log.debug(f"crypto.unwrap() extracted key_id={key_id_b64}")
     except Exception as e:
@@ -212,7 +212,7 @@ def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None
         return (None, [])
 
     # Get the key using the id (filtered by recorded_by for access control)
-    key_data = key.get_key_by_id(id_bytes, recorded_by, db)
+    key_data = key_lookup.get_key_by_id(id_bytes, recorded_by, db)
     if not key_data:
         key_id_b64 = b64encode(id_bytes)
         log.warning(f"crypto.unwrap() key not found for id={key_id_b64} (will block until key arrives)")

@@ -13,7 +13,10 @@ this is a demonstration of the API, not an actual failure.
 import sqlite3
 from db import Database
 import schema
-from events import peer, key, group, channel, message
+from events.transit import transit_key
+from events.group import group
+from events.identity import peer
+from events.content import channel, message
 from tests.utils.convergence import (
     replay_ordering,
     _get_projectable_event_ids,
@@ -36,7 +39,7 @@ def main():
     # Create test data
     print("2. Creating test data (Alice's identity, group, channel, message)...")
     alice_peer_id, alice_peer_shared_id = peer.create(t_ms=1000, db=db)
-    alice_key_id = key.create(alice_peer_id, t_ms=2000, db=db)
+    alice_key_id = transit_key.create(alice_peer_id, t_ms=2000, db=db)
     alice_group_id = group.create(
         'My Group', alice_peer_id, alice_peer_shared_id,
         alice_key_id, t_ms=3000, db=db

@@ -8,7 +8,9 @@ import sqlite3
 import logging
 from db import Database
 import schema
-from events import message, sync, user
+from events.transit import sync
+from events.identity import user
+from events.content import message
 
 # Enable logging
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +35,7 @@ def test_sync_perf_10k():
     alice_channel_id = alice['channel_id']
 
     # Alice creates an invite for Bob
-    from events import invite
+    from events.identity import invite
     invite_id, invite_link, invite_data = invite.create(
         inviter_peer_id=alice['peer_id'],
         inviter_peer_shared_id=alice['peer_shared_id'],
@@ -60,7 +62,7 @@ def test_sync_perf_10k():
         peer_id=bob_peer_id,
         peer_shared_id=bob_peer_shared_id,
         user_id=bob_user_id,
-        prekey_shared_id=bob['prekey_shared_id'],
+        transit_prekey_shared_id=bob['transit_prekey_shared_id'],
         invite_data=bob['invite_data'],
         t_ms=4000,
         db=db

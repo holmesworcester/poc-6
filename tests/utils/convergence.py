@@ -250,7 +250,7 @@ def _recreate_projection_tables(db: Any) -> None:
 
 def _replay_events(event_ids: list[str], db: Any) -> None:
     """Replay recorded events in order. Event-driven unblocking happens automatically."""
-    from events import recorded
+    from events.transit import recorded
     import crypto
 
     # Project all events - unblocking happens automatically via notify_event_valid()
@@ -328,7 +328,7 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
 
 def _project_with_repetitions(event_ids: list[str], repetitions: list[int], db: Any) -> None:
     """Project recorded events with repetitions."""
-    from events import recorded
+    from events.transit import recorded
 
     for event_id, count in zip(event_ids, repetitions):
         for _ in range(count):

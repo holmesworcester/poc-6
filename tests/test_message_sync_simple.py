@@ -2,7 +2,9 @@
 import sqlite3
 from db import Database
 import schema
-from events import user, sync, message
+from events.transit import sync
+from events.identity import user
+from events.content import message
 
 
 def test_alice_bob_message_sync():
@@ -15,7 +17,7 @@ def test_alice_bob_message_sync():
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     # Alice creates an invite for Bob
-    from events import invite
+    from events.identity import invite
     invite_id, invite_link, invite_data = invite.create(
         inviter_peer_id=alice['peer_id'],
         inviter_peer_shared_id=alice['peer_shared_id'],
@@ -28,20 +30,19 @@ def test_alice_bob_message_sync():
 
     bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 
-    # Bootstrap
-    user.send_bootstrap_events(
-        peer_id=bob['peer_id'],
-        peer_shared_id=bob['peer_shared_id'],
-        user_id=bob['user_id'],
-        prekey_shared_id=bob['prekey_shared_id'],
-        invite_data=bob['invite_data'],
-        t_ms=4000,
-        db=db
-    )
-
-    # Alice receives Bootstrap
-    for t in [4100, 4200, 4300]:
-        sync.receive(batch_size=20, t_ms=t, db=db)
+    # Bootstrap - Bob sends multiple times to ensure Alice receives all events
+    for t in [4000, 4050, 4100]:
+        user.send_bootstrap_events(
+            peer_id=bob['peer_id'],
+            peer_shared_id=bob['peer_shared_id'],
+            user_id=bob['user_id'],
+            transit_prekey_shared_id=bob['transit_prekey_shared_id'],
+            invite_data=bob['invite_data'],
+            t_ms=t,
+            db=db
+        )
+        # Alice receives after each send
+        sync.receive(batch_size=20, t_ms=t + 10, db=db)
 
     # Initial sync rounds
     sync.sync_all(t_ms=4400, db=db)

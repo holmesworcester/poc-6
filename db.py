@@ -20,7 +20,11 @@ SUBJECTIVE_TABLES = {
     'peers_shared',
     'groups',
     'channels',
-    'keys_shared',
+    'group_keys',                  # NEW: subjective group encryption keys
+    'group_keys_shared',           # Group keys shared (subjective)
+    'group_prekeys',               # NEW: subjective group prekeys
+    'group_prekeys_shared',        # Group prekeys shared (subjective)
+    'transit_prekeys_shared',      # Transit prekeys shared (subjective)
     'invite_acceptances',
     'users',
     'group_members',
@@ -29,16 +33,15 @@ SUBJECTIVE_TABLES = {
     'blocked_events_ephemeral',
     'blocked_event_deps_ephemeral',
     'shareable_events',
-    'prekeys_shared',
     'invites',
+    'bootstrap_status',            # Bootstrap status (network creator/joiner status)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
 DEVICE_TABLES = {
     'local_peers',
-    'prekeys',
-    'keys',
-    'key_ownership',
+    'transit_keys',                # NEW: device-wide transit keys
+    'transit_prekeys',             # RENAMED from prekeys
     'store',
     'incoming_blobs',
     'sync_state_ephemeral',
@@ -276,6 +279,43 @@ class SafeDB:
             raise ScopingViolation(
                 f"SCOPING VIOLATION: Peer {self.recorded_by} doesn't have access to event {event_id}\n"
                 f"Event not found in valid_events for this peer."
+            )
+
+        return result['blob']
+
+    def get_shareable_blob(self, event_id: str) -> bytes:
+        """Get blob from store only if this peer can share this event.
+
+        Joins store table with shareable_events to enforce scoping for sync.
+        This is less restrictive than get_blob() - allows sharing encrypted events.
+
+        Args:
+            event_id: The event ID (base64 encoded string)
+
+        Returns:
+            The blob bytes
+
+        Raises:
+            ScopingViolation: If this peer cannot share this event
+        """
+        import crypto
+
+        # Decode event_id for store lookup
+        id_bytes = crypto.b64decode(event_id)
+
+        # Join store with shareable_events to verify can share
+        result = self._db.query_one("""
+            SELECT s.blob
+            FROM store s
+            INNER JOIN shareable_events se
+              ON se.event_id = ? AND se.can_share_peer_id = ?
+            WHERE s.id = ?
+        """, (event_id, self.recorded_by, id_bytes))
+
+        if result is None:
+            raise ScopingViolation(
+                f"SCOPING VIOLATION: Peer {self.recorded_by} cannot share event {event_id}\n"
+                f"Event not found in shareable_events for this peer."
             )
 
         return result['blob']

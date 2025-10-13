@@ -4,6 +4,11 @@
 
 # TODO:
 
+- look at how key_lookup is used. it seems like transit and group key lookup should be separated and built into unwrap. we should probably have separate unwraps for transit (device-wide) and group (safe)
+- it would be useful to have local graph style tests where we can force project some set of events as valid, and then test if a subsequent event is valid. like a "graph_neighborhood" test or something. this would make it easier to break up the scenario tests into smaller pieces and focus on key invariants. 
+- make a sync receive test that includes lots of invalid events of different kinds and ensures we get the right behavior
+- have a test for a broken invite link to make sure joining fails due to missing proof
+- drop `address` event from the bootstrap flow and instead let the recipient create `address` events for peers.
 - make group-member depend on the group-member of the person adding, so that missing deps will block and we can rely on our projections to be queryable synchronously. (and think about this.) --and generally review group-member and group events.
 - reduce the number of non-subjective tables and events (break out transit keys/prekeys from group keys e.g.)
 - try to use unsafedb as rarely as possible 
@@ -35,6 +40,56 @@ Run tests matching a pattern:
 ```
 
 **For LLMs:** Always use `./run_tests.sh` to run tests for consistency.
+
+# Debugging and Logging
+
+## Structured Logging for LLM Debugging
+
+This codebase uses **structured logging** designed to be easily parsed and understood by LLM assistants during debugging. The approach makes execution flow crystal clear and eliminates confusion when tracing issues.
+
+### Logging Pattern
+
+**Format:** `[TAG] key1=value1 key2=value2 ...`
+
+**Key principles:**
+1. **Tagged sections** - Uppercase tags in brackets group related operations (e.g., `[BOOTSTRAP_SEND]`, `[UNWRAP_START]`)
+2. **Key-value pairs** - Structured data instead of prose (e.g., `hint=abc123... peers=['xyz...']`)
+3. **Short IDs** - First 10-20 characters of hashes for readability while maintaining uniqueness
+4. **Result fields** - Explicit outcomes (e.g., `result=found_3_peers`, `result=blob_not_found`)
+5. **Correlation IDs** - Track entities across function calls (e.g., `hint`, `peer_id`, `key_id`)
+
+### Example Log Sequence
+
+```
+[BOOTSTRAP_SEND] from_peer=wMmT14UfFO... to_inviter=n51phxWWy0... invite_transit_key_id=fAjNFEUK... sending_4_events
+[BOOTSTRAP_SEND] event=peer_shared blob_size=296B hint=fAjNFEUK...
+[BOOTSTRAP_SEND] event=user blob_size=494B hint=fAjNFEUK...
+[SYNC_RECEIVE] batch_size=20 drained=5_blobs t_ms=4100
+[UNWRAP_START] blob_size=296B hint=fAjNFEUK...
+[UNWRAP_TRANSIT_KEY] hint=fAjNFEUK... result=found_1_peers peers=['hsl+wW22L4...']
+[TRANSIT_KEY_PROJECT] key_id=fAjNFEUK... recorded_by=hsl+wW22L4... result=inserting
+```
+
+### Benefits for LLM Debugging
+
+1. **Easy correlation** - Match events across function boundaries using hint/peer_id
+2. **Clear flow** - Tags show operation sequence (SEND → RECEIVE → UNWRAP → PROJECT)
+3. **Fast diagnosis** - Result fields immediately show success/failure
+4. **No ambiguity** - Structured format eliminates natural language confusion
+5. **Grep-friendly** - Easy to filter logs by tag: `grep '\[UNWRAP'`
+
+### When to Use Structured Logs
+
+Use structured WARNING-level logs for:
+- **Entry/exit points** of major operations (sync, unwrap, project)
+- **Decision outcomes** (found peers, missing deps, blocked events)
+- **State transitions** (event becomes valid, unblocking)
+- **Cross-boundary communication** (bootstrap send/receive, sync request/response)
+
+Use regular INFO/DEBUG for:
+- Internal function logic details
+- Verbose iteration loops
+- Temporary debugging during development
 
 # Quiet Protocol Proof of Concept #6
 
@@ -157,11 +212,25 @@ All projected state is scoped per-peer via `recorded_by`:
 - Contains: `invite_pubkey`, `invite_key_secret`, `group_id`, `channel_id`, `key_id`
 - Stored as canonicalized JSON blob, included in invite link (~882 chars, 56% reduction from previous)
 
+**Invite Link Contents:**
+- Invite event blob (signed)
+- Inviter's peer_shared blob (NEW: for immediate bootstrap)
+- Symmetric keys for bootstrap and network access
+- Inviter's network address (IP/port)
+
 **Join Flow (Bob):**
 1. Extracts invite blob from URL, stores as event → `invite_id`
-2. Creates `user` event: references `invite_id`, wrapped with `invite_key` (not network key)
-3. User projection: fetches invite, validates Alice's signature, extracts metadata, creates stub group/channel rows
-4. Bob can message immediately (has stubs), sync fills in full details later
+2. Projects inviter's peer_shared from invite link → Alice appears in Bob's peers_shared table immediately
+3. Creates `user` event: references `invite_id`, wrapped with `invite_key` (not network key)
+4. Creates `network_joined` event: marks bootstrap complete with inviter
+5. User projection: fetches invite, validates Alice's signature, extracts metadata, creates stub group/channel rows
+6. Bob can message immediately (has stubs), sync fills in full details later
+
+**Bootstrap Mode:**
+- When Bob calls `sync_all()`, checks `sync_state_ephemeral.bootstrap_complete`
+- If 0: sends ALL shareable events to peer (bootstrap mode)
+- If 1: sends incremental bloom-filtered sync (normal mode)
+- Network creator and joiners create `network_created` and `network_joined` events to mark bootstrap complete
 
 **Dependency Model:**
 - User events depend on `invite_id` (automatic blocking/unblocking)
@@ -169,6 +238,9 @@ All projected state is scoped per-peer via `recorded_by`:
 - User projection is deterministic: same invite → same stubs for all peers
 
 **Key Insight:** User event is the membership credential. Projection grants minimal access (stubs). Real group/channel events upgrade stubs to full data via `INSERT OR REPLACE`.
+
+**Future Enhancement (Multi-Peer Bootstrap):**
+Note: Invite links currently include a single inviter's peer_shared blob. In the future, this could be extended to include multiple bootstrap peers for high availability (e.g., include backup server's peer_shared blob alongside inviter's). The invite would still be signed by the original inviter (trust anchor), but joiners could immediately sync with multiple peers for redundancy. This requires no protocol changes - just populating multiple entries in the invite link's bootstrap peers array.
 
 ### Dependency Resolution: Local vs Network Dependencies
 

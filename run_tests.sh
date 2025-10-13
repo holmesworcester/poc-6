@@ -22,4 +22,5 @@ export PYTHONPATH=.
 # -v: verbose
 # -x: stop on first failure
 # -s: show print statements
-pytest -xvs "$@"
+# Only run tests in the tests/ directory, ignore previous-poc/
+pytest -xvs tests/ "$@"
