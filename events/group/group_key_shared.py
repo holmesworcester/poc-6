@@ -141,7 +141,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
 
         # Check if this is in transit_prekeys_shared (invite prekeys are added there)
         safedb_check = create_safe_db(db, recorded_by=recorded_by)
-        invite_prekey = safedb_check.query_one("SELECT peer_id FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ?", (hint_id, recorded_by))
+        invite_prekey = safedb_check.query_one("SELECT 1 FROM transit_prekeys_shared WHERE transit_prekey_shared_id = ? AND recorded_by = ?", (hint_id, recorded_by))
         if invite_prekey:
             # This is a key_shared to an invite prekey - mark as shareable even though we can't decrypt
             # We need to extract created_by and created_at from the wrapped data if possible

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS channels (
     group_id TEXT NOT NULL,
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    is_main INTEGER DEFAULT 0,  -- 1 if this is the peer's main channel
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,
     PRIMARY KEY (channel_id, recorded_by)

@@ -13,8 +13,10 @@ log = logging.getLogger(__name__)
 
 
 def create(inviter_peer_id: str, inviter_peer_shared_id: str,
-           group_id: str, channel_id: str, key_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
+           t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
+
+    Automatically queries for the inviter's main group and main channel.
 
     SECURITY: This function trusts that inviter_peer_id is correct and owned by the caller.
     In production, the API authentication layer should validate that the authenticated session
@@ -24,15 +26,36 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     Args:
         inviter_peer_id: Local peer ID (for signing)
         inviter_peer_shared_id: Public peer ID (for created_by)
-        group_id: Group being invited to (serves as network identifier)
-        channel_id: Default channel ID
-        key_id: Network symmetric key ID
         t_ms: Timestamp
         db: Database connection
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
     """
+    # Query for main group and main channel
+    safedb = create_safe_db(db, recorded_by=inviter_peer_id)
+
+    # Get main group
+    group_row = safedb.query_one(
+        "SELECT group_id, key_id FROM groups WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
+        (inviter_peer_id,)
+    )
+    if not group_row:
+        raise ValueError(f"No main group found for peer {inviter_peer_id}. Cannot create invite.")
+
+    group_id = group_row['group_id']
+    key_id = group_row['key_id']
+
+    # Get main channel
+    channel_row = safedb.query_one(
+        "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
+        (inviter_peer_id,)
+    )
+    if not channel_row:
+        raise ValueError(f"No main channel found for peer {inviter_peer_id}. Cannot create invite.")
+
+    channel_id = channel_row['channel_id']
+
     # Generate Ed25519 keypair for invite proof (separate from invite prekey)
     # Bob will use private key for proof signature only
     invite_private_key, invite_public_key = crypto.generate_keypair()

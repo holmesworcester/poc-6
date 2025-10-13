@@ -21,9 +21,6 @@ def test_alice_bob_message_sync():
     invite_id, invite_link, invite_data = invite.create(
         inviter_peer_id=alice['peer_id'],
         inviter_peer_shared_id=alice['peer_shared_id'],
-        group_id=alice['group_id'],
-        channel_id=alice['channel_id'],
-        key_id=alice['key_id'],
         t_ms=1500,
         db=db
     )
@@ -72,11 +69,11 @@ def test_alice_bob_message_sync():
     bob_msg = message.create_message(
         params={
             'content': 'Hello from Bob',
-            'channel_id': alice['channel_id'],
-            'group_id': alice['group_id'],
+            'channel_id': bob['channel_id'],
+            'group_id': bob['group_id'],
             'peer_id': bob['peer_id'],
             'peer_shared_id': bob['peer_shared_id'],
-            'key_id': alice['key_id']
+            'key_id': bob['key_id']
         },
         t_ms=6000,
         db=db

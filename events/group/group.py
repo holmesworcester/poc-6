@@ -11,8 +11,11 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any) -> str:
+def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_main: bool = False) -> tuple[str, str]:
     """Create a shareable, encrypted group event.
+
+    Groups own their encryption keys. The key is created internally and its id stored
+    in the group event for later retrieval.
 
     Note: peer_id (local) signs and sees the event; peer_shared_id (public) is the creator identity.
 
@@ -20,8 +23,17 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
     In production, the API authentication layer should validate that the authenticated session
     owns this peer_id before calling this function. This is safe for local-only apps where
     the user controls all peers on the device.
+
+    Args:
+        is_main: True if this is the peer's main group for inviting (default: False)
+
+    Returns:
+        (group_id, key_id): The group event ID and its encryption key ID
     """
-    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}")
+    # Create the group's encryption key
+    key_id = group_key.create(peer_id=peer_id, t_ms=t_ms, db=db)
+
+    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}")
 
     # Create event dict
     event_data = {
@@ -29,7 +41,8 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
         'name': name,
         'created_by': peer_shared_id,  # References shareable peer identity
         'created_at': t_ms,
-        'key_id': key_id  # Store key_id in event for later retrieval
+        'key_id': key_id,  # Store key_id in event for later retrieval
+        'is_main': 1 if is_main else 0  # Store is_main flag
     }
 
     # Sign the event with local peer's private key
@@ -46,8 +59,8 @@ def create(name: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int,
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
-    log.info(f"group.create() created group_id={event_id}")
-    return event_id
+    log.info(f"group.create() created group_id={event_id}, key_id={key_id}")
+    return (event_id, key_id)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -83,14 +96,15 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into groups table (use REPLACE to overwrite stubs from user.project())
     safedb.execute(
         """INSERT OR REPLACE INTO groups
-           (group_id, name, created_by, created_at, key_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (group_id, name, created_by, created_at, key_id, is_main, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event_data['name'],
             event_data['created_by'],
             event_data['created_at'],
             event_data['key_id'],
+            event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
             recorded_by,
             recorded_at
         )

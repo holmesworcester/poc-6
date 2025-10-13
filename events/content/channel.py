@@ -10,7 +10,7 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any) -> str:
+def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: str, t_ms: int, db: Any, is_main: bool = False) -> str:
     """Create a shareable, encrypted channel event in the given group.
 
     Note: peer_id (local) sees the event; peer_shared_id (public) is the creator identity.
@@ -19,8 +19,11 @@ def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: 
     In production, the API authentication layer should validate that the authenticated session
     owns this peer_id before calling this function. This is safe for local-only apps where
     the user controls all peers on the device.
+
+    Args:
+        is_main: True if this is the peer's main channel (default: False)
     """
-    log.info(f"channel.create() creating channel name='{name}', group_id={group_id}, peer_id={peer_id}")
+    log.info(f"channel.create() creating channel name='{name}', group_id={group_id}, peer_id={peer_id}, is_main={is_main}")
 
     # Create event dict
     event_data = {
@@ -28,7 +31,8 @@ def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: 
         'name': name,
         'group_id': group_id,
         'created_by': peer_shared_id,  # References shareable peer identity
-        'created_at': t_ms
+        'created_at': t_ms,
+        'is_main': 1 if is_main else 0  # Store is_main flag
     }
 
     # Get key_data for encryption
@@ -71,14 +75,15 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     # Insert into channels table (use REPLACE to overwrite stubs from user.project())
     safedb.execute(
         """INSERT OR REPLACE INTO channels
-           (channel_id, name, group_id, created_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (channel_id, name, group_id, created_by, created_at, is_main, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event_data['name'],
             event_data['group_id'],
             event_data['created_by'],
             event_data['created_at'],
+            event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
             recorded_by,
             recorded_at
         )

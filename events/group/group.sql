@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS groups (
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     key_id TEXT NOT NULL,
+    is_main INTEGER DEFAULT 0,  -- 1 if this is the peer's main group for inviting
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,
     PRIMARY KEY (group_id, recorded_by)

@@ -47,9 +47,6 @@ def test_three_player_messaging():
     invite_id, invite_link, invite_data = invite.create(
         inviter_peer_id=alice['peer_id'],
         inviter_peer_shared_id=alice['peer_shared_id'],
-        group_id=alice['group_id'],
-        channel_id=alice['channel_id'],
-        key_id=alice['key_id'],
         t_ms=1500,
         db=db
     )
@@ -94,6 +91,11 @@ def test_three_player_messaging():
     sync.receive(batch_size=20, t_ms=4800, db=db)
     sync.receive(batch_size=20, t_ms=4900, db=db)
 
+    # Extra sync rounds to ensure Bob receives Alice's group event
+    for i in range(5):
+        sync.sync_all(t_ms=5000 + i*100, db=db)
+        sync.receive(batch_size=20, t_ms=5000 + i*100 + 50, db=db)
+
     db.commit()
 
     # Each peer creates a message
@@ -113,11 +115,11 @@ def test_three_player_messaging():
     bob_msg = message.create_message(
         params={
             'content': 'Hello from Bob',
-            'channel_id': alice['channel_id'],  # Bob joined Alice's network, uses same channel
-            'group_id': alice['group_id'],      # Same group
+            'channel_id': bob['channel_id'],  # Bob joined Alice's network, uses same channel
+            'group_id': bob['group_id'],      # Same group
             'peer_id': bob['peer_id'],
             'peer_shared_id': bob['peer_shared_id'],
-            'key_id': alice['key_id']           # Same key
+            'key_id': bob['key_id']           # Same key
         },
         t_ms=6000,
         db=db
