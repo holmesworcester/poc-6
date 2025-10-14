@@ -36,15 +36,10 @@ def test_alice_sends_to_herself():
     assert len(alice['user_id']) == 24
 
     # Send first message in default channel
-    result1 = message.create_message(
-        params={
-            'content': 'Hello',
-            'channel_id': alice['channel_id'],
-            'group_id': alice['group_id'],
-            'peer_id': alice['peer_id'],
-            'peer_shared_id': alice['peer_shared_id'],
-            'key_id': alice['key_id']
-        },
+    result1 = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Hello',
         t_ms=2000,
         db=db
     )
@@ -58,15 +53,10 @@ def test_alice_sends_to_herself():
     assert result1['latest'][0]['author_id'] == alice['peer_shared_id']
 
     # Send second message
-    result2 = message.create_message(
-        params={
-            'content': 'World',
-            'channel_id': alice['channel_id'],
-            'group_id': alice['group_id'],
-            'peer_id': alice['peer_id'],
-            'peer_shared_id': alice['peer_shared_id'],
-            'key_id': alice['key_id']
-        },
+    result2 = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='World',
         t_ms=3000,
         db=db
     )
@@ -88,15 +78,10 @@ def test_alice_sends_to_herself():
     )
 
     # Send message to second channel
-    result3 = message.create_message(
-        params={
-            'content': 'Random thoughts',
-            'channel_id': random_channel_id,
-            'group_id': alice['group_id'],
-            'peer_id': alice['peer_id'],
-            'peer_shared_id': alice['peer_shared_id'],
-            'key_id': alice['key_id']
-        },
+    result3 = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=random_channel_id,
+        content='Random thoughts',
         t_ms=5000,
         db=db
     )

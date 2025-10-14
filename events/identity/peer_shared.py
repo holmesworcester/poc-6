@@ -82,6 +82,15 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     )
     log.info(f"peer_shared.project() inserted into peers_shared: peer_shared_id={peer_shared_id}, owner_peer_id={event_data['peer_id']}, recorded_by={recorded_by}")
 
+    # Insert into peer_self table (subjective mapping) if this is our own peer
+    owner_peer_id = event_data['peer_id']
+    if owner_peer_id == recorded_by:
+        safedb.execute(
+            "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?)",
+            (owner_peer_id, peer_shared_id, recorded_by, recorded_at)
+        )
+        log.info(f"peer_shared.project() inserted into peer_self: peer_id={owner_peer_id[:20]}..., peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
+
     # Mark as valid for this peer
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",

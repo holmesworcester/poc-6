@@ -45,8 +45,7 @@ def test_three_player_messaging():
     # Alice creates an invite link for Bob to join
     from events.identity import invite
     invite_id, invite_link, invite_data = invite.create(
-        inviter_peer_id=alice['peer_id'],
-        inviter_peer_shared_id=alice['peer_shared_id'],
+        peer_id=alice['peer_id'],
         t_ms=1500,
         db=db
     )
@@ -91,74 +90,102 @@ def test_three_player_messaging():
     sync.receive(batch_size=20, t_ms=4800, db=db)
     sync.receive(batch_size=20, t_ms=4900, db=db)
 
-    # Extra sync rounds to ensure Bob receives Alice's group event
-    for i in range(5):
-        sync.sync_all(t_ms=5000 + i*100, db=db)
-        sync.receive(batch_size=20, t_ms=5000 + i*100 + 50, db=db)
-
     db.commit()
 
-    # Each peer creates a message
-    alice_msg = message.create_message(
-        params={
-            'content': 'Hello from Alice',
-            'channel_id': alice['channel_id'],
-            'group_id': alice['group_id'],
-            'peer_id': alice['peer_id'],
-            'peer_shared_id': alice['peer_shared_id'],
-            'key_id': alice['key_id']
-        },
-        t_ms=5000,
-        db=db
-    )
+    # Ensure Bob has the channel event marked as valid before creating message
+    # This ensures it will re-project correctly
+    for attempt in range(20):
+        bob_has_channel_event = db.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+            (bob['channel_id'], bob['peer_id'])
+        )
+        if bob_has_channel_event:
+            break
+        t_base = 5000 + (attempt * 10)
+        sync.sync_all(t_ms=t_base, db=db)
+        sync.receive(batch_size=20, t_ms=t_base + 5, db=db)
 
-    bob_msg = message.create_message(
-        params={
-            'content': 'Hello from Bob',
-            'channel_id': bob['channel_id'],  # Bob joined Alice's network, uses same channel
-            'group_id': bob['group_id'],      # Same group
-            'peer_id': bob['peer_id'],
-            'peer_shared_id': bob['peer_shared_id'],
-            'key_id': bob['key_id']           # Same key
-        },
+    assert bob_has_channel_event, f"Bob should have channel event {bob['channel_id']} marked as valid after sync"
+
+    # Verify the channel is also projected (for message.create() to work)
+    bob_channel = db.query_one(
+        "SELECT channel_id FROM channels WHERE channel_id = ? AND recorded_by = ?",
+        (bob['channel_id'], bob['peer_id'])
+    )
+    assert bob_channel, f"Bob should have channel {bob['channel_id']} projected"
+
+    # Debug: Check how many times channel is in channels table for each peer
+    print(f"\nDEBUG: Channel {bob['channel_id'][:20]}... in channels table:")
+    for peer_name, peer_data in [('Alice', alice), ('Bob', bob), ('Charlie', charlie)]:
+        channel_rows = db.query(
+            "SELECT recorded_at FROM channels WHERE channel_id = ? AND recorded_by = ?",
+            (bob['channel_id'], peer_data['peer_id'])
+        )
+        print(f"  {peer_name}: {len(channel_rows)} rows, recorded_at={[r['recorded_at'] for r in channel_rows]}")
+
+    # Debug: Count recorded events for the channel by peer
+    print(f"\nDEBUG: Recorded events for channel {bob['channel_id'][:20]}...:")
+    import crypto as crypto_mod
+    channel_id_bytes = crypto_mod.b64decode(bob['channel_id'])
+    all_recorded = db.query("SELECT id, blob FROM store ORDER BY rowid")
+    for peer_name, peer_data in [('Alice', alice), ('Bob', bob), ('Charlie', charlie)]:
+        count = 0
+        for row in all_recorded:
+            try:
+                event_data = crypto_mod.parse_json(row['blob'])
+                if event_data.get('type') == 'recorded':
+                    if event_data.get('ref_id') == bob['channel_id'] and event_data.get('recorded_by') == peer_data['peer_id']:
+                        count += 1
+            except:
+                pass
+        print(f"  {peer_name}: {count} recorded events")
+
+    # Each peer creates a message
+    alice_msg = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Hello from Alice',
         t_ms=6000,
         db=db
     )
 
-    charlie_msg = message.create_message(
-        params={
-            'content': 'Hello from Charlie',
-            'channel_id': charlie['channel_id'],
-            'group_id': charlie['group_id'],
-            'peer_id': charlie['peer_id'],
-            'peer_shared_id': charlie['peer_shared_id'],
-            'key_id': charlie['key_id']
-        },
+    bob_msg = message.create(
+        peer_id=bob['peer_id'],
+        channel_id=bob['channel_id'],
+        content='Hello from Bob',
         t_ms=7000,
         db=db
     )
 
+    charlie_msg = message.create(
+        peer_id=charlie['peer_id'],
+        channel_id=charlie['channel_id'],
+        content='Hello from Charlie',
+        t_ms=8000,
+        db=db
+    )
+
     # Round 1: Send sync requests (all peers sync with peers they've seen)
-    sync.sync_all(t_ms=8000, db=db)
+    sync.sync_all(t_ms=9000, db=db)
 
     # Receive sync requests - this unwraps requests and auto-sends responses
-    sync.receive(batch_size=10, t_ms=9000, db=db)
+    sync.receive(batch_size=10, t_ms=10000, db=db)
 
     # Round 2: Receive sync responses
-    sync.receive(batch_size=100, t_ms=10000, db=db)
+    sync.receive(batch_size=100, t_ms=11000, db=db)
 
     # Round 3: Sync window 1 (with w=1, there are 2 windows: 0 and 1)
-    sync.sync_all(t_ms=11000, db=db)
+    sync.sync_all(t_ms=12000, db=db)
 
     # Receive sync requests for window 1
-    sync.receive(batch_size=10, t_ms=12000, db=db)
+    sync.receive(batch_size=10, t_ms=13000, db=db)
 
     # Receive sync responses for window 1
-    sync.receive(batch_size=100, t_ms=13000, db=db)
+    sync.receive(batch_size=100, t_ms=14000, db=db)
 
     # Round 4: Additional sync rounds for convergence
     for round_num in range(10):
-        base_time = 14000 + (round_num * 1000)
+        base_time = 15000 + (round_num * 1000)
         sync.sync_all(t_ms=base_time, db=db)
         sync.receive(batch_size=100, t_ms=base_time + 100, db=db)
         sync.receive(batch_size=100, t_ms=base_time + 200, db=db)

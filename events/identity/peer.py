@@ -67,6 +67,7 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
     event_data = crypto.parse_json(blob)
 
     # Insert into local_peers table (local-only, not shareable)
+    # Note: peer_id → peer_shared_id mapping is stored in peer_self table (subjective)
     unsafedb.execute(
         """INSERT OR IGNORE INTO local_peers (peer_id, public_key, private_key, created_at)
            VALUES (?, ?, ?, ?)""",

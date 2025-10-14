@@ -37,8 +37,7 @@ def test_sync_perf_10k():
     # Alice creates an invite for Bob
     from events.identity import invite
     invite_id, invite_link, invite_data = invite.create(
-        inviter_peer_id=alice['peer_id'],
-        inviter_peer_shared_id=alice['peer_shared_id'],
+        peer_id=alice['peer_id'],
         t_ms=1500,
         db=db
     )
@@ -88,15 +87,10 @@ def test_sync_perf_10k():
     log.info("Alice creating 10,000 messages...")
     num_messages = 10000
     for i in range(num_messages):
-        message.create_message(
-            params={
-                'content': f'Message {i}',
-                'channel_id': alice_channel_id,
-                'group_id': alice_group_id,
-                'peer_id': alice_peer_id,
-                'peer_shared_id': alice_peer_shared_id,
-                'key_id': alice_key_id
-            },
+        message.create(
+            peer_id=alice_peer_id,
+            channel_id=alice_channel_id,
+            content=f'Message {i}',
             t_ms=10000 + i,
             db=db
         )

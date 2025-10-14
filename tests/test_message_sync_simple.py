@@ -19,8 +19,7 @@ def test_alice_bob_message_sync():
     # Alice creates an invite for Bob
     from events.identity import invite
     invite_id, invite_link, invite_data = invite.create(
-        inviter_peer_id=alice['peer_id'],
-        inviter_peer_shared_id=alice['peer_shared_id'],
+        peer_id=alice['peer_id'],
         t_ms=1500,
         db=db
     )
@@ -52,29 +51,35 @@ def test_alice_bob_message_sync():
 
     db.commit()
 
+    # Ensure Bob has the channel projected before creating message
+    # Keep syncing until Bob has it (with timeout)
+    for attempt in range(20):
+        bob_channel = db.query_one(
+            "SELECT channel_id FROM channels WHERE channel_id = ? AND recorded_by = ?",
+            (bob['channel_id'], bob['peer_id'])
+        )
+        if bob_channel:
+            break
+        # More sync rounds
+        t_base = 4950 + (attempt * 10)
+        sync.sync_all(t_ms=t_base, db=db)
+        sync.receive(batch_size=20, t_ms=t_base + 5, db=db)
+
+    assert bob_channel, f"Bob should have channel {bob['channel_id']} projected after sync"
+
     # Create messages
-    alice_msg = message.create_message(
-        params={
-            'content': 'Hello from Alice',
-            'channel_id': alice['channel_id'],
-            'group_id': alice['group_id'],
-            'peer_id': alice['peer_id'],
-            'peer_shared_id': alice['peer_shared_id'],
-            'key_id': alice['key_id']
-        },
+    alice_msg = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Hello from Alice',
         t_ms=5000,
         db=db
     )
 
-    bob_msg = message.create_message(
-        params={
-            'content': 'Hello from Bob',
-            'channel_id': bob['channel_id'],
-            'group_id': bob['group_id'],
-            'peer_id': bob['peer_id'],
-            'peer_shared_id': bob['peer_shared_id'],
-            'key_id': bob['key_id']
-        },
+    bob_msg = message.create(
+        peer_id=bob['peer_id'],
+        channel_id=bob['channel_id'],
+        content='Hello from Bob',
         t_ms=6000,
         db=db
     )

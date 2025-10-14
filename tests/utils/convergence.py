@@ -45,6 +45,27 @@ def assert_reprojection(db: Any) -> None:
     if not equal:
         print(f"\n❌ Re-projection FAILED")
         print(f"Difference: {diff_msg}")
+
+        # Debug: Show channel details
+        if 'channels' in baseline_state and 'channels' in current_state:
+            print(f"\nBaseline channels ({len(baseline_state['channels'])} rows):")
+            for ch in baseline_state['channels']:
+                print(f"  {ch}")
+            print(f"\nCurrent channels ({len(current_state['channels'])} rows):")
+            for ch in current_state['channels']:
+                print(f"  {ch}")
+
+            # Show blocked events
+            blocked = db.query("SELECT * FROM blocked_events_ephemeral")
+            print(f"\nBlocked events after reprojection: {len(blocked)}")
+            print(f"NOTE: Events blocked during reprojection indicate that some projection")
+            print(f"depends on the sync protocol running, not just on replaying recorded events.")
+            print(f"This is a known architectural issue where sync protocol state affects projection.")
+            if blocked:
+                print(f"\nFirst 10 blocked events:")
+                for b in blocked[:10]:
+                    print(f"  {b}")
+
         raise AssertionError(f"Cannot restore state from event store! {diff_msg}")
 
     print(f"✓ Re-projection test passed: restored {len(event_ids)} events from blank slate")

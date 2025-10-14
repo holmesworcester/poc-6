@@ -48,14 +48,13 @@ def main():
         'general', alice_group_id, alice_peer_id,
         alice_peer_shared_id, alice_key_id, t_ms=4000, db=db
     )
-    msg1 = message.create_message({
-        'content': 'Hello',
-        'channel_id': alice_channel_id,
-        'group_id': alice_group_id,
-        'peer_id': alice_peer_id,
-        'peer_shared_id': alice_peer_shared_id,
-        'key_id': alice_key_id
-    }, t_ms=5000, db=db)
+    msg1 = message.create(
+        peer_id=alice_peer_id,
+        channel_id=alice_channel_id,
+        content='Hello',
+        t_ms=5000,
+        db=db
+    )
 
     # Get event IDs
     event_ids = _get_projectable_event_ids(db)

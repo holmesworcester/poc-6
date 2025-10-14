@@ -18,6 +18,7 @@ from typing import Any
 SUBJECTIVE_TABLES = {
     'messages',
     'peers_shared',
+    'peer_self',                   # Mapping from peer_id to peer_shared_id (subjective)
     'groups',
     'channels',
     'group_keys',                  # NEW: subjective group encryption keys

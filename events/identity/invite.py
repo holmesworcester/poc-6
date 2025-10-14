@@ -12,36 +12,46 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(inviter_peer_id: str, inviter_peer_shared_id: str,
-           t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
+def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
-    Automatically queries for the inviter's main group and main channel.
+    Automatically queries for the inviter's main group, main channel, and peer_shared_id.
 
-    SECURITY: This function trusts that inviter_peer_id is correct and owned by the caller.
+    SECURITY: This function trusts that peer_id is correct and owned by the caller.
     In production, the API authentication layer should validate that the authenticated session
     owns this peer_id before calling this function. This is safe for local-only apps where
     the user controls all peers on the device.
 
     Args:
-        inviter_peer_id: Local peer ID (for signing)
-        inviter_peer_shared_id: Public peer ID (for created_by)
+        peer_id: Local peer ID of the inviter
         t_ms: Timestamp
         db: Database connection
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
     """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    unsafedb = create_unsafe_db(db)
+
+    # Query peer_self to get peer_shared_id (subjective table)
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if not peer_self_row or not peer_self_row['peer_shared_id']:
+        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set in peer_self table")
+
+    peer_shared_id = peer_self_row['peer_shared_id']
+
     # Query for main group and main channel
-    safedb = create_safe_db(db, recorded_by=inviter_peer_id)
 
     # Get main group
     group_row = safedb.query_one(
         "SELECT group_id, key_id FROM groups WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
-        (inviter_peer_id,)
+        (peer_id,)
     )
     if not group_row:
-        raise ValueError(f"No main group found for peer {inviter_peer_id}. Cannot create invite.")
+        raise ValueError(f"No main group found for peer {peer_id}. Cannot create invite.")
 
     group_id = group_row['group_id']
     key_id = group_row['key_id']
@@ -49,10 +59,10 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # Get main channel
     channel_row = safedb.query_one(
         "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
-        (inviter_peer_id,)
+        (peer_id,)
     )
     if not channel_row:
-        raise ValueError(f"No main channel found for peer {inviter_peer_id}. Cannot create invite.")
+        raise ValueError(f"No main channel found for peer {peer_id}. Cannot create invite.")
 
     channel_id = channel_row['channel_id']
 
@@ -69,7 +79,7 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     invite_prekey_id = transit_prekey.create_with_material(
         public_key=invite_public_key,
         private_key=invite_private_key,
-        peer_id=inviter_peer_id,
+        peer_id=peer_id,
         t_ms=t_ms,
         db=db
     )
@@ -78,14 +88,13 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # Linking happens during projection (event-sourcing principle)
     invite_transit_prekey_shared_id = transit_prekey_shared.create(
         prekey_id=invite_prekey_id,
-        peer_id=inviter_peer_id,
-        peer_shared_id=inviter_peer_shared_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
         t_ms=t_ms,
         db=db
     )
 
     invite_prekey_public_key_b64 = invite_pubkey_b64  # For event data
-    unsafedb = create_unsafe_db(db)
 
     # Generate invite-scoped keys
     invite_transit_key = crypto.generate_secret()  # Outer wrapper for Bob→Alice messages
@@ -98,7 +107,7 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # Create key events for invite keys (so we have event IDs to use as hints)
     invite_transit_key_id = transit_key.create_with_material(
         key_material=invite_transit_key,
-        peer_id=inviter_peer_id,
+        peer_id=peer_id,
         t_ms=t_ms,
         db=db
     )
@@ -106,7 +115,7 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     from events.group import group_key
     invite_group_key_id = group_key.create_with_material(
         key_material=invite_group_key,
-        peer_id=inviter_peer_id,
+        peer_id=peer_id,
         t_ms=t_ms + 1,
         db=db
     )
@@ -118,24 +127,23 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
     # Query prekey from transit_prekeys table
     inviter_prekey_row = unsafedb.query_one(
         "SELECT prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
-        (inviter_peer_id,)
+        (peer_id,)
     )
 
     if not inviter_prekey_row:
-        raise ValueError(f"No prekey found for inviter {inviter_peer_id}. Cannot create invite.")
+        raise ValueError(f"No prekey found for inviter {peer_id}. Cannot create invite.")
 
     inviter_prekey_id = inviter_prekey_row['prekey_id']
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
     # Get prekey_shared_id from transit_prekeys_shared table
-    safedb = create_safe_db(db, recorded_by=inviter_peer_id)
     inviter_prekey_shared_row = safedb.query_one(
         "SELECT transit_prekey_shared_id FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
-        (inviter_peer_shared_id, inviter_peer_id)
+        (peer_shared_id, peer_id)
     )
 
     if not inviter_prekey_shared_row:
-        raise ValueError(f"No prekey_shared found for inviter {inviter_peer_id}. Cannot create invite.")
+        raise ValueError(f"No prekey_shared found for inviter {peer_id}. Cannot create invite.")
 
     inviter_transit_prekey_shared_id = inviter_prekey_shared_row['transit_prekey_shared_id']
 
@@ -161,22 +169,22 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
         'group_id': group_id,
         'channel_id': channel_id,
         'key_id': key_id,
-        'inviter_peer_shared_id': inviter_peer_shared_id,  # For prekey projection (public identity)
+        'inviter_peer_shared_id': peer_shared_id,  # For prekey projection (public identity)
         'inviter_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),  # For Bob to send sync requests
         'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,  # Event ID for inviter's transit_prekey_shared event
         'inviter_transit_prekey_id': inviter_prekey_id,  # Inviter's transit_prekey event ID (for hint lookup)
-        'created_by': inviter_peer_shared_id,
+        'created_by': peer_shared_id,
         'created_at': t_ms
     }
 
     # Sign the invite event with inviter's peer private key
-    private_key = peer.get_private_key(inviter_peer_id, inviter_peer_id, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_invite_event = crypto.sign_event(invite_event_data, private_key)
 
     # Canonicalize and store the invite event (with recorded wrapper for reprojection)
     # store.event() will automatically project the invite, restoring keys from event data
     invite_blob = crypto.canonicalize_json(signed_invite_event)
-    invite_id = store.event(invite_blob, inviter_peer_id, t_ms, db)
+    invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
     # Create group_key_shared for network key, sealed to invite prekey
     # Anyone with invite private key can unseal this
@@ -191,8 +199,8 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
 
     group_key_shared_id = group_key_shared.create_for_invite(
         key_id=key_id,  # Network key
-        peer_id=inviter_peer_id,
-        peer_shared_id=inviter_peer_shared_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
         recipient_prekey_dict=invite_prekey_dict,
         t_ms=t_ms + 3,
         db=db
@@ -206,9 +214,9 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
 
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
-    inviter_peer_shared_blob = store.get(inviter_peer_shared_id, unsafedb)
+    inviter_peer_shared_blob = store.get(peer_shared_id, unsafedb)
     if not inviter_peer_shared_blob:
-        raise ValueError(f"Inviter's peer_shared blob not found: {inviter_peer_shared_id}. Cannot create invite.")
+        raise ValueError(f"Inviter's peer_shared blob not found: {peer_shared_id}. Cannot create invite.")
 
     # Build invite link with invite blob + secrets
     # Group/channel/key metadata is now in the signed blob (not plaintext)
@@ -225,7 +233,7 @@ def create(inviter_peer_id: str, inviter_peer_shared_id: str,
         'invite_transit_key_id': invite_transit_key_id,  # Pre-computed ID (b64)
         'invite_group_key': invite_group_key_b64,  # Inner encryption key (b64)
         'invite_group_key_id': invite_group_key_id,  # Pre-computed ID (b64)
-        'inviter_peer_shared_id': inviter_peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
+        'inviter_peer_shared_id': peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
         'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
         'ip': inviter_ip,
         'port': inviter_port,

@@ -10,25 +10,47 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]:
+def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages.
 
-    SECURITY: This function trusts that params['peer_id'] is correct and owned by the caller.
+    SECURITY: This function trusts that peer_id is correct and owned by the caller.
     In production, the API authentication layer should validate that the authenticated session
     owns this peer_id before calling this function. This is safe for local-only apps where
     the user controls all peers on the device.
+
+    Args:
+        peer_id: Local peer ID creating the message
+        channel_id: Channel to post message in
+        content: Message content
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        {'id': message_id, 'latest': list of recent messages}
     """
-    import json
+    log.info(f"message.create() creating message in channel_id={channel_id}, content='{content[:50]}...'")
 
-    # Extract params
-    channel_id = params['channel_id']
-    group_id = params['group_id']
-    peer_id = params['peer_id']  # Local peer ID
-    peer_shared_id = params['peer_shared_id']  # Shareable identity ID
-    content = params.get('content', '')
-    key_id = params['key_id']
+    safedb = create_safe_db(db, recorded_by=peer_id)
 
-    log.info(f"message.create_message() creating message in channel_id={channel_id}, content='{content[:50]}...'")
+    # Query channel to get group_id
+    channel_row = safedb.query_one(
+        "SELECT group_id FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        (channel_id, peer_id)
+    )
+    if not channel_row:
+        raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
+
+    group_id = channel_row['group_id']
+
+    # Query peer_self to get peer_shared_id (subjective table)
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if not peer_self_row or not peer_self_row['peer_shared_id']:
+        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set in peer_self table")
+
+    peer_shared_id = peer_self_row['peer_shared_id']
 
     # Build standardized event structure
     event_data = {
@@ -44,7 +66,7 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
-    # Get key_data for encryption
+    # Get key_data for encryption (group.pick_key uses peer_id for access control)
     key_data = group.pick_key(group_id, peer_id, db)
 
     # Wrap (canonicalize + encrypt)
@@ -54,7 +76,7 @@ def create_message(params: dict[str, Any], t_ms: int, db: Any) -> dict[str, Any]
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
-    log.info(f"message.create_message() created message_id={event_id}")
+    log.info(f"message.create() created message_id={event_id}")
 
     # Get latest messages
     latest = list_messages(channel_id, peer_id, db)

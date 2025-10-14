@@ -2,6 +2,7 @@
 -- Contains private keys for signing (NOT for key exchange - see local_prekeys)
 -- In tests: May contain multiple identities (Alice, Bob, Charlie)
 -- In production: Typically one identity per device
+-- Note: peer_id → peer_shared_id mapping is stored in the subjective peer_self table
 CREATE TABLE IF NOT EXISTS local_peers (
     peer_id TEXT PRIMARY KEY,
     public_key TEXT NOT NULL,
