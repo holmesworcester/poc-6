@@ -62,9 +62,30 @@ def assert_reprojection(db: Any) -> None:
             print(f"depends on the sync protocol running, not just on replaying recorded events.")
             print(f"This is a known architectural issue where sync protocol state affects projection.")
             if blocked:
-                print(f"\nFirst 10 blocked events:")
-                for b in blocked[:10]:
-                    print(f"  {b}")
+                print(f"\nALL {len(blocked)} blocked events:")
+                import crypto as crypto_mod
+                for i, b in enumerate(blocked):
+                    # Try to get the event type
+                    event_type = "unknown"
+                    ref_id_short = "?"
+                    try:
+                        recorded_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto_mod.b64decode(b['recorded_id']),))
+                        if recorded_blob:
+                            recorded_data = crypto_mod.parse_json(recorded_blob['blob'])
+                            ref_id = recorded_data.get('ref_id', 'N/A')
+                            ref_id_short = ref_id[:20] if ref_id != 'N/A' else '?'
+                            ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto_mod.b64decode(ref_id),))
+                            if ref_blob:
+                                try:
+                                    ref_data = crypto_mod.parse_json(ref_blob['blob'])
+                                    event_type = ref_data.get('type', 'unknown')
+                                except:
+                                    event_type = "encrypted"
+                    except:
+                        pass
+
+                    print(f"  [{i+1}] type={event_type} ref_id={ref_id_short}... recorded_by={b['recorded_by'][:20]}... deps_remaining={b['deps_remaining']}")
+                    print(f"      missing_deps: {b['missing_deps']}")
 
         raise AssertionError(f"Cannot restore state from event store! {diff_msg}")
 

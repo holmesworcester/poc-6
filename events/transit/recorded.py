@@ -204,7 +204,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined'}
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted'}
 
     should_mark_shareable = False
     if event_type:
@@ -267,6 +267,13 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         # (invite comes from out-of-band link, not network sync)
         created_by = event_data.get('created_by')
         if recorded_by == created_by:
+            skip_dep_check = True
+
+    if event_type == 'invite_accepted':
+        # invite_accepted events are root-of-trust for joiners - they capture out-of-band
+        # trusted data from the invite link. Only self-created ones are valid.
+        created_by = event_data.get('created_by')
+        if recorded_by == created_by:  # Self-created
             skip_dep_check = True
 
     if not skip_dep_check:
