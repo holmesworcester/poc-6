@@ -38,7 +38,7 @@ def setup_db(failure_data: dict) -> Database:
     for row in failure_data['store']:
         db.execute(
             "INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-            (crypto.b64decode(row['id']), row['blob'].encode('latin1'), row['stored_at'])
+            (row['id'], row['blob'].encode('latin1'), row['stored_at'])
         )
 
     # Restore local_peers
@@ -92,7 +92,7 @@ def replay_with_trace(db: Any, ordering: list[str], verbose: bool = False) -> di
 
         # Get event metadata
         try:
-            blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(event_id),))
+            blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
             if blob:
                 data = crypto.parse_json(blob['blob'])
                 event_info['event_type'] = data.get('type', 'unknown')
@@ -104,7 +104,7 @@ def replay_with_trace(db: Any, ordering: list[str], verbose: bool = False) -> di
 
                     # Get wrapped event type
                     if ref_id:
-                        ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                        ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                         if ref_blob:
                             try:
                                 ref_data = crypto.parse_json(ref_blob['blob'])
@@ -125,7 +125,7 @@ def replay_with_trace(db: Any, ordering: list[str], verbose: bool = False) -> di
                 if recorded_id:
                     blocked = db.query_one(
                         "SELECT 1 FROM blocked_events_ephemeral WHERE recorded_id = ?",
-                        (crypto.b64decode(recorded_id),)
+                        (recorded_id,)
                     )
                     if blocked:
                         event_info['projection_result'] = 'blocked'

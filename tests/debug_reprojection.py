@@ -79,7 +79,7 @@ for row in all_events:
             recorded_by = data.get('recorded_by')
             if recorded_by == bob['peer_id']:
                 # Check if the ref is a group_key_shared event
-                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                 if ref_blob:
                     try:
                         ref_data = crypto.parse_json(ref_blob['blob'])
@@ -142,11 +142,11 @@ if blocked:
     print("\nBlocked event details:")
     for b in blocked:
         try:
-            recorded_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(b['recorded_id']),))
+            recorded_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (b['recorded_id'],))
             if recorded_blob:
                 recorded_data = crypto.parse_json(recorded_blob['blob'])
                 ref_id = recorded_data.get('ref_id', 'N/A')
-                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                 event_type = "unknown"
                 if ref_blob:
                     try:

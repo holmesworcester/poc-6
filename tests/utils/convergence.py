@@ -69,12 +69,12 @@ def assert_reprojection(db: Any) -> None:
                     event_type = "unknown"
                     ref_id_short = "?"
                     try:
-                        recorded_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto_mod.b64decode(b['recorded_id']),))
+                        recorded_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (b['recorded_id'],))
                         if recorded_blob:
                             recorded_data = crypto_mod.parse_json(recorded_blob['blob'])
                             ref_id = recorded_data.get('ref_id', 'N/A')
                             ref_id_short = ref_id[:20] if ref_id != 'N/A' else '?'
-                            ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto_mod.b64decode(ref_id),))
+                            ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                             if ref_blob:
                                 try:
                                     ref_data = crypto_mod.parse_json(ref_blob['blob'])
@@ -206,7 +206,7 @@ def assert_convergence(
             store_data = []
             for row in store_rows:
                 store_data.append({
-                    'id': crypto.b64encode(row['id']),
+                    'id': row['id'],
                     'blob': row['blob'].decode('latin1') if isinstance(row['blob'], bytes) else row['blob'],
                     'stored_at': row['stored_at']
                 })
@@ -254,14 +254,14 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
 
             # Only recorded events (all events now have recorded wrappers)
             if event_type == 'recorded':
-                # Encode id as base64 (matching store.py format)
-                event_id = crypto.b64encode(row['id'])
+                # ID is already TEXT (base64) in store
+                event_id = row['id']
                 event_ids.append(event_id)
 
                 # Track what types are being replayed for debugging
                 ref_id = event_data.get('ref_id')
                 if ref_id:
-                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                     if ref_blob:
                         try:
                             ref_data = crypto.parse_json(ref_blob['blob'])
@@ -352,13 +352,13 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
     for i, event_id in enumerate(event_ids):
         # Log event type for debugging
         try:
-            blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(event_id),))
+            blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
             if blob:
                 data = crypto.parse_json(blob['blob'])
                 event_type = data.get('type', 'unknown')
                 ref_id = data.get('ref_id', 'N/A') if event_type == 'recorded' else event_id
                 if event_type == 'recorded' and ref_id != 'N/A':
-                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                     if ref_blob:
                         try:
                             ref_data = crypto.parse_json(ref_blob['blob'])
@@ -384,14 +384,14 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
             import json
             deps = json.loads(b['missing_deps'])
             try:
-                blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(b['recorded_id']),))
+                blob = db.query_one("SELECT blob FROM store WHERE id = ?", (b['recorded_id'],))
                 if blob:
                     try:
                         data = crypto.parse_json(blob['blob'])
                         event_type = data.get('type', 'unknown')
                         if event_type == 'recorded':
                             ref_id = data.get('ref_id', 'N/A')
-                            ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                            ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                             if ref_blob:
                                 try:
                                     ref_data = crypto.parse_json(ref_blob['blob'])
@@ -410,7 +410,7 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
 
                 # Check each dependency
                 for dep_id in deps:
-                    dep_in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (crypto.b64decode(dep_id),))
+                    dep_in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (dep_id,))
                     dep_is_valid = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (dep_id, b['recorded_by']))
                     status = "✓valid" if dep_is_valid else ("in_store" if dep_in_store else "MISSING")
                     print(f"      {dep_id}: {status}")

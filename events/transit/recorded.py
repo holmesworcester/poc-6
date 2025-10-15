@@ -164,7 +164,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get stored_at from store table as recorded_at
-    store_row = unsafedb.query_one("SELECT stored_at FROM store WHERE id = ?", (crypto.b64decode(recorded_id),))
+    store_row = unsafedb.query_one("SELECT stored_at FROM store WHERE id = ?", (recorded_id,))
     recorded_at = store_row['stored_at'] if store_row else 0
 
     # Get referenced event blob
@@ -353,7 +353,13 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         projected_id = network_joined.project(ref_id, recorded_by, recorded_at, db)
 
     # Mark event as valid for this peer
-    log.warning(f"Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
+    log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
+
+    # Check if blob is in store before marking as valid
+    in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (ref_id,))
+    if not in_store:
+        log.error(f"[VALID_EVENT_BUG] ❌ Marking event {ref_id[:20]}... as valid but blob NOT in store! type={event_type}")
+
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (ref_id, recorded_by)

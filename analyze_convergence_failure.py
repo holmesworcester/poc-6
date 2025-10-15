@@ -32,7 +32,7 @@ print("Restoring store...")
 for row in failure['store']:
     db.execute(
         "INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-        (crypto.b64decode(row['id']), row['blob'].encode('latin1'), row['stored_at'])
+        (row['id'], row['blob'].encode('latin1'), row['stored_at'])
     )
 print(f"Restored {len(failure['store'])} store entries")
 
@@ -53,7 +53,7 @@ from events.transit import recorded
 for i, event_id in enumerate(failure['failed_order']):
     # Get event type for logging
     try:
-        blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(event_id),))
+        blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
         if blob:
             data = crypto.parse_json(blob['blob'])
             event_type = data.get('type', 'unknown')
@@ -61,7 +61,7 @@ for i, event_id in enumerate(failure['failed_order']):
             if event_type == 'recorded':
                 ref_id = data.get('ref_id')
                 if ref_id:
-                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                     if ref_blob:
                         try:
                             ref_data = crypto.parse_json(ref_blob['blob'])
@@ -104,12 +104,12 @@ if blocked[0]['count'] > 0:
         print(f"    missing_deps: {be['missing_deps']}")
 
         # Try to identify what's blocked
-        rec_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(be['recorded_id']),))
+        rec_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (be['recorded_id'],))
         if rec_blob:
             rec_data = crypto.parse_json(rec_blob['blob'])
             ref_id = rec_data.get('ref_id')
             if ref_id:
-                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                 if ref_blob:
                     try:
                         ref_data = crypto.parse_json(ref_blob['blob'])

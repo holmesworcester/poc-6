@@ -120,6 +120,13 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
     )
 
     # Mark as valid for this peer
+    log.warning(f"[VALID_EVENT] Marking transit_prekey {prekey_id[:20]}... as valid for peer {recorded_by[:20]}...")
+
+    # Check if blob is in store before marking as valid
+    in_store = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (prekey_id,))
+    if not in_store:
+        log.error(f"[VALID_EVENT_BUG] ❌ Marking transit_prekey {prekey_id[:20]}... as valid but blob NOT in store!")
+
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (prekey_id, recorded_by)

@@ -80,7 +80,7 @@ for row in all_recorded:
                 print(f"  ref_id (Alice's channel): {ref_id[:20]}...")
 
                 # Check if the channel event itself is encrypted
-                channel_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                channel_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                 if channel_blob:
                     try:
                         channel_data = crypto.parse_json(channel_blob['blob'])
@@ -114,7 +114,7 @@ for row in all_recorded:
             recorded_by = data.get('recorded_by')
             if recorded_by == bob['peer_id']:
                 # Check if the ref is a key_shared event
-                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (ref_id,))
                 if ref_blob:
                     try:
                         ref_data = crypto.parse_json(ref_blob['blob'])

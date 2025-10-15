@@ -347,6 +347,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
 
     # Store the unwrapped event blob (once)
     event_id = store.blob(unwrapped_blob, t_ms, True, db)
+    log.warning(f"[SYNC_STORE] Stored unwrapped blob: event_id={event_id[:20]}..., size={len(unwrapped_blob)}B")
 
     # Create recorded event for EACH peer who can decrypt
     # This ensures each peer gets their own view of when they recorded the event

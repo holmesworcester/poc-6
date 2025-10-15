@@ -12,15 +12,21 @@ def blob(blob: bytes, t_ms: int, return_dupes: bool, unsafedb: UnsafeDB) -> str:
     id_str = crypto.b64encode(id)
     log.debug(f"store.blob() storing blob with id={id_str}, size={len(blob)}B, t_ms={t_ms}, return_dupes={return_dupes}")
 
-    unsafedb.execute("INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)", (id, blob, t_ms))
+    # Check if blob already exists
+    existing = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (id_str,))
+
+    unsafedb.execute("INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)", (id_str, blob, t_ms))
 
     # Encode ID as base64 for more compact string representation
     if return_dupes:
-        log.debug(f"store.blob() returning id={id_str} (return_dupes=True)")
+        if not existing:
+            log.warning(f"[STORE_BLOB] NEW blob stored: id={id_str[:20]}..., size={len(blob)}B, return_dupes=True")
+        else:
+            log.debug(f"store.blob() duplicate blob (already exists): id={id_str[:20]}..., return_dupes=True")
         return id_str
     else:
-        if unsafedb.changes() > 0:
-            log.info(f"store.blob() new blob stored: id={id_str}")
+        if not existing:
+            log.warning(f"[STORE_BLOB] NEW blob stored: id={id_str[:20]}..., size={len(blob)}B")
             return id_str
         else:
             log.debug(f"store.blob() duplicate blob skipped: id={id_str}")
@@ -59,9 +65,8 @@ def event(event_blob: bytes, recorded_by: str, t_ms: int, db: Any) -> str:
 
 def get(blob_id: str, unsafedb: UnsafeDB) -> bytes:
     """Get a blob from the store by its ID (base64 encoded string)."""
-    # Decode base64 ID to bytes for database lookup
-    id_bytes = crypto.b64decode(blob_id)
-    row = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (id_bytes,))
+    # Query directly with base64 string (store now uses TEXT for id)
+    row = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (blob_id,))
     if row:
         log.debug(f"store.get() found blob: id={blob_id}, size={len(row['blob'])}B")
         return row['blob']

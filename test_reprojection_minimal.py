@@ -55,7 +55,7 @@ for row in rows:
         data = crypto.parse_json(row['blob'])
         if data.get('type') == 'recorded':
             ref_id = data.get('ref_id')
-            ref_blob = db.query_one('SELECT blob FROM store WHERE id = ?', (crypto.b64decode(ref_id),))
+            ref_blob = db.query_one('SELECT blob FROM store WHERE id = ?', (ref_id,))
             if ref_blob:
                 ref_data = crypto.parse_json(ref_blob['blob'])
                 if ref_data.get('type') == 'invite_accepted':
