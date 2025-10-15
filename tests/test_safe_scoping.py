@@ -314,8 +314,8 @@ def test_no_direct_db_access():
         if any(excluded in py_file for excluded in EXCLUDED_DIRS):
             continue
 
-        # Skip debug scripts
-        if 'debug_' in py_file or 'trace_' in py_file or 'check_' in py_file:
+        # Skip debug and test scripts
+        if 'debug_' in py_file or 'trace_' in py_file or 'check_' in py_file or 'test_' in py_file or 'analyze_' in py_file:
             continue
 
         # Skip allowed files

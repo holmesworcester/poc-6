@@ -4,6 +4,7 @@
 
 # TODO:
 
+- in unwrap_transit it seems like we're calling it per-recorded-by instead of *learning* the recorded_by from the transit key, but at the same time we do need to try for each peer since invite links might use the same key even with different peers. this merits more thought!
 - consider an ephemeral event store for sync and transit keys that's not reprojected.
 - look at syncing loop in tests and remove the necessity for this by adding this to bootstrap and checking bootstrap 
 - bootstrap_status.sql should be in transit not identity? what events correspond to it? 
@@ -277,42 +278,60 @@ This enables:
 
 ### Event Encryption and Relay Design
 
-The protocol uses **two-layer wrapping** to separate routing authorization from content privacy:
+The protocol uses **two-layer wrapping** with **separate key namespaces** to prevent mixing routing and content keys:
 
-**Layer 1: Transit Wrapping (Routing)**
+**Layer 1: Transit Wrapping (Network Routing)**
 - Determines WHO can store and forward an event
 - Wrapped with sync request's `transit_key` (symmetric, ephemeral per sync)
 - Success = routing permission granted
-- Handled in `sync.unwrap_and_store()`
+- Handled in `sync.unwrap_and_store()` via `crypto.unwrap_transit()`
+- **Key namespace**: `transit_keys`, `transit_prekeys` ONLY
+- **Blocking**: Never blocks - drops unknown blobs (DoS protection)
+- **Key lookup**: `key_lookup.get_transit_key_by_id()` - only checks local transit keys we own
 
-**Layer 2: Content Wrapping (Privacy)**
+**Layer 2: Event Content Wrapping (Application Privacy)**
 - Determines WHO can read event content
-- Wrapped with group keys (symmetric) or prekeys (asymmetric)
+- Wrapped with group keys (symmetric) or group prekeys (asymmetric)
 - May fail even when transit succeeds
-- Handled in `recorded.project()` via `crypto.unwrap()`
+- Handled in `recorded.project()` via `crypto.unwrap_event()`
+- **Key namespace**: `group_keys`, `group_prekeys` ONLY
+- **Blocking**: Always blocks on missing keys (convergence guarantee)
+- **Key lookup**: `key_lookup.get_event_key_by_id()` - only checks local group keys we own
+
+**Key Namespace Separation:**
+- Transit and event layers use completely separate key tables
+- Transit unwrap NEVER checks group keys (prevents accidental content exposure at routing layer)
+- Event unwrap NEVER checks transit keys (prevents DoS by forcing event blocking on transit keys)
+- Key lookup functions ONLY return keys with private keys (decryption), not public keys from `*_shared` tables
+- This architecture ensures routing keys cannot decrypt content, and content keys cannot be used for DoS
 
 **Shareable Event Marking (Centralized in recorded.py)**
 
-All events that successfully decrypt their content layer are **centrally marked as shareable** in `recorded.project()` (lines 151-162), regardless of whether they:
-- Successfully complete projection
-- Get blocked on missing semantic dependencies (e.g., missing group_id)
+Events are marked as shareable based on whether we can decrypt them OR whether they're encrypted at all:
+- **Plaintext events**: Marked as shareable immediately
+- **Encrypted events we CAN decrypt**: Marked as shareable after successful event-layer unwrap
+- **Encrypted events we CANNOT decrypt**: Blocked until keys arrive (never marked shareable while blocked)
 
-This centralized approach enables:
-1. **Relay/forwarding of blocked events** - Peers forward messages they can't project yet (missing dependencies)
+This happens in `recorded.project()` BEFORE blocking, so blocked events are still shareable and forwarded during sync.
+
+Benefits:
+1. **Relay/forwarding of blocked events** - Peers forward messages they can't project yet (missing semantic dependencies like group_id)
 2. **Mesh network routing** - Events propagate even when individual peers can't fully process them
 3. **Simpler projectors** - Type-specific code doesn't handle shareable marking
 
-**Local-only events** (peer, key, prekey, recorded) are explicitly excluded from shareable marking and never sync to other peers.
+**Local-only events** (peer, transit_key, group_key, transit_prekey, group_prekey, recorded, network_created, network_joined, invite_accepted) are explicitly excluded from shareable marking and never sync to other peers.
 
-**Special case: invite_key_shared**
+**Blocking Behavior for Wrapped Events:**
 
-The `invite_key_shared` event type handles sharing group keys with future invitees. Unlike regular `key_shared` events:
-- Creator wraps the group key to an invite prekey (doesn't have the private key)
-- Creator cannot decrypt their own event (expected behavior)
-- Creator marks as valid without decryption (handled in `invite_key_shared.project()`)
-- Recipient (invitee with private key) decrypts and adds key to local keys table
+When a peer creates an event wrapped to another peer's prekey (e.g., `group_key_shared` wrapped to Bob's transit prekey):
+- Creator stores the wrapped blob locally
+- Creator attempts to project via `recorded.project()` → `crypto.unwrap_event()`
+- Event-layer unwrap fails (creator doesn't have recipient's private key)
+- Event is BLOCKED with missing key dependency
+- Event is still marked as SHAREABLE (happens before blocking)
+- Recipient receives event via sync, can decrypt and project successfully
 
-This separation eliminates the need for special-case logic in `recorded.py` and makes invite bootstrap explicit.
+This ensures proper convergence - creators can share wrapped events they cannot read themselves.
 
 ### Testing Requirements
 

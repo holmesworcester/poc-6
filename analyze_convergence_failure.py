@@ -6,9 +6,20 @@ import sqlite3
 from db import Database
 import schema
 import crypto
+import os
+import glob
+
+# Find most recent failure file
+failure_files = glob.glob('tests/failures/convergence_failure_*.json')
+if not failure_files:
+    print("No failure files found!")
+    sys.exit(1)
+
+failure_file = max(failure_files, key=os.path.getctime)
+print(f"Loading failure from: {failure_file}\n")
 
 # Load failure
-with open('tests/failures/convergence_failure_1760488173_ordering_1.json', 'r') as f:
+with open(failure_file, 'r') as f:
     failure = json.load(f)
 
 # Create fresh DB
@@ -16,21 +27,23 @@ conn = sqlite3.Connection(':memory:')
 db = Database(conn)
 schema.create_all(db)
 
-# Copy the store from baseline_state
-print("Restoring store from baseline state...")
-for row in failure['baseline_state']['store']:
+# Copy the store
+print("Restoring store...")
+for row in failure['store']:
     db.execute(
         "INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
         (crypto.b64decode(row['id']), row['blob'].encode('latin1'), row['stored_at'])
     )
+print(f"Restored {len(failure['store'])} store entries")
 
 # Copy local_peers
 print("Restoring local_peers...")
 for row in failure['baseline_state']['local_peers']:
     db.execute(
-        "INSERT INTO local_peers (peer_id) VALUES (?)",
-        (crypto.b64decode(row['peer_id']),)
+        "INSERT INTO local_peers (peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?)",
+        (crypto.b64decode(row['peer_id']), crypto.b64decode(row['public_key']), crypto.b64decode(row['private_key']), row['created_at'])
     )
+print(f"Restored {len(failure['baseline_state']['local_peers'])} local peers")
 
 print(f"\nReplaying failed ordering ({len(failure['failed_order'])} events)...")
 

@@ -300,7 +300,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     # Try to unwrap with each peer who has access (for prekeys, only owner can decrypt)
     unwrapped_blob = None
     for peer_id in recorded_by_peers:
-        unwrapped_blob, missing_keys = crypto.unwrap(blob, peer_id, db)
+        unwrapped_blob, missing_keys = crypto.unwrap_transit(blob, peer_id, db)
         if unwrapped_blob is not None:
             break
 

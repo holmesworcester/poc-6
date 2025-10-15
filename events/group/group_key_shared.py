@@ -3,7 +3,7 @@ from typing import Any
 import logging
 import crypto
 import store
-from events.transit import transit_key, transit_prekey as prekey
+from events.transit import transit_key, transit_prekey
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
@@ -130,32 +130,17 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         return None
 
     # Unwrap (decrypt) - recorded should have already done this, but we need the plaintext
-    plaintext, missing_keys = crypto.unwrap(blob, recorded_by, db)
+    plaintext, missing_keys = crypto.unwrap_event(blob, recorded_by, db)
     log.warning(f"[GROUP_KEY_SHARED_PROJECT] unwrap result: plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_keys}")
     if not plaintext:
-        # If we can't decrypt, this might be a key_shared wrapped to someone else's prekey
-        # (e.g., invite prekey where creator doesn't have the private key)
-        # Extract hint and check if it's an invite prekey
-        import crypto as crypto_module
-        hint_bytes = crypto_module.transit_key.extract_id(blob)
-        hint_id = crypto.b64encode(hint_bytes)
-
-        # Check if this is in transit_prekeys_shared (invite prekeys are added there)
-        safedb_check = create_safe_db(db, recorded_by=recorded_by)
-        invite_prekey = safedb_check.query_one("SELECT 1 FROM transit_prekeys_shared WHERE transit_prekey_shared_id = ? AND recorded_by = ?", (hint_id, recorded_by))
-        if invite_prekey:
-            # This is a key_shared to an invite prekey - mark as shareable even though we can't decrypt
-            # We need to extract created_by and created_at from the wrapped data if possible
-            # For now, mark with current peer as creator
-            log.info(f"key_shared.project() can't decrypt (wrapped to invite prekey {hint_id}), marking as valid anyway")
-            safedb = create_safe_db(db, recorded_by=recorded_by)
-            safedb.execute(
-                "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-                (key_shared_id, recorded_by)
-            )
-            return key_shared_id
-
-        log.warning(f"key_shared.project() failed to unwrap key_shared_id={key_shared_id}")
+        # Can't decrypt - this event is not for us
+        # It's already shareable (marked by recorded.py), but we don't project it
+        # Examples:
+        # - Alice creates group_key_shared wrapped to Bob's invite prekey - Alice can't decrypt
+        # - Bob will receive it and decrypt it
+        log.info(f"key_shared.project() can't decrypt, event not for us (wrapped to someone else)")
+        # Don't mark as valid - we can't use this event
+        # recorded.py already handled crypto blocking if needed
         return None
 
     # Parse JSON
