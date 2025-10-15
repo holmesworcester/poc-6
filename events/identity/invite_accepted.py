@@ -123,20 +123,6 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         verify = unsafedb.query_one("SELECT 1 FROM transit_keys WHERE key_id = ?", (invite_transit_key_id,))
         log.info(f"invite_accepted.project() invite_transit_key insertion verified: {verify is not None}")
 
-    # Track in invite_acceptances table for audit/debugging (simplified - no invite_group_key_shared_id)
-    safedb.execute(
-        """INSERT OR IGNORE INTO invite_acceptances
-           (invite_accepted_id, invite_id, invite_group_key_shared_id, peer_id, created_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (
-            invite_accepted_id,
-            invite_id,
-            '',  # No longer using invite_group_key_shared_id
-            recorded_by,
-            event_data['created_at']
-        )
-    )
-
     # Mark invite_accepted as valid
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",

@@ -26,7 +26,6 @@ SUBJECTIVE_TABLES = {
     'group_prekeys',               # NEW: subjective group prekeys
     'group_prekeys_shared',        # Group prekeys shared (subjective)
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)
-    'invite_acceptances',
     'users',
     'group_members',
     'group_members_wip',
