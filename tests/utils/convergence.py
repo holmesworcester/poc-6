@@ -201,7 +201,16 @@ def assert_convergence(
             print(f"Failed order:   {list(ordering)}")
             print(f"Difference: {diff_msg}")
 
-            # Save failure data
+            # Save failure data with store table for replay
+            store_rows = db.query("SELECT * FROM store")
+            store_data = []
+            for row in store_rows:
+                store_data.append({
+                    'id': crypto.b64encode(row['id']),
+                    'blob': row['blob'].decode('latin1') if isinstance(row['blob'], bytes) else row['blob'],
+                    'stored_at': row['stored_at']
+                })
+
             failure_data = {
                 'ordering_number': i,
                 'total_orderings': len(orderings),
@@ -209,6 +218,7 @@ def assert_convergence(
                 'failed_order': list(ordering),
                 'baseline_state': baseline_state,
                 'failed_state': current_state,
+                'store': store_data,  # Add store table for replay
                 'difference': diff_msg,
                 'timestamp': time.time(),
                 'test_name': 'convergence',
@@ -233,6 +243,7 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
     """Find all recorded events for re-projection."""
     rows = db.query("SELECT id, blob FROM store ORDER BY rowid")
     event_ids = []
+    event_type_counts = {}
 
     for row in rows:
         try:
@@ -246,8 +257,26 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
                 # Encode id as base64 (matching store.py format)
                 event_id = crypto.b64encode(row['id'])
                 event_ids.append(event_id)
+
+                # Track what types are being replayed for debugging
+                ref_id = event_data.get('ref_id')
+                if ref_id:
+                    ref_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (crypto.b64decode(ref_id),))
+                    if ref_blob:
+                        try:
+                            ref_data = crypto.parse_json(ref_blob['blob'])
+                            ref_type = ref_data.get('type', 'unknown')
+                            event_type_counts[ref_type] = event_type_counts.get(ref_type, 0) + 1
+                        except:
+                            event_type_counts['encrypted'] = event_type_counts.get('encrypted', 0) + 1
         except:
             continue  # Skip encrypted/non-JSON blobs
+
+    # Debug output
+    if event_type_counts:
+        print(f"\nEvent types to replay:")
+        for etype, count in sorted(event_type_counts.items()):
+            print(f"  {etype}: {count}")
 
     return event_ids
 
@@ -257,7 +286,7 @@ def _get_projection_tables(db: Any) -> list[str]:
     rows = db.query("""
         SELECT name FROM sqlite_master
         WHERE type='table'
-        AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence', 'pre_keys')
+        AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence', 'pre_keys', 'transit_keys')
         AND name NOT LIKE '%_ephemeral'
         ORDER BY name
     """)
@@ -277,13 +306,37 @@ def _clear_projection_tables(db: Any) -> None:
 def _recreate_projection_tables(db: Any) -> None:
     """Drop and recreate all projection tables using schema.create_all()."""
     import schema
+    import sqlite3
+
+    # Clear incoming_blobs (sync protocol messages that reference ephemeral state)
+    # These must be cleared because they contain wrapped blobs with transit_key hints
+    # that reference ephemeral transit_keys created during sync protocol
+    db.execute("DELETE FROM incoming_blobs")
+
+    # Clear blocked_events_ephemeral (events waiting for ephemeral state won't resolve after reprojection)
+    db.execute("DELETE FROM blocked_events_ephemeral")
 
     # Drop all projection tables (disable foreign keys to avoid constraint errors)
-    db.execute("PRAGMA foreign_keys = OFF")
+    # Multiple attempts may be needed due to dependency ordering
     tables = _get_projection_tables(db)
-    for table in tables:
-        db.execute(f"DROP TABLE IF EXISTS {table}")
-    db.execute("PRAGMA foreign_keys = ON")
+
+    # Try to drop all tables, retrying if foreign key constraints fail
+    max_attempts = len(tables) + 1
+    for _ in range(max_attempts):
+        remaining = []
+        for table in tables:
+            try:
+                db._conn.execute(f"DROP TABLE IF EXISTS {table}")
+            except sqlite3.IntegrityError:
+                # Foreign key constraint - try again in next pass
+                remaining.append(table)
+
+        if not remaining:
+            break
+        tables = remaining
+    else:
+        # Still have tables after max attempts
+        raise RuntimeError(f"Could not drop tables due to circular foreign key constraints: {remaining}")
 
     # Recreate using schema.create_all()
     # This will skip creating 'store' (already exists)
@@ -310,7 +363,8 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
                         try:
                             ref_data = crypto.parse_json(ref_blob['blob'])
                             wrapped_type = ref_data.get('type', 'unknown')
-                            if i < 3 or i >= len(event_ids) - 3:  # Log first and last few TODO: understand this part
+                            # Log all invite-related events for debugging
+                            if wrapped_type in ['invite', 'invite_accepted'] or i < 3 or i >= len(event_ids) - 3:
                                 print(f"  [{i+1}/{len(event_ids)}] Projecting {event_id[:12]}... (recorded→{wrapped_type})")
                         except:
                             if i < 3 or i >= len(event_ids) - 3:
@@ -403,6 +457,14 @@ def _dump_projection_state(db: Any) -> dict[str, list[dict]]:
                 else:
                     row_dict[key] = value
             row_dicts.append(row_dict)
+
+        # Filter out ephemeral events from valid_events table
+        # Ephemeral events (like sync) are not stored in the event log, so they won't be
+        # re-projected during reprojection. We exclude them from comparison.
+        if table == 'valid_events':
+            # Get all event IDs from the store to identify which events are persisted
+            persisted_event_ids = set(row['id'] for row in db.query("SELECT id FROM store"))
+            row_dicts = [r for r in row_dicts if r.get('event_id') in persisted_event_ids]
 
         # Sort by all columns as tuple for deterministic ordering
         row_dicts.sort(key=lambda r: tuple(str(v) for v in r.values()))

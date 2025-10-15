@@ -68,27 +68,104 @@ def test_three_player_messaging():
         db=db
     )
 
-    # Alice receives Bob's bootstrap events, learns about Bob
+    print(f"\n=== STEP 1: Alice receives Bob's bootstrap events ===")
     sync.receive(batch_size=20, t_ms=4100, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    print(f"Bob has channel valid: {bool(bob_has_channel)}")
 
-    # Process any unblocked events (sync requests that were waiting for peer_shared)
+    print(f"\n=== STEP 2: Process any unblocked events ===")
     sync.receive(batch_size=20, t_ms=4150, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    print(f"Bob has channel valid: {bool(bob_has_channel)}")
 
-    # Alice receives Bob's sync request, sends sync response with her events
+    print(f"\n=== STEP 3: Alice processes sync request, sends response ===")
     sync.receive(batch_size=20, t_ms=4200, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    print(f"Bob has channel valid: {bool(bob_has_channel)}")
 
-    # Bob receives Alice's sync response with her peer_shared, prekey_shared, etc.
+    print(f"\n=== STEP 4: Bob receives Alice's sync response ===")
     sync.receive(batch_size=20, t_ms=4300, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"Bob has channel valid: {bool(bob_has_channel)}")
+    print(f"Bob blocked events: {bob_blocked['cnt']}")
 
-    # Continue with bloom sync to exchange remaining events (group, channel, keys)
-    sync.sync_all(t_ms=4400, db=db)
+    print(f"\n=== STEP 5: Continue with bloom sync round 1 ===")
+    sync.send_request_to_all(t_ms=4400, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    print(f"After send_request: Bob has channel valid: {bool(bob_has_channel)}")
+
     sync.receive(batch_size=20, t_ms=4500, db=db)
-    sync.receive(batch_size=20, t_ms=4600, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"After receive 1: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
 
-    # Additional sync rounds to ensure all events flow through
-    sync.sync_all(t_ms=4700, db=db)
+    sync.receive(batch_size=20, t_ms=4600, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"After receive 2: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+
+    print(f"\n=== STEP 6: Additional sync round 2 ===")
+    sync.send_request_to_all(t_ms=4700, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    print(f"After send_request: Bob has channel valid: {bool(bob_has_channel)}")
+
     sync.receive(batch_size=20, t_ms=4800, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"After receive 1: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+
     sync.receive(batch_size=20, t_ms=4900, db=db)
+    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"After receive 2: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+
+    # Check if channel blob is in store
+    channel_in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (bob['channel_id'],))
+    print(f"Channel in store: {bool(channel_in_store)}")
+
+    # Check if channel can be unwrapped
+    if channel_in_store:
+        import crypto
+        channel_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (bob['channel_id'],))['blob']
+        plaintext, missing = crypto.unwrap(channel_blob, bob['peer_id'], db)
+        print(f"Channel unwrap: plaintext={bool(plaintext)}, missing_keys={missing}")
+
+    # Check WHICH events are blocked
+    if bob_blocked['cnt'] > 0:
+        print(f"\n=== Blocked Events Debug ===")
+        blocked_rows = db.query("SELECT recorded_id FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+        missing_deps_set = set()
+        for row in blocked_rows:
+            # Get the missing deps
+            deps = db.query("SELECT dep_id FROM blocked_event_deps_ephemeral WHERE recorded_id = ?", (row['recorded_id'],))
+            dep_list = [d['dep_id'] for d in deps]
+            missing_deps_set.update(dep_list)
+            print(f"Blocked event: {row['recorded_id'][:20]}..., missing: {[d[:20] + '...' for d in dep_list]}")
+
+        # Check if the missing deps are in store
+        print(f"\n=== Missing Dependencies Analysis ===")
+        for dep_id in missing_deps_set:
+            in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (dep_id,))
+            in_valid = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (dep_id, bob['peer_id']))
+            in_shareable = db.query_one("SELECT 1 FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?", (dep_id, alice['peer_id']))
+
+            # Try to get event type
+            event_type = "unknown"
+            if in_store:
+                try:
+                    blob = db.query_one("SELECT blob FROM store WHERE id = ?", (dep_id,))['blob']
+                    data = crypto.parse_json(blob)
+                    event_type = data.get('type', 'unknown')
+                except:
+                    event_type = "encrypted/unparseable"
+
+            print(f"Dep {dep_id[:20]}... type={event_type}, in_store={bool(in_store)}, in_valid={bool(in_valid)}, in_alice_shareable={bool(in_shareable)}")
+
+            # This is the BUG: event is valid but not in store - must be ephemeral!
+            if in_valid and not in_store:
+                print(f"  ❌ BUG: Event is in valid_events but NOT in store! This must be an ephemeral event.")
+                print(f"  Ephemeral events (sync, transit_key) should NOT be dependencies for other events!")
 
     db.commit()
 
@@ -102,7 +179,7 @@ def test_three_player_messaging():
         if bob_has_channel_event:
             break
         t_base = 5000 + (attempt * 10)
-        sync.sync_all(t_ms=t_base, db=db)
+        sync.send_request_to_all(t_ms=t_base, db=db)
         sync.receive(batch_size=20, t_ms=t_base + 5, db=db)
 
     assert bob_has_channel_event, f"Bob should have channel event {bob['channel_id']} marked as valid after sync"
@@ -166,7 +243,7 @@ def test_three_player_messaging():
     )
 
     # Round 1: Send sync requests (all peers sync with peers they've seen)
-    sync.sync_all(t_ms=9000, db=db)
+    sync.send_request_to_all(t_ms=9000, db=db)
 
     # Receive sync requests - this unwraps requests and auto-sends responses
     sync.receive(batch_size=10, t_ms=10000, db=db)
@@ -175,7 +252,7 @@ def test_three_player_messaging():
     sync.receive(batch_size=100, t_ms=11000, db=db)
 
     # Round 3: Sync window 1 (with w=1, there are 2 windows: 0 and 1)
-    sync.sync_all(t_ms=12000, db=db)
+    sync.send_request_to_all(t_ms=12000, db=db)
 
     # Receive sync requests for window 1
     sync.receive(batch_size=10, t_ms=13000, db=db)
@@ -186,7 +263,7 @@ def test_three_player_messaging():
     # Round 4: Additional sync rounds for convergence
     for round_num in range(10):
         base_time = 15000 + (round_num * 1000)
-        sync.sync_all(t_ms=base_time, db=db)
+        sync.send_request_to_all(t_ms=base_time, db=db)
         sync.receive(batch_size=100, t_ms=base_time + 100, db=db)
         sync.receive(batch_size=100, t_ms=base_time + 200, db=db)
 

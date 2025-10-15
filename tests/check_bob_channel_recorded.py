@@ -40,18 +40,18 @@ user.send_bootstrap_events(
 for t in [4100, 4150, 4200, 4300]:
     sync.receive(batch_size=20, t_ms=t, db=db)
 
-sync.sync_all(t_ms=4400, db=db)
+sync.send_request_to_all(t_ms=4400, db=db)
 for t in [4500, 4600]:
     sync.receive(batch_size=20, t_ms=t, db=db)
 
-sync.sync_all(t_ms=4700, db=db)
+sync.send_request_to_all(t_ms=4700, db=db)
 for t in [4800, 4900]:
     sync.receive(batch_size=20, t_ms=t, db=db)
 
 # Additional rounds
 for round_num in range(10):
     base_time = 15000 + (round_num * 1000)
-    sync.sync_all(t_ms=base_time, db=db)
+    sync.send_request_to_all(t_ms=base_time, db=db)
     sync.receive(batch_size=100, t_ms=base_time + 100, db=db)
     sync.receive(batch_size=100, t_ms=base_time + 200, db=db)
 

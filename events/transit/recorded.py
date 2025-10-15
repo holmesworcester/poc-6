@@ -195,8 +195,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             plaintext = event_blob
             event_data = crypto.parse_json(plaintext)
             event_type = event_data.get('type')
-        except:
+        except Exception as e:
             # Can't parse - skip projection
+            print(f"DEBUG PARSE FAILURE: ref_id={ref_id[:20] if ref_id else 'N/A'}..., error={str(e)[:50]}")
             return [None, recorded_id]
 
     log.info(f"Parsed event data, type={event_type}")
@@ -269,25 +270,41 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         if recorded_by == created_by:
             skip_dep_check = True
 
+    if event_type == 'invite':
+        # invite events received from out-of-band invite links are root-of-trust for joiners
+        # When Bob records Alice's invite, he doesn't need Alice's group/channel to be valid
+        # (he trusts the invite link itself as the credential)
+        created_by = event_data.get('created_by')
+        if recorded_by != created_by:  # Received from out-of-band (not self-created)
+            skip_dep_check = True
+
     if event_type == 'invite_accepted':
         # invite_accepted events are root-of-trust for joiners - they capture out-of-band
         # trusted data from the invite link. Only self-created ones are valid.
+        # However, we still need to check created_by dependency (peer event must exist first
+        # for foreign key constraints in transit_prekeys table)
         created_by = event_data.get('created_by')
-        if recorded_by == created_by:  # Self-created
-            skip_dep_check = True
+        print(f"DEBUG invite_accepted: recorded_by={recorded_by[:20]}..., created_by={created_by[:20] if created_by else 'N/A'}...")
+        # Do NOT skip dep check - we need peer event to be projected first
 
+    print(f"DEBUG: Before dep check, skip_dep_check={skip_dep_check}, event_type={event_type}")
     if not skip_dep_check:
+        print(f"DEBUG: Checking dependencies for {event_type}")
         missing_deps = check_deps(event_data, recorded_by, db)
         if missing_deps:
             # Event dependencies missing - block this event for this peer
             requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
             log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
+            print(f"DEBUG BLOCKING: {event_type} event blocked, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..., missing deps={[d[:20] + '...' for d in missing_deps]}")
             queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
+    else:
+        print(f"DEBUG: Skipping dep check for {event_type}")
 
     # All dependencies satisfied - proceed with projection
     projected_id = None
     log.info(f"Projecting event type: {event_type}")
+    print(f"DEBUG: About to dispatch event_type={event_type}, ref_id={ref_id[:20] if ref_id else 'N/A'}..., recorded_by={recorded_by[:20]}...")
 
     if event_type == 'message':
         projected_id = message.project(ref_id, recorded_by, recorded_at, db)
@@ -334,11 +351,12 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     elif event_type == 'group_prekey_shared':
         from events.group import group_prekey_shared
         projected_id = group_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'key_shared':
+    elif event_type == 'group_key_shared':
         from events.group import group_key_shared
         projected_id = group_key_shared.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'invite_accepted':
         from events.identity import invite_accepted
+        log.warning(f"DISPATCHER: Calling invite_accepted.project() for ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
         invite_accepted.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'group_member':
         from events.group import group_member

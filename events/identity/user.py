@@ -11,8 +11,7 @@ log = logging.getLogger(__name__)
 
 
 def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
-           invite_id: str | None = None, invite_key_secret: bytes | None = None,
-           invite_key_id: str | None = None,
+           invite_id: str | None = None,
            invite_private_key: bytes | None = None,
            group_id: str | None = None, channel_id: str | None = None) -> tuple[str, str]:
     """Create a user event representing network membership.
@@ -20,7 +19,7 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     Also auto-creates a prekey for receiving sync requests.
 
     Two modes:
-    1. Invite joiner (Bob): Requires invite_id, invite_key_secret, invite_key_id. Metadata from invite.
+    1. Invite joiner (Bob): Requires invite_id, invite_private_key. Metadata from invite.
     2. Network creator (Alice): Requires group_id, channel_id. No invite.
 
     Args:
@@ -30,8 +29,6 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         t_ms: Timestamp
         db: Database connection
         invite_id: Reference to invite event (for invite joiners)
-        invite_key_secret: Invite group key bytes for wrapping (for invite joiners)
-        invite_key_id: Pre-computed key ID from Alice (for invite joiners)
         invite_private_key: Invite private key for proof (for invite joiners)
         group_id: Group ID (for network creators only)
         channel_id: Channel ID (for network creators only)
@@ -83,14 +80,8 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         event_data['invite_pubkey'] = invite_pubkey_b64
         event_data['invite_signature'] = invite_signature_b64
 
-        # Store invite prekey in transit_prekeys so Bob can decrypt invite_key_shared
-        # Use the invite prekey_id from invite link (hash of public key)
-        invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key, size=16))
-        unsafedb = create_unsafe_db(db)
-        unsafedb.execute(
-            "INSERT OR REPLACE INTO transit_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
-            (invite_prekey_id, peer_id, invite_public_key, invite_private_key, t_ms)
-        )
+        # Note: invite prekey is restored via invite_accepted.project()
+        # invite_accepted is created before user.create() in user.join()
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -533,13 +524,8 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     invite_blob = base64.urlsafe_b64decode(invite_blob_b64 + '===')  # Add padding
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
-    # Mark invite as valid immediately (out-of-band trust via URL)
-    # This bypasses dependency checking since we trust the invite link itself
-    safedb = create_safe_db(db, recorded_by=peer_id)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (invite_id, peer_id)
-    )
+    # Note: invite is now marked as valid via invite_accepted.project() for reprojection
+    # During initial join, we'll mark it valid after creating invite_accepted event below
 
     # Project invite immediately to restore invite_key_secret and invite prekey to prekeys_shared
     # The invite prekey is reconstructed from invite event data (doesn't require decryption)
@@ -568,15 +554,11 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # Extract secrets from invite link (all b64 encoded)
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
 
-    # Extract keys and their pre-computed IDs from invite link
+    # Extract transit key and its pre-computed ID from invite link
     invite_transit_key = crypto.b64decode(invite_data['invite_transit_key'])
     invite_transit_key_id = invite_data['invite_transit_key_id']  # Alice's pre-computed ID
 
-    invite_group_key = crypto.b64decode(invite_data['invite_group_key'])
-    invite_group_key_id = invite_data['invite_group_key_id']  # Alice's pre-computed ID
-
     log.info(f"join() extracted invite_transit_key_id={invite_transit_key_id} from invite link")
-    log.info(f"join() extracted invite_group_key_id={invite_group_key_id} from invite link")
 
     # Get metadata from invite event
     invite_event_data = crypto.parse_json(invite_blob)
@@ -584,28 +566,13 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     channel_id = invite_event_data['channel_id']
     key_id = invite_event_data['key_id']
 
-    # 2. Create user membership with invite proof (auto-creates transit_prekey + transit_prekey_shared)
-    # User event references invite_id (contains group/channel/key metadata)
-    user_id, transit_prekey_shared_id, prekey_id = create(
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        name=name,
-        t_ms=t_ms + 1,
-        db=db,
-        invite_id=invite_id,
-        invite_key_secret=invite_group_key,  # Inner encryption for bootstrap events
-        invite_key_id=invite_group_key_id,  # Alice's pre-computed ID
-        invite_private_key=invite_private_key
-    )
-
-    log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
-
     # Get invite_transit_prekey_shared_id from projected invite event
     invite_transit_prekey_shared_id = invite_event_data.get('invite_transit_prekey_shared_id')
     if not invite_transit_prekey_shared_id:
         raise ValueError("invite_transit_prekey_shared_id missing from invite event")
 
-    # Create invite_accepted event to capture ALL invite link data for event-sourcing
+    # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
+    # This restores the invite private key via projection BEFORE user.create() is called
     # This allows reprojection to work without the original invite link
     from events.identity import invite_accepted
     invite_accepted_id = invite_accepted.create(
@@ -614,12 +581,25 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         invite_transit_prekey_shared_id=invite_transit_prekey_shared_id,
         invite_transit_key=invite_transit_key,
         invite_transit_key_id=invite_transit_key_id,  # Alice's pre-computed ID
-        invite_group_key=invite_group_key,
-        invite_group_key_id=invite_group_key_id,  # Alice's pre-computed ID
         peer_id=peer_id,
-        t_ms=t_ms + 2,  # After user creation
+        t_ms=t_ms + 1,  # Before user creation
         db=db
     )
+
+    # 2. Create user membership with invite proof (auto-creates transit_prekey + transit_prekey_shared)
+    # User event references invite_id (contains group/channel/key metadata)
+    # The invite private key is now available via invite_accepted projection
+    user_id, transit_prekey_shared_id, prekey_id = create(
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        name=name,
+        t_ms=t_ms + 2,
+        db=db,
+        invite_id=invite_id,
+        invite_private_key=invite_private_key
+    )
+
+    log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
 
     # Add invite_transit_key_id to invite_data for send_bootstrap_events
     invite_data['invite_transit_key_id'] = invite_transit_key_id

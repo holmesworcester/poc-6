@@ -4,6 +4,7 @@
 
 # TODO:
 
+- consider an ephemeral event store for sync and transit keys that's not reprojected.
 - look at syncing loop in tests and remove the necessity for this by adding this to bootstrap and checking bootstrap 
 - bootstrap_status.sql should be in transit not identity? what events correspond to it? 
 - break out the logic for detecting bootstrap from sync.receive into its own function.  

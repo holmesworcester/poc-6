@@ -96,15 +96,11 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     invite_prekey_public_key_b64 = invite_pubkey_b64  # For event data
 
-    # Generate invite-scoped keys
-    invite_transit_key = crypto.generate_secret()  # Outer wrapper for Bob→Alice messages
-    invite_group_key = crypto.generate_secret()  # Inner encryption for Bob's bootstrap events
-
-    # Encode as b64 (not hex) for consistency
+    # Generate invite-scoped key for outer encryption (Bob→Alice messages)
+    invite_transit_key = crypto.generate_secret()
     invite_transit_key_b64 = crypto.b64encode(invite_transit_key)
-    invite_group_key_b64 = crypto.b64encode(invite_group_key)
 
-    # Create key events for invite keys (so we have event IDs to use as hints)
+    # Create key event for invite transit key (so we have event ID to use as hint)
     invite_transit_key_id = transit_key.create_with_material(
         key_material=invite_transit_key,
         peer_id=peer_id,
@@ -112,16 +108,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         db=db
     )
 
-    from events.group import group_key
-    invite_group_key_id = group_key.create_with_material(
-        key_material=invite_group_key,
-        peer_id=peer_id,
-        t_ms=t_ms + 1,
-        db=db
-    )
-
     log.info(f"invite.create() created invite_transit_key_id={invite_transit_key_id}")
-    log.info(f"invite.create() created invite_group_key_id={invite_group_key_id}")
 
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table
@@ -164,8 +151,6 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'invite_transit_prekey_shared_id': invite_transit_prekey_shared_id,  # Event ID for invite prekey (detached: prekey_id = prekey_shared_id)
         'invite_transit_key_secret': invite_transit_key_b64,  # Outer wrapper for Bob→Alice messages (b64)
         'invite_transit_key_id': invite_transit_key_id,  # Pre-computed ID (b64)
-        'invite_group_key_secret': invite_group_key_b64,  # Inner encryption for Bob's bootstrap events (b64)
-        'invite_group_key_id': invite_group_key_id,  # Pre-computed ID (b64)
         'group_id': group_id,
         'channel_id': channel_id,
         'key_id': key_id,
@@ -208,10 +193,6 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for network key")
 
-    # Note: invite_group_key is only used by Alice to validate Bob's bootstrap events
-    # It doesn't need to be shared to other members - they receive Bob's events
-    # decrypted and re-encrypted with the network key via normal sync
-
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
     inviter_peer_shared_blob = store.get(peer_shared_id, unsafedb)
@@ -228,11 +209,9 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     invite_link_data = {
         'invite_blob': invite_blob_b64,  # Signed invite event (contains group/channel/key + invite prekey public key)
-        'invite_private_key': crypto.b64encode(invite_private_key),  # Bob uses in-memory only (for proof signature)
+        'invite_private_key': crypto.b64encode(invite_private_key),  # Bob uses in-memory only (for proof signature + unsealing key_shared)
         'invite_transit_key': invite_transit_key_b64,  # Outer wrapper key (b64)
         'invite_transit_key_id': invite_transit_key_id,  # Pre-computed ID (b64)
-        'invite_group_key': invite_group_key_b64,  # Inner encryption key (b64)
-        'invite_group_key_id': invite_group_key_id,  # Pre-computed ID (b64)
         'inviter_peer_shared_id': peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
         'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
         'ip': inviter_ip,
@@ -246,7 +225,6 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     invite_link = f"quiet://invite/{invite_code}"
 
     log.info(f"invite.create() invite link contains transit_key_id={invite_transit_key_id}")
-    log.info(f"invite.create() invite link contains group_key_id={invite_group_key_id}")
 
     return (invite_id, invite_link, invite_link_data)
 
@@ -319,11 +297,10 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         invite_transit_key_id = event_data['invite_transit_key_id']
         log.info(f"invite.project() invite_transit_key already projected with key_id={invite_transit_key_id}, recorded_by={recorded_by[:20]}...")
 
-    # Restore invite_group_key for event-sourcing (Alice needs this to validate Bob's bootstrap events)
-    # The key event was already created in invite.create(), so it's already projected
-    # We just need to verify the invite_group_key_id is in the event data
-    if 'invite_group_key_id' in event_data:
-        invite_group_key_id = event_data['invite_group_key_id']
-        log.info(f"invite.project() invite_group_key already projected with key_id={invite_group_key_id}, recorded_by={recorded_by[:20]}...")
+    # Mark invite as valid for this peer (required for invite_accepted dependencies)
+    safedb.execute(
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (invite_id, recorded_by)
+    )
 
     return invite_id

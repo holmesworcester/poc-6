@@ -41,7 +41,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 
 def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project peer_shared event into peers_shared and shareable_events tables."""
-    log.info(f"peer_shared.project() peer_shared_id={peer_shared_id}, recorded_by={recorded_by}")
+    log.warning(f"[PEER_SHARED_PROJECT] peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)

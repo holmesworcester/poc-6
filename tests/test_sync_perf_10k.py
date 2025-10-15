@@ -1,7 +1,7 @@
 """
 Performance test: Alice creates 10,000 messages, Bob syncs them.
 
-Tracks how many sync steps (sync.sync_all() + sync.receive() calls) are needed
+Tracks how many sync steps (sync.send_request_to_all() + sync.receive() calls) are needed
 to transfer all messages from Alice to Bob, using the realistic user.join() API.
 """
 import sqlite3
@@ -71,12 +71,12 @@ def test_sync_perf_10k():
     sync.receive(batch_size=20, t_ms=4300, db=db)  # Bob receives Alice's response
 
     # Continue bloom sync to exchange remaining events
-    sync.sync_all(t_ms=4400, db=db)
+    sync.send_request_to_all(t_ms=4400, db=db)
     sync.receive(batch_size=20, t_ms=4500, db=db)
     sync.receive(batch_size=20, t_ms=4600, db=db)
 
     # Additional sync rounds to ensure all events flow through
-    sync.sync_all(t_ms=4700, db=db)
+    sync.send_request_to_all(t_ms=4700, db=db)
     sync.receive(batch_size=20, t_ms=4800, db=db)
     sync.receive(batch_size=20, t_ms=4900, db=db)
 
@@ -118,7 +118,7 @@ def test_sync_perf_10k():
         sync_step += 1
 
         # Step: All peers send sync requests
-        sync.sync_all(t_ms=30000 + sync_step * 100, db=db)
+        sync.send_request_to_all(t_ms=30000 + sync_step * 100, db=db)
 
         # Step: Receive sync requests (unwraps and auto-sends responses)
         sync.receive(batch_size=100, t_ms=30000 + sync_step * 100 + 10, db=db)

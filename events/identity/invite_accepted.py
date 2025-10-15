@@ -12,7 +12,6 @@ log = logging.getLogger(__name__)
 def create(invite_id: str, invite_private_key: bytes,
            invite_transit_prekey_shared_id: str,
            invite_transit_key: bytes, invite_transit_key_id: str,
-           invite_group_key: bytes, invite_group_key_id: str,
            peer_id: str, t_ms: int, db: Any) -> str:
     """Create local invite_accepted event (not shareable).
 
@@ -25,8 +24,6 @@ def create(invite_id: str, invite_private_key: bytes,
         invite_transit_prekey_shared_id: Prekey_shared event ID (synthetic ID for invite prekey)
         invite_transit_key: Outer encryption key for Bob's bootstrap events → Alice
         invite_transit_key_id: Pre-computed ID for invite_transit_key (from Alice)
-        invite_group_key: Inner encryption key for Bob's bootstrap events
-        invite_group_key_id: Pre-computed ID for invite_group_key (from Alice)
         peer_id: Bob's peer_id (local)
         t_ms: Timestamp
         db: Database connection
@@ -43,8 +40,6 @@ def create(invite_id: str, invite_private_key: bytes,
         'invite_transit_prekey_shared_id': invite_transit_prekey_shared_id,
         'invite_transit_key': crypto.b64encode(invite_transit_key),
         'invite_transit_key_id': invite_transit_key_id,  # Alice's pre-computed ID
-        'invite_group_key': crypto.b64encode(invite_group_key),
-        'invite_group_key_id': invite_group_key_id,  # Alice's pre-computed ID
         'created_by': peer_id,
         'created_at': t_ms
     }
@@ -61,10 +56,10 @@ def create(invite_id: str, invite_private_key: bytes,
 def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project invite_accepted: restore ALL invite link data for event-sourcing.
 
-    This restores raw keys (invite_group_key, network_key) from the invite link
-    and enables full reprojection without the original invite link.
+    This restores the invite_transit_key from the invite link and enables
+    full reprojection without the original invite link.
     """
-    log.info(f"invite_accepted.project() id={invite_accepted_id}, recorded_by={recorded_by}")
+    log.warning(f"[INVITE_ACCEPTED_PROJECT_ENTRY] id={invite_accepted_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -106,7 +101,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         )
     )
 
-    log.info(f"invite_accepted.project() stored invite_private_key in transit_prekeys table")
+    log.warning(f"[INVITE_ACCEPTED_PROJECT] stored invite_private_key prekey_id={invite_transit_prekey_shared_id[:20]}... for peer {recorded_by[:20]}...")
 
     # Restore invite_transit_key (outer encryption for Bob→Alice bootstrap events)
     # Alice created a key event with this ID, Bob/others need to restore it with the same ID
@@ -128,25 +123,6 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         verify = unsafedb.query_one("SELECT 1 FROM transit_keys WHERE key_id = ?", (invite_transit_key_id,))
         log.info(f"invite_accepted.project() invite_transit_key insertion verified: {verify is not None}")
 
-    # Restore invite_group_key (inner encryption for bootstrap events)
-    # Alice created a key event with this ID, Bob needs to restore it with the same ID
-    if 'invite_group_key' in event_data and 'invite_group_key_id' in event_data:
-        invite_group_key = crypto.b64decode(event_data['invite_group_key'])
-        invite_group_key_id = event_data['invite_group_key_id']  # Alice's event ID
-
-        log.info(f"invite_accepted.project() restoring invite_group_key with key_id={invite_group_key_id}, recorded_by={recorded_by[:20]}...")
-
-        # Store directly in group_keys table with Alice's event ID
-        # (Bob doesn't create a new key event, he uses Alice's ID)
-        safedb.execute(
-            "INSERT OR REPLACE INTO group_keys (key_id, key, recorded_by, created_at) VALUES (?, ?, ?, ?)",
-            (invite_group_key_id, invite_group_key, recorded_by, event_data['created_at'])
-        )
-
-        # Verify insertion worked
-        verify = safedb.query_one("SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?", (invite_group_key_id, recorded_by))
-        log.info(f"invite_accepted.project() invite_group_key insertion verified: {verify is not None}")
-
     # Track in invite_acceptances table for audit/debugging (simplified - no invite_group_key_shared_id)
     safedb.execute(
         """INSERT OR IGNORE INTO invite_acceptances
@@ -161,10 +137,17 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         )
     )
 
-    # Mark as valid
+    # Mark invite_accepted as valid
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (invite_accepted_id, recorded_by)
+    )
+
+    # Mark the invite itself as valid (restores out-of-band trust from invite link)
+    # This is necessary for reprojection since the invite link is not available
+    safedb.execute(
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (invite_id, recorded_by)
     )
 
     log.info(f"invite_accepted.project() completed for {recorded_by}")

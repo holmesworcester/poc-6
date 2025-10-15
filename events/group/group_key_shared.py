@@ -44,7 +44,7 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
 
     # Create the inner event (to be wrapped to recipient's prekey)
     inner_event_data = {
-        'type': 'key_shared',
+        'type': 'group_key_shared',
         'key_id': key_id,  # Reference to the key being shared
         'symmetric_key': symmetric_key_b64,  # The actual key material
         'recipient_peer_id': recipient_peer_id,
@@ -98,7 +98,7 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     # Create inner event (use prekey id as recipient marker)
     recipient_marker = crypto.b64encode(recipient_prekey_dict['id'])
     inner_event_data = {
-        'type': 'key_shared',
+        'type': 'group_key_shared',
         'key_id': key_id,
         'symmetric_key': symmetric_key_b64,
         'recipient_peer_id': recipient_marker,  # Invite prekey ID
@@ -121,7 +121,7 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
 
 def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project key_shared event into keys table and shareable_events."""
-    log.info(f"key_shared.project() key_shared_id={key_shared_id}, seen_by={recorded_by}")
+    log.warning(f"[GROUP_KEY_SHARED_PROJECT] key_shared_id={key_shared_id[:20]}..., seen_by={recorded_by[:20]}...")
 
     # Get blob from store (already unwrapped by recorded)
     blob = store.get(key_shared_id, db)
@@ -131,6 +131,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
 
     # Unwrap (decrypt) - recorded should have already done this, but we need the plaintext
     plaintext, missing_keys = crypto.unwrap(blob, recorded_by, db)
+    log.warning(f"[GROUP_KEY_SHARED_PROJECT] unwrap result: plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_keys}")
     if not plaintext:
         # If we can't decrypt, this might be a key_shared wrapped to someone else's prekey
         # (e.g., invite prekey where creator doesn't have the private key)
@@ -191,7 +192,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         )
     )
 
-    log.info(f"key_shared.project() added key {original_key_id} to group_keys table")
+    log.warning(f"[GROUP_KEY_SHARED_PROJECT] INSERTED key {original_key_id[:20]}... to group_keys for peer {recorded_by[:20]}...")
 
     # Insert into group_keys_shared table to track this event
     safedb.execute(
@@ -220,6 +221,15 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (original_key_id, recorded_by)
     )
+
+    # Notify blocked queue - unblock events that were waiting for this key
+    import queues
+    unblocked_ids = queues.blocked.notify_event_valid(original_key_id, recorded_by, safedb)
+    if unblocked_ids:
+        log.warning(f"[GROUP_KEY_SHARED_PROJECT] Unblocked {len(unblocked_ids)} events waiting for key {original_key_id[:20]}...")
+        # Re-project the unblocked events
+        from events.transit import recorded
+        recorded.project_ids(unblocked_ids, db)
 
     return key_shared_id
 

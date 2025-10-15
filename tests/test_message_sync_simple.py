@@ -41,11 +41,11 @@ def test_alice_bob_message_sync():
         sync.receive(batch_size=20, t_ms=t + 10, db=db)
 
     # Initial sync rounds
-    sync.sync_all(t_ms=4400, db=db)
+    sync.send_request_to_all(t_ms=4400, db=db)
     for t in [4500, 4600]:
         sync.receive(batch_size=20, t_ms=t, db=db)
 
-    sync.sync_all(t_ms=4700, db=db)
+    sync.send_request_to_all(t_ms=4700, db=db)
     for t in [4800, 4900]:
         sync.receive(batch_size=20, t_ms=t, db=db)
 
@@ -62,7 +62,7 @@ def test_alice_bob_message_sync():
             break
         # More sync rounds
         t_base = 4950 + (attempt * 10)
-        sync.sync_all(t_ms=t_base, db=db)
+        sync.send_request_to_all(t_ms=t_base, db=db)
         sync.receive(batch_size=20, t_ms=t_base + 5, db=db)
 
     assert bob_channel, f"Bob should have channel {bob['channel_id']} projected after sync"
@@ -85,10 +85,10 @@ def test_alice_bob_message_sync():
     )
 
     # Sync messages
-    sync.sync_all(t_ms=8000, db=db)
+    sync.send_request_to_all(t_ms=8000, db=db)
     sync.receive(batch_size=10, t_ms=9000, db=db)
     sync.receive(batch_size=100, t_ms=10000, db=db)
-    sync.sync_all(t_ms=11000, db=db)
+    sync.send_request_to_all(t_ms=11000, db=db)
     sync.receive(batch_size=10, t_ms=12000, db=db)
     sync.receive(batch_size=100, t_ms=13000, db=db)
 

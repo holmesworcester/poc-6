@@ -12,26 +12,36 @@ ID_SIZE = 16  # bytes (128 bits) - BLAKE2b hash size
 
 
 def create(peer_id: str, t_ms: int, db: Any) -> str:
-    """Create a transit key for sync responses, owned by peer_id."""
-    log.info(f"transit_key.create() creating new transit key for peer_id={peer_id}, t_ms={t_ms}")
+    """Create an ephemeral transit key for sync responses (not stored in event log).
+
+    Transit keys are sync protocol infrastructure and don't need to be replayed
+    during reprojection. They're created on-demand and stored only in transit_keys table.
+    """
+    log.info(f"transit_key.create() creating ephemeral transit key for peer_id={peer_id}, t_ms={t_ms}")
 
     # Generate symmetric key
     key = crypto.generate_secret()
 
-    # Create event blob (plaintext JSON, no encryption for local-only)
+    # Create key ID by hashing the key material (deterministic)
+    # Use same approach as store.py but don't store in event log
     event_data = {
         'type': 'transit_key',
         'key': crypto.b64encode(key),
-        'created_by': peer_id,  # Local peer who created this key
+        'created_by': peer_id,
         'created_at': t_ms
     }
+    blob = json.dumps(event_data, separators=(',', ':'), sort_keys=True).encode()
+    key_id = crypto.b64encode(crypto.hash(blob))
 
-    blob = json.dumps(event_data).encode()
+    # Store directly in transit_keys table (ephemeral, not in event log)
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute(
+        """INSERT OR IGNORE INTO transit_keys (key_id, key, owner_peer_id, created_at)
+           VALUES (?, ?, ?, ?)""",
+        (key_id, key, peer_id, t_ms)
+    )
 
-    # Store event with recorded wrapper and projection
-    key_id = store.event(blob, peer_id, t_ms, db)
-
-    log.info(f"transit_key.create() created key_id={key_id}")
+    log.info(f"transit_key.create() created ephemeral key_id={key_id}")
     return key_id
 
 
