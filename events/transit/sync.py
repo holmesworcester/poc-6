@@ -264,20 +264,20 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
 
         # Try detached prekey first (prekey_id = prekey_shared_id)
         # Debug: list all prekeys in database
-        # For asymmetric (prekey) wrapping, hint is transit_prekey_shared_id (event ID)
+        # For asymmetric (prekey) wrapping, hint is transit_prekey_id (matches prekey_id in recipient's transit_prekeys table)
         # Query transit_prekeys_shared to find all peers who have this prekey in their subjective view
         # Note: transit_prekeys_shared is subjective, but we need to find ALL peers
         # Use raw SQL via Database._conn to bypass SafeDB scoping
         try:
             cursor = db._conn.execute(
-                "SELECT DISTINCT recorded_by FROM transit_prekeys_shared WHERE transit_prekey_shared_id = ?",
+                "SELECT DISTINCT recorded_by FROM transit_prekeys_shared WHERE transit_prekey_id = ?",
                 (hint_b64,)
             )
             prekey_shared_rows = cursor.fetchall()
             recorded_by_peers = [row[0] for row in prekey_shared_rows]  # fetchall returns tuples
 
             if recorded_by_peers:
-                log.info(f"unwrap_and_store: hint={hint_b64[:30]}..., found {len(recorded_by_peers)} peers via transit_prekeys_shared lookup: {[p[:20] for p in recorded_by_peers]}")
+                log.info(f"unwrap_and_store: hint={hint_b64[:30]}..., found {len(recorded_by_peers)} peers via transit_prekey_id lookup: {[p[:20] for p in recorded_by_peers]}")
         except Exception as e:
             log.warning(f"unwrap_and_store: Failed to query transit_prekeys_shared: {e}")
             recorded_by_peers = []
@@ -316,6 +316,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     try:
         event_data = crypto.parse_json(unwrapped_blob)
         event_type = event_data.get('type')
+        log.warning(f"[UNWRAP_PARSE] Parsed event type={event_type}, checking if ephemeral (types={EPHEMERAL_EVENT_TYPES})")
 
         if event_type in EPHEMERAL_EVENT_TYPES:
             # Handle sync events ephemerally - project directly without storing
@@ -342,7 +343,8 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
 
             # Return empty list - no recorded events to project later
             return []
-    except:
+    except Exception as e:
+        log.warning(f"[UNWRAP_PARSE_FAIL] Failed to parse as ephemeral event: {e}, continuing with normal storage")
         pass  # Not JSON or parse failed, continue with normal storage
 
     # Store the unwrapped event blob (once)
@@ -570,9 +572,9 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
 
     created_network = status['created_network'] if status else 0
     joined_network = status['joined_network'] if status else 0
-    bootstrap_complete = (created_network == 1 or joined_network == 1)
+    my_bootstrap_complete = (created_network == 1 or joined_network == 1)
 
-    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... created={created_network} joined={joined_network} bootstrap_complete={bootstrap_complete}")
+    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... created={created_network} joined={joined_network} my_bootstrap_complete={my_bootstrap_complete}")
 
     # Query all peer_shared events seen by this peer
     peer_shared_rows = safedb.query(
@@ -590,14 +592,27 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
             log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_self={ps_id[:20]}...")
             continue
 
-        if bootstrap_complete:
+        # Check per-relationship bootstrap: have we synced with this peer before?
+        unsafedb = create_unsafe_db(db)
+        relationship_state = unsafedb.query_one(
+            "SELECT 1 FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
+            (from_peer_id, ps_id)
+        )
+        relationship_bootstrap_complete = bool(relationship_state)
+
+        log.warning(f"[BOOTSTRAP_CHECK] from={peer_id_str[:10]}... to={ps_id[:10]}... my_complete={my_bootstrap_complete} rel_complete={relationship_bootstrap_complete}")
+
+        # Use bootstrap if EITHER:
+        # 1. We haven't completed our own bootstrap (joined/created network), OR
+        # 2. We haven't synced with this specific peer before (no sync_state)
+        if not my_bootstrap_complete or not relationship_bootstrap_complete:
+            # Bootstrap mode
+            log.warning(f"[BOOTSTRAP_MODE] {peer_id_str[:20]}... -> {ps_id[:20]}... mode=bootstrap (my_complete={my_bootstrap_complete}, rel_complete={relationship_bootstrap_complete})")
+            send_bootstrap_to_peer(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
+        else:
             # Use normal bloom-filtered sync
             log.info(f"send_requests: {peer_id_str[:20]}... -> {ps_id[:20]}... mode=sync")
             send_request(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
-        else:
-            # Still bootstrapping
-            log.info(f"send_requests: {peer_id_str[:20]}... -> {ps_id[:20]}... mode=bootstrap")
-            send_bootstrap_to_peer(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
 
@@ -853,6 +868,13 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 
     log.warning(f"[SYNC_PROJECT] result=ACCEPTED requester={requester_peer_shared_id[:20]}... recognized_by={recorded_by[:10]}... window={window_id}")
 
+    # Check if we've synced with this peer before
+    unsafedb = create_unsafe_db(db)
+    sync_state_exists = unsafedb.query_one(
+        "SELECT 1 FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
+        (recorded_by, requester_peer_shared_id)
+    )
+
     # Decode transit_key from base64-encoded dict to bytes dict
     transit_key_dict = {
         'id': crypto.b64decode(transit_key_encoded['id']),
@@ -868,20 +890,96 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     from events.identity import peer_shared
     requester_public_key = peer_shared.get_public_key(requester_peer_shared_id, recorded_by, db)
 
-    # Send bloom-filtered response
-    send_response(
-        requester_peer_id,
-        requester_peer_shared_id,
-        recorded_by,
-        transit_key_dict,
-        window_id,
-        window_min,
-        window_max,
-        bloom_filter,
-        requester_public_key,
-        recorded_at,
-        db
+    if not sync_state_exists:
+        # First sync with this peer - send bloom-filtered events from ALL windows
+        log.warning(f"[SYNC_PROJECT] first_sync_with_requester={requester_peer_shared_id[:20]}... sending_bootstrap_response")
+        send_bootstrap_response(recorded_by, transit_key_dict, bloom_filter, requester_public_key, window_id, recorded_at, db)
+        # Mark that we've now bootstrapped with this peer
+        update_sync_state(recorded_by, requester_peer_shared_id, 0, 1, 0, recorded_at, db)
+    else:
+        # Normal bloom-filtered sync (single window)
+        send_response(
+            requester_peer_id,
+            requester_peer_shared_id,
+            recorded_by,
+            transit_key_dict,
+            window_id,
+            window_min,
+            window_max,
+            bloom_filter,
+            requester_public_key,
+            recorded_at,
+            db
+        )
+
+
+def send_bootstrap_response(from_peer_id: str, transit_key_dict: dict[str, Any], bloom_filter: bytes,
+                            requester_public_key: bytes, window_id: int, t_ms: int, db: Any) -> None:
+    """Send shareable events filtered by bloom (from ALL windows, not just requested window).
+
+    This is used for first-time sync with a new peer - we check all windows and send
+    any events the requester doesn't have (based on their bloom filter).
+
+    Args:
+        from_peer_id: Responder's peer_id (which peer is sending the response)
+        transit_key_dict: Transit key dict from the sync request (for wrapping responses)
+        bloom_filter: Bloom filter from sync request showing what requester has
+        requester_public_key: For deriving bloom salt
+        window_id: Window ID from sync request (for salt derivation)
+        t_ms: Current timestamp
+        db: Database connection
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    log.warning(f"[BOOTSTRAP_RESPONSE] from={from_peer_id[:10]}... checking_all_windows")
+
+    # Get ALL shareable events for this peer (from all windows)
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    all_shareable = safedb.query(
+        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ? ORDER BY created_at ASC",
+        (from_peer_id,)
     )
+
+    log.warning(f"[BOOTSTRAP_RESPONSE] found={len(all_shareable)}_shareable_events from={from_peer_id[:10]}...")
+
+    # Derive salt for bloom checking
+    salt = derive_salt(requester_public_key, window_id)
+
+    # Filter using bloom and send events requester doesn't have
+    events_sent = 0
+    for row in all_shareable:
+        event_id = row['event_id']
+        event_id_bytes = crypto.b64decode(event_id)
+
+        # Check if event is in requester's bloom
+        in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
+        if in_bloom:
+            continue  # Requester already has this event
+
+        # Send this event
+        try:
+            event_blob = safedb.get_shareable_blob(event_id)
+        except Exception as e:
+            log.warning(f"send_bootstrap_response: failed to get shareable blob for {event_id[:20]}...: {e}")
+            continue
+
+        # Log event type
+        try:
+            event_data = crypto.parse_json(event_blob)
+            event_type = event_data.get('type', 'unknown')
+            log.warning(f"[BOOTSTRAP_RESPONSE] sending {event_type} event {event_id[:20]}...")
+        except:
+            log.warning(f"[BOOTSTRAP_RESPONSE] sending encrypted event {event_id[:20]}...")
+
+        # Wrap with transit key from sync request
+        wrapped = crypto.wrap(event_blob, transit_key_dict, db)
+
+        # Send
+        queues.incoming.add(wrapped, t_ms, db)
+        events_sent += 1
+
+    log.warning(f"[BOOTSTRAP_RESPONSE] sent={events_sent}_events (filtered_from_{len(all_shareable)}_total)")
 
 
 def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, transit_key_dict: dict[str, Any],

@@ -167,12 +167,12 @@ def get_transit_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) 
         lookup_log.warning(f"get_transit_prekey_for_peer() NO PREKEY FOUND for peer_shared_id={peer_shared_id[:20]}...")
         return None
 
-    # Use transit_prekey_shared_id as the hint/id for asymmetric keys (event ID in blob store)
-    transit_prekey_shared_id_bytes = crypto.b64decode(result['transit_prekey_shared_id'])
-    lookup_log.info(f"get_transit_prekey_for_peer() FOUND transit_prekey_shared_id={result['transit_prekey_shared_id'][:20]}... for peer_shared_id={peer_shared_id[:20]}...")
+    # Use transit_prekey_id as the crypto hint (matches prekey_id in recipient's transit_prekeys table)
+    transit_prekey_id_bytes = crypto.b64decode(result['transit_prekey_id'])
+    lookup_log.info(f"get_transit_prekey_for_peer() FOUND transit_prekey_id={result['transit_prekey_id'][:20]}... for peer_shared_id={peer_shared_id[:20]}...")
 
     return {
-        'id': transit_prekey_shared_id_bytes,
+        'id': transit_prekey_id_bytes,
         'public_key': result['public_key'],
         'type': 'asymmetric'
     }

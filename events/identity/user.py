@@ -1,5 +1,6 @@
 """User event type (shareable, encrypted) - represents network membership."""
 from typing import Any
+import base64
 import logging
 import crypto
 import store
@@ -257,38 +258,52 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
 
     unsafedb = create_unsafe_db(db)
 
-    # Get invite address from invite_data (parsed from link)
+    # Get invite address and inviter's transit prekey from invite_data
     invite_ip = invite_data.get('ip', '127.0.0.1')
     invite_port = invite_data.get('port', 6100)
-    invite_transit_key_secret = crypto.b64decode(invite_data['invite_transit_key'])
-    invite_transit_key_id = invite_data['invite_transit_key_id']  # Alice's pre-computed ID
 
-    # Create invite transit key dict for outer wrapping (use Alice's pre-computed ID)
+    # Get inviter's transit prekey for wrapping bootstrap messages
+    # Note: invite_data is the decoded invite link, which contains the invite event
+    invite_blob = base64.urlsafe_b64decode(invite_data['invite_blob'] + '===')
+    invite_event_data = crypto.parse_json(invite_blob)
+
+    inviter_transit_prekey_id = invite_event_data['inviter_transit_prekey_id']  # Crypto hint (hash)
+    inviter_transit_prekey_shared_id = invite_event_data['inviter_transit_prekey_shared_id']  # Event ID
+    inviter_transit_prekey_public_key = crypto.b64decode(invite_event_data['inviter_transit_prekey_public_key'])
+
+    # Create transit prekey dict for outer wrapping (Alice's transit prekey)
+    # Use prekey_id as hint (for Alice's key lookup), not prekey_shared_id (event ID)
     import logging
     log = logging.getLogger(__name__)
-    log.info(f"send_bootstrap_events() using invite_transit_key_id={invite_transit_key_id}")
+    log.info(f"send_bootstrap_events() using inviter_transit_prekey_id={inviter_transit_prekey_id[:20]}... (hint for unwrap)")
 
-    invite_transit_key = {
-        'id': crypto.b64decode(invite_transit_key_id),
-        'key': invite_transit_key_secret,
-        'type': 'symmetric'
+    inviter_transit_prekey_dict = {
+        'id': crypto.b64decode(inviter_transit_prekey_id),  # Crypto hint for key lookup
+        'public_key': inviter_transit_prekey_public_key,
+        'type': 'asymmetric'
     }
+
+    log.warning(f"[BOOTSTRAP_WRAP] inviter_transit_prekey_id={inviter_transit_prekey_id[:20]}...")
+    log.warning(f"[BOOTSTRAP_WRAP] id_bytes_for_hint={crypto.b64encode(inviter_transit_prekey_dict['id'])[:20]}...")
 
     # Get peer_shared blob
     peer_shared_blob = store.get(peer_shared_id, unsafedb)
     if not peer_shared_blob:
         return  # Can't send if blob not found
 
-    # Wrap with invite transit key for outer encryption
-    wrapped_peer = crypto.wrap(peer_shared_blob, invite_transit_key, db)
+    log.warning(f"[BOOTSTRAP_WRAP] peer_shared_blob is {len(peer_shared_blob)}B, first_byte={peer_shared_blob[:1].hex()}")
+
+    # Wrap with inviter's transit prekey for outer encryption
+    wrapped_peer = crypto.wrap(peer_shared_blob, inviter_transit_prekey_dict, db)
+    log.warning(f"[BOOTSTRAP_WRAP] wrapped_blob_hint={crypto.b64encode(wrapped_peer[:16])[:20]}...")
 
     # Get user blob
     user_blob = store.get(user_id, unsafedb)
     if not user_blob:
         return  # Can't send if blob not found
 
-    # Wrap with invite transit key for outer encryption
-    wrapped_user = crypto.wrap(user_blob, invite_transit_key, db)
+    # Wrap with inviter's transit prekey for outer encryption
+    wrapped_user = crypto.wrap(user_blob, inviter_transit_prekey_dict, db)
 
     # Create address event (plaintext, will be wrapped)
     # TODO: Get actual address from somewhere instead of hardcoding
@@ -304,19 +319,19 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_address = crypto.sign_event(address_data, private_key)
     canonical_address = crypto.canonicalize_json(signed_address)
-    wrapped_address = crypto.wrap(canonical_address, invite_transit_key, db)
+    wrapped_address = crypto.wrap(canonical_address, inviter_transit_prekey_dict, db)
 
     # Get transit_prekey_shared blob (created by user.create() auto-creation)
     transit_prekey_shared_blob = store.get(transit_prekey_shared_id, unsafedb)
     if not transit_prekey_shared_blob:
         return  # Can't send if blob not found
 
-    # Wrap with invite transit key for outer encryption
-    wrapped_transit_prekey_shared = crypto.wrap(transit_prekey_shared_blob, invite_transit_key, db)
+    # Wrap with inviter's transit prekey for outer encryption
+    wrapped_transit_prekey_shared = crypto.wrap(transit_prekey_shared_blob, inviter_transit_prekey_dict, db)
 
     # Add all to incoming queue (simulates sending to invite address)
     inviter_id_short = invite_data.get('inviter_peer_shared_id', 'N/A')[:10] + '...' if invite_data.get('inviter_peer_shared_id') else 'N/A'
-    log.warning(f"[BOOTSTRAP_SEND] from_peer={peer_id[:10]}... to_inviter={inviter_id_short} invite_transit_key_id={invite_transit_key_id[:20]}... sending_4_events")
+    log.warning(f"[BOOTSTRAP_SEND] from_peer={peer_id[:10]}... to_inviter={inviter_id_short} inviter_transit_prekey_shared_id={inviter_transit_prekey_shared_id[:20]}... sending_4_events")
     queues.incoming.add(wrapped_peer, t_ms, db)
     log.warning(f"[BOOTSTRAP_SEND] event=peer_shared blob_size={len(wrapped_peer)}B hint={crypto.b64encode(wrapped_peer[:16])[:20]}...")
     queues.incoming.add(wrapped_user, t_ms, db)
@@ -552,13 +567,10 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
 
     # Extract secrets from invite link (all b64 encoded)
+    invite_prekey_id = invite_data['invite_prekey_id']
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
 
-    # Extract transit key and its pre-computed ID from invite link
-    invite_transit_key = crypto.b64decode(invite_data['invite_transit_key'])
-    invite_transit_key_id = invite_data['invite_transit_key_id']  # Alice's pre-computed ID
-
-    log.info(f"join() extracted invite_transit_key_id={invite_transit_key_id} from invite link")
+    log.info(f"join() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite link")
 
     # Get metadata from invite event
     invite_event_data = crypto.parse_json(invite_blob)
@@ -566,21 +578,14 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     channel_id = invite_event_data['channel_id']
     key_id = invite_event_data['key_id']
 
-    # Get invite_transit_prekey_shared_id from projected invite event
-    invite_transit_prekey_shared_id = invite_event_data.get('invite_transit_prekey_shared_id')
-    if not invite_transit_prekey_shared_id:
-        raise ValueError("invite_transit_prekey_shared_id missing from invite event")
-
     # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
     # This restores the invite private key via projection BEFORE user.create() is called
     # This allows reprojection to work without the original invite link
     from events.identity import invite_accepted
     invite_accepted_id = invite_accepted.create(
         invite_id=invite_id,
+        invite_prekey_id=invite_prekey_id,
         invite_private_key=invite_private_key,
-        invite_transit_prekey_shared_id=invite_transit_prekey_shared_id,
-        invite_transit_key=invite_transit_key,
-        invite_transit_key_id=invite_transit_key_id,  # Alice's pre-computed ID
         peer_id=peer_id,
         t_ms=t_ms + 1,  # Before user creation
         db=db
@@ -600,9 +605,6 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     )
 
     log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
-
-    # Add invite_transit_key_id to invite_data for send_bootstrap_events
-    invite_data['invite_transit_key_id'] = invite_transit_key_id
 
     # TODO: Create network_joined event after receiving first sync response from inviter
     # This marks bootstrap as successful and switches from bootstrap mode to normal sync

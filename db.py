@@ -261,19 +261,15 @@ class SafeDB:
         Raises:
             ScopingViolation: If this peer doesn't have access to this event
         """
-        import crypto
-
-        # Decode event_id for store lookup
-        id_bytes = crypto.b64decode(event_id)
-
         # Join store with valid_events to verify access
+        # Note: store.id is TEXT (base64), not BLOB
         result = self._db.query_one("""
             SELECT s.blob
             FROM store s
             INNER JOIN valid_events v
               ON v.event_id = ? AND v.recorded_by = ?
             WHERE s.id = ?
-        """, (event_id, self.recorded_by, id_bytes))
+        """, (event_id, self.recorded_by, event_id))
 
         if result is None:
             raise ScopingViolation(
@@ -298,19 +294,15 @@ class SafeDB:
         Raises:
             ScopingViolation: If this peer cannot share this event
         """
-        import crypto
-
-        # Decode event_id for store lookup
-        id_bytes = crypto.b64decode(event_id)
-
         # Join store with shareable_events to verify can share
+        # Note: store.id is TEXT (base64), not BLOB
         result = self._db.query_one("""
             SELECT s.blob
             FROM store s
             INNER JOIN shareable_events se
               ON se.event_id = ? AND se.can_share_peer_id = ?
             WHERE s.id = ?
-        """, (event_id, self.recorded_by, id_bytes))
+        """, (event_id, self.recorded_by, event_id))
 
         if result is None:
             raise ScopingViolation(

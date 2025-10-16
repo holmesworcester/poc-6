@@ -66,49 +66,13 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     channel_id = channel_row['channel_id']
 
-    # Generate Ed25519 keypair for invite proof (separate from invite prekey)
-    # Bob will use private key for proof signature only
+    # Generate Ed25519 keypair for invite proof + GKS decryption
     invite_private_key, invite_public_key = crypto.generate_keypair()
     invite_pubkey_b64 = crypto.b64encode(invite_public_key)
 
-    # Create invite prekey using the proof key (reuse for wrapping)
-    # This is a proper transit_prekey event (not detached), so Bob receives the same event ID
-    from events.transit import transit_prekey, transit_prekey_shared
-
-    # Create transit_prekey event with the invite keypair
-    invite_prekey_id = transit_prekey.create_with_material(
-        public_key=invite_public_key,
-        private_key=invite_private_key,
-        peer_id=peer_id,
-        t_ms=t_ms,
-        db=db
-    )
-
-    # Create transit_prekey_shared event so Bob can receive it
-    # Linking happens during projection (event-sourcing principle)
-    invite_transit_prekey_shared_id = transit_prekey_shared.create(
-        prekey_id=invite_prekey_id,
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        t_ms=t_ms,
-        db=db
-    )
-
-    invite_prekey_public_key_b64 = invite_pubkey_b64  # For event data
-
-    # Generate invite-scoped key for outer encryption (Bob→Alice messages)
-    invite_transit_key = crypto.generate_secret()
-    invite_transit_key_b64 = crypto.b64encode(invite_transit_key)
-
-    # Create key event for invite transit key (so we have event ID to use as hint)
-    invite_transit_key_id = transit_key.create_with_material(
-        key_material=invite_transit_key,
-        peer_id=peer_id,
-        t_ms=t_ms,
-        db=db
-    )
-
-    log.info(f"invite.create() created invite_transit_key_id={invite_transit_key_id}")
+    # Generate deterministic prekey ID from public key hash
+    # This serves as the crypto hint for group_key_shared decryption
+    invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key)[:16])
 
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table
@@ -140,24 +104,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     # Create minimal invite event (signed by Alice, proves authorization)
     # This event contains group/channel/key metadata that Bob's user event will reference
-    # Include invite_transit_key and invite_group_key secrets for event-sourcing (Alice needs to restore during reprojection)
     # Include inviter's prekey so Bob can send sync requests (projection into prekeys_shared)
-    # Include prekey_shared_id values for proper reprojection
-    # Include invite prekey public key so Bob can locally reconstruct prekey_shared projection
     invite_event_data = {
         'type': 'invite',
-        'invite_pubkey': invite_pubkey_b64,
-        'invite_prekey_public_key': invite_prekey_public_key_b64,  # For Bob to seal to
-        'invite_transit_prekey_shared_id': invite_transit_prekey_shared_id,  # Event ID for invite prekey (detached: prekey_id = prekey_shared_id)
-        'invite_transit_key_secret': invite_transit_key_b64,  # Outer wrapper for Bob→Alice messages (b64)
-        'invite_transit_key_id': invite_transit_key_id,  # Pre-computed ID (b64)
+        'invite_pubkey': invite_pubkey_b64,  # For user proof signature
+        'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
         'group_id': group_id,
         'channel_id': channel_id,
         'key_id': key_id,
-        'inviter_peer_shared_id': peer_shared_id,  # For prekey projection (public identity)
-        'inviter_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),  # For Bob to send sync requests
-        'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,  # Event ID for inviter's transit_prekey_shared event
-        'inviter_transit_prekey_id': inviter_prekey_id,  # Inviter's transit_prekey event ID (for hint lookup)
+        'inviter_peer_shared_id': peer_shared_id,
+        'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
+        'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
+        'inviter_transit_prekey_id': inviter_prekey_id,
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -171,19 +129,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     invite_blob = crypto.canonicalize_json(signed_invite_event)
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
-    # Create group_key_shared for network key, sealed to invite prekey
-    # Anyone with invite private key can unseal this
+    # Create group_key_shared sealed to invite proof prekey
+    # Use invite_prekey_id as hint (deterministic from public key)
     from events.group import group_key_shared
 
-    # Build invite prekey dict for wrapping
     invite_prekey_dict = {
-        'id': crypto.b64decode(invite_transit_prekey_shared_id),
+        'id': crypto.b64decode(invite_prekey_id),
         'public_key': invite_public_key,
         'type': 'asymmetric'
     }
 
     group_key_shared_id = group_key_shared.create_for_invite(
-        key_id=key_id,  # Network key
+        key_id=key_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         recipient_prekey_dict=invite_prekey_dict,
@@ -201,17 +158,15 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     # Build invite link with invite blob + secrets
     # Group/channel/key metadata is now in the signed blob (not plaintext)
-    # Invite prekey reconstructed from invite event (public key), not from encrypted blob
-    # Raw keys included directly - Bob gets them via invite_accepted event projection
     import base64
     invite_blob_b64 = base64.urlsafe_b64encode(invite_blob).decode().rstrip('=')
     inviter_peer_shared_blob_b64 = base64.urlsafe_b64encode(inviter_peer_shared_blob).decode().rstrip('=')
 
     invite_link_data = {
-        'invite_blob': invite_blob_b64,  # Signed invite event (contains group/channel/key + invite prekey public key)
-        'invite_private_key': crypto.b64encode(invite_private_key),  # Bob uses in-memory only (for proof signature + unsealing key_shared)
-        'invite_transit_key': invite_transit_key_b64,  # Outer wrapper key (b64)
-        'invite_transit_key_id': invite_transit_key_id,  # Pre-computed ID (b64)
+        'invite_blob': invite_blob_b64,  # Signed invite event (contains group/channel/key + invite prekey_id)
+        'invite_id': invite_id,  # Event ID for reference
+        'invite_prekey_id': invite_prekey_id,  # Crypto hint (where Bob stores the key)
+        'invite_private_key': crypto.b64encode(invite_private_key),  # Key material for GKS decryption + proof
         'inviter_peer_shared_id': peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
         'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
         'ip': inviter_ip,
@@ -224,7 +179,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     invite_code = base64.urlsafe_b64encode(invite_json.encode()).decode().rstrip('=')
     invite_link = f"quiet://invite/{invite_code}"
 
-    log.info(f"invite.create() invite link contains transit_key_id={invite_transit_key_id}")
+    log.info(f"invite.create() invite link created with invite_prekey_id={invite_prekey_id[:20]}...")
 
     return (invite_id, invite_link, invite_link_data)
 
@@ -266,22 +221,10 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         )
     )
 
-    # Restore invite prekey to transit_prekeys_shared table (needed for invite_key_shared.project())
-    # Bob reconstructs this locally from invite event data (doesn't need to decrypt transit_prekey_shared blob)
-    # Alice restores it during reprojection so she can decrypt invite_key_shared from Bob
-    # Invite prekeys are "detached": transit_prekey_id = transit_prekey_shared_id (no separate transit_prekey event)
-    if 'invite_prekey_public_key' in event_data and 'invite_transit_prekey_shared_id' in event_data:
-        invite_prekey_public_key_bytes = crypto.b64decode(event_data['invite_prekey_public_key'])
-        invite_transit_prekey_shared_id = event_data['invite_transit_prekey_shared_id']
-        safedb.execute(
-            "INSERT OR REPLACE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (invite_transit_prekey_shared_id, invite_transit_prekey_shared_id, created_by, invite_prekey_public_key_bytes, event_data['created_at'], recorded_by, recorded_at)
-        )
-
     # Project inviter's prekey into transit_prekeys_shared (for Bob to send sync requests to Alice)
     # Always project for anyone who receives the invite (INSERT OR IGNORE handles duplicates)
-    if 'inviter_prekey_public_key' in event_data and 'inviter_peer_shared_id' in event_data and 'inviter_transit_prekey_shared_id' in event_data and 'inviter_transit_prekey_id' in event_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(event_data['inviter_prekey_public_key'])
+    if 'inviter_transit_prekey_public_key' in event_data and 'inviter_peer_shared_id' in event_data and 'inviter_transit_prekey_shared_id' in event_data and 'inviter_transit_prekey_id' in event_data:
+        inviter_prekey_public_key_bytes = crypto.b64decode(event_data['inviter_transit_prekey_public_key'])
         inviter_peer_shared_id = event_data['inviter_peer_shared_id']
 
         log.info(f"invite.project() projecting inviter's prekey for {recorded_by[:20]}... to contact {inviter_peer_shared_id[:20]}...")
@@ -289,13 +232,6 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (event_data['inviter_transit_prekey_shared_id'], event_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, event_data['created_at'], recorded_by, recorded_at)
         )
-
-    # Restore invite_transit_key for event-sourcing (Alice needs this to unwrap Bob's bootstrap messages)
-    # The key event was already created in invite.create(), so it's already projected
-    # We just need to verify the invite_transit_key_id is in the event data
-    if 'invite_transit_key_id' in event_data:
-        invite_transit_key_id = event_data['invite_transit_key_id']
-        log.info(f"invite.project() invite_transit_key already projected with key_id={invite_transit_key_id}, recorded_by={recorded_by[:20]}...")
 
     # Mark invite as valid for this peer (required for invite_accepted dependencies)
     safedb.execute(

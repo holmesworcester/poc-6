@@ -13,7 +13,7 @@ import sqlite3
 import pytest
 from db import Database
 import schema
-from events.transit import sync, recorded
+from events.transit import sync, recorded, sync_debug
 from events.content import message
 from events.identity import user
 import store
@@ -90,35 +90,87 @@ def test_three_player_messaging():
     print(f"Bob has channel valid: {bool(bob_has_channel)}")
     print(f"Bob blocked events: {bob_blocked['cnt']}")
 
-    print(f"\n=== STEP 5: Continue with bloom sync round 1 ===")
-    sync.send_request_to_all(t_ms=4400, db=db)
-    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
-    print(f"After send_request: Bob has channel valid: {bool(bob_has_channel)}")
+    print(f"\n=== STEP 5: Run debug sync to convergence ===")
+    send_rounds = sync_debug.send_request_to_all_debug(t_ms=4400, db=db, max_rounds=20)
+    print(f"Debug sync send completed in {send_rounds} rounds")
 
-    sync.receive(batch_size=20, t_ms=4500, db=db)
+    receive_rounds = sync_debug.receive_debug(batch_size=20, t_ms=5000, db=db, max_rounds=20)
+    print(f"Debug sync receive completed in {receive_rounds} rounds")
+
     bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
     bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
-    print(f"After receive 1: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+    print(f"After debug sync: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
 
-    sync.receive(batch_size=20, t_ms=4600, db=db)
-    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
-    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
-    print(f"After receive 2: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+    print(f"\n=== Verify Bob received and projected group_key_shared ===")
 
-    print(f"\n=== STEP 6: Additional sync round 2 ===")
-    sync.send_request_to_all(t_ms=4700, db=db)
-    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
-    print(f"After send_request: Bob has channel valid: {bool(bob_has_channel)}")
+    # Check if Bob has Alice's network key (from GKS) in his group_keys table
+    alice_network_key_id = alice['key_id']  # Alice's network key
+    bob_has_network_key = db.query_one(
+        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+        (alice_network_key_id, bob['peer_id'])
+    )
+    print(f"Bob has Alice's network key: {bool(bob_has_network_key)}")
 
-    sync.receive(batch_size=20, t_ms=4800, db=db)
-    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
-    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
-    print(f"After receive 1: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+    # Find all shareable events from Alice
+    alice_shareable_events = db.query(
+        """SELECT se.event_id
+           FROM shareable_events se
+           WHERE se.can_share_peer_id = ?
+           ORDER BY se.created_at""",
+        (alice['peer_id'],)
+    )
+    print(f"Alice has {len(alice_shareable_events)} shareable events total")
+    for row in alice_shareable_events:
+        # Try to determine event type
+        event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (row['event_id'],))
+        if event_blob:
+            try:
+                data = crypto.parse_json(event_blob['blob'])
+                event_type = data.get('type', 'unknown')
+            except:
+                event_type = 'encrypted'
+            # Get window_id from shareable_events
+            window_row = db.query_one(
+                "SELECT window_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+                (row['event_id'], alice['peer_id'])
+            )
+            window_id = window_row['window_id'] if window_row else 'N/A'
+            print(f"  - {row['event_id'][:20]}... type={event_type} window={window_id}")
 
-    sync.receive(batch_size=20, t_ms=4900, db=db)
-    bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
-    bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
-    print(f"After receive 2: Bob has channel valid: {bool(bob_has_channel)}, blocked: {bob_blocked['cnt']}")
+    # Count Bob's valid events
+    bob_valid_count = db.query_one(
+        "SELECT COUNT(*) as count FROM valid_events WHERE recorded_by = ?",
+        (bob['peer_id'],)
+    )
+    print(f"Bob has {bob_valid_count['count']} valid events total")
+
+    # Check what events Bob has received from Alice (check valid_events for events that Alice created)
+    bob_has_alice_events = db.query(
+        """SELECT ve.event_id
+           FROM valid_events ve
+           WHERE ve.recorded_by = ?
+           AND ve.event_id IN (SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?)
+           LIMIT 10""",
+        (bob['peer_id'], alice['peer_id'])
+    )
+    print(f"Bob has received {len(bob_has_alice_events)} of Alice's {len(alice_shareable_events)} shareable events:")
+    for row in bob_has_alice_events:
+        print(f"  - {row['event_id'][:20]}...")
+
+    # Check if Bob has received any group_key_shared events
+    bob_gks_in_store = db.query(
+        """SELECT s.id, v.event_id as valid_id
+           FROM store s
+           LEFT JOIN valid_events v ON v.event_id = s.id AND v.recorded_by = ?
+           WHERE s.blob LIKE '%group_key_shared%'""",
+        (bob['peer_id'],)
+    )
+    print(f"Bob has {len(bob_gks_in_store)} group_key_shared events in store")
+    for row in bob_gks_in_store:
+        print(f"  GKS event {row['id'][:20]}..., valid={bool(row['valid_id'])}")
+
+    # Critical assertion - this will show us if sync is working
+    assert bob_has_network_key, f"Bob should have Alice's network key {alice_network_key_id} after sync (received via group_key_shared)"
 
     # Check if channel blob is in store
     channel_in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (bob['channel_id'],))
