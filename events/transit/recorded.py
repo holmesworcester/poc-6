@@ -351,6 +351,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     elif event_type == 'network_joined':
         from events.identity import network_joined
         projected_id = network_joined.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'address':
+        from events.identity import address
+        projected_id = address.project(ref_id, recorded_by, recorded_at, db)
 
     # Mark event as valid for this peer
     log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")

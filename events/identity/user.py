@@ -305,21 +305,25 @@ def send_bootstrap_events(peer_id: str, peer_shared_id: str, user_id: str,
     # Wrap with inviter's transit prekey for outer encryption
     wrapped_user = crypto.wrap(user_blob, inviter_transit_prekey_dict, db)
 
-    # Create address event (plaintext, will be wrapped)
+    # Create and store address event locally first
     # TODO: Get actual address from somewhere instead of hardcoding
-    address_data = {
-        'type': 'address',
-        'peer_id': peer_shared_id,
-        'ip': '127.0.0.1',  # Bob's address (hardcoded for now)
-        'port': 6100,
-        'created_at': t_ms
-    }
+    from events.identity import address as address_module
+    address_id = address_module.create(
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        ip='127.0.0.1',  # TODO: Get actual address
+        port=6100,       # TODO: Get actual port
+        t_ms=t_ms,
+        db=db
+    )
 
-    # Sign and wrap address event
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_address = crypto.sign_event(address_data, private_key)
-    canonical_address = crypto.canonicalize_json(signed_address)
-    wrapped_address = crypto.wrap(canonical_address, inviter_transit_prekey_dict, db)
+    # Get the stored blob for wrapping
+    address_blob = store.get(address_id, unsafedb)
+    if not address_blob:
+        return  # Can't send if blob not found
+
+    # Wrap with inviter's transit prekey for outer encryption
+    wrapped_address = crypto.wrap(address_blob, inviter_transit_prekey_dict, db)
 
     # Get transit_prekey_shared blob (created by user.create() auto-creation)
     transit_prekey_shared_blob = store.get(transit_prekey_shared_id, unsafedb)

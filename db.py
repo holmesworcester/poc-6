@@ -21,6 +21,7 @@ SUBJECTIVE_TABLES = {
     'peer_self',                   # Mapping from peer_id to peer_shared_id (subjective)
     'groups',
     'channels',
+    'addresses',
     'group_keys',                  # NEW: subjective group encryption keys
     'group_keys_shared',           # Group keys shared (subjective)
     'group_prekeys',               # NEW: subjective group prekeys

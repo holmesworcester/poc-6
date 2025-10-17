@@ -714,6 +714,7 @@ def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
     # Determine if symmetric or asymmetric based on key_data type
     key_type = key_data.get('type') if isinstance(key_data, dict) else None
 
+    log.warning(f"[CRYPTO_WRAP] key_id={key_id_b64[:20]}..., key_type={key_type}, id_bytes_len={len(id_bytes)}")
     log.info(f"crypto.wrap() wrapping with key_id={key_id_b64}, key_type={key_type}, id_bytes_len={len(id_bytes)}")
     log.debug(f"crypto.wrap() called: key_id={key_id_b64}, key_type={key_type}, plaintext_size={len(plaintext_bytes)}B")
 
