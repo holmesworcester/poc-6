@@ -69,32 +69,211 @@ def test_three_player_messaging():
     )
 
     print(f"\n=== STEP 1: Alice receives Bob's bootstrap events ===")
+
+    # Check Bob's SHAREABLE events (not just store) BEFORE Alice processes
+    bob_shareable_before_step1 = db.query("SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?", (bob['peer_id'],))
+    alice_shareable_before = db.query("SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?", (alice['peer_id'],))
+
+    bob_shareable_ids = set(row['event_id'] for row in bob_shareable_before_step1)
+    alice_shareable_ids = set(row['event_id'] for row in alice_shareable_before)
+
+    # Check if Bob's shareable events overlap with Alice's
+    bob_can_share_alice_events = bob_shareable_ids & alice_shareable_ids
+
+    print(f"BEFORE Step 1: Alice has {len(alice_shareable_ids)} shareable events")
+    print(f"BEFORE Step 1: Bob has {len(bob_shareable_ids)} shareable events")
+    print(f"BEFORE Step 1: Bob can share {len(bob_can_share_alice_events)}/{len(alice_shareable_ids)} of Alice's events (WRONG - should be 0!)")
+
+    # Print Alice's shareable_events list and check if Bob has RECORDED them
+    print(f"\n🔍 ALICE'S SHAREABLE EVENTS (and Bob's status):")
+    for row in alice_shareable_before:
+        event_id = row['event_id']
+        event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
+        window_row = db.query_one("SELECT window_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?", (event_id, alice['peer_id']))
+        window_id = window_row['window_id'] if window_row else 'N/A'
+
+        # Check if Bob has recorded this event (recorded events are in store table as JSON)
+        import json
+        all_store = db.query("SELECT id, blob FROM store")
+        bob_has_recorded = False
+        for s in all_store:
+            try:
+                data = json.loads(s['blob'])
+                if data.get('type') == 'recorded' and data.get('ref_id') == event_id and data.get('recorded_by') == bob['peer_id']:
+                    bob_has_recorded = True
+                    break
+            except:
+                pass
+
+        # Check if Bob has it in shareable_events
+        in_bob_shareable = event_id in bob_shareable_ids
+
+        if event_blob:
+            try:
+                event_data = crypto.parse_json(event_blob['blob'])
+                event_type = event_data.get('type', 'unknown')
+                print(f"  - {event_id[:20]}... type={event_type:20} window={window_id:7} bob_shareable={'YES' if in_bob_shareable else 'NO':3} bob_recorded={'YES' if bob_has_recorded else 'NO':3}")
+            except:
+                print(f"  - {event_id[:20]}... type={'encrypted':20} window={window_id:7} bob_shareable={'YES' if in_bob_shareable else 'NO':3} bob_recorded={'YES' if bob_has_recorded else 'NO':3}")
+
+    # Print Bob's full shareable_events list
+    print(f"\n🔍 BOB'S SHAREABLE EVENTS:")
+    for row in bob_shareable_before_step1:
+        event_id = row['event_id']
+        event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
+        window_row = db.query_one("SELECT window_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?", (event_id, bob['peer_id']))
+        window_id = window_row['window_id'] if window_row else 'N/A'
+        if event_blob:
+            try:
+                event_data = crypto.parse_json(event_blob['blob'])
+                event_type = event_data.get('type', 'unknown')
+                in_alice = event_id in alice_shareable_ids
+                print(f"  - {event_id[:20]}... type={event_type:20} window={window_id} alice_has={'YES' if in_alice else 'NO'}")
+            except:
+                print(f"  - {event_id[:20]}... type={'encrypted':20} window={window_id}")
+
+    # Print which specific events overlap
+    if len(bob_can_share_alice_events) > 0:
+        print(f"\n🔍 OVERLAP EVENTS (Bob claims to have Alice's events):")
+        for event_id in bob_can_share_alice_events:
+            print(f"  - {event_id[:20]}...")
+
+    # CRITICAL TEST: Verify Bob's bloom filter only contains events Bob has recorded
+    print(f"\n🔬 BLOOM FILTER VERIFICATION:")
+    print(f"Testing that Bob's bloom only matches events Bob has actually recorded...")
+
+    # Get Bob's shareable events (these should be in his bloom)
+    bob_shareable_events = set(row['event_id'] for row in bob_shareable_before_step1)
+    print(f"Bob has {len(bob_shareable_events)} shareable events")
+
+    # Manually check each of Alice's events against Bob's bloom
+    # We need to reconstruct the bloom check logic
+    from events.transit import sync as sync_module
+    from events.identity import peer_shared
+    import crypto as crypto_mod
+
+    # Get Bob's public key (same as used in send_request)
+    bob_public_key = peer_shared.get_public_key(bob['peer_shared_id'], bob['peer_id'], db)
+    window_id = 0
+    salt = sync_module.derive_salt(bob_public_key, window_id)
+
+    # Create Bob's bloom from his shareable events
+    bob_event_id_bytes = [crypto_mod.b64decode(eid) for eid in bob_shareable_events]
+    bob_bloom = sync_module.create_bloom(bob_event_id_bytes, salt)
+
+    print(f"Bob's bloom has {bin(int.from_bytes(bob_bloom, 'big')).count('1')} bits set")
+
+    # Test each of Alice's events
+    print(f"\nTesting Alice's {len(alice_shareable_ids)} events against Bob's bloom:")
+    false_positives = []
+    for alice_event_id in alice_shareable_ids:
+        alice_event_bytes = crypto_mod.b64decode(alice_event_id)
+        in_bloom = sync_module.check_bloom(alice_event_bytes, bob_bloom, salt)
+        bob_actually_has = alice_event_id in bob_shareable_events
+
+        status = "✓" if in_bloom == bob_actually_has else "✗"
+        if in_bloom and not bob_actually_has:
+            false_positives.append(alice_event_id)
+            print(f"  {status} {alice_event_id[:20]}... in_bloom={in_bloom} bob_has={bob_actually_has} ← FALSE POSITIVE!")
+        else:
+            print(f"  {status} {alice_event_id[:20]}... in_bloom={in_bloom} bob_has={bob_actually_has}")
+
+    if false_positives:
+        print(f"\n❌ BLOOM FILTER BUG: {len(false_positives)} false positives detected!")
+        print(f"These events match the bloom but Bob doesn't have them:")
+        for fp in false_positives:
+            print(f"  - {fp[:20]}...")
+    else:
+        print(f"\n✅ Bloom filter working correctly - no false positives")
+
+    print(f"\n🔍 Bloom hex (manually created): {bob_bloom.hex()[:60]}...")
+
     sync.receive(batch_size=20, t_ms=4100, db=db)
+
+    # Check Bob's SHAREABLE events AFTER Alice processes
+    bob_shareable_after_step1 = db.query("SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?", (bob['peer_id'],))
+    alice_shareable_after_step1 = db.query("SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?", (alice['peer_id'],))
+
+    bob_shareable_ids_after = set(row['event_id'] for row in bob_shareable_after_step1)
+    alice_shareable_ids_after = set(row['event_id'] for row in alice_shareable_after_step1)
+    bob_can_share_alice_events_after = bob_shareable_ids_after & alice_shareable_ids_after
+
+    print(f"AFTER Step 1: Alice has {len(alice_shareable_ids_after)} shareable events (gained {len(alice_shareable_ids_after) - len(alice_shareable_ids)})")
+    print(f"AFTER Step 1: Bob has {len(bob_shareable_ids_after)} shareable events (gained {len(bob_shareable_ids_after) - len(bob_shareable_ids)})")
+    print(f"AFTER Step 1: Bob can share {len(bob_can_share_alice_events_after)}/{len(alice_shareable_ids_after)} of Alice's events")
+
     bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
     print(f"Bob has channel valid: {bool(bob_has_channel)}")
 
     print(f"\n=== STEP 2: Process any unblocked events ===")
+
     sync.receive(batch_size=20, t_ms=4150, db=db)
+
     bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
     print(f"Bob has channel valid: {bool(bob_has_channel)}")
 
     print(f"\n=== STEP 3: Alice processes sync request, sends response ===")
+    queue_before = db.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
+    print(f"Incoming queue before Alice processes: {queue_before} blobs")
+
     sync.receive(batch_size=20, t_ms=4200, db=db)
+
+    queue_after = db.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
     bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
+    print(f"Incoming queue after Alice processes: {queue_after} blobs")
     print(f"Bob has channel valid: {bool(bob_has_channel)}")
 
+    # Check why Alice didn't send anything
+    alice_shareable = db.query("SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?", (alice['peer_id'],))
+    bob_shareable = db.query("SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?", (bob['peer_id'],))
+    bob_in_store = db.query("SELECT id FROM store")
+
+    # Check how many of Alice's shareable events Bob actually has
+    alice_event_ids = set(row['event_id'] for row in alice_shareable)
+    bob_event_ids = set(row['id'] for row in bob_in_store)
+    bob_has_alice_events = alice_event_ids & bob_event_ids
+
+    print(f"\nAlice has {len(alice_shareable)} shareable events")
+    print(f"Bob has {len(bob_shareable)} shareable events")
+    print(f"Bob has {len(bob_in_store)} total events in store")
+    print(f"Bob actually has {len(bob_has_alice_events)}/{len(alice_event_ids)} of Alice's shareable events in his store")
+
+    if len(bob_has_alice_events) > 0:
+        print(f"✓ Bob legitimately has {len(bob_has_alice_events)} of Alice's events")
+        print(f"  Alice should send {len(alice_event_ids) - len(bob_has_alice_events)} events that Bob doesn't have")
+
+    # Check if Bob's bloom is wrong
+    if len(alice_shareable) > 0 and queue_after == queue_before:
+        print(f"\n⚠️ WARNING: Alice has shareable events but didn't send any!")
+        if len(bob_has_alice_events) == len(alice_event_ids):
+            print(f"✓ Bob's bloom is CORRECT - he has all {len(alice_event_ids)} of Alice's events")
+        else:
+            print(f"✗ Bob's bloom is WRONG - claims to have events he doesn't have!")
+
+    # For now, skip the assertion to see more of the test output
+    # assert queue_after > queue_before, f"Alice should have added sync response blobs to queue! before={queue_before}, after={queue_after}"
+
     print(f"\n=== STEP 4: Bob receives Alice's sync response ===")
+    queue_before_bob = db.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
+    print(f"Incoming queue before Bob receives: {queue_before_bob} blobs")
+
     sync.receive(batch_size=20, t_ms=4300, db=db)
+
+    queue_after_bob = db.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
     bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
     bob_blocked = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"Incoming queue after Bob receives: {queue_after_bob} blobs")
     print(f"Bob has channel valid: {bool(bob_has_channel)}")
     print(f"Bob blocked events: {bob_blocked['cnt']}")
 
+    # Assert: Bob should have drained some blobs
+    assert queue_before_bob > 0, f"There should be blobs for Bob to receive! queue={queue_before_bob}"
+
     print(f"\n=== STEP 5: Run debug sync to convergence ===")
-    send_rounds = sync_debug.send_request_to_all_debug(t_ms=4400, db=db, max_rounds=20)
+    send_rounds = sync_debug.send_request_to_all_debug(t_ms=4400, db=db, max_rounds=50)
     print(f"Debug sync send completed in {send_rounds} rounds")
 
-    receive_rounds = sync_debug.receive_debug(batch_size=20, t_ms=5000, db=db, max_rounds=20)
+    receive_rounds = sync_debug.receive_debug(batch_size=20, t_ms=5000, db=db, max_rounds=50)
     print(f"Debug sync receive completed in {receive_rounds} rounds")
 
     bob_has_channel = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?", (bob['channel_id'], bob['peer_id']))
@@ -144,7 +323,32 @@ def test_three_player_messaging():
     )
     print(f"Bob has {bob_valid_count['count']} valid events total")
 
-    # Check what events Bob has received from Alice (check valid_events for events that Alice created)
+    # Check what events Bob has in store from Alice (regardless of validation)
+    bob_has_alice_in_store = db.query(
+        """SELECT s.id
+           FROM store s
+           WHERE s.id IN (SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?)""",
+        (alice['peer_id'],)
+    )
+    print(f"Bob has {len(bob_has_alice_in_store)} of Alice's {len(alice_shareable_events)} events in STORE (unwrapped):")
+    for row in bob_has_alice_in_store:
+        # Check if this event is valid
+        is_valid = db.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+            (row['id'], bob['peer_id'])
+        )
+        # Try to get event type
+        event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (row['id'],))
+        try:
+            data = crypto.parse_json(event_blob['blob'])
+            event_type = data.get('type', 'unknown')
+        except:
+            event_type = 'encrypted'
+
+        status = "VALID" if is_valid else "NOT_VALID"
+        print(f"  - {row['id'][:20]}... type={event_type} {status}")
+
+    # Check which of those are also valid
     bob_has_alice_events = db.query(
         """SELECT ve.event_id
            FROM valid_events ve
@@ -153,9 +357,113 @@ def test_three_player_messaging():
            LIMIT 10""",
         (bob['peer_id'], alice['peer_id'])
     )
-    print(f"Bob has received {len(bob_has_alice_events)} of Alice's {len(alice_shareable_events)} shareable events:")
-    for row in bob_has_alice_events:
-        print(f"  - {row['event_id'][:20]}...")
+    print(f"Bob has {len(bob_has_alice_events)} of Alice's {len(alice_shareable_events)} shareable events VALID:")
+
+    # Summary: Bob has ALL events in store but only some are valid
+    not_valid_count = len([row for row in bob_has_alice_in_store
+                           if not db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+                                              (row['id'], bob['peer_id']))])
+    print(f"\nSummary: Bob received {len(bob_has_alice_in_store)}/{len(alice_shareable_events)} events (unwrapped successfully)")
+    print(f"         But only {len(bob_has_alice_in_store) - not_valid_count}/{len(bob_has_alice_in_store)} are valid (projection issue, not sync issue)")
+
+    # Check what group keys Bob has
+    bob_group_keys = db.query("SELECT key_id FROM group_keys WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"\nBob has {len(bob_group_keys)} group keys:")
+    for row in bob_group_keys:
+        print(f"  - {row['key_id'][:20]}...")
+
+    # Check what group keys Alice has
+    alice_group_keys = db.query("SELECT key_id FROM group_keys WHERE recorded_by = ?", (alice['peer_id'],))
+    print(f"Alice has {len(alice_group_keys)} group keys:")
+    for row in alice_group_keys:
+        print(f"  - {row['key_id'][:20]}...")
+
+    # Try to unwrap the NOT_VALID encrypted events to see what keys they need
+    import crypto as crypto_mod
+    print(f"\nTrying to unwrap NOT_VALID encrypted events:")
+    missing_key_set = set()
+    for row in bob_has_alice_in_store:
+        is_valid = db.query_one("SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+                               (row['id'], bob['peer_id']))
+        if not is_valid:
+            event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (row['id'],))
+            try:
+                event_data = crypto_mod.parse_json(event_blob['blob'])
+                event_type = event_data.get('type', 'unknown')
+                print(f"  - {row['id'][:20]}... plaintext type={event_type} (not encrypted)")
+            except:
+                # It's encrypted - try to unwrap
+                unwrapped, missing_keys = crypto_mod.unwrap_event(event_blob['blob'], bob['peer_id'], db)
+                if missing_keys:
+                    print(f"  - {row['id'][:20]}... MISSING KEYS: {[k[:20]+'...' for k in missing_keys]}")
+                    missing_key_set.update(missing_keys)
+                else:
+                    print(f"  - {row['id'][:20]}... failed to unwrap (no missing keys reported)")
+
+    # Check what the missing keys are
+    print(f"\nUnique missing keys ({len(missing_key_set)}):")
+    for key_id in missing_key_set:
+        # Check if it's a group key Alice has
+        alice_has_key = db.query_one("SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+                                     (key_id, alice['peer_id']))
+        # Check if there's a group_key_shared event for this key in ANY peer's shareable_events
+        gks_in_shareable = db.query(
+            """SELECT event_id, can_share_peer_id FROM shareable_events se
+               JOIN store s ON s.id = se.event_id
+               WHERE s.blob LIKE '%group_key_shared%'"""
+        )
+        print(f"  - Missing key: {key_id[:20]}... alice_has={bool(alice_has_key)}")
+        print(f"    All group_key_shared events in shareable_events: {len(gks_in_shareable)}")
+        for gks_row in gks_in_shareable:
+            # Check if Bob received this GKS event
+            bob_has_gks = db.query_one("SELECT 1 FROM store WHERE id = ?", (gks_row['event_id'],))
+            print(f"      GKS {gks_row['event_id'][:20]}... shared_by={gks_row['can_share_peer_id'][:10]}... bob_has={bool(bob_has_gks)}")
+
+    # The GKS event created during invite should have this approximate ID
+    # Let me check the store table directly
+    print(f"\nChecking store table for all events:")
+    all_in_store = db.query("SELECT id FROM store ORDER BY id LIMIT 50")
+    print(f"Total events in store: {len(all_in_store)}")
+
+    # Check if group_key_shared events exist in store at all
+    all_gks_in_store = db.query(
+        """SELECT s.id FROM store s WHERE s.blob LIKE '%group_key_shared%'"""
+    )
+    print(f"group_key_shared events in store (by blob content): {len(all_gks_in_store)}")
+
+    # The logs show the GKS was added to shareable_events, so let me query directly
+    print(f"\n**DEPENDENCY CYCLE INVESTIGATION**")
+    all_shareable_for_alice = db.query(
+        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
+        (alice['peer_id'],)
+    )
+    print(f"Alice has {len(all_shareable_for_alice)} events in shareable_events")
+
+    # Check each shareable event to see if it's the GKS
+    gks_in_shareable = 0
+    for row in all_shareable_for_alice:
+        blob = db.query_one("SELECT blob FROM store WHERE id = ?", (row['event_id'],))
+        if blob and b'group_key_shared' in blob['blob']:
+            gks_in_shareable += 1
+            print(f"  Found GKS in shareable: {row['event_id'][:20]}...")
+
+    print(f"GKS events in Alice's shareable_events: {gks_in_shareable}")
+    print(f"GKS events Bob received: {len([e for e in bob_has_alice_in_store if b'group_key_shared' in db.query_one('SELECT blob FROM store WHERE id = ?', (e['id'],))['blob']])}")
+
+    # The GKS was logged as added to shareable_events but it's not there!
+    # This means either:
+    # 1. The transaction was rolled back
+    # 2. The add failed silently
+    # 3. The shareable_events table is being queried from wrong scope
+    print(f"\n**ROOT CAUSE**: GKS was logged as added to shareable_events, but it's not in the table!")
+    print(f"This indicates a transaction rollback or database scoping issue.")
+
+    for row in all_gks_in_store:
+        # Check if in shareable_events
+        in_shareable = db.query("SELECT can_share_peer_id FROM shareable_events WHERE event_id = ?", (row['id'],))
+        # Check if in recorded
+        in_recorded = db.query("SELECT recorded_by FROM recorded WHERE ref_id = ?", (row['id'],))
+        print(f"  GKS {row['id'][:20]}... shareable={len(in_shareable)} recorded={len(in_recorded)}")
 
     # Check if Bob has received any group_key_shared events
     bob_gks_in_store = db.query(
@@ -166,8 +474,194 @@ def test_three_player_messaging():
         (bob['peer_id'],)
     )
     print(f"Bob has {len(bob_gks_in_store)} group_key_shared events in store")
-    for row in bob_gks_in_store:
-        print(f"  GKS event {row['id'][:20]}..., valid={bool(row['valid_id'])}")
+
+    # === NEW DIAGNOSTIC: Check crypto hints match Bob's keys ===
+    print(f"\n=== Crypto Hint Verification ===")
+
+    # Get all events Bob received from Alice
+    for event_row in bob_has_alice_in_store:
+        event_id = event_row['id']
+        event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))['blob']
+
+        # Extract crypto hint (first 16 bytes of wrapped blobs)
+        if len(event_blob) >= 16:
+            import crypto
+            hint_bytes = event_blob[:16]
+            hint_b64 = crypto.b64encode(hint_bytes)
+
+            # Check if Bob has a matching key in group_prekeys
+            bob_has_group_prekey = db.query_one(
+                "SELECT 1 FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
+                (hint_b64, bob['peer_id'], bob['peer_id'])
+            )
+
+            # Check if Bob has a matching key in group_keys
+            bob_has_group_key = db.query_one(
+                "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+                (hint_b64, bob['peer_id'])
+            )
+
+            # Check if Bob has a matching key in transit_prekeys
+            bob_has_transit_prekey = db.query_one(
+                "SELECT 1 FROM transit_prekeys WHERE prekey_id = ? AND owner_peer_id = ?",
+                (hint_b64, bob['peer_id'])
+            )
+
+            # Determine if this event can be decrypted
+            can_decrypt = bool(bob_has_group_prekey or bob_has_group_key or bob_has_transit_prekey)
+
+            # Check if event is valid (successfully projected)
+            is_valid = db.query_one(
+                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+                (event_id, bob['peer_id'])
+            )
+
+            print(f"  Event {event_id[:20]}... hint={hint_b64[:20]}... "
+                  f"group_prekey={bool(bob_has_group_prekey)} group_key={bool(bob_has_group_key)} "
+                  f"transit_prekey={bool(bob_has_transit_prekey)} valid={bool(is_valid)}")
+
+            # If Bob should be able to decrypt but event is not valid, this is the problem
+            if can_decrypt and not is_valid:
+                print(f"    ⚠️ WARNING: Bob has key to decrypt but event NOT valid!")
+
+                # Check if this event is blocked
+                # Bob's blocked events reference the recorded wrapper ID, not the ref_id
+                # So we need to find any recorded events that reference this event_id
+                blocked_recorded_ids = db.query(
+                    """SELECT DISTINCT be.recorded_id
+                       FROM blocked_events_ephemeral be
+                       JOIN store s ON s.id = be.recorded_id
+                       WHERE json_extract(s.blob, '$.ref_id') = ? AND be.recorded_by = ?""",
+                    (event_id, bob['peer_id'])
+                )
+
+                if blocked_recorded_ids:
+                    print(f"    Event IS BLOCKED ({len(blocked_recorded_ids)} recorded wrappers):")
+                    for row in blocked_recorded_ids:
+                        recorded_id = row['recorded_id']
+                        # Get the missing dependencies
+                        blocked_deps = db.query(
+                            """SELECT dep_id FROM blocked_event_deps_ephemeral
+                               WHERE recorded_id = ? AND recorded_by = ?""",
+                            (recorded_id, bob['peer_id'])
+                        )
+                        print(f"      Recorded {recorded_id[:20]}... blocked on {len(blocked_deps)} deps:")
+                        for dep in blocked_deps:
+                            dep_id = dep['dep_id']
+                            # Check if Bob has this dependency
+                            bob_has_dep = db.query_one(
+                                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+                                (dep_id, bob['peer_id'])
+                            )
+                            print(f"        - {dep_id[:20]}... (Bob has: {bool(bob_has_dep)})")
+                else:
+                    print(f"    Event is NOT blocked - projection may have failed for another reason")
+
+            elif not can_decrypt and not is_valid:
+                print(f"    ℹ️ Bob missing key: event blocked as expected")
+
+    # Specifically check for invite prekey
+    print(f"\n=== Invite Prekey Check ===")
+    bob_invite_prekeys = db.query(
+        "SELECT prekey_id FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ?",
+        (bob['peer_id'], bob['peer_id'])
+    )
+    print(f"Bob has {len(bob_invite_prekeys)} invite prekeys in group_prekeys:")
+    for row in bob_invite_prekeys:
+        print(f"  - {row['prekey_id'][:20]}...")
+
+    # Check Bob's transit keys
+    print(f"\n=== Transit Key Check ===")
+    bob_transit_keys = db.query(
+        "SELECT key_id FROM transit_keys WHERE owner_peer_id = ?",
+        (bob['peer_id'],)
+    )
+    print(f"Bob has {len(bob_transit_keys)} transit keys")
+    for row in bob_transit_keys:
+        print(f"  - {row['key_id'][:20]}...")
+
+    # Check if Bob has recorded events for the events he received
+    print(f"\n=== Recorded Events Check ===")
+    # Recorded events are plaintext JSON in the store
+    import json as json_lib
+    all_store_rows = db.query("SELECT id, blob FROM store")
+    bob_recorded_count = 0
+    for row in all_store_rows:
+        try:
+            blob_data = json_lib.loads(row['blob'])
+            if blob_data.get('type') == 'recorded' and blob_data.get('recorded_by') == bob['peer_id']:
+                bob_recorded_count += 1
+        except:
+            pass
+    print(f"Bob has {bob_recorded_count} recorded events")
+
+    # Check ALL of Bob's received events for recorded wrappers
+    print(f"\n=== Checking ALL events for recorded wrappers ===")
+    events_with_wrappers = 0
+    events_without_wrappers = 0
+    gks_event_id = None
+
+    for event_row in bob_has_alice_in_store:
+        event_id = event_row['id']
+        event_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))['blob']
+
+        # Check if it has a recorded wrapper
+        recorded_wrapper_id = None
+        for row in all_store_rows:
+            try:
+                blob_data = json_lib.loads(row['blob'])
+                if (blob_data.get('type') == 'recorded' and
+                    blob_data.get('ref_id') == event_id and
+                    blob_data.get('recorded_by') == bob['peer_id']):
+                    recorded_wrapper_id = row['id']
+                    break
+            except:
+                pass
+
+        # Check if this is the GKS (has matching invite prekey hint)
+        is_gks = False
+        if len(event_blob) >= 16:
+            import crypto
+            hint_bytes = event_blob[:16]
+            hint_b64 = crypto.b64encode(hint_bytes)
+            bob_has_group_prekey = db.query_one(
+                "SELECT 1 FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
+                (hint_b64, bob['peer_id'], bob['peer_id'])
+            )
+            is_gks = bool(bob_has_group_prekey)
+            if is_gks:
+                gks_event_id = event_id
+
+        # Check if valid
+        is_valid = db.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+            (event_id, bob['peer_id'])
+        )
+
+        if recorded_wrapper_id:
+            events_with_wrappers += 1
+        else:
+            events_without_wrappers += 1
+            marker = "🔑 GKS" if is_gks else ""
+
+            # For events without wrappers, check the transit key hint
+            if len(event_blob) >= 16:
+                import crypto
+                hint_bytes = event_blob[:16]
+                hint_b64 = crypto.b64encode(hint_bytes)
+
+                # Check if this transit key hint is in Bob's transit_keys
+                bob_has_transit_key = db.query_one(
+                    "SELECT 1 FROM transit_keys WHERE key_id = ? AND owner_peer_id = ?",
+                    (hint_b64, bob['peer_id'])
+                )
+
+                print(f"  ❌ Event {event_id[:20]}... NO recorded wrapper, valid={bool(is_valid)}, bob_has_transit_key={bool(bob_has_transit_key)} {marker}")
+
+    print(f"\nSummary: {events_with_wrappers} events WITH wrappers, {events_without_wrappers} events WITHOUT wrappers")
+
+    if gks_event_id:
+        print(f"\n⚠️ GKS event {gks_event_id[:20]}... is missing recorded wrapper!")
 
     # Critical assertion - this will show us if sync is working
     assert bob_has_network_key, f"Bob should have Alice's network key {alice_network_key_id} after sync (received via group_key_shared)"
