@@ -154,17 +154,3 @@ def get_peer_ids_for_key(key_id: str, db: Any) -> list[str]:
         return [row['owner_peer_id']]
 
     return []
-
-
-def get_peer_id_for_key(key_id: str, db: Any) -> str:
-    """Get the peer_id that owns a specific transit key.
-
-    Args:
-        key_id: Base64-encoded key ID (hint from wrapped blob)
-        db: Database connection
-
-    Returns:
-        Peer ID string, or empty string if not found
-    """
-    peer_ids = get_peer_ids_for_key(key_id, db)
-    return peer_ids[0] if peer_ids else ""
