@@ -127,11 +127,12 @@ def get_sync_state(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> di
             'total_events_seen': row['total_events_seen']
         }
 
-    # Start with w=1 (2 windows) for small networks
-    # This will auto-adjust upward as events are synced
+    # Start with w=0 (1 window covering entire event space) for initial sync
+    # This ensures ALL events are included in the first sync request bloom filter
+    # w_param will auto-adjust upward as events are synced
     return {
         'last_window': -1,
-        'w_param': 1,
+        'w_param': 0,
         'total_events_seen': 0
     }
 
@@ -231,6 +232,13 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
         (event_id, can_share_peer_id, created_at, recorded_at, window_id)
     )
 
+    # DEBUG: Verify the insert succeeded
+    check = safedb.query_one(
+        "SELECT 1 FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+        (event_id, can_share_peer_id)
+    )
+    log.warning(f"[ADD_SHAREABLE_DEBUG] INSERT result: event={event_id[:20]}..., found_in_table={'YES' if check else 'NO'}")
+
 
 def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     """Unwrap transit blob, store event, create recorded events for all peers with access.
@@ -247,12 +255,12 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     hint = blob[:16]  # Extract hint from blob (first 16 bytes, already a hash)
     hint_b64 = crypto.b64encode(hint)
 
-    log.warning(f"[UNWRAP_START] blob_size={len(blob)}B hint={hint_b64[:20]}...")
+    log.warning(f"[UNWRAP_START] blob_size={len(blob)}B hint={hint_b64} (len={len(hint_b64)} chars, {len(hint)} bytes)")
 
     # For incoming blobs: get ALL peers who can decrypt this blob
     # Try transit keys first (symmetric), then prekeys (asymmetric)
     recorded_by_peers = transit_key.get_peer_ids_for_key(hint_b64, db)
-    log.warning(f"[UNWRAP_TRANSIT_KEY] hint={hint_b64[:20]}... result=found_{len(recorded_by_peers)}_peers peers={[p[:10]+'...' for p in recorded_by_peers]}")
+    log.warning(f"[UNWRAP_TRANSIT_KEY] hint={hint_b64} (len={len(hint_b64)}) result=found_{len(recorded_by_peers)}_peers peers={[p[:10]+'...' for p in recorded_by_peers]}")
 
     # If not a transit key, check if it's a prekey (for sync requests wrapped to prekeys)
     if not recorded_by_peers:
@@ -379,8 +387,15 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
         log.error(f"[SYNC_RECEIVE] CALL LIMIT EXCEEDED count={_receive_call_count} - possible infinite loop!")
         return
 
+    # Count blobs before draining
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+    before_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
+
     transit_blobs = queues.incoming.drain(batch_size, db)
-    log.warning(f"[SYNC_RECEIVE] batch_size={batch_size} drained={len(transit_blobs)}_blobs t_ms={t_ms} call_count={_receive_call_count}")
+
+    after_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
+    log.warning(f"[SYNC_RECEIVE] batch_size={batch_size} queue_before={before_count} drained={len(transit_blobs)}_blobs queue_after={after_count} t_ms={t_ms} call_count={_receive_call_count}")
 
     # unwrap_and_store now returns a list of recorded_ids (one per peer who can decrypt)
     new_recorded_id_lists = []
@@ -730,9 +745,13 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Build list of event_id bytes for bloom
     event_id_bytes_list = [crypto.b64decode(row['event_id']) for row in my_events_in_window]
 
-    # Derive salt for this window (from requester's peer public key)
-    requester_public_key = peer.get_public_key(from_peer_id, from_peer_id, db)
+    # Derive salt for this window (from requester's peer_shared public key)
+    # IMPORTANT: Must use peer_shared public key, not local peer key, because responder
+    # won't have access to requester's local peer table (only peers_shared table)
+    from events.identity import peer_shared
+    requester_public_key = peer_shared.get_public_key(from_peer_shared_id, from_peer_id, db)
     salt = derive_salt(requester_public_key, window_id)
+    log.warning(f"[BLOOM_CREATE] from={from_peer_id[:10]}... from_peer_shared={from_peer_shared_id[:20]}... pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
 
     # Create bloom filter of events requester HAS
     bloom_filter = create_bloom(event_id_bytes_list, salt)
@@ -743,9 +762,18 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     # Create a transit key for the response (owned by requester so they can decrypt response)
     response_transit_key_id = transit_key.create(from_peer_id, t_ms, db)
-    response_transit_key = transit_key.get_key(response_transit_key_id, from_peer_id, db)
 
-    # Encode transit key for JSON serialization (recipient needs the actual key to wrap responses)
+    # Get the raw key bytes from DB (don't use get_key() to avoid encoding round-trip)
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+    key_row = unsafedb.query_one("SELECT key FROM transit_keys WHERE key_id = ?", (response_transit_key_id,))
+    if not key_row:
+        raise ValueError(f"transit key not found after creation: {response_transit_key_id}")
+    response_transit_key_bytes = key_row['key']
+
+    log.warning(f"[SEND_REQUEST] from={from_peer_id[:10]}... created response_transit_key_id={response_transit_key_id} (len={len(response_transit_key_id)} chars)")
+
+    # Flatten transit key fields for JSON serialization (recipient needs the actual key to wrap responses)
     request_data = {
         'type': 'sync',
         'peer_id': from_peer_id,
@@ -755,13 +783,11 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         'window_min': window_min,  # Concrete storage window range start
         'window_max': window_max,  # Concrete storage window range end
         'bloom': crypto.b64encode(bloom_filter),  # Bloom of events requester HAS
-        'transit_key': {
-            'id': crypto.b64encode(response_transit_key['id']),
-            'key': crypto.b64encode(response_transit_key['key']),
-            'type': response_transit_key['type']
-        },
+        'response_transit_key_id': response_transit_key_id,  # Base64 key ID for crypto hint
+        'response_transit_key': crypto.b64encode(response_transit_key_bytes),  # Base64 key material
         'created_at': t_ms
     }
+    log.warning(f"[SEND_REQUEST] serializing transit_key_id into request: {response_transit_key_id} (len={len(response_transit_key_id)})")
 
     # Sign the request
     private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
@@ -838,7 +864,8 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 
     # Extract requester info
     requester_peer_id = sync_data.get('peer_id')
-    transit_key_encoded = sync_data.get('transit_key')
+    response_transit_key_id = sync_data.get('response_transit_key_id')
+    response_transit_key_b64 = sync_data.get('response_transit_key')
     window_id = sync_data.get('window_id')
     window_min = sync_data.get('window_min')
     window_max = sync_data.get('window_max')
@@ -847,7 +874,12 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     log.info(f"sync.project() processing sync request: window_id={window_id}, window_range={window_min}-{window_max}")
     log.info(f"sync.project() requester={requester_peer_id[:20] if requester_peer_id else None}..., recorded_by={recorded_by[:20]}..., requester==recorded_by: {requester_peer_id == recorded_by if requester_peer_id else False}")
 
-    if not requester_peer_id or not requester_peer_shared_id or not transit_key_encoded:
+    # Don't respond to our own sync requests (can happen during multi-perspective projection)
+    if requester_peer_id == recorded_by:
+        log.warning(f"[SYNC_PROJECT] result=SKIPPED requester={requester_peer_id[:10]}... is_self (multi-perspective projection)")
+        return
+
+    if not requester_peer_id or not requester_peer_shared_id or not response_transit_key_id or not response_transit_key_b64:
         log.info(f"Invalid sync request: missing requester info")
         return  # Invalid sync request
 
@@ -875,12 +907,16 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
         (recorded_by, requester_peer_shared_id)
     )
 
-    # Decode transit_key from base64-encoded dict to bytes dict
+    # Build transit_key dict for wrapping responses
+    # response_transit_key_id is already base64 string (key ID from DB)
+    # Decode it to bytes for crypto hint
+    transit_key_id_bytes = crypto.b64decode(response_transit_key_id)
     transit_key_dict = {
-        'id': crypto.b64decode(transit_key_encoded['id']),
-        'key': crypto.b64decode(transit_key_encoded['key']),
-        'type': transit_key_encoded['type']
+        'id': transit_key_id_bytes,
+        'key': crypto.b64decode(response_transit_key_b64),
+        'type': 'symmetric'
     }
+    log.warning(f"[SYNC_PROJECT] extracted transit_key_id={response_transit_key_id} (len={len(response_transit_key_id)} chars, decoded to {len(transit_key_id_bytes)} bytes)")
 
     # Decode bloom filter
     bloom_filter = crypto.b64decode(bloom_b64)
@@ -890,27 +926,25 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     from events.identity import peer_shared
     requester_public_key = peer_shared.get_public_key(requester_peer_shared_id, recorded_by, db)
 
+    # Always use normal bloom-filtered sync response (single window)
+    log.warning(f"[SYNC_PROJECT] calling send_response with transit_key_hint={crypto.b64encode(transit_key_dict['id'])} ({len(crypto.b64encode(transit_key_dict['id']))} chars)")
+    send_response(
+        requester_peer_id,
+        requester_peer_shared_id,
+        recorded_by,
+        transit_key_dict,
+        window_id,
+        window_min,
+        window_max,
+        bloom_filter,
+        requester_public_key,
+        recorded_at,
+        db
+    )
+
+    # Initialize sync state if this is first sync
     if not sync_state_exists:
-        # First sync with this peer - send bloom-filtered events from ALL windows
-        log.warning(f"[SYNC_PROJECT] first_sync_with_requester={requester_peer_shared_id[:20]}... sending_bootstrap_response")
-        send_bootstrap_response(recorded_by, transit_key_dict, bloom_filter, requester_public_key, window_id, recorded_at, db)
-        # Mark that we've now bootstrapped with this peer
         update_sync_state(recorded_by, requester_peer_shared_id, 0, 1, 0, recorded_at, db)
-    else:
-        # Normal bloom-filtered sync (single window)
-        send_response(
-            requester_peer_id,
-            requester_peer_shared_id,
-            recorded_by,
-            transit_key_dict,
-            window_id,
-            window_min,
-            window_max,
-            bloom_filter,
-            requester_public_key,
-            recorded_at,
-            db
-        )
 
 
 def send_bootstrap_response(from_peer_id: str, transit_key_dict: dict[str, Any], bloom_filter: bytes,
@@ -1022,6 +1056,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
 
     # Derive salt for bloom checking (same salt requester used)
     salt = derive_salt(requester_public_key, window_id)
+    log.warning(f"[BLOOM_CHECK] to={to_peer_id[:10]}... requester_pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
 
     # Debug: Log bloom filter stats
     bits_set = bin(int.from_bytes(bloom_filter, 'big')).count('1')
@@ -1066,5 +1101,16 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
             log.info(f"send_response: sending encrypted event {event_id[:20]}...")
 
         # Double-wrap with transit key
+        hint_for_wrapping = crypto.b64encode(transit_key_dict['id'])
+        log.warning(f"[SYNC_RESPONSE] wrapping event={event_id[:20]}... with transit_key_hint={hint_for_wrapping} ({len(hint_for_wrapping)} chars)")
         wrapped_blob = crypto.wrap(event_blob, transit_key_dict, db)
+        actual_hint_in_blob = crypto.b64encode(wrapped_blob[:16])
+        log.warning(f"[SYNC_RESPONSE] wrapped blob hint={actual_hint_in_blob} ({len(actual_hint_in_blob)} chars), matches_expected={actual_hint_in_blob == hint_for_wrapping}")
+
+        # Count blobs in queue before adding
+        from db import create_unsafe_db
+        unsafedb = create_unsafe_db(db)
+        before_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
         queues.incoming.add(wrapped_blob, t_ms, db)
+        after_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
+        log.warning(f"[SYNC_RESPONSE] added blob to incoming queue: before={before_count}, after={after_count}, hint={actual_hint_in_blob}")
