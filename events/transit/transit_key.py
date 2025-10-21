@@ -41,6 +41,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
         (key_id, key, peer_id, t_ms)
     )
 
+    log.warning(f"[TRANSIT_KEY_CREATE] owner={peer_id[:10]}... key_id={key_id} (len={len(key_id)} chars, {len(crypto.b64decode(key_id))} bytes)")
     log.info(f"transit_key.create() created ephemeral key_id={key_id}")
     return key_id
 
