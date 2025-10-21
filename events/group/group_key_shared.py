@@ -68,40 +68,62 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
 
 
 def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
-                      recipient_prekey_dict: dict[str, Any], t_ms: int, db: Any) -> str:
-    """Create a shareable key_shared event sealed to an arbitrary prekey (for invites).
+                      invite_id: str, t_ms: int, db: Any) -> str:
+    """Create a shareable key_shared event sealed to invite prekey.
 
-    Unlike create(), this takes a prekey dict directly instead of looking up via peer_id.
-    Used when sharing network key via invite (sealed to invite prekey).
+    Extracts the invite prekey from the stored invite event and wraps the group key to it.
+    Used when sharing network key via invite (sealed to invite prekey for joiner to decrypt).
 
     Args:
         key_id: Local key event ID (symmetric key to share)
         peer_id: Local peer ID (for signing)
         peer_shared_id: Public peer ID (for created_by)
-        recipient_prekey_dict: Prekey dict with {id, public_key, type} for sealing
+        invite_id: The invite event ID (contains invite_prekey_id and invite_pubkey)
         t_ms: Timestamp
         db: Database connection
 
     Returns:
         key_shared_id: The stored key_shared event ID
     """
-    log.info(f"key_shared.create_for_invite() creating key_shared for key_id={key_id}, t_ms={t_ms}")
+    log.info(f"key_shared.create_for_invite() creating key_shared for key_id={key_id}, invite_id={invite_id[:20]}..., t_ms={t_ms}")
 
     # Get symmetric key from local key event
-    key_blob = store.get(key_id, db)
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+    key_blob = store.get(key_id, unsafedb)
     if not key_blob:
         raise ValueError(f"key not found: {key_id}")
 
     key_data = crypto.parse_json(key_blob)
     symmetric_key_b64 = key_data['key']
 
-    # Create inner event (use prekey id as recipient marker)
-    recipient_marker = crypto.b64encode(recipient_prekey_dict['id'])
+    # Get invite event to extract prekey info
+    invite_blob = store.get(invite_id, unsafedb) # TODO: Make a safedb way to get events like these from the store, or hold the params we need and get the invite_id in the caller so we don't need another lookup 
+    if not invite_blob:
+        raise ValueError(f"invite not found: {invite_id}")
+
+    invite_data = crypto.parse_json(invite_blob)
+    invite_prekey_id = invite_data['invite_prekey_id']
+    invite_pubkey_b64 = invite_data['invite_pubkey']
+
+    # Build recipient prekey dict from invite data
+    recipient_prekey_dict = {
+        'id': crypto.b64decode(invite_prekey_id),
+        'public_key': crypto.b64decode(invite_pubkey_b64),
+        'type': 'asymmetric'
+    }
+
+    log.info(f"key_shared.create_for_invite() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite")
+
+    # Create inner event
+    # NOTE: For invite-sealed keys, recipient_peer_id contains invite_prekey_id (not a peer_id)
+    # This allows Bob to identify which GKS corresponds to his invite
+    # Decryption routing is handled by crypto hints, not this field
     inner_event_data = {
         'type': 'group_key_shared',
         'key_id': key_id,
         'symmetric_key': symmetric_key_b64,
-        'recipient_peer_id': recipient_marker,  # Invite prekey ID
+        'recipient_peer_id': invite_prekey_id,  # INVITE CASE: invite_prekey_id (not peer_id)
         'created_by': peer_shared_id,
         'created_at': t_ms
     }

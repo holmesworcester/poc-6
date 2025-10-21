@@ -130,20 +130,14 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
     # Create group_key_shared sealed to invite proof prekey
-    # Use invite_prekey_id as hint (deterministic from public key)
+    # The create_for_invite function will extract the prekey from the invite event
     from events.group import group_key_shared
-
-    invite_prekey_dict = {
-        'id': crypto.b64decode(invite_prekey_id),
-        'public_key': invite_public_key,
-        'type': 'asymmetric'
-    }
 
     group_key_shared_id = group_key_shared.create_for_invite(
         key_id=key_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        recipient_prekey_dict=invite_prekey_dict,
+        invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
         t_ms=t_ms + 3,
         db=db
     )
