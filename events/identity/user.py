@@ -194,7 +194,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
         """INSERT OR IGNORE INTO users
-           (user_id, peer_id, name, joined_at, invite_pubkey, recorded_by, recorded_at)
+           (user_id, peer_id, name, created_at, invite_pubkey, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,

@@ -1,12 +1,62 @@
 """Recorded event management functions."""
 from typing import Any
 import json
+import logging
 
 from events.group import group
 from events.content import message
 import store
 import crypto
 from db import create_safe_db, create_unsafe_db
+
+log = logging.getLogger(__name__)
+
+
+def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: str, safedb: Any) -> int | None:
+    """Get authoritative created_at from projection table.
+
+    Maps each event type to its projection table and queries for the true created_at value
+    that was stored during projection. Returns None if event type doesn't project to a table
+    or the row wasn't found.
+
+    Args:
+        event_type: The event type (e.g., 'channel', 'group', 'message')
+        event_id: The event ID
+        recorded_by: The peer who recorded this event
+        safedb: Safe database connection
+
+    Returns:
+        The authoritative created_at timestamp, or None if not found
+    """
+    # Map event types to (table_name, id_column_name)
+    TABLE_MAP = {
+        'channel': ('channels', 'channel_id'),
+        'group': ('groups', 'group_id'),
+        'peer_shared': ('peers_shared', 'peer_shared_id'),
+        'user': ('users', 'user_id'),
+        'transit_prekey_shared': ('transit_prekeys_shared', 'transit_prekey_shared_id'),
+        'group_prekey_shared': ('group_prekeys_shared', 'group_prekey_shared_id'),
+        'group_key_shared': ('group_keys_shared', 'group_key_shared_id'),
+        'invite': ('invites', 'invite_id'),
+        'message': ('messages', 'message_id'),
+        'address': ('addresses', 'address_id'),
+        'group_member': ('group_members_wip', 'user_id'),
+    }
+
+    if event_type not in TABLE_MAP:
+        return None
+
+    table, id_col = TABLE_MAP[event_type]
+
+    try:
+        row = safedb.query_one(
+            f"SELECT created_at FROM {table} WHERE {id_col} = ? AND recorded_by = ?",
+            (event_id, recorded_by)
+        )
+        return row['created_at'] if row else None
+    except Exception as e:
+        log.debug(f"Failed to get authoritative created_at for {event_type} {event_id[:20]}...: {e}")
+        return None
 
 
 def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: str) -> bool:
@@ -367,6 +417,19 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (ref_id, recorded_by)
     )
+
+    # Update shareable_events with authoritative created_at from projection table
+    # This ensures all shareable events have the correct created_at for bloom filtering
+    if should_mark_shareable and projected_id:
+        actual_created_at = _get_authoritative_created_at(event_type, ref_id, recorded_by, safedb)
+        if actual_created_at is not None:
+            safedb.execute(
+                """UPDATE shareable_events
+                   SET created_at = ?
+                   WHERE event_id = ? AND can_share_peer_id = ?""",
+                (actual_created_at, ref_id, recorded_by)
+            )
+            log.debug(f"Updated shareable_events created_at for {event_type} {ref_id[:20]}... to {actual_created_at}")
 
     # Notify blocked queue - unblock events that were waiting for this event
     unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)

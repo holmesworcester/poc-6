@@ -2,8 +2,32 @@
 
 - Bootstrap flow: Invite link contains signed invite event blob. Invitee stores it as an event, creates user event referencing it. User projection extracts metadata from invite, creates stub group/channel rows. This enables immediate messaging before sync completes.
 
+
+Observations: 
+
+- simplifying sync.py seems important 
+- receive has a ton of bootstrapping-related garbage in it
+- test_sync_perf_10k seems pretty good, though it's not clear if/why db.commmit() calls are necessary
+- test_sync_bloom seems more suspect
+- there's some question about whether id's should be blob or text but right now they're text
+
+# SIMPLIFYING SYNC
+
+1. route (unsafe / device-wide) - look up the peers for transit id, call handle
+1. if we routed first, we wouldn't need to worry about responding to our own requests
+1. remove send_bootstrap_response
+1. combine project and project_sync_event
+1. we could have some generic verification that all events use, and sync would benefit from this
+1. do we still need transit key dict now that we have separate wrap_event and wrap_transit
+
 # TODO:
 
+- check how bootstrap works. it should not be per-peer-relationship it
+  should be per network (per user.join attempt) 
+- transit_prekey_shared.py is another place where we could be calling it with more useful parameters to save a lookup and remove brittleness, but I'm not sure. maybe we should just have a store.get_json)id, db)
+- why is the logging totally random whether we're logging 10 or 20 chars of id's?
+- get_sync_state and update_sync_state could be using safedb because it's for a peer pair
+- marked_window_synced seems like it could be simplified 
 - in unwrap_transit it seems like we're calling it per-recorded-by instead of *learning* the recorded_by from the transit key, but at the same time we do need to try for each peer since invite links might use the same key even with different peers. this merits more thought!
 - consider an ephemeral event store for sync and transit keys that's not reprojected.
 - look at syncing loop in tests and remove the necessity for this by adding this to bootstrap and checking bootstrap 
@@ -210,6 +234,21 @@ All projected state is scoped per-peer via `recorded_by`:
   - `list_all_groups(recorded_by, db)` - filters by peer only (groups aren't scoped to channels)
 - The `db` parameter always comes last for consistency across the codebase
 
+### Shareable Events and Sync Ordering
+
+**Problem:** Events must be marked as shareable (for bloom-filtered sync) before we know their exact `created_at` timestamp. This is because some events are encrypted and can't be decrypted until later when keys arrive. Without a consistent `created_at` value, different projection orders produce different final states, breaking convergence.
+
+**Solution:** Two-phase approach with centralized update:
+1. **Early marking:** When an event enters the projection pipeline, mark it as shareable immediately (with best-guess `created_at`)
+   - Ensures blocked/encrypted events can still be synced (haven't decrypted them yet)
+   - Uses `event_data.get('created_at', recorded_at)` as fallback
+2. **Authoritative update:** After successful projection to the event's table, query that table to get the true `created_at` and update `shareable_events`
+   - Single centralized location in `recorded.project()` after validation
+   - Uses `_get_authoritative_created_at()` helper with table mapping
+   - Updates via: `UPDATE shareable_events SET created_at = ? WHERE event_id = ? AND can_share_peer_id = ?`
+
+**Design invariant:** All shareable event types store `created_at` in their projection tables (strict enforcement). Users table renamed from `joined_at` → `created_at` for consistency. This guarantees we can always query the authoritative value after projection.
+
 ### Invite Link Design
 
 **Architecture:** Minimal signed invite event as single source of truth for join authorization.
@@ -338,6 +377,44 @@ This ensures proper convergence - creators can share wrapped events they cannot 
 - **No `time.time()` calls** - all timestamps must be explicit parameters for deterministic testing
 - `recorded_at` comes from `recorded.created_at` (which equals the `t_ms` passed to `store.event()`)
 - Tests can control time progression by passing explicit `t_ms` values to all event creation and storage functions
+
+### Transaction Ownership Policy
+
+Database transactions follow a clear ownership pattern to ensure atomicity and prevent partial commits:
+
+**Transaction Owners (commit at the end):**
+- **Sync entry points**: `sync.receive()` and `sync.send_requests()` commit after completing batch operations
+- **Test code**: Tests explicitly call `db.commit()` after operations they want to persist
+- **Future API layer**: Will commit after API write operations (not yet implemented)
+
+**Helper Functions (never commit):**
+- Event creation functions (`message.create()`, `group.create()`, etc.) - no commits
+- Projection functions (`*.project()`) - no commits
+- Queue operations (`queues.blocked.*`) - no commits
+- Storage functions (`store.event()`, `store.blob()`) - no commits
+
+**Rationale:**
+- **Atomicity**: All operations in a workflow succeed or fail together
+- **Composability**: Helper functions can be called from different contexts (sync, API, tests) without premature commits
+- **Clear boundaries**: Transaction scope is obvious at entry points
+
+**Example flows:**
+```python
+# Sync flow - sync owns transaction
+sync.receive()
+  ├─ unwrap_and_store() → recorded.project_ids() → various projections
+  └─ db.commit()  # Single atomic commit
+
+# Test flow - test owns transaction
+message.create() → store.event() → projection  # No commits
+message.create() → store.event() → projection  # No commits
+db.commit()  # Test commits when ready
+
+# Future API flow - API layer owns transaction
+api_handler()
+  ├─ message.create() → projection  # No commits
+  └─ db.commit()  # API commits after operation
+```
 
 ## Scenario Tests
 
