@@ -43,17 +43,27 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
-    # Query for main group and main channel
+    # Query for network (which contains members group and other metadata)
 
-    # Get main group
-    group_row = safedb.query_one(
-        "SELECT group_id, key_id FROM groups WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
+    # Get network
+    network_row = safedb.query_one(
+        "SELECT network_id, members_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (peer_id,)
     )
-    if not group_row:
-        raise ValueError(f"No main group found for peer {peer_id}. Cannot create invite.")
+    if not network_row:
+        raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
-    group_id = group_row['group_id']
+    network_id = network_row['network_id']
+    members_group_id = network_row['members_group_id']
+
+    # Get key from members group
+    group_row = safedb.query_one(
+        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (members_group_id, peer_id)
+    )
+    if not group_row:
+        raise ValueError(f"No key found for members group {members_group_id}. Cannot create invite.")
+
     key_id = group_row['key_id']
 
     # Get main channel
@@ -109,7 +119,8 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'type': 'invite',
         'invite_pubkey': invite_pubkey_b64,  # For user proof signature
         'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
-        'group_id': group_id,
+        'network_id': network_id,  # NEW - explicit network reference
+        'group_id': members_group_id,  # Members group (for adding joiner)
         'channel_id': channel_id,
         'key_id': key_id,
         'inviter_peer_shared_id': peer_shared_id,
@@ -192,12 +203,48 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     # Parse JSON (plaintext, no unwrap needed)
     event_data = crypto.parse_json(blob)
 
-    # Note: Signature verification skipped during projection
-    # For inviter: they created it locally (already verified)
-    # For invitee: they trust the URL itself as the credential
-    # The signature exists in the blob for future verification if needed
-
     created_by = event_data['created_by']
+
+    # Check if this is a bootstrap invite (first join via URL)
+    # Bootstrap invites are processed before peer has any networks, and before invite_accepted is created
+    # If peer has no networks, this is a bootstrap - skip validation (root of trust from URL)
+    peer_networks = safedb.query_one(
+        "SELECT 1 FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+
+    is_bootstrap = (peer_networks is None)
+
+    # If not bootstrap, this came via sync or is a second invite - validate it
+    if not is_bootstrap:
+        log.info(f"invite.project() sync-sourced invite, validating...")
+
+        # 1. Verify creator (created_by) exists
+        from events.identity import peer_shared
+        creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+        if not creator_public_key:
+            log.warning(f"invite.project() creator not found: {created_by[:20]}...")
+            return None
+
+        # 2. Verify signature
+        if not crypto.verify_event(event_data, creator_public_key):
+            log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
+            return None
+
+        # 3. Verify network_id matches peer's network
+        invite_network_id = event_data.get('network_id')
+        if invite_network_id:
+            peer_network = safedb.query_one(
+                "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+                (invite_network_id, recorded_by)
+            )
+            if not peer_network:
+                log.warning(f"invite.project() network mismatch: invite for {invite_network_id[:20]}... but peer not in that network")
+                return None
+
+        log.info(f"invite.project() validation passed for sync-sourced invite")
+    else:
+        log.info(f"invite.project() bootstrap invite (first join via URL), skipping validation")
 
     # Insert into invites table
     safedb.execute(

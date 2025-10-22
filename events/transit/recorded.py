@@ -119,13 +119,20 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # and not shared between peers. Events encrypted with a key are sent as plaintext
     # during sync responses, so the recording peer should not be required to possess
     # the creator's key event.
-    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id']
+    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id', 'user_id']
 
     # User events reference invite_id (which contains group/channel metadata)
     # They create stub group/channel rows from the invite during projection
     event_type = event_data.get('type')
     if event_type == 'user':
         dep_fields = ['created_by', 'peer_id', 'invite_id']  # Depend on invite, not group/channel
+    elif event_type == 'network':
+        # Network events depend on both groups and the creator user
+        dep_fields = ['created_by', 'members_group_id', 'admins_group_id', 'creator_user_id']
+    elif event_type == 'invite':
+        # Invite events need creator to exist for signature verification
+        # Network/group/channel are metadata and don't need to exist yet
+        dep_fields = ['created_by']
 
     missing_deps = []
 
@@ -181,6 +188,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     from events.identity import peer
     from events.content import channel
     import queues
+    import json
 
     unsafedb = create_unsafe_db(db)
 
@@ -299,13 +307,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         if recorded_by == created_by:
             skip_dep_check = True
 
-    if event_type == 'invite':
-        # invite events received from out-of-band invite links are root-of-trust for joiners
-        # When Bob records Alice's invite, he doesn't need Alice's group/channel to be valid
-        # (he trusts the invite link itself as the credential)
-        created_by = event_data.get('created_by')
-        if recorded_by != created_by:  # Received from out-of-band (not self-created)
-            skip_dep_check = True
+    # NOTE: Invite validation moved to invite.project() for better modularity
+    # Invites from URLs (with invite_accepted) skip validation in projector
+    # Invites from sync are validated (signature, network, creator) in projector
 
     if event_type == 'invite_accepted':
         # invite_accepted events are root-of-trust for joiners - they capture out-of-band
@@ -395,6 +399,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     elif event_type == 'group_member':
         from events.group import group_member
         projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'network':
+        from events.identity import network
+        projected_id = network.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'network_created':
         from events.identity import network_created
         projected_id = network_created.project(ref_id, recorded_by, recorded_at, db)
@@ -409,7 +416,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
 
     # Check if blob is in store before marking as valid
-    in_store = db.query_one("SELECT 1 FROM store WHERE id = ?", (ref_id,))
+    unsafedb = create_unsafe_db(db)
+    in_store = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (ref_id,))
     if not in_store:
         log.error(f"[VALID_EVENT_BUG] ❌ Marking event {ref_id[:20]}... as valid but blob NOT in store! type={event_type}")
 

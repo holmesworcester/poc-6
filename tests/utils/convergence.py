@@ -244,6 +244,8 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
     rows = db.query("SELECT id, blob FROM store ORDER BY rowid")
     event_ids = []
     event_type_counts = {}
+    non_recorded_types = {}
+    non_recorded_ids = {}  # Track which IDs are non-recorded for debugging
 
     for row in rows:
         try:
@@ -269,14 +271,31 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
                             event_type_counts[ref_type] = event_type_counts.get(ref_type, 0) + 1
                         except:
                             event_type_counts['encrypted'] = event_type_counts.get('encrypted', 0) + 1
+            else:
+                # Track non-recorded events for debugging
+                non_recorded_types[event_type] = non_recorded_types.get(event_type, 0) + 1
+                if event_type not in non_recorded_ids:
+                    non_recorded_ids[event_type] = []
+                non_recorded_ids[event_type].append(row['id'][:16])
         except:
             continue  # Skip encrypted/non-JSON blobs
 
     # Debug output
     if event_type_counts:
-        print(f"\nEvent types to replay:")
+        print(f"\nEvent types to replay ({len(event_ids)} recorded events):")
         for etype, count in sorted(event_type_counts.items()):
             print(f"  {etype}: {count}")
+
+    if non_recorded_types:
+        print(f"\n⚠️  WARNING: Found {sum(non_recorded_types.values())} non-recorded events in store:")
+        for etype, count in sorted(non_recorded_types.items()):
+            ids_sample = non_recorded_ids[etype][:2]
+            print(f"  {etype}: {count} (examples: {ids_sample})")
+
+            # Check if any recorded IDs match non-recorded IDs (major bug!)
+            for raw_id in non_recorded_ids[etype]:
+                if raw_id in [eid[:16] for eid in event_ids]:
+                    print(f"   ⚠️  PROBLEM: raw {etype} ID {raw_id}... is in recorded events list!")
 
     return event_ids
 

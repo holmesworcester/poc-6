@@ -35,6 +35,7 @@ SUBJECTIVE_TABLES = {
     'blocked_event_deps_ephemeral',
     'shareable_events',
     'invites',
+    'networks',                    # Networks are subjective (peer-scoped)
     'bootstrap_status',            # Bootstrap status (network creator/joiner status)
 }
 
@@ -268,9 +269,9 @@ class SafeDB:
             SELECT s.blob
             FROM store s
             INNER JOIN valid_events v
-              ON v.event_id = ? AND v.recorded_by = ?
+              ON s.id = v.event_id AND v.recorded_by = ?
             WHERE s.id = ?
-        """, (event_id, self.recorded_by, event_id))
+        """, (self.recorded_by, event_id))
 
         if result is None:
             raise ScopingViolation(

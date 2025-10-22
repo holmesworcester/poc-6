@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS users (
     user_id TEXT NOT NULL,
     peer_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    network_id TEXT,
     created_at INTEGER NOT NULL,
     invite_pubkey TEXT NOT NULL,
     recorded_by TEXT NOT NULL,
