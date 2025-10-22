@@ -28,7 +28,7 @@ def create(peer_id: str, peer_shared_id: str, inviter_peer_shared_id: str,
     event_data = {
         'type': 'network_joined',
         'peer_id': peer_id,
-        'peer_shared_id': peer_shared_id,
+        'created_by': peer_shared_id,
         'inviter_peer_shared_id': inviter_peer_shared_id,
         'created_at': t_ms
     }

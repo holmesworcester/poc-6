@@ -52,23 +52,11 @@ def test_sync_perf_10k():
     bob_group_id = bob['group_id']
     bob_channel_id = alice_channel_id  # Same channel as Alice
 
-    # Bootstrap: Bob sends bootstrap events + sync request
-    log.info("Bob sending bootstrap events...")
-    user.send_bootstrap_events(
-        peer_id=bob_peer_id,
-        peer_shared_id=bob_peer_shared_id,
-        user_id=bob_user_id,
-        transit_prekey_shared_id=bob['transit_prekey_shared_id'],
-        invite_data=bob['invite_data'],
-        t_ms=4000,
-        db=db
-    )
-
-    # Initial sync rounds to establish connection
+    # Bootstrap: Initial sync rounds to establish connection
     log.info("Running initial sync rounds to establish connection...")
-    sync.receive(batch_size=20, t_ms=4100, db=db)  # Alice receives Bob's bootstrap
-    sync.receive(batch_size=20, t_ms=4200, db=db)  # Alice sends sync response
-    sync.receive(batch_size=20, t_ms=4300, db=db)  # Bob receives Alice's response
+    sync.send_request_to_all(t_ms=4000, db=db)
+    sync.receive(batch_size=20, t_ms=4100, db=db)
+    sync.receive(batch_size=20, t_ms=4200, db=db)
 
     # Continue bloom sync to exchange remaining events
     sync.send_request_to_all(t_ms=4400, db=db)

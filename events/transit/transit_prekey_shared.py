@@ -77,13 +77,11 @@ def project(transit_prekey_shared_id: str, recorded_by: str, recorded_at: int, d
     event_data = crypto.parse_json(blob)
 
     # Verify signature using peer_shared public key
-    from events.identity import peer_shared
-    creator_public_key = peer_shared.get_public_key(event_data['created_by'], recorded_by, db)
-    public_key = crypto.b64decode(event_data['public_key'])
-
-    if not crypto.verify_event(event_data, creator_public_key):
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
         log.warning(f"transit_prekey_shared.project() signature verification failed for transit_prekey_shared_id={transit_prekey_shared_id}")
         return None
+
+    public_key = crypto.b64decode(event_data['public_key'])
 
     # Insert into transit_prekeys_shared table
     log.info(f"transit_prekey_shared.project() storing transit_prekey_id={event_data['transit_prekey_id'][:30]}... for peer={event_data['peer_id'][:20]}..., recorded_by={recorded_by[:20]}...")

@@ -157,6 +157,35 @@ def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
         return False
 
 
+def verify_signed_by_peer_shared(event_data: dict[str, Any], recorded_by: str, db: Any) -> bool:
+    """Verify event signature using peer_shared public key from event data.
+
+    Looks for signer ID in event_data['created_by'], retrieves their public key
+    from peers_shared table, and verifies signature.
+
+    Args:
+        event_data: Event data dict with signature
+        recorded_by: Peer ID whose perspective to use for peer_shared lookup
+        db: Database connection
+
+    Returns:
+        True if signature is valid
+        False if signature invalid OR peer_shared not projected yet OR missing fields
+    """
+    # Find signer's peer_shared_id from event data
+    signer_peer_shared_id = event_data.get('created_by')
+    if not signer_peer_shared_id:
+        return False
+
+    try:
+        from events.identity import peer_shared
+        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
+        return verify_event(event_data, public_key)
+    except ValueError:
+        # peer_shared not projected yet or not found
+        return False
+
+
 def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
     """Derive a deterministic nonce from hint and canonical plaintext.
 
