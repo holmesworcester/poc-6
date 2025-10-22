@@ -335,10 +335,10 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
 
             # Project sync event directly for each peer (without storing)
             for recorded_by in recorded_by_peers:
-                log.warning(f"[EPHEMERAL_SYNC] Calling project_ephemeral for recorded_by={recorded_by[:10]}...")
-                # Call project() directly with ephemeral event data
+                log.warning(f"[EPHEMERAL_SYNC] Calling project for recorded_by={recorded_by[:10]}...")
+                # Call project() with ephemeral event data (sync_data parameter)
                 from events.transit import sync as sync_module
-                sync_module.project_ephemeral(event_id, event_data, recorded_by, t_ms, db)
+                sync_module.project(event_id, recorded_by, t_ms, db, sync_data=event_data)
 
                 # Mark sync event as valid (same as recorded.project() does)
                 # This is critical for sync protocol to track which sync requests have been processed
@@ -374,6 +374,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
 
 
 _receive_call_count = 0
+
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
@@ -411,107 +412,6 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
     log.info(f"Valid recorded_ids to project: {valid_recorded_ids}")
 
     recorded.project_ids(valid_recorded_ids, db)
-
-    # Check if any joiner just completed bootstrap (received inviter's events)
-    # If so, create network_joined event to mark bootstrap success
-    unsafedb = create_unsafe_db(db)
-    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
-
-    for peer_row in local_peers:
-        peer_id = peer_row['peer_id']
-
-        # Check if this peer is a network creator - if so, skip bootstrap detection
-        safedb = create_safe_db(db, recorded_by=peer_id)
-        status = safedb.query_one(
-            "SELECT created_network FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?",
-            (peer_id, peer_id)
-        )
-        if status and status['created_network'] == 1:
-            continue  # Network creator, not a joiner
-
-        # Check if this peer has an invite (they're a joiner, not a creator)
-        # Invites are stored as events with type='invite' in the recorded_by's valid_events
-        invite_rows = safedb.query(
-            "SELECT event_id FROM valid_events WHERE recorded_by = ?",
-            (peer_id,)
-        )
-
-        inviter_peer_shared_id = None
-        for invite_row in invite_rows:
-            event_id = invite_row['event_id']
-            blob = store.get(event_id, db)
-            if blob:
-                try:
-                    event_data = crypto.parse_json(blob)
-                    if event_data.get('type') == 'invite':
-                        inviter_peer_shared_id = event_data.get('inviter_peer_shared_id')
-                        break
-                except:
-                    pass
-
-        if not inviter_peer_shared_id:
-            continue  # Not a joiner, skip
-
-        # Check if network_joined already exists for this peer
-        existing_joined = False
-        joined_events = safedb.query(
-            "SELECT event_id FROM valid_events WHERE recorded_by = ?",
-            (peer_id,)
-        )
-        for joined_row in joined_events:
-            event_id = joined_row['event_id']
-            blob = store.get(event_id, db)
-            if blob:
-                try:
-                    event_data = crypto.parse_json(blob)
-                    if event_data.get('type') == 'network_joined':
-                        existing_joined = True
-                        break
-                except:
-                    pass
-
-        if existing_joined:
-            continue  # Already created network_joined
-
-        # Check if we've received ANY valid events from inviter (bootstrap successful)
-        received_from_inviter = False
-        for valid_row in safedb.query("SELECT event_id FROM valid_events WHERE recorded_by = ?", (peer_id,)):
-            event_id = valid_row['event_id']
-            blob = store.get(event_id, db)
-            if blob:
-                try:
-                    event_data = crypto.parse_json(blob)
-                    # Check if event was created by inviter (their peer_shared_id)
-                    if event_data.get('created_by') == inviter_peer_shared_id:
-                        received_from_inviter = True
-                        break
-                    # Also check for peer_id field in case of peer events
-                    if event_data.get('peer_id') == inviter_peer_shared_id:
-                        received_from_inviter = True
-                        break
-                except:
-                    pass
-
-        if received_from_inviter:
-            # Bootstrap successful! Create network_joined event
-            from events.identity import network_joined
-
-            # Get peer_shared_id for this peer
-            peer_shared_row = safedb.query_one(
-                "SELECT peer_shared_id FROM peers_shared WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-                (peer_id, peer_id)
-            )
-            peer_shared_id = peer_shared_row['peer_shared_id'] if peer_shared_row else None
-
-            if peer_shared_id:
-                network_joined_id = network_joined.create(peer_id, peer_shared_id, inviter_peer_shared_id, t_ms, db)
-                log.info(f"Bootstrap successful for {peer_id[:20]}... - created network_joined {network_joined_id[:20]}...")
-
-                # Project the event immediately so bootstrap_complete gets set
-                from events.transit import recorded as recorded_module
-                # Create recorded event for network_joined
-                recorded_id = recorded_module.create(network_joined_id, peer_id, t_ms, db, return_dupes=True)
-                recorded_module.project_ids([recorded_id], db)
 
     # Event-driven unblocking now happens automatically in recorded.project()
     # via queues.blocked.notify_event_valid() - no need for scan-all loop
@@ -800,28 +700,31 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     mark_window_synced(from_peer_id, to_peer_shared_id, window_id, t_ms, db)
 
 
-def project_ephemeral(sync_event_id: str, sync_data: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Handle sync request ephemerally (without storing in event log).
+def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_data: dict | None = None) -> None:
+    """Handle sync request by sending bloom-filtered response.
 
-    This is called directly from unwrap_and_store() for sync events.
+    Can be called either:
+    - With sync_data=None (loads from store) - for recorded sync events
+    - With sync_data dict (from ephemeral processing) - for directly handled sync events
+
+    Args:
+        sync_event_id: ID of the sync event
+        recorded_by: Which peer recorded this event
+        recorded_at: When they recorded it
+        db: Database connection
+        sync_data: Optional parsed sync request data. If None, loads from store.
     """
-    _project_sync_event(sync_event_id, sync_data, recorded_by, recorded_at, db)
-
-
-def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Handle sync request by sending bloom-filtered response (for stored sync events)."""
     import logging
     log = logging.getLogger(__name__)
-    log.warning(f"[SYNC_PROJECT] sync_id={sync_event_id[:20]}... recorded_by={recorded_by[:10]}...")
 
-    # Get the sync event data from store
-    sync_blob = store.get(sync_event_id, db)
-    if not sync_blob:
-        log.info(f"sync blob not found in store")
-        return
-
-    # Parse sync request data (signed plaintext)
-    sync_data = crypto.parse_json(sync_blob)
+    if sync_data is None:
+        # Load from store (non-ephemeral case)
+        log.warning(f"[SYNC_PROJECT] sync_id={sync_event_id[:20]}... recorded_by={recorded_by[:10]}...")
+        sync_blob = store.get(sync_event_id, db)
+        if not sync_blob:
+            log.info(f"sync blob not found in store")
+            return
+        sync_data = crypto.parse_json(sync_blob)
 
     _project_sync_event(sync_event_id, sync_data, recorded_by, recorded_at, db)
 

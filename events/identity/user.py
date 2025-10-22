@@ -480,8 +480,21 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
 
-    # TODO: Create network_joined event after receiving first sync response from inviter
-    # This marks bootstrap as successful and switches from bootstrap mode to normal sync
+    # Create network_joined event immediately to mark bootstrap intent
+    # The inviter_peer_shared_id comes from the invite event
+    inviter_peer_shared_id = invite_event_data.get('inviter_peer_shared_id')
+    if inviter_peer_shared_id:
+        from events.identity import network_joined
+        network_joined_id = network_joined.create(
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            inviter_peer_shared_id=inviter_peer_shared_id,
+            t_ms=t_ms + 3,  # After user creation
+            db=db
+        )
+        log.info(f"join() created network_joined {network_joined_id[:20]}... for peer {peer_id[:20]}...")
+    else:
+        log.warning(f"join() invite event missing inviter_peer_shared_id, skipping network_joined creation")
 
     return {
         'peer_id': peer_id,
