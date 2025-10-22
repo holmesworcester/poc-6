@@ -56,6 +56,8 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any
     log.info(f"transit_prekey_shared.create() created transit_prekey_shared_id={transit_prekey_shared_id}")
     return transit_prekey_shared_id
 
+    # TODO: confirm that it is not necessary to project my own transit_prekey_shared after creation
+
 
 def project(transit_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project transit_prekey_shared into transit_prekeys_shared table.
