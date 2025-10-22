@@ -265,7 +265,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     # If not a transit key, check if it's a prekey (for sync requests wrapped to prekeys)
     if not recorded_by_peers:
         # Check transit_prekeys table - hint is prekey_shared_id
-        # Two cases: detached prekey (prekey_id = prekey_shared_id) or regular prekey (need to look up via transit_prekeys_shared)
+        # Two cases: detached prekey (prekey_id = prekey_shared_id) or regular prekey (need to look up via transit_prekeys_shared) <== TODO: understand this  
         from db import create_unsafe_db, create_safe_db
         import store as store_module
         unsafedb = create_unsafe_db(db)
@@ -663,25 +663,12 @@ def send_bootstrap_to_peer(to_peer_shared_id: str, from_peer_id: str, from_peer_
         log.info(f"send_bootstrap_to_peer: no events to send, skipping")
         return
 
-    # Get recipient's prekey for wrapping
-    # Try to find prekey in transit_prekeys_shared table
-    prekey_row = safedb.query_one(
-        "SELECT transit_prekey_shared_id, transit_prekey_id, public_key FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
-        (to_peer_shared_id, from_peer_id)
-    )
+    # Get recipient's prekey for wrapping using standard helper
+    recipient_key_dict = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
 
-    if not prekey_row:
+    if not recipient_key_dict:
         log.warning(f"send_bootstrap_to_peer: no prekey found for {to_peer_shared_id[:20]}..., cannot send")
         return
-
-    # Build key dict for crypto.wrap() with transit_prekey_shared_id as hint
-    transit_prekey_shared_id = prekey_row['transit_prekey_shared_id']
-    recipient_prekey_public_key = prekey_row['public_key']
-    recipient_key_dict = {
-        'id': crypto.b64decode(transit_prekey_shared_id),
-        'public_key': recipient_prekey_public_key,
-        'type': 'asymmetric'
-    }
 
     # Wrap and send each event
     for row in all_shareable:
@@ -945,75 +932,6 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     # Initialize sync state if this is first sync
     if not sync_state_exists:
         update_sync_state(recorded_by, requester_peer_shared_id, 0, 1, 0, recorded_at, db)
-
-
-def send_bootstrap_response(from_peer_id: str, transit_key_dict: dict[str, Any], bloom_filter: bytes,
-                            requester_public_key: bytes, window_id: int, t_ms: int, db: Any) -> None:
-    """Send shareable events filtered by bloom (from ALL windows, not just requested window).
-
-    This is used for first-time sync with a new peer - we check all windows and send
-    any events the requester doesn't have (based on their bloom filter).
-
-    Args:
-        from_peer_id: Responder's peer_id (which peer is sending the response)
-        transit_key_dict: Transit key dict from the sync request (for wrapping responses)
-        bloom_filter: Bloom filter from sync request showing what requester has
-        requester_public_key: For deriving bloom salt
-        window_id: Window ID from sync request (for salt derivation)
-        t_ms: Current timestamp
-        db: Database connection
-    """
-    import logging
-    log = logging.getLogger(__name__)
-
-    log.warning(f"[BOOTSTRAP_RESPONSE] from={from_peer_id[:10]}... checking_all_windows")
-
-    # Get ALL shareable events for this peer (from all windows)
-    safedb = create_safe_db(db, recorded_by=from_peer_id)
-    all_shareable = safedb.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ? ORDER BY created_at ASC",
-        (from_peer_id,)
-    )
-
-    log.warning(f"[BOOTSTRAP_RESPONSE] found={len(all_shareable)}_shareable_events from={from_peer_id[:10]}...")
-
-    # Derive salt for bloom checking
-    salt = derive_salt(requester_public_key, window_id)
-
-    # Filter using bloom and send events requester doesn't have
-    events_sent = 0
-    for row in all_shareable:
-        event_id = row['event_id']
-        event_id_bytes = crypto.b64decode(event_id)
-
-        # Check if event is in requester's bloom
-        in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
-        if in_bloom:
-            continue  # Requester already has this event
-
-        # Send this event
-        try:
-            event_blob = safedb.get_shareable_blob(event_id)
-        except Exception as e:
-            log.warning(f"send_bootstrap_response: failed to get shareable blob for {event_id[:20]}...: {e}")
-            continue
-
-        # Log event type
-        try:
-            event_data = crypto.parse_json(event_blob)
-            event_type = event_data.get('type', 'unknown')
-            log.warning(f"[BOOTSTRAP_RESPONSE] sending {event_type} event {event_id[:20]}...")
-        except:
-            log.warning(f"[BOOTSTRAP_RESPONSE] sending encrypted event {event_id[:20]}...")
-
-        # Wrap with transit key from sync request
-        wrapped = crypto.wrap(event_blob, transit_key_dict, db)
-
-        # Send
-        queues.incoming.add(wrapped, t_ms, db)
-        events_sent += 1
-
-    log.warning(f"[BOOTSTRAP_RESPONSE] sent={events_sent}_events (filtered_from_{len(all_shareable)}_total)")
 
 
 def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, transit_key_dict: dict[str, Any],
