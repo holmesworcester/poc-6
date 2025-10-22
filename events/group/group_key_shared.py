@@ -43,11 +43,11 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
         raise ValueError(f"No prekey found for recipient peer: {recipient_peer_id}")
 
     # Create the inner event (to be wrapped to recipient's prekey)
+    # Note: recipient identity is in the crypto hint (from wrap()), not in event data
     inner_event_data = {
         'type': 'group_key_shared',
         'key_id': key_id,  # Reference to the key being shared
         'symmetric_key': symmetric_key_b64,  # The actual key material
-        'recipient_peer_id': recipient_peer_id,
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -116,14 +116,11 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     log.info(f"key_shared.create_for_invite() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite")
 
     # Create inner event
-    # NOTE: For invite-sealed keys, recipient_peer_id contains invite_prekey_id (not a peer_id)
-    # This allows Bob to identify which GKS corresponds to his invite
-    # Decryption routing is handled by crypto hints, not this field
+    # Note: recipient identity (invite_prekey_id) is in the crypto hint (from wrap()), not in event data
     inner_event_data = {
         'type': 'group_key_shared',
         'key_id': key_id,
         'symmetric_key': symmetric_key_b64,
-        'recipient_peer_id': invite_prekey_id,  # INVITE CASE: invite_prekey_id (not peer_id)
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -204,14 +201,13 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     # Insert into group_keys_shared table to track this event
     safedb.execute(
         """INSERT OR IGNORE INTO group_keys_shared
-           (key_shared_id, original_key_id, created_by, created_at, recipient_peer_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (key_shared_id, original_key_id, created_by, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
         (
             key_shared_id,
             original_key_id,
             event_data['created_by'],
             event_data['created_at'],
-            event_data['recipient_peer_id'],
             recorded_by,
             recorded_at
         )
