@@ -66,7 +66,7 @@ class blocked:
                 (recorded_id, recorded_by, dep_id)
             )
 
-        safedb.commit()
+        # Note: No commit here - caller owns the transaction (sync entry points or tests)
 
     @staticmethod
     def process(recorded_by: str, safedb: SafeDB) -> list[str]:
@@ -99,7 +99,7 @@ class blocked:
                 # blocked_event_deps_ephemeral will be cascade deleted
 
         if unblocked:
-            safedb.commit()
+            # Note: No commit here - caller owns the transaction (sync entry points or tests)
             log.info(f"queues.blocked.process() unblocked {len(unblocked)} events for peer={recorded_by}")
 
         return unblocked
@@ -219,6 +219,6 @@ class blocked:
                 WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
             """, tuple(unblocked) + (recorded_by,))
 
-            safedb.commit()
+            # Note: No commit here - caller owns the transaction (sync entry points or tests)
 
         return unblocked

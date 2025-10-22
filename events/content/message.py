@@ -81,9 +81,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
     # Get latest messages
     latest = list_messages(channel_id, peer_id, db)
 
-    # Commit through unsafedb (commit is device-wide, not peer-scoped)
-    unsafedb = create_unsafe_db(db)
-    unsafedb.commit()
+    # Note: No commit here - caller owns the transaction (future API layer or tests)
 
     return {
         'id': event_id,
