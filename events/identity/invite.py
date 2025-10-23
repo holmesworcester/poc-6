@@ -43,26 +43,26 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
-    # Query for network (which contains members group and other metadata)
+    # Query for network (which contains all_users group and other metadata)
 
     # Get network
     network_row = safedb.query_one(
-        "SELECT network_id, members_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        "SELECT network_id, all_users_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (peer_id,)
     )
     if not network_row:
         raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
     network_id = network_row['network_id']
-    members_group_id = network_row['members_group_id']
+    all_users_group_id = network_row['all_users_group_id']
 
-    # Get key from members group
+    # Get key from all_users group
     group_row = safedb.query_one(
         "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (members_group_id, peer_id)
+        (all_users_group_id, peer_id)
     )
     if not group_row:
-        raise ValueError(f"No key found for members group {members_group_id}. Cannot create invite.")
+        raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
 
     key_id = group_row['key_id']
 
@@ -120,7 +120,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'invite_pubkey': invite_pubkey_b64,  # For user proof signature
         'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
         'network_id': network_id,  # NEW - explicit network reference
-        'group_id': members_group_id,  # Members group (for adding joiner)
+        'group_id': all_users_group_id,  # All users group (for adding joiner)
         'channel_id': channel_id,
         'key_id': key_id,
         'inviter_peer_shared_id': peer_shared_id,
@@ -144,6 +144,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # The create_for_invite function will extract the prekey from the invite event
     from events.group import group_key_shared
 
+    # Share all_users group key
     group_key_shared_id = group_key_shared.create_for_invite(
         key_id=key_id,
         peer_id=peer_id,
@@ -153,7 +154,37 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         db=db
     )
 
-    log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for network key")
+    log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for all_users group key")
+
+    # Share admins group key (so all users can see who admins are)
+    # Get admins group ID from network
+    from events.identity import network
+    network_row_for_admins = safedb.query_one(
+        "SELECT network_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (peer_id,)
+    )
+    if network_row_for_admins and network_row_for_admins['admins_group_id']:
+        admins_group_id = network_row_for_admins['admins_group_id']
+
+        # Get admin group key
+        admin_group_row = safedb.query_one(
+            "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+            (admins_group_id, peer_id)
+        )
+
+        if admin_group_row:
+            admin_key_id = admin_group_row['key_id']
+
+            # Share admin group key
+            admin_key_shared_id = group_key_shared.create_for_invite(
+                key_id=admin_key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,
+                t_ms=t_ms + 4,
+                db=db
+            )
+            log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
