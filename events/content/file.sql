@@ -1,0 +1,14 @@
+CREATE TABLE IF NOT EXISTS files (
+    file_id TEXT NOT NULL,
+    blob_bytes INTEGER NOT NULL,
+    nonce_prefix BLOB NOT NULL,
+    enc_key BLOB NOT NULL,
+    root_hash BLOB NOT NULL,
+    total_slices INTEGER NOT NULL,
+    recorded_by TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (file_id, recorded_by)
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_peer
+ON files(recorded_by, recorded_at DESC);

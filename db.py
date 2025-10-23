@@ -36,6 +36,9 @@ SUBJECTIVE_TABLES = {
     'shareable_events',
     'invites',
     'bootstrap_status',            # Bootstrap status (network creator/joiner status)
+    'files',                       # File metadata (peer-scoped)
+    'file_slices',                 # File slice storage (peer-scoped)
+    'message_attachments',         # Message-file links (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

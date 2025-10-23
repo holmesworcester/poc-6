@@ -766,3 +766,101 @@ def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
     result = id_bytes + encrypted_data
     log.debug(f"crypto.wrap() returning blob size={len(result)}B")
     return result
+
+
+# ===== File Slice Encryption =====
+
+def encrypt_file_slice(plaintext: bytes, key: bytes, nonce: bytes) -> tuple[bytes, bytes]:
+    """Encrypt file slice with XChaCha20-Poly1305. Returns (ciphertext, tag).
+
+    Args:
+        plaintext: Plain bytes to encrypt (max 450 bytes)
+        key: 32-byte symmetric encryption key
+        nonce: 24-byte nonce
+
+    Returns:
+        (ciphertext, poly_tag) where ciphertext is plaintext-sized, tag is 16 bytes
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    box = nacl.secret.SecretBox(key)
+    encrypted = box.encrypt(plaintext, nonce)
+    # PyNaCl prepends nonce, we return just ciphertext + tag
+    ciphertext_and_tag = encrypted[NONCE_SIZE:]  # Skip the nonce prefix
+
+    # Split into ciphertext and tag
+    ciphertext = ciphertext_and_tag[:-16]  # All but last 16 bytes
+    poly_tag = ciphertext_and_tag[-16:]  # Last 16 bytes
+
+    log.debug(f"encrypt_file_slice() encrypted {len(plaintext)}B → ciphertext {len(ciphertext)}B + tag {len(poly_tag)}B")
+    return (ciphertext, poly_tag)
+
+
+def decrypt_file_slice(ciphertext: bytes, poly_tag: bytes, key: bytes, nonce: bytes) -> bytes:
+    """Decrypt file slice with XChaCha20-Poly1305.
+
+    Args:
+        ciphertext: Ciphertext bytes
+        poly_tag: 16-byte AEAD authentication tag
+        key: 32-byte symmetric decryption key
+        nonce: 24-byte nonce
+
+    Returns:
+        Plaintext bytes
+
+    Raises:
+        nacl.exceptions.CryptoError: If verification fails
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    box = nacl.secret.SecretBox(key)
+    # PyNaCl expects nonce + ciphertext + tag
+    encrypted_with_nonce = nonce + ciphertext + poly_tag
+    plaintext = box.decrypt(encrypted_with_nonce)
+
+    log.debug(f"decrypt_file_slice() decrypted {len(ciphertext)}B ciphertext → {len(plaintext)}B plaintext")
+    return plaintext
+
+
+def compute_file_id(full_ciphertext: bytes) -> str:
+    """Compute file ID as BLAKE2b-128 hash of complete ciphertext stream.
+
+    Args:
+        full_ciphertext: Complete ciphertext (all slices concatenated)
+
+    Returns:
+        Base64-encoded 16-byte hash
+    """
+    file_id_bytes = hash(full_ciphertext, size=16)
+    return b64encode(file_id_bytes)
+
+
+def compute_root_hash(slice_ciphertexts: list[bytes]) -> bytes:
+    """Compute root hash as BLAKE2b-256 over concatenated slice ciphertexts.
+
+    Args:
+        slice_ciphertexts: List of ciphertext bytes for each slice
+
+    Returns:
+        32-byte BLAKE2b-256 hash
+    """
+    concatenated = b''.join(slice_ciphertexts)
+    return hash(concatenated, size=32)
+
+
+def derive_slice_nonce(nonce_prefix: bytes, slice_number: int) -> bytes:
+    """Derive slice-specific nonce from 20-byte prefix and slice number.
+
+    Construct: nonce_prefix (20 bytes) || slice_number (4 bytes, little-endian)
+
+    Args:
+        nonce_prefix: 20-byte nonce prefix
+        slice_number: Slice index (0-based)
+
+    Returns:
+        24-byte nonce for this slice
+    """
+    slice_no_bytes = slice_number.to_bytes(4, byteorder='little')
+    return nonce_prefix + slice_no_bytes

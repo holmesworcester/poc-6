@@ -41,6 +41,7 @@ def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: s
         'message': ('messages', 'message_id'),
         'address': ('addresses', 'address_id'),
         'group_member': ('group_members_wip', 'user_id'),
+        'file': ('files', 'file_id'),
     }
 
     if event_type not in TABLE_MAP:
@@ -119,7 +120,7 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # and not shared between peers. Events encrypted with a key are sent as plaintext
     # during sync responses, so the recording peer should not be required to possess
     # the creator's key event.
-    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id']
+    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id', 'message_id']
 
     # User events reference invite_id (which contains group/channel metadata)
     # They create stub group/channel rows from the invite during projection
@@ -404,6 +405,18 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     elif event_type == 'address':
         from events.identity import address
         projected_id = address.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'file':
+        from events.content import file
+        file.project(ref_id, event_data, recorded_by, recorded_at, db)
+        projected_id = ref_id
+    elif event_type == 'file_slice':
+        from events.content import file_slice
+        file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
+        projected_id = ref_id
+    elif event_type == 'message_attachment':
+        from events.content import message_attachment
+        message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
+        projected_id = ref_id
 
     # Mark event as valid for this peer
     log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
