@@ -10,7 +10,7 @@ class NetworkConfig:
     """Configuration for network simulation."""
     packet_loss_rate: float = 0.0  # 0.0 to 1.0 - probability of dropping packets
     latency_ms: int = 0             # Fixed latency in milliseconds
-    max_packet_size: int = 600      # Maximum packet size in bytes
+    max_packet_size: int = 10000    # Maximum packet size in bytes (lower to ~600 for realistic UDP simulation)
 
 
 # Global network configuration
