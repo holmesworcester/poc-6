@@ -39,8 +39,9 @@ def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: s
         'group_key_shared': ('group_keys_shared', 'group_key_shared_id'),
         'invite': ('invites', 'invite_id'),
         'message': ('messages', 'message_id'),
+        'message_deletion': ('message_deletions', 'deletion_id'),
         'address': ('addresses', 'address_id'),
-        'group_member': ('group_members_wip', 'user_id'),
+        'group_member': ('group_members', 'user_id'),
         'file': ('files', 'file_id'),
         # Note: file_slice and message_attachment are NOT included here because:
         # - file_slice: syncs separately, no created_at in projection table
@@ -259,7 +260,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             event_type = event_data.get('type')
         except Exception as e:
             # Can't parse - skip projection
-            print(f"DEBUG PARSE FAILURE: ref_id={ref_id[:20] if ref_id else 'N/A'}..., error={str(e)[:50]}")
+            log.warning(f"Failed to parse event: ref_id={ref_id[:20] if ref_id else 'N/A'}..., error={str(e)[:50]}")
             return [None, recorded_id]
 
     log.info(f"Parsed event data, type={event_type}")
@@ -267,7 +268,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted'}
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'bootstrap_complete'}
 
     should_mark_shareable = False
     if event_type:
@@ -347,30 +348,26 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         # However, we still need to check created_by dependency (peer event must exist first
         # for foreign key constraints in transit_prekeys table)
         created_by = event_data.get('created_by')
-        print(f"DEBUG invite_accepted: recorded_by={recorded_by[:20]}..., created_by={created_by[:20] if created_by else 'N/A'}...")
         # Do NOT skip dep check - we need peer event to be projected first
 
-    print(f"DEBUG: Before dep check, skip_dep_check={skip_dep_check}, event_type={event_type}")
     if not skip_dep_check:
-        print(f"DEBUG: Checking dependencies for {event_type}")
         missing_deps = check_deps(event_data, recorded_by, db)
         if missing_deps:
             # Event dependencies missing - block this event for this peer
             requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
             log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
-            print(f"DEBUG BLOCKING: {event_type} event blocked, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..., missing deps={[d[:20] + '...' for d in missing_deps]}")
             queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
-    else:
-        print(f"DEBUG: Skipping dep check for {event_type}")
 
     # All dependencies satisfied - proceed with projection
     projected_id = None
     log.info(f"Projecting event type: {event_type}")
-    print(f"DEBUG: About to dispatch event_type={event_type}, ref_id={ref_id[:20] if ref_id else 'N/A'}..., recorded_by={recorded_by[:20]}...")
 
     if event_type == 'message':
         projected_id = message.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'message_deletion':
+        from events.content import message_deletion
+        projected_id = message_deletion.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'group':
         projected_id = group.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'peer':
@@ -438,6 +435,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     elif event_type == 'network_joined':
         from events.identity import network_joined
         projected_id = network_joined.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'bootstrap_complete':
+        from events.identity import bootstrap_complete
+        projected_id = bootstrap_complete.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'address':
         from events.identity import address
         projected_id = address.project(ref_id, recorded_by, recorded_at, db)

@@ -320,6 +320,30 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
     log.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
     event_id = crypto.b64encode(crypto.hash(unwrapped_blob))
 
+    # Handle sync request: mark joiner peers as having received bootstrap acknowledgment
+    if event_type == 'sync':
+        from events.identity import bootstrap_complete
+
+        for recorded_by in recorded_by_peers:
+            # Check if this peer is a joiner (joined_network=1, created_network=0)
+            safedb = create_safe_db(db, recorded_by=recorded_by)
+            status = safedb.query_one(
+                "SELECT created_network, joined_network FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?",
+                (recorded_by, recorded_by)
+            )
+
+            if status:
+                created_network = status['created_network']
+                joined_network = status['joined_network']
+
+                # Only mark bootstrap complete if this peer is a joiner
+                if joined_network == 1 and created_network == 0:
+                    try:
+                        bootstrap_complete.create(recorded_by, t_ms, db)
+                        log.info(f"handle_ephemeral_event: created bootstrap_complete for joiner {recorded_by[:20]}...")
+                    except Exception as e:
+                        log.warning(f"handle_ephemeral_event: failed to create bootstrap_complete: {e}")
+
     # Project event for each peer who can access it
     for recorded_by in recorded_by_peers:
         _project_ephemeral_for_peer(event_id, event_type, event_data, recorded_by, t_ms, db)
@@ -472,15 +496,20 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     # Check my bootstrap status (subjective table, use safedb)
     safedb = create_safe_db(db, recorded_by=from_peer_id)
     status = safedb.query_one(
-        "SELECT created_network, joined_network FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?",
+        "SELECT created_network, joined_network, received_sync_request FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?",
         (from_peer_id, from_peer_id)
     )
 
     created_network = status['created_network'] if status else 0
     joined_network = status['joined_network'] if status else 0
-    my_bootstrap_complete = (created_network == 1 or joined_network == 1)
+    received_sync_request = status['received_sync_request'] if status else 0
 
-    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... created={created_network} joined={joined_network} my_bootstrap_complete={my_bootstrap_complete}")
+    # Bootstrap complete if:
+    # 1. We created the network (created_network=1), OR
+    # 2. We joined the network AND received first sync request back (joined_network=1 AND received_sync_request=1)
+    my_bootstrap_complete = (created_network == 1) or (joined_network == 1 and received_sync_request == 1)
+
+    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... created={created_network} joined={joined_network} received_sync={received_sync_request} my_bootstrap_complete={my_bootstrap_complete}")
 
     # Query all peer_shared events seen by this peer
     peer_shared_rows = safedb.query(
@@ -498,25 +527,14 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
             log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_self={ps_id[:20]}...")
             continue
 
-        # Check per-relationship bootstrap: have we synced with this peer before?
-        unsafedb = create_unsafe_db(db)
-        relationship_state = unsafedb.query_one(
-            "SELECT 1 FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
-            (from_peer_id, ps_id)
-        )
-        relationship_bootstrap_complete = bool(relationship_state)
-
-        log.debug(f"[BOOTSTRAP_CHECK] from={peer_id_str[:10]}... to={ps_id[:10]}... my_complete={my_bootstrap_complete} rel_complete={relationship_bootstrap_complete}")
-
-        # Use bootstrap if EITHER:
-        # 1. We haven't completed our own bootstrap (joined/created network), OR
-        # 2. We haven't synced with this specific peer before (no sync_state)
-        if not my_bootstrap_complete or not relationship_bootstrap_complete:
-            # Bootstrap mode
-            log.debug(f"[BOOTSTRAP_MODE] {peer_id_str[:20]}... -> {ps_id[:20]}... mode=bootstrap (my_complete={my_bootstrap_complete}, rel_complete={relationship_bootstrap_complete})")
+        # Use bootstrap mode only if WE haven't completed bootstrap yet (per-peer, not per-relationship)
+        # Once we receive any sync request, we're done bootstrapping and use bloom-filtered sync
+        if not my_bootstrap_complete:
+            # Bootstrap mode: only for joiners who haven't received sync acknowledgment yet
+            log.debug(f"[BOOTSTRAP_MODE] {peer_id_str[:20]}... -> {ps_id[:20]}... mode=bootstrap (my_complete={my_bootstrap_complete})")
             send_bootstrap_to_peer(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
         else:
-            # Use normal bloom-filtered sync
+            # Use normal bloom-filtered sync (creators always use this, joiners use it after receiving sync)
             log.info(f"send_requests: {peer_id_str[:20]}... -> {ps_id[:20]}... mode=sync")
             send_request(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
