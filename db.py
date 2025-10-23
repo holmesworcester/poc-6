@@ -17,6 +17,7 @@ from typing import Any
 # Tables that require recorded_by scoping (peer-subjective views)
 SUBJECTIVE_TABLES = {
     'messages',
+    'message_deletions',           # Message deletions (subjective)
     'peers_shared',
     'peer_self',                   # Mapping from peer_id to peer_shared_id (subjective)
     'groups',

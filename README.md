@@ -551,5 +551,12 @@ Networks include two groups:
 
 **Visibility:** The admins group is **readable by all users** (group key is shared with all joiners). This allows any user to see who the admins are, but only existing admins can modify admin membership (enforced during `group_member.create()` projection).
 
+**Group Membership:** Only admins can add members to groups. This applies to:
+- The all_users group (adding new members to the network)
+- The admins group (making other users admins)
+- Any custom groups created within the network
+
+Non-admin members cannot add other users to any group. The admin check is enforced via the `group_member.validate()` function which is called by both `create()` and `project()` to ensure consistency.
+
 **Future work:** Admins will need a private communication channel. Consider adding a private admin-only group separate from the visibility-tracking admins group.
 

@@ -39,6 +39,7 @@ def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: s
         'group_key_shared': ('group_keys_shared', 'group_key_shared_id'),
         'invite': ('invites', 'invite_id'),
         'message': ('messages', 'message_id'),
+        'message_deletion': ('message_deletions', 'deletion_id'),
         'address': ('addresses', 'address_id'),
         'group_member': ('group_members_wip', 'user_id'),
         'file': ('files', 'file_id'),
