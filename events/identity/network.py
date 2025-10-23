@@ -146,10 +146,10 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
 
     log.info(f"network.project() inserted into networks table")
 
-    # Add creator to admin group via group_members_wip
+    # Add creator to admin group via group_members
     # (Don't create a separate group_member event - just insert directly during projection)
     safedb.execute(
-        """INSERT OR IGNORE INTO group_members_wip
+        """INSERT OR IGNORE INTO group_members
            (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (

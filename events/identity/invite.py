@@ -12,6 +12,32 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
+def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: Any) -> bool:
+    """Validate that inviter has authorization to create invites.
+
+    Authorization rule:
+    - inviter_user_id must be a member of the network's admins group
+
+    Args:
+        inviter_user_id: User attempting to create invite (user event ID)
+        admins_group_id: The network's admins group ID
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if authorized, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Check if inviter is in admin group
+    is_admin = safedb.query_one(
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        (admins_group_id, inviter_user_id, recorded_by)
+    )
+
+    return is_admin is not None
+
+
 def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
@@ -68,12 +94,8 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     inviter_user_id = inviter_user_row['user_id']
 
-    # Check if inviter is in admin group
-    is_admin = safedb.query_one(
-        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, inviter_user_id, peer_id)
-    )
-    if not is_admin:
+    # Check authorization using shared validate() function
+    if not validate(inviter_user_id, admins_group_id, peer_id, db):
         raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
     # Get key from all_users group
@@ -294,16 +316,12 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
                 log.warning(f"invite.project() network mismatch: invite for {invite_network_id[:20]}... but peer not in that network")
                 return None
 
-            # 4. Verify inviter is an admin (only admins can create invites)
+            # 4. Verify inviter is an admin using shared validate() function
             inviter_user_id = event_data.get('inviter_user_id')
             if inviter_user_id and peer_network['admins_group_id']:
                 admins_group_id = peer_network['admins_group_id']
-                is_admin = safedb.query_one(
-                    "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-                    (admins_group_id, inviter_user_id, recorded_by)
-                )
-                if not is_admin:
-                    log.warning(f"invite.project() inviter {inviter_user_id[:20]}... is not an admin - rejecting invite")
+                if not validate(inviter_user_id, admins_group_id, recorded_by, db):
+                    log.warning(f"invite.project() authorization FAILED: inviter {inviter_user_id[:20]}... is not an admin")
                     return None
             else:
                 # If inviter_user_id is missing (old invite format), reject for safety

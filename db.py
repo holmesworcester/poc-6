@@ -30,7 +30,7 @@ SUBJECTIVE_TABLES = {
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)
     'users',
     'group_members',
-    'group_members_wip',
+    'group_members',
     'valid_events',
     'blocked_events_ephemeral',
     'blocked_event_deps_ephemeral',

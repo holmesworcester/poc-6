@@ -133,7 +133,7 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         dep_fields = ['created_by', 'peer_id', 'invite_id']  # Depend on invite, not group/channel
     elif event_type == 'network':
         # Network events depend on both groups and the creator user
-        dep_fields = ['created_by', 'members_group_id', 'admins_group_id', 'creator_user_id']
+        dep_fields = ['created_by', 'all_users_group_id', 'admins_group_id', 'creator_user_id']
     elif event_type == 'invite':
         # Invite events need creator to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet

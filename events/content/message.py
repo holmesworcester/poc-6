@@ -153,6 +153,17 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
+    # Rule 2 from ideal_protocol_design: Don't project messages that are already deleted
+    # Check if a deletion already exists for this message
+    # TODO: there's a problem here: we do actually want to delete the message event and never store it.
+    deletion_check = safedb.query_one(
+        "SELECT 1 FROM message_deletions WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+        (message_id, recorded_by)
+    )
+    if deletion_check:
+        log.info(f"message.project() skipping projection - message {message_id[:20]}... already deleted")
+        return event_id  # Event is valid, just not projected
+
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(
         """INSERT OR IGNORE INTO messages

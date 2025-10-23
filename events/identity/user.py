@@ -217,11 +217,14 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     )
 
     # Insert into group_members table
+    # TODO: This should be refactored to use group_member events instead of direct insertion
+    # For now, we keep this to maintain functionality while we work on other features
     safedb.execute(
         """INSERT OR IGNORE INTO group_members
-           (group_id, user_id, added_by, added_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
+            user_id,  # Use user_id as member_id for bootstrap membership
             group_id,  # Extracted from invite event (or event_data for network creator)
             user_id,
             event_data['created_by'],  # Self-added for invite joins
