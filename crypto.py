@@ -249,7 +249,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     # Check transit_prekeys (asymmetric) - DIRECT lookup, no _shared table
     transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM transit_prekeys WHERE prekey_id = ? AND owner_peer_id = ?",
+        "SELECT private_key FROM transit_prekeys WHERE transit_prekey_id = ? AND owner_peer_id = ?",
         (key_id, recorded_by)
     )
     if transit_prekey_row and transit_prekey_row['private_key']:
@@ -393,7 +393,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     log.debug(f"get_key_by_id() checking transit_prekeys for prekey_id={key_id} (detached), owner={recorded_by[:20]}...")
     transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM transit_prekeys WHERE prekey_id = ? AND owner_peer_id = ? LIMIT 1",
+        "SELECT private_key FROM transit_prekeys WHERE transit_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
         (key_id, recorded_by)
     )
     if transit_prekey_row and transit_prekey_row['private_key']:
@@ -418,7 +418,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
             transit_prekey_id = transit_prekey_shared_data.get('transit_prekey_id')
             if transit_prekey_id:
                 transit_prekey_row = unsafedb.query_one(
-                    "SELECT private_key FROM transit_prekeys WHERE prekey_id = ? AND owner_peer_id = ? LIMIT 1",
+                    "SELECT private_key FROM transit_prekeys WHERE transit_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
                     (transit_prekey_id, recorded_by)
                 )
                 if transit_prekey_row and transit_prekey_row['private_key']:

@@ -47,7 +47,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     # Get network
     network_row = safedb.query_one(
-        "SELECT network_id, all_users_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        "SELECT network_id, all_users_group_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (peer_id,)
     )
     if not network_row:
@@ -55,6 +55,26 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     network_id = network_row['network_id']
     all_users_group_id = network_row['all_users_group_id']
+    admins_group_id = network_row['admins_group_id']
+
+    # Check if inviter is an admin (only admins can create invites)
+    # First, get the inviter's user_id (event ID, not peer_shared_id)
+    inviter_user_row = safedb.query_one(
+        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, peer_id)
+    )
+    if not inviter_user_row:
+        raise ValueError(f"User record not found for peer {peer_id}. Cannot create invite.")
+
+    inviter_user_id = inviter_user_row['user_id']
+
+    # Check if inviter is in admin group
+    is_admin = safedb.query_one(
+        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        (admins_group_id, inviter_user_id, peer_id)
+    )
+    if not is_admin:
+        raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
     # Get key from all_users group
     group_row = safedb.query_one(
@@ -87,14 +107,14 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table
     inviter_prekey_row = unsafedb.query_one(
-        "SELECT prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT transit_prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_row:
         raise ValueError(f"No prekey found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_prekey_id = inviter_prekey_row['prekey_id']
+    inviter_prekey_id = inviter_prekey_row['transit_prekey_id']
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
     # Get prekey_shared_id from transit_prekeys_shared table
@@ -124,6 +144,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'channel_id': channel_id,
         'key_id': key_id,
         'inviter_peer_shared_id': peer_shared_id,
+        'inviter_user_id': inviter_user_id,  # NEW - for admin validation during projection
         'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
         'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
         'inviter_transit_prekey_id': inviter_prekey_id,
@@ -266,11 +287,27 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         invite_network_id = event_data.get('network_id')
         if invite_network_id:
             peer_network = safedb.query_one(
-                "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+                "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
                 (invite_network_id, recorded_by)
             )
             if not peer_network:
                 log.warning(f"invite.project() network mismatch: invite for {invite_network_id[:20]}... but peer not in that network")
+                return None
+
+            # 4. Verify inviter is an admin (only admins can create invites)
+            inviter_user_id = event_data.get('inviter_user_id')
+            if inviter_user_id and peer_network['admins_group_id']:
+                admins_group_id = peer_network['admins_group_id']
+                is_admin = safedb.query_one(
+                    "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+                    (admins_group_id, inviter_user_id, recorded_by)
+                )
+                if not is_admin:
+                    log.warning(f"invite.project() inviter {inviter_user_id[:20]}... is not an admin - rejecting invite")
+                    return None
+            else:
+                # If inviter_user_id is missing (old invite format), reject for safety
+                log.warning(f"invite.project() missing inviter_user_id in invite event - rejecting for security")
                 return None
 
         log.info(f"invite.project() validation passed for sync-sourced invite")

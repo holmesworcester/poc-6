@@ -1,7 +1,7 @@
 -- Transit prekeys for receiving sync requests (device-wide)
 -- Each local peer has one transit prekey for initial contact
 CREATE TABLE IF NOT EXISTS transit_prekeys (
-    prekey_id TEXT PRIMARY KEY,
+    transit_prekey_id TEXT PRIMARY KEY,
     owner_peer_id TEXT NOT NULL,  -- FK to local_peers.peer_id
     public_key BLOB NOT NULL,
     private_key BLOB NOT NULL,

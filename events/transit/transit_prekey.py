@@ -114,7 +114,7 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
 
     # Insert into transit_prekeys table with owner (device-wide)
     unsafedb.execute(
-        "INSERT OR IGNORE INTO transit_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO transit_prekeys (transit_prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
         (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
          crypto.b64decode(event_data['private_key']), event_data['created_at'])
     )
