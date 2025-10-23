@@ -114,8 +114,6 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
 
     Returns list of missing dependency IDs (empty if all satisfied).
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -174,8 +172,6 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
 def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> list[list[str | None]]:
     """Since `recorded` is the event that triggers projection, this is the central function for projection."""
     """It calls the necessary project functions in other modules for the given event types."""
-    import logging
-    log = logging.getLogger(__name__)
 
     if _recursion_depth > 100:
         log.error(f"[PROJECT_IDS] RECURSION LIMIT EXCEEDED depth={_recursion_depth} - possible infinite loop!")
@@ -212,8 +208,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     ref_id = recorded_event['ref_id']
     recorded_by = recorded_event['recorded_by']
 
-    import logging
-    log = logging.getLogger(__name__)
     log.info(f"recorded.project(): ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..., recorded_id={recorded_id[:20]}...")
 
     # DEBUG: Check if this is a sync request that we're about to process
@@ -515,8 +509,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
 
 def create(ref_id: str, recorded_by: str, t_ms: int, db: Any, return_dupes: bool) -> str:
     """Create a recorded event for the given ref_id and return the recorded_id."""
-    import logging
-    log = logging.getLogger(__name__)
 
     log.debug(f"recorded.create() creating recorded event: ref_id={ref_id}, recorded_by={recorded_by}, t_ms={t_ms}")
 
