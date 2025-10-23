@@ -165,4 +165,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         (message_id, channel_id, group_id, author_id, content, created_at, recorded_by, recorded_at)
     )
 
+    # Record dependency: message depends on channel (for cascading deletion)
+    safedb.execute(
+        """INSERT OR IGNORE INTO event_dependencies
+           (child_event_id, parent_event_id, recorded_by, dependency_type)
+           VALUES (?, ?, ?, ?)""",
+        (message_id, channel_id, recorded_by, 'channel')
+    )
+
     return event_id

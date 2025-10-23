@@ -392,6 +392,50 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
             pass
         recorded.project(event_id, db)
 
+    # Cleanup: Remove blocked events that successfully projected (deps_remaining=0 AND in valid_events)
+    # Only delete if the event actually made it into valid_events after re-projection
+    print("Cleaning up successfully unblocked events from blocked_events_ephemeral...")
+
+    # Find all events with deps_remaining=0
+    events_to_clean = db.query("SELECT recorded_id, recorded_by FROM blocked_events_ephemeral WHERE deps_remaining = 0")
+
+    # For each, check if its ref_id is in valid_events
+    cleaned_count = 0
+    for blocked_event in events_to_clean:
+        recorded_id = blocked_event['recorded_id']
+        recorded_by = blocked_event['recorded_by']
+
+        # Get the ref_id from this recorded event
+        recorded_blob = db.query_one("SELECT blob FROM store WHERE id = ?", (recorded_id,))
+        if recorded_blob:
+            try:
+                recorded_data = json.loads(recorded_blob['blob'])
+                ref_id = recorded_data.get('ref_id')
+
+                # Check if the event is actually in valid_events
+                is_valid = db.query_one(
+                    "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                    (ref_id, recorded_by)
+                )
+
+                if is_valid:
+                    # Safe to delete - the event was successfully projected
+                    db.execute(
+                        "DELETE FROM blocked_events_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
+                        (recorded_id, recorded_by)
+                    )
+                    cleaned_count += 1
+                else:
+                    # Event was NOT successfully projected - don't delete
+                    print(f"  ⚠️  Event {recorded_id[:20]}... has deps_remaining=0 but is NOT in valid_events - keeping in blocked_events")
+            except Exception as e:
+                print(f"  ⚠️  Error checking event {recorded_id[:20]}...: {e}")
+
+    print(f"Cleaned up {cleaned_count} successfully projected events")
+
+    # Cascade cleanup
+    db.execute("DELETE FROM blocked_event_deps_ephemeral WHERE recorded_id NOT IN (SELECT recorded_id FROM blocked_events_ephemeral)")
+
     # Safety check: verify no events remain blocked (would indicate a bug) TODO: fix this: sometimes it will be normal for events to remain blocked, but unblockable events should unblock naturally
     remaining = db.query("SELECT COUNT(*) as count FROM blocked_events_ephemeral")
     if remaining and remaining[0]['count'] > 0:

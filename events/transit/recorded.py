@@ -178,7 +178,16 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
         return []
 
     log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth})")
-    projected_ids = [project(id, db, _recursion_depth) for id in recorded_ids]
+    projected_ids = []
+    for recorded_id in recorded_ids:
+        try:
+            result = project(recorded_id, db, _recursion_depth)
+            projected_ids.append(result)
+        except Exception as e:
+            log.error(f"[PROJECT_IDS_EXCEPTION] ❌ EXCEPTION projecting recorded_id={recorded_id[:20]}... depth={_recursion_depth}: {str(e)[:200]}")
+            import traceback
+            traceback.print_exc()
+            raise  # Re-raise to fail immediately so we can see the error
     log.info(f"recorded.project_ids() completed projection of {len(recorded_ids)} events (depth={_recursion_depth})")
     return projected_ids
 
@@ -236,6 +245,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     # Phase 1: Try to unwrap (for encrypted events)
     plaintext, missing_key_ids = crypto.unwrap_event(event_blob, recorded_by, db)
 
+    # DEBUG: Log unwrap results for all events to understand what's happening
+    log.error(f"[UNWRAP_RESULT] ref_id={ref_id[:20]}... plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_key_ids}, temp_type={temp_type}")
+
     # DEBUG: Check if sync events are being blocked on keys
     if temp_type == 'sync':
         log.info(f"recorded.project(): SYNC unwrap result: plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_key_ids}")
@@ -262,6 +274,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             return [None, recorded_id]
 
     log.info(f"Parsed event data, type={event_type}")
+
+    # DEBUG: Log if this is a channel event
+    if event_type == 'channel':
+        log.error(f"[CHANNEL_AFTER_PARSE] type=channel, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
@@ -354,6 +370,11 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             # Event dependencies missing - block this event for this peer
             requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
             log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
+
+            # DEBUG: If this is a channel event, log the actual dep_ids
+            if event_type == 'channel':
+                log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
+
             queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
 
@@ -394,8 +415,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         from events.identity import peer_shared
         projected_id = peer_shared.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'channel':
+        log.error(f"[CHANNEL_PROJECT_DISPATCHER] Dispatching channel.project() for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
         channel.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
+        log.error(f"[CHANNEL_PROJECT_DISPATCHER] ✓ channel.project() completed for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
     elif event_type == 'sync':
         from events.transit import sync
         sync.project(ref_id, recorded_by, recorded_at, db)
@@ -472,10 +495,28 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     if not in_store:
         log.error(f"[VALID_EVENT_BUG] ❌ Marking event {ref_id[:20]}... as valid but blob NOT in store! type={event_type}")
 
+    # Log before and after valid_events insert
+    already_valid = safedb.query_one(
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+        (ref_id, recorded_by)
+    )
+    if already_valid:
+        log.warning(f"[VALID_EVENT_ALREADY] Event {ref_id[:20]}... already in valid_events for peer {recorded_by[:20]}...")
+
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (ref_id, recorded_by)
     )
+
+    # Verify insertion
+    check_valid = safedb.query_one(
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+        (ref_id, recorded_by)
+    )
+    if check_valid:
+        log.warning(f"[VALID_EVENT_SUCCESS] ✓ Event {ref_id[:20]}... is now in valid_events for peer {recorded_by[:20]}...")
+    else:
+        log.error(f"[VALID_EVENT_FAILED] ✗ Event {ref_id[:20]}... NOT in valid_events after insert! peer={recorded_by[:20]}...")
 
     # Ensure shareable_events has the authoritative created_at from projection table
     # This is critical for convergence: created_at must come from the projection table, not from initial insertion

@@ -279,6 +279,36 @@ With the fix:
 - These are two **independent** timestamps that serve different purposes
 - Never use recorded_at as a fallback for created_at
 
+### Cascading Deletion
+
+**Problem:** When an event is deleted, its dependent events must also be removed from `valid_events` to ensure convergence. Otherwise, different event orderings produce different final states:
+- If deletion arrives first: event is blocked from projecting
+- If event arrives first: event projects and must be removed upon deletion
+- Without cascading deletion: different states in different orderings!
+
+**Solution:** Generic dependency tracking with transitive cascading deletion:
+
+**Implementation:**
+1. **`event_dependencies` table** - Tracks parent→child relationships (child depends on parent)
+   - Schema: `(child_event_id, parent_event_id, recorded_by, dependency_type)`
+   - Index on `(parent_event_id, recorded_by)` for efficient cascade lookup
+
+2. **Populate during projection** - Each `*.project()` function records its dependencies
+   - Message depends on channel: `INSERT INTO event_dependencies VALUES (message_id, channel_id, recorded_by, 'channel')`
+   - Attachment depends on message and file
+   - File slice depends on file
+   - Generic pattern for future event types
+
+3. **Cascade on deletion** - When an event is deleted, recursively remove all dependents
+   - `cascade.cascade_delete_from_valid_events(event_id, recorded_by, safedb)`
+   - Depth-first traversal with cycle detection
+   - Removes event and all its transitive dependents from `valid_events`
+
+**Why this ensures convergence:**
+- **Order A (event first, then deletion):** Event projects → deletion cascades → event removed from valid_events
+- **Order B (deletion first, then event):** Deletion marks event as deleted → event blocked from projecting → not in valid_events
+- Both orderings produce identical final state!
+
 ### Invite Link Design
 
 **Architecture:** Minimal signed invite event as single source of truth for join authorization.

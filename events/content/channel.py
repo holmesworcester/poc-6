@@ -51,7 +51,7 @@ def create(name: str, group_id: str, peer_id: str, peer_shared_id: str, key_id: 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project channel event into channels table and shareable_events table."""
-    log.debug(f"channel.project() projecting channel_id={event_id}, seen_by={recorded_by}")
+    log.warning(f"[CHANNEL_PROJECT_START] channel.project() CALLED for channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}... recorded_at={recorded_at}")
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -60,19 +60,38 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     blob = store.get(event_id, unsafedb)
     if not blob:
         log.warning(f"channel.project() blob not found for channel_id={event_id}")
-        return
+        log.warning(f"[ASSERT] channel.project() blob must exist before projection - FAILING!")
+        raise RuntimeError(f"[CHANNEL_PROJECT_ERROR] blob not found for channel_id={event_id}")
 
     # Unwrap (decrypt)
     unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
     if not unwrapped:
         log.warning(f"channel.project() unwrap failed for channel_id={event_id}")
-        return  # Already blocked by recorded.project() if keys missing
+        log.warning(f"[ASSERT] channel.project() unwrap must succeed before projection - FAILING!")
+        raise RuntimeError(f"[CHANNEL_PROJECT_ERROR] unwrap failed for channel_id={event_id}, recorded_by={recorded_by[:20]}...")
 
     # Parse JSON
     event_data = crypto.parse_json(unwrapped)
-    log.info(f"channel.project() projected channel name='{event_data.get('name')}', id={event_id}")
+    log.warning(f"[CHANNEL_PROJECT] ✓ channel_id={event_id[:20]}... name='{event_data.get('name')}' recorded_by={recorded_by[:20]}...")
+
+    # Check: Verify all required fields exist
+    assert event_data.get('name'), f"[CHANNEL_ASSERT] channel must have name"
+    assert event_data.get('group_id'), f"[CHANNEL_ASSERT] channel must have group_id"
+    assert event_data.get('created_by'), f"[CHANNEL_ASSERT] channel must have created_by"
+    assert isinstance(event_data.get('created_at'), int), f"[CHANNEL_ASSERT] channel must have created_at as int, got {type(event_data.get('created_at'))}"
+    log.warning(f"[CHANNEL_ASSERT] ✓ All required fields present for channel {event_id[:20]}...")
 
     # Insert into channels table (use REPLACE to overwrite stubs from user.project())
+    log.warning(f"[CHANNEL_PROJECT] Inserting into channels table: channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}... recorded_at={recorded_at}")
+
+    # Before insert, check current state
+    existing = safedb.query(
+        "SELECT * FROM channels WHERE channel_id = ? AND recorded_by = ?",
+        (event_id, recorded_by)
+    )
+    if existing:
+        log.warning(f"[CHANNEL_INSERT_REPLACE] Already exists: {len(existing)} rows for channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}...")
+
     safedb.execute(
         """INSERT OR REPLACE INTO channels
            (channel_id, name, group_id, created_by, created_at, is_main, recorded_by, recorded_at)
@@ -88,6 +107,18 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
             recorded_at
         )
     )
+
+    # After insert, verify it was actually inserted
+    after_insert = safedb.query(
+        "SELECT * FROM channels WHERE channel_id = ? AND recorded_by = ?",
+        (event_id, recorded_by)
+    )
+    if after_insert:
+        log.warning(f"[CHANNEL_PROJECT_INSERTED] ✓ Row inserted for channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}... recorded_at={recorded_at} ({len(after_insert)} total rows)")
+    else:
+        log.warning(f"[CHANNEL_INSERT_FAILED] ✗ Row NOT found after insert! channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}...")
+        # This is a major bug - the insert failed silently
+        assert False, f"[CHANNEL_ASSERT] Insert failed for channel {event_id[:20]}... recorded_by={recorded_by[:20]}..."
 
 
 def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:

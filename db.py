@@ -44,6 +44,7 @@ SUBJECTIVE_TABLES = {
     'message_attachments',         # Message-file links (peer-scoped)
     'keys_to_purge',               # Forward secrecy: keys marked for purging (peer-scoped)
     'message_rekeys',              # Forward secrecy: rekeyed messages (peer-scoped)
+    'event_dependencies',          # Event dependency tracking for cascading deletion (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

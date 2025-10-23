@@ -247,6 +247,11 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     )
     log.info(f"message_deletion.project() marked message {message_id[:20]}... as deleted in deleted_events")
 
+    # Cascade delete from valid_events to ensure convergence
+    from events import cascade
+    deleted_count = cascade.cascade_delete_from_valid_events(message_id, recorded_by, safedb)
+    log.info(f"message_deletion.project() cascaded deletion of {deleted_count} events from valid_events (message + dependents)")
+
     # Remove from shareable_events if it was marked shareable
     safedb.execute(
         "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",

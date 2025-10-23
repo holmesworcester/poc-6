@@ -243,17 +243,22 @@ class blocked:
                 if result and result['deps_remaining'] == 0:
                     unblocked.append(evt['recorded_id'])
 
-        # Cleanup: delete unblocked events from blocked_events_ephemeral
+        # IMPORTANT FIX: Do NOT delete unblocked events from blocked_events_ephemeral here!
+        # If re-projection fails, the event needs to be re-blocked with its missing deps.
+        # Deletion should only happen AFTER confirming successful projection.
+        # For now, we keep the event in blocked_events_ephemeral with deps_remaining=0.
+        # The convergence test and sync protocol will handle cleaning up truly unblocked events.
+        #
+        # Previous code that deleted immediately:
+        # if unblocked:
+        #     log.info(f"queues.blocked.notify_event_valid() UNBLOCKING {len(unblocked)} events: {unblocked}")
+        #     placeholders_del = ','.join(['?' for _ in unblocked])
+        #     safedb.execute(f"""
+        #         DELETE FROM blocked_events_ephemeral
+        #         WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
+        #     """, tuple(unblocked) + (recorded_by,))
+
         if unblocked:
-            log.info(f"queues.blocked.notify_event_valid() UNBLOCKING {len(unblocked)} events: {unblocked}")
-
-            # Build DELETE with IN clause
-            placeholders_del = ','.join(['?' for _ in unblocked])
-            safedb.execute(f"""
-                DELETE FROM blocked_events_ephemeral
-                WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
-            """, tuple(unblocked) + (recorded_by,))
-
-            # Note: No commit here - caller owns the transaction (sync entry points or tests)
+            log.info(f"queues.blocked.notify_event_valid() UNBLOCKED (awaiting re-projection confirmation) {len(unblocked)} events: {unblocked}")
 
         return unblocked

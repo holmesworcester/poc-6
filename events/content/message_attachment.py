@@ -138,5 +138,14 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
         (message_id, file_id, filename, mime_type, recorded_by, recorded_at)
     )
 
+    # Record dependency for cascading deletion
+    # attachment depends on message (attachment is a child of message)
+    safedb.execute(
+        """INSERT OR IGNORE INTO event_dependencies
+           (child_event_id, parent_event_id, recorded_by, dependency_type)
+           VALUES (?, ?, ?, ?)""",
+        (event_id, message_id, recorded_by, 'message')
+    )
+
     log.debug(f"message_attachment.project() projected attachment "
               f"message={message_id[:20]}... file={file_id[:20]}...")

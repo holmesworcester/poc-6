@@ -97,4 +97,12 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
         (file_id, slice_number, nonce, ciphertext, poly_tag, recorded_by, recorded_at)
     )
 
+    # Record dependency: slice depends on file (for cascading deletion)
+    safedb.execute(
+        """INSERT OR IGNORE INTO event_dependencies
+           (child_event_id, parent_event_id, recorded_by, dependency_type)
+           VALUES (?, ?, ?, ?)""",
+        (event_id, file_id, recorded_by, 'file')
+    )
+
     log.debug(f"file_slice.project() projected slice {file_id[:20]}.../{slice_number}")
