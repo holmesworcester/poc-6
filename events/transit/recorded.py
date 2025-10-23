@@ -138,6 +138,10 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Invite events need creator to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet
         dep_fields = ['created_by']
+    elif event_type == 'message_deletion':
+        # Deletion events only depend on the creator (for signature verification)
+        # Message doesn't need to exist - deletion can arrive before the message
+        dep_fields = ['created_by']
 
     missing_deps = []
 
@@ -305,11 +309,11 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             # This allows the event to be synced to other peers even while blocked
             # The actual created_at will be set during projection (via INSERT OR REPLACE at line 464)
             from events.transit import sync
-            log.debug(f"Encrypted {event_type} {ref_id[:20]}... - adding to shareable_events with placeholder created_at=0")
+            log.debug(f"Encrypted {event_type} {ref_id[:20]}... - adding to shareable_events with placeholder created_at=NULL")
             sync.add_shareable_event(
                 ref_id,
                 recorded_by,
-                created_at=0,  # Placeholder - will be updated by INSERT OR REPLACE during projection
+                created_at=None,  # Placeholder - will be updated by INSERT OR REPLACE during projection
                 recorded_at=recorded_at,
                 db=db
             )
@@ -362,6 +366,17 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     # All dependencies satisfied - proceed with projection
     projected_id = None
     log.info(f"Projecting event type: {event_type}")
+
+    # Check if this event has been marked as deleted (prevents projection of deleted messages)
+    # This handles the case where a deletion arrives before or after the message
+    if event_type == 'message':
+        deleted_check = safedb.query_one(
+            "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+            (ref_id, recorded_by)
+        )
+        if deleted_check:
+            log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
+            return [None, recorded_id]
 
     if event_type == 'message':
         projected_id = message.project(ref_id, recorded_by, recorded_at, db)

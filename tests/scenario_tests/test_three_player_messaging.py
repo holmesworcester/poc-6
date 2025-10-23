@@ -49,18 +49,13 @@ def test_three_player_messaging():
 
     db.commit()
 
-    # Initial sync to converge (need 2 rounds: round 1 for bootstrap, round 2 for GKS projection)
-    print("\n=== Sync Round 1: Bootstrap ===")
-    sync.send_request_to_all(t_ms=4000, db=db)
-    db.commit()
-    sync.receive(batch_size=20, t_ms=4100, db=db)
-    db.commit()
-
-    print("\n=== Sync Round 2: GKS projection ===")
-    sync.send_request_to_all(t_ms=4200, db=db)
-    db.commit()
-    sync.receive(batch_size=20, t_ms=4300, db=db)
-    db.commit()
+    # Initial sync to converge (need multiple rounds for GKS events to propagate)
+    for i in range(5):
+        print(f"\n=== Sync Round {i+1} ===")
+        sync.send_request_to_all(t_ms=4000 + i*200, db=db)
+        db.commit()
+        sync.receive(batch_size=20, t_ms=4100 + i*200, db=db)
+        db.commit()
 
     # Check that Bob has Alice's network key (from GKS)
     bob_has_network_key = db.query_one(

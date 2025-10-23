@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS shareable_events (
     event_id TEXT NOT NULL,
     can_share_peer_id TEXT NOT NULL,  -- Peer who saw/has this event and can share it
-    created_at INTEGER NOT NULL,      -- When the event was originally created (canonical from projection)
+    created_at INTEGER,               -- When the event was originally created (canonical from projection), NULL if not yet known
     recorded_at INTEGER NOT NULL,     -- When we received/saw this event locally (for lazy loading)
     window_id INTEGER,                -- Computed from BLAKE2b-256(event_id) at w=20 for future-proofing
     PRIMARY KEY (event_id, can_share_peer_id)

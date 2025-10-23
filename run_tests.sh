@@ -18,9 +18,8 @@ fi
 # Set PYTHONPATH to current directory so imports work
 export PYTHONPATH=.
 
-# Run pytest with verbose output and stop on first failure
+# Run pytest with verbose output
 # -v: verbose
-# -x: stop on first failure
 # -s: show print statements
 # Only run tests in the tests/ directory, ignore previous-poc/
-pytest -xvs tests/ "$@"
+pytest -vs tests/ "$@"

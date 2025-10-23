@@ -46,17 +46,13 @@ def test_file_attachment_sync_only():
 
     db.commit()
 
-    # Initial sync to converge
+    # Initial sync to converge (need multiple rounds for GKS events to propagate)
     print("\n=== Initial sync (bootstrap + GKS) ===")
-    sync.send_request_to_all(t_ms=2100, db=db)
-    db.commit()
-    sync.receive(batch_size=20, t_ms=2200, db=db)
-    db.commit()
-
-    sync.send_request_to_all(t_ms=2300, db=db)
-    db.commit()
-    sync.receive(batch_size=20, t_ms=2400, db=db)
-    db.commit()
+    for i in range(5):
+        sync.send_request_to_all(t_ms=2100 + i*200, db=db)
+        db.commit()
+        sync.receive(batch_size=20, t_ms=2200 + i*200, db=db)
+        db.commit()
 
     print("✓ Initial sync completed")
 

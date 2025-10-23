@@ -48,22 +48,13 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
 
     added_by_user_id = user_row['user_id']
 
-    # Check if added_by is a member of the admins group (check both tables since network.project() inserts to group_members_wip)
+    # Check if added_by is a member of the admins group
     is_admin = safedb.query_one(
         "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
         (admins_group_id, added_by_user_id, recorded_by)
     )
 
-    if is_admin is not None:
-        return True
-
-    # Also check group_members_wip for entries added directly by network.project()
-    is_admin_wip = safedb.query_one(
-        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, added_by_user_id, recorded_by)
-    )
-
-    return is_admin_wip is not None
+    return is_admin is not None
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
@@ -257,22 +248,13 @@ def is_member(user_id: str, group_id: str, recorded_by: str, db: Any) -> bool:
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Check both tables: group_members (from group_member events) and group_members_wip (from network.project())
+    # Check if user is a member of the group
     member = safedb.query_one(
         "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
         (group_id, user_id, recorded_by)
     )
 
-    if member is not None:
-        return True
-
-    # Also check group_members_wip for entries added directly by network.project()
-    member_wip = safedb.query_one(
-        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
-        (group_id, user_id, recorded_by)
-    )
-
-    return member_wip is not None
+    return member is not None
 
 
 def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any]]:
@@ -288,15 +270,11 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Query both tables and union results (avoid duplicates)
+    # Query group_members table
     return safedb.query(
         """SELECT user_id, added_by, created_at
            FROM group_members
            WHERE group_id = ? AND recorded_by = ?
-           UNION
-           SELECT user_id, added_by, created_at
-           FROM group_members_wip
-           WHERE group_id = ? AND recorded_by = ?
            ORDER BY created_at ASC""",
-        (group_id, recorded_by, group_id, recorded_by)
+        (group_id, recorded_by)
     )

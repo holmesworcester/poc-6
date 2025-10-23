@@ -30,22 +30,19 @@ def validate(message_id: str, deleted_by: str, recorded_by: str, db: Any) -> boo
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get message to check authorship
+    # Get message to check authorship (if it exists)
     message_row = safedb.query_one(
         "SELECT author_id, group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
         (message_id, recorded_by)
     )
-    if not message_row:
-        # Message not found - not authorized
-        return False
 
-    message_author_id = message_row['author_id']
+    # Check if deleted_by is the message author (only if message exists)
+    if message_row:
+        message_author_id = message_row['author_id']
+        if deleted_by == message_author_id:
+            return True
 
-    # Check if deleted_by is the message author
-    if deleted_by == message_author_id:
-        return True
-
-    # If not author, check if deleted_by is an admin
+    # If not author (or message doesn't exist yet), check if deleted_by is an admin
     # Get deleter's user_id
     deleter_user_row = safedb.query_one(
         "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
@@ -68,7 +65,7 @@ def validate(message_id: str, deleted_by: str, recorded_by: str, db: Any) -> boo
 
     # Check if deleter is in admin group
     admin_check = safedb.query_one(
-        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
         (admins_group_id, deleter_user_id, recorded_by)
     )
 
@@ -159,7 +156,8 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     """Project message_deletion event.
 
     Analogous to unblocking: when a deletion is projected, it acts like adding a permanent block.
-    The message is removed from the messages table, and future message projections are skipped.
+    The message is removed from the messages table, the blob is deleted from store,
+    and future message projections are skipped (via deleted_events table).
 
     Args:
         deletion_id: Deletion event ID
@@ -214,7 +212,34 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
         "DELETE FROM messages WHERE message_id = ? AND recorded_by = ?",
         (message_id, recorded_by)
     )
-    log.info(f"message_deletion.project() attempted to delete message {message_id[:20]}... (may have already been deleted or not yet arrived)")
+    log.info(f"message_deletion.project() deleted message {message_id[:20]}... from messages table (may have already been deleted or not yet arrived)")
+
+    # Mark message as deleted in deleted_events table to prevent future projection
+    safedb.execute(
+        """INSERT OR IGNORE INTO deleted_events (event_id, recorded_by, deleted_at)
+           VALUES (?, ?, ?)""",
+        (message_id, recorded_by, recorded_at)
+    )
+    log.info(f"message_deletion.project() marked message {message_id[:20]}... as deleted in deleted_events")
+
+    # Remove from valid_events if it was marked valid
+    safedb.execute(
+        "DELETE FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, recorded_by)
+    )
+
+    # Remove from shareable_events if it was marked shareable
+    safedb.execute(
+        "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+        (message_id, recorded_by)
+    )
+
+    # Delete blob from store to clean up storage
+    unsafedb.execute(
+        "DELETE FROM store WHERE id = ?",
+        (message_id,)
+    )
+    log.info(f"message_deletion.project() deleted message blob {message_id[:20]}... from store")
 
     # Return deletion_id to mark as valid
     return deletion_id

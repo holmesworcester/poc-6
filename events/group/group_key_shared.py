@@ -131,7 +131,9 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     canonical = crypto.canonicalize_json(signed_inner_event)
     wrapped_blob = crypto.wrap(canonical, recipient_prekey_dict, db)
 
-    # Store with recorded wrapper
+    # Store with recorded wrapper (for replay)
+    # Note: Alice can't decrypt this (only Bob can), so it will remain blocked for Alice
+    # But it will still be sent to Bob during sync who can decrypt and project it
     key_shared_id = store.event(wrapped_blob, peer_id, t_ms, db)
 
     log.info(f"key_shared.create_for_invite() created key_shared_id={key_shared_id}")

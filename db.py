@@ -18,6 +18,7 @@ from typing import Any
 SUBJECTIVE_TABLES = {
     'messages',
     'message_deletions',           # Message deletions (subjective)
+    'deleted_events',              # Deleted events (prevents projection of deleted messages)
     'peers_shared',
     'peer_self',                   # Mapping from peer_id to peer_shared_id (subjective)
     'groups',

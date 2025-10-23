@@ -32,8 +32,8 @@ def test_file_slice_sync_debug():
     print(f"✓ Bob channel_id: {bob['channel_id'][:20]}...")
     db.commit()
 
-    print("\n=== STEP 3: Initial sync (2 rounds) ===")
-    for round_num in range(2):
+    print("\n=== STEP 3: Initial sync (need multiple rounds for GKS) ===")
+    for round_num in range(5):
         sync.send_request_to_all(t_ms=2100 + round_num * 100, db=db)
         db.commit()
         sync.receive(batch_size=20, t_ms=2200 + round_num * 100, db=db)

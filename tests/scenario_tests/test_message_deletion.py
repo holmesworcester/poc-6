@@ -85,6 +85,24 @@ def test_message_deletion_self():
     assert deletion_check is not None, "Deletion record should exist"
     print("✓ Deletion record persisted")
 
+    # Verify event is marked as deleted in deleted_events
+    deleted_events_check = safedb.query_one(
+        "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, alice['peer_id'])
+    )
+    assert deleted_events_check is not None, "Event should be marked as deleted in deleted_events"
+    print("✓ Event marked in deleted_events table")
+
+    # Verify blob is removed from store
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+    blob_check = unsafedb.query_one(
+        "SELECT 1 FROM store WHERE id = ?",
+        (message_id,)
+    )
+    assert blob_check is None, "Blob should be removed from store"
+    print("✓ Blob removed from store")
+
     print("\n✅ Self-deletion test passed")
 
 
@@ -378,6 +396,26 @@ def test_message_deletion_ordering():
     # The key convergence property: regardless of projection order, Bob doesn't see the message
     assert bob_msg_check is None, "Bob should not see deleted message (convergence)"
     print("✓ Message not visible to Bob (convergence verified)")
+
+    # Verify Bob's deleted_events table is populated
+    bob_deleted_check = bob_safedb.query_one(
+        "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, bob['peer_id'])
+    )
+    assert bob_deleted_check is not None, "Bob should have deleted_events entry"
+    print("✓ Bob has message in deleted_events (prevents future projection)")
+
+    # Verify blob is removed from store for Alice
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+    alice_blob_check = unsafedb.query_one(
+        "SELECT 1 FROM store WHERE id = ?",
+        (message_id,)
+    )
+    # Note: Since the message and deletion events have different IDs (both blobs are stored),
+    # and we only delete the message blob, not the deletion blob, the blob may still exist
+    # in store under the deletion event ID. But the message_id (event_id) should not be in deleted_events
+    # and should not be in valid_events or messages table.
 
     print("\n✅ Ordering/convergence test passed")
 
