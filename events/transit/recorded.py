@@ -42,6 +42,9 @@ def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: s
         'address': ('addresses', 'address_id'),
         'group_member': ('group_members_wip', 'user_id'),
         'file': ('files', 'file_id'),
+        # Note: file_slice and message_attachment are NOT included here because:
+        # - file_slice: syncs separately, no created_at in projection table
+        # - message_attachment: syncs separately, no created_at in projection table
     }
 
     if event_type not in TABLE_MAP:
