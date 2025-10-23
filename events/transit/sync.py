@@ -8,6 +8,9 @@ import crypto
 import store
 import hashlib
 import struct
+import logging
+
+log = logging.getLogger(__name__)
 
 # Bloom filter parameters
 BLOOM_SIZE_BITS = 512  # 512 bits = 64 bytes
@@ -171,8 +174,6 @@ def get_next_window(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> t
 
 def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms: int, db: Any) -> None:
     """Mark window as synced and adjust w_param based on requester's total event count."""
-    import logging
-    log = logging.getLogger(__name__)
     log.debug(f"mark_window_synced: from={from_peer_id[:20]}... to={to_peer_id[:20]}... window={window_id}")
     state = get_sync_state(from_peer_id, to_peer_id, t_ms, db)
     state['last_window'] = window_id
@@ -216,8 +217,6 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
         recorded_at: When this peer recorded the event
         db: Database connection
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     event_id_bytes = crypto.b64decode(event_id)
     window_id = compute_storage_window_id(event_id_bytes)
@@ -245,8 +244,6 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     Returns:
         List of peer_ids who can decrypt this blob (empty if no keys found)
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     hint = blob[:16]
     hint_b64 = crypto.b64encode(hint)
@@ -278,8 +275,6 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
 
     Handles type-specific projection and marks event as valid.
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     # Type-specific projection dispatch
     if event_type == 'sync':
@@ -309,15 +304,14 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
     Returns:
         True if event was ephemeral and handled, False to proceed with normal storage
     """
-    import logging
-    log = logging.getLogger(__name__)
+    logger = log  # Alias to avoid scoping issues with loop variable
 
     event_type = event_data.get('type')
     if event_type not in EPHEMERAL_EVENT_TYPES:
         return False
 
     # Ephemeral event: project directly without storing
-    log.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
+    logger.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
     event_id = crypto.b64encode(crypto.hash(unwrapped_blob))
 
     # Handle sync request: mark joiner peers as having received bootstrap acknowledgment
@@ -340,9 +334,9 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
                 if joined_network == 1 and created_network == 0:
                     try:
                         bootstrap_complete.create(recorded_by, t_ms, db)
-                        log.info(f"handle_ephemeral_event: created bootstrap_complete for joiner {recorded_by[:20]}...")
+                        logger.info(f"handle_ephemeral_event: created bootstrap_complete for joiner {recorded_by[:20]}...")
                     except Exception as e:
-                        log.warning(f"handle_ephemeral_event: failed to create bootstrap_complete: {e}")
+                        logger.warning(f"handle_ephemeral_event: failed to create bootstrap_complete: {e}")
 
     # Project event for each peer who can access it
     for recorded_by in recorded_by_peers:
@@ -360,8 +354,6 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     Returns:
         List of recorded_ids (one per peer who can decrypt), or empty list if unwrap fails
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
@@ -411,8 +403,6 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
     global _receive_call_count
     _receive_call_count += 1
 
-    import logging
-    log = logging.getLogger(__name__)
 
     if _receive_call_count > 1000:
         log.error(f"sync.receive: CALL LIMIT EXCEEDED count={_receive_call_count} - possible infinite loop!")
@@ -438,8 +428,6 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
 
 def send_request_to_all(t_ms: int, db: Any) -> None:
     """All local peers send sync requests to all peers they've seen."""
-    import logging
-    log = logging.getLogger(__name__)
 
     # Query all local peers
     unsafedb = create_unsafe_db(db)
@@ -484,8 +472,6 @@ def send_request_to_all(t_ms: int, db: Any) -> None:
 
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
     """Send sync requests to all peers this peer has seen."""
-    import logging
-    log = logging.getLogger(__name__)
 
     # Standardize encoding for logging
     if isinstance(from_peer_id, bytes):
@@ -554,8 +540,6 @@ def send_bootstrap_to_peer(to_peer_shared_id: str, from_peer_id: str, from_peer_
         t_ms: Current timestamp
         db: Database connection
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     log.info(f"send_bootstrap_to_peer: from={from_peer_id[:20]}... to={to_peer_shared_id[:20]}... sending_all_shareable_events")
 
@@ -607,8 +591,6 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         t_ms: Timestamp
         db: Database connection
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     log.debug(f"[SEND_REQUEST_ENTRY] from={from_peer_id[:20]}... to={to_peer_shared_id[:20]}...")
 
@@ -695,10 +677,8 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Wrap with recipient's prekey for transit only
     to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
     if to_key:
-        import logging
         log.info(f"send_request: wrapping with hint={crypto.b64encode(to_key['id'])[:30]}...")
     else:
-        import logging
         log.warning(f"send_request: NO PREKEY FOUND for {to_peer_shared_id[:20]}...")
     request_blob = crypto.wrap(canonical, to_key, db)
 
@@ -723,8 +703,6 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, syn
         db: Database connection
         sync_data: Optional parsed sync request data. If None, loads from store.
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     if sync_data is None:
         # Load from store (non-ephemeral case)
@@ -740,8 +718,6 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, syn
 
 def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Internal function to handle sync request logic (shared between ephemeral and stored)."""
-    import logging
-    log = logging.getLogger(__name__)
     log.debug(f"[SYNC_PROJECT] sync_id={sync_event_id[:20]}... recorded_by={recorded_by[:10]}...")
 
     # Verify signature using requester's peer_shared public key
@@ -847,8 +823,6 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         t_ms: Current timestamp
         db: Database connection
     """
-    import logging
-    log = logging.getLogger(__name__)
 
     log.debug(f"[SYNC_RESPONSE] from={from_peer_id[:10]}... to={to_peer_id[:10]}... window={window_id} range={window_min}-{window_max}")
 

@@ -1,13 +1,14 @@
 -- Message rekey events for forward secrecy
 -- Tracks re-encrypted messages when their original encryption key is being purged
 CREATE TABLE IF NOT EXISTS message_rekeys (
-    rekey_id TEXT PRIMARY KEY,
+    rekey_id TEXT NOT NULL,
     original_message_id TEXT NOT NULL,
     new_key_id TEXT NOT NULL,
     new_ciphertext BLOB NOT NULL,
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
-    recorded_at INTEGER NOT NULL
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (rekey_id, recorded_by)
 );
 
 CREATE INDEX IF NOT EXISTS idx_message_rekeys_by_message
