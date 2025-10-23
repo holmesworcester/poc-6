@@ -271,14 +271,31 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         should_mark_shareable = True
 
     if should_mark_shareable:
-        from events.transit import sync
-        sync.add_shareable_event(
-            ref_id,
-            recorded_by,  # This peer recorded the event and can share it
-            event_data.get('created_at', recorded_at) if event_data else recorded_at,
-            recorded_at,
-            db
-        )
+        # Mark event as shareable in shareable_events table
+        # For decrypted events: add with created_at from event_data
+        # For encrypted events: add placeholder, update after projection with authoritative created_at
+        # CRITICAL: Never use recorded_at as created_at (would violate convergence)
+        if event_data:
+            created_at_from_event = event_data.get('created_at')
+            log.debug(f"shareable mark: type={event_type}, event_data exists, created_at={created_at_from_event}")
+            if created_at_from_event:
+                # Decrypted event with created_at - add immediately with correct created_at
+                from events.transit import sync
+                log.debug(f"Adding {event_type} {ref_id[:20]}... to shareable_events with created_at={created_at_from_event}")
+                sync.add_shareable_event(
+                    ref_id,
+                    recorded_by,  # This peer recorded the event and can share it
+                    created_at_from_event,
+                    recorded_at,
+                    db
+                )
+            else:
+                log.debug(f"Event data exists but no created_at for {event_type} {ref_id[:20]}...")
+        elif event_data is None:
+            # Encrypted event - can't decrypt yet, defer shareable_events insert to projection phase
+            # (it will be added/updated with authoritative created_at after projection)
+            log.debug(f"Encrypted {event_type} - deferring shareable_events insert to projection phase")
+        # Note: We don't add placeholder with recorded_at here to maintain convergence invariant
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
@@ -434,18 +451,23 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         (ref_id, recorded_by)
     )
 
-    # Update shareable_events with authoritative created_at from projection table
-    # This ensures all shareable events have the correct created_at for bloom filtering
+    # Ensure shareable_events has the authoritative created_at from projection table
+    # This is critical for convergence: created_at must come from the projection table, not from initial insertion
     if should_mark_shareable and projected_id:
         actual_created_at = _get_authoritative_created_at(event_type, ref_id, recorded_by, safedb)
         if actual_created_at is not None:
+            # Use INSERT OR REPLACE to ensure the row exists with correct created_at
+            # (for encrypted events that weren't added initially, or to update existing rows)
+            from events.transit import sync
+            event_id_bytes = crypto.b64decode(ref_id)
+            window_id = sync.compute_storage_window_id(event_id_bytes)
             safedb.execute(
-                """UPDATE shareable_events
-                   SET created_at = ?
-                   WHERE event_id = ? AND can_share_peer_id = ?""",
-                (actual_created_at, ref_id, recorded_by)
+                """INSERT OR REPLACE INTO shareable_events
+                   (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (ref_id, recorded_by, actual_created_at, recorded_at, window_id)
             )
-            log.debug(f"Updated shareable_events created_at for {event_type} {ref_id[:20]}... to {actual_created_at}")
+            log.debug(f"Set shareable_events created_at={actual_created_at} for {event_type} {ref_id[:20]}... (from projection table)")
 
     # Notify blocked queue - unblock events that were waiting for this event
     unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
