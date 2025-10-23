@@ -243,11 +243,11 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     return member_id
 
 
-def is_member(peer_shared_id: str, group_id: str, recorded_by: str, db: Any) -> bool:
+def is_member(user_id: str, group_id: str, recorded_by: str, db: Any) -> bool:
     """Check if a user is a member of a group.
 
     Args:
-        peer_shared_id: User's peer_shared_id to check
+        user_id: User's ID to check
         group_id: Group to check membership in
         recorded_by: Perspective of which peer is checking
         db: Database connection
@@ -260,7 +260,7 @@ def is_member(peer_shared_id: str, group_id: str, recorded_by: str, db: Any) -> 
     # Check both tables: group_members (from group_member events) and group_members_wip (from network.project())
     member = safedb.query_one(
         "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
-        (group_id, peer_shared_id, recorded_by)
+        (group_id, user_id, recorded_by)
     )
 
     if member is not None:
@@ -269,7 +269,7 @@ def is_member(peer_shared_id: str, group_id: str, recorded_by: str, db: Any) -> 
     # Also check group_members_wip for entries added directly by network.project()
     member_wip = safedb.query_one(
         "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
-        (group_id, peer_shared_id, recorded_by)
+        (group_id, user_id, recorded_by)
     )
 
     return member_wip is not None
