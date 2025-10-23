@@ -43,17 +43,47 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
-    # Query for main group and main channel
+    # Query for network (which contains all_users group and other metadata)
 
-    # Get main group
-    group_row = safedb.query_one(
-        "SELECT group_id, key_id FROM groups WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
+    # Get network
+    network_row = safedb.query_one(
+        "SELECT network_id, all_users_group_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (peer_id,)
     )
-    if not group_row:
-        raise ValueError(f"No main group found for peer {peer_id}. Cannot create invite.")
+    if not network_row:
+        raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
-    group_id = group_row['group_id']
+    network_id = network_row['network_id']
+    all_users_group_id = network_row['all_users_group_id']
+    admins_group_id = network_row['admins_group_id']
+
+    # Check if inviter is an admin (only admins can create invites)
+    # First, get the inviter's user_id (event ID, not peer_shared_id)
+    inviter_user_row = safedb.query_one(
+        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, peer_id)
+    )
+    if not inviter_user_row:
+        raise ValueError(f"User record not found for peer {peer_id}. Cannot create invite.")
+
+    inviter_user_id = inviter_user_row['user_id']
+
+    # Check if inviter is in admin group
+    is_admin = safedb.query_one(
+        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        (admins_group_id, inviter_user_id, peer_id)
+    )
+    if not is_admin:
+        raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
+
+    # Get key from all_users group
+    group_row = safedb.query_one(
+        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (all_users_group_id, peer_id)
+    )
+    if not group_row:
+        raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
+
     key_id = group_row['key_id']
 
     # Get main channel
@@ -77,14 +107,14 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table
     inviter_prekey_row = unsafedb.query_one(
-        "SELECT prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT transit_prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_row:
         raise ValueError(f"No prekey found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_prekey_id = inviter_prekey_row['prekey_id']
+    inviter_prekey_id = inviter_prekey_row['transit_prekey_id']
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
     # Get prekey_shared_id from transit_prekeys_shared table
@@ -109,10 +139,12 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'type': 'invite',
         'invite_pubkey': invite_pubkey_b64,  # For user proof signature
         'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
-        'group_id': group_id,
+        'network_id': network_id,  # NEW - explicit network reference
+        'group_id': all_users_group_id,  # All users group (for adding joiner)
         'channel_id': channel_id,
         'key_id': key_id,
         'inviter_peer_shared_id': peer_shared_id,
+        'inviter_user_id': inviter_user_id,  # NEW - for admin validation during projection
         'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
         'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
         'inviter_transit_prekey_id': inviter_prekey_id,
@@ -133,6 +165,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # The create_for_invite function will extract the prekey from the invite event
     from events.group import group_key_shared
 
+    # Share all_users group key
     group_key_shared_id = group_key_shared.create_for_invite(
         key_id=key_id,
         peer_id=peer_id,
@@ -142,7 +175,37 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         db=db
     )
 
-    log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for network key")
+    log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for all_users group key")
+
+    # Share admins group key (so all users can see who admins are)
+    # Get admins group ID from network
+    from events.identity import network
+    network_row_for_admins = safedb.query_one(
+        "SELECT network_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (peer_id,)
+    )
+    if network_row_for_admins and network_row_for_admins['admins_group_id']:
+        admins_group_id = network_row_for_admins['admins_group_id']
+
+        # Get admin group key
+        admin_group_row = safedb.query_one(
+            "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+            (admins_group_id, peer_id)
+        )
+
+        if admin_group_row:
+            admin_key_id = admin_group_row['key_id']
+
+            # Share admin group key
+            admin_key_shared_id = group_key_shared.create_for_invite(
+                key_id=admin_key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,
+                t_ms=t_ms + 4,
+                db=db
+            )
+            log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
@@ -192,12 +255,64 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     # Parse JSON (plaintext, no unwrap needed)
     event_data = crypto.parse_json(blob)
 
-    # Note: Signature verification skipped during projection
-    # For inviter: they created it locally (already verified)
-    # For invitee: they trust the URL itself as the credential
-    # The signature exists in the blob for future verification if needed
-
     created_by = event_data['created_by']
+
+    # Check if this is a bootstrap invite (first join via URL)
+    # Bootstrap invites are processed before peer has any networks, and before invite_accepted is created
+    # If peer has no networks, this is a bootstrap - skip validation (root of trust from URL)
+    peer_networks = safedb.query_one(
+        "SELECT 1 FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+
+    is_bootstrap = (peer_networks is None)
+
+    # If not bootstrap, this came via sync or is a second invite - validate it
+    if not is_bootstrap:
+        log.info(f"invite.project() sync-sourced invite, validating...")
+
+        # 1. Verify creator (created_by) exists
+        from events.identity import peer_shared
+        creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+        if not creator_public_key:
+            log.warning(f"invite.project() creator not found: {created_by[:20]}...")
+            return None
+
+        # 2. Verify signature
+        if not crypto.verify_event(event_data, creator_public_key):
+            log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
+            return None
+
+        # 3. Verify network_id matches peer's network
+        invite_network_id = event_data.get('network_id')
+        if invite_network_id:
+            peer_network = safedb.query_one(
+                "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+                (invite_network_id, recorded_by)
+            )
+            if not peer_network:
+                log.warning(f"invite.project() network mismatch: invite for {invite_network_id[:20]}... but peer not in that network")
+                return None
+
+            # 4. Verify inviter is an admin (only admins can create invites)
+            inviter_user_id = event_data.get('inviter_user_id')
+            if inviter_user_id and peer_network['admins_group_id']:
+                admins_group_id = peer_network['admins_group_id']
+                is_admin = safedb.query_one(
+                    "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+                    (admins_group_id, inviter_user_id, recorded_by)
+                )
+                if not is_admin:
+                    log.warning(f"invite.project() inviter {inviter_user_id[:20]}... is not an admin - rejecting invite")
+                    return None
+            else:
+                # If inviter_user_id is missing (old invite format), reject for safety
+                log.warning(f"invite.project() missing inviter_user_id in invite event - rejecting for security")
+                return None
+
+        log.info(f"invite.project() validation passed for sync-sourced invite")
+    else:
+        log.info(f"invite.project() bootstrap invite (first join via URL), skipping validation")
 
     # Insert into invites table
     safedb.execute(

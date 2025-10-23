@@ -262,14 +262,14 @@ def test_users_and_group_members_have_scoping():
 
     # Alice sees a user
     alice_db.execute(
-        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ('user1', 'peer1', 'User One', 1000, 'invite_key', alice_id, 1001)
+        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ('user1', 'peer1', 'User One', 'net1', 1000, 'invite_key', alice_id, 1001)
     )
 
     # Bob sees same user_id but different data
     bob_db.execute(
-        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ('user1', 'peer1', 'Different Name', 2000, 'other_key', bob_id, 2001)
+        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ('user1', 'peer1', 'Different Name', 'net1', 2000, 'other_key', bob_id, 2001)
     )
 
     db.commit()
@@ -365,11 +365,11 @@ def test_safedb_get_blob_enforces_scoping():
     alice_event_id = crypto.b64encode(crypto.hash(alice_blob))
     bob_event_id = crypto.b64encode(crypto.hash(bob_blob))
 
-    # Store blobs (device-wide)
+    # Store blobs (device-wide) - use base64 IDs (TEXT type)
     db.execute("INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-               (crypto.b64decode(alice_event_id), alice_blob, 1000))
+               (alice_event_id, alice_blob, 1000))
     db.execute("INSERT INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-               (crypto.b64decode(bob_event_id), bob_blob, 2000))
+               (bob_event_id, bob_blob, 2000))
 
     # Mark Alice's event as valid for Alice only
     db.execute("INSERT INTO valid_events (event_id, recorded_by) VALUES (?, ?)",

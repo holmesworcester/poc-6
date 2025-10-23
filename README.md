@@ -513,3 +513,13 @@ Most data retrieval functions include a `recorded_by` parameter that specifies w
 
 These functions are safe because they're part of the system's internal plumbing for routing encrypted events to the correct local identities.
 
+## Admin Group Design
+
+Networks include two groups:
+- **all_users group**: Contains all network members
+- **admins group**: Contains administrative users with permission to add/remove admins
+
+**Visibility:** The admins group is **readable by all users** (group key is shared with all joiners). This allows any user to see who the admins are, but only existing admins can modify admin membership (enforced during `group_member.create()` projection).
+
+**Future work:** Admins will need a private communication channel. Consider adding a private admin-only group separate from the visibility-tracking admins group.
+

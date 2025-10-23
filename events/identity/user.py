@@ -14,7 +14,8 @@ log = logging.getLogger(__name__)
 def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
            invite_id: str | None = None,
            invite_private_key: bytes | None = None,
-           group_id: str | None = None, channel_id: str | None = None) -> tuple[str, str]:
+           group_id: str | None = None, channel_id: str | None = None,
+           network_id: str | None = None) -> tuple[str, str, str]:
     """Create a user event representing network membership.
 
     Also auto-creates a prekey for receiving sync requests.
@@ -57,12 +58,18 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
             group_id = invite_event_data['group_id']
             channel_id = invite_event_data['channel_id']
             key_id = invite_event_data['key_id']
+            network_id = invite_event_data.get('network_id')  # NEW - extract from invite
         else:
             raise ValueError(f"invite event not found: {invite_id}")
     else:
         # Network creator - include metadata directly (old format for compatibility)
         event_data['group_id'] = group_id
         event_data['channel_id'] = channel_id
+        # network_id passed as parameter for network creator
+
+    # Add network_id if present (joiners get from invite, creators pass explicitly)
+    if network_id:
+        event_data['network_id'] = network_id
 
     # If joining via invite, add invite proof fields
     if invite_private_key:
@@ -192,14 +199,16 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
     # Insert into users table
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    network_id = event_data.get('network_id')  # NEW - may be from invite or event_data
     safedb.execute(
         """INSERT OR IGNORE INTO users
-           (user_id, peer_id, name, created_at, invite_pubkey, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (user_id, peer_id, name, network_id, created_at, invite_pubkey, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
             event_data['peer_id'],
             event_data['name'],
+            network_id,  # NEW
             event_data['created_at'],
             event_data.get('invite_pubkey', ''),
             recorded_by,
@@ -235,11 +244,10 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     Creates:
     - peer (local + shared)
-    - prekey (local + shared)
-    - key (symmetric, for the network)
-    - group (serves as the network)
+    - groups (all_users + admins)
+    - network event (binds groups, adds creator to admin)
     - channel (default channel)
-    - user (membership record)
+    - user (membership record in all_users group)
 
     Args:
         name: Username/display name
@@ -251,16 +259,16 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
             'peer_id': str,
             'peer_shared_id': str,
             'prekey_id': str,
-            'key_id': str,
-            'group_id': str,  # Also serves as network_id
+            'network_id': str,
+            'all_users_group_id': str,
+            'admins_group_id': str,
             'channel_id': str,
             'user_id': str,
-            'invite_link': str,
         }
     """
     from events.transit import transit_prekey
     from events.group import group
-    from events.identity import invite
+    from events.identity import network
     from events.content import channel
 
     log.info(f"new_network() creating user '{name}' at t_ms={t_ms}")
@@ -268,81 +276,80 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # 1. Create peer (local + shared)
     peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
 
-    # 2. Create group (group creates its own encryption key)
-    # Mark as main group for inviting
-    group_id, key_id = group.create(
-        name=f"{name}'s Network",
+    # 2. Create ALL_USERS group (main group for all users)
+    all_users_group_id, all_users_key_id = group.create(
+        name=f"{name}",
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 1,
+        t_ms=t_ms + 10,
         db=db,
         is_main=True  # This is the main group for inviting
     )
 
-    # 3. Share the group key with ourselves (sealed to our own prekey)
-    # This ensures we have a decryptable copy that syncs to other peers
-    from events.group import group_key_shared
-    from events.transit import transit_prekey
-
-    try:
-        our_prekey = transit_prekey.get_transit_prekey_for_peer(peer_shared_id, peer_id, db)
-        if our_prekey:
-            group_key_shared.create(
-                key_id=key_id,  # Group's key we just created
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                recipient_peer_id=peer_shared_id,  # Sealed to ourselves
-                t_ms=t_ms + 2,
-                db=db
-            )
-            log.info(f"new_network() created group_key_shared for creator {peer_shared_id[:20]}...")
-        else:
-            log.warning(f"new_network() no prekey found for creator {peer_shared_id[:20]}...")
-    except Exception as e:
-        log.warning(f"new_network() failed to create group_key_shared: {e}")
-
-    # 4. Create default channel
-    # Mark as main channel
-    channel_id = channel.create(
-        name='general',
-        group_id=group_id,
+    # 3. Create ADMINS group (admin-only group)
+    admins_group_id, admins_key_id = group.create(
+        name=f"{name} - Admins",
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        key_id=key_id,
-        t_ms=t_ms + 3,
+        t_ms=t_ms + 20,
+        db=db,
+        is_main=False
+    )
+
+    # 4. Create default channel
+    channel_id = channel.create(
+        name='general',
+        group_id=all_users_group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        key_id=all_users_key_id,
+        t_ms=t_ms + 30,
         db=db,
         is_main=True  # This is the main channel
     )
 
     # 5. Create user membership record (auto-creates transit_prekey + transit_prekey_shared)
-    # Network creator - no invite
+    # Network creator - no invite, will be added to all_users group by user.project()
     user_id, transit_prekey_shared_id, prekey_id = create(
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         name=name,
-        t_ms=t_ms + 4,
+        t_ms=t_ms + 40,
         db=db,
-        group_id=group_id,
+        group_id=all_users_group_id,
         channel_id=channel_id
     )
 
-    log.info(f"new_network() created user '{name}': peer={peer_id}, group={group_id}")
+    log.info(f"new_network() created user '{name}': peer={peer_id}, user_id={user_id}")
 
-    # 6. Create network_created event to mark this peer as network creator (self-bootstrapped)
+    # 6. Create NETWORK event (binds all_users + admins groups, adds creator to admin group)
+    network_id = network.create(
+        all_users_group_id=all_users_group_id,
+        admins_group_id=admins_group_id,
+        creator_user_id=user_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms + 60,
+        db=db
+    )
+
+    log.info(f"new_network() created network_id={network_id}")
+
+    # 7. Create network_created event to mark this peer as network creator (self-bootstrapped)
     network_created_event = {
         'type': 'network_created',
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
-        'group_id': group_id,
+        'network_id': network_id,  # NEW - explicit network reference
         'created_by': peer_shared_id,
-        'created_at': t_ms + 5
+        'created_at': t_ms + 70
     }
 
     # Sign and store the event
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(network_created_event, private_key)
     network_created_blob = crypto.canonicalize_json(signed_event)
-    network_created_id = store.event(network_created_blob, peer_id, t_ms + 5, db)
+    network_created_id = store.event(network_created_blob, peer_id, t_ms + 70, db)
 
     log.info(f"new_network() created network_created event: {network_created_id[:20]}...")
 
@@ -351,11 +358,15 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'peer_shared_id': peer_shared_id,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,
-        'key_id': key_id,
-        'group_id': group_id,
-        'channel_id': channel_id,
         'user_id': user_id,
+        'network_id': network_id,
+        'all_users_group_id': all_users_group_id,
+        'admins_group_id': admins_group_id,
+        'channel_id': channel_id,
         'network_created_id': network_created_id,
+        # Backward compatibility - group_id and key_id reference all_users group
+        'group_id': all_users_group_id,
+        'key_id': all_users_key_id,
     }
 
 

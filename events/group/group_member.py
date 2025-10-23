@@ -141,7 +141,7 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
     if not group:
         log.info(f"group_member.project() blocking: group {event_data['group_id']} not found")
-        queues.blocked.add(member_id, recorded_by, [event_data['group_id']], safedb)
+        # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
     # Check if user being added exists
@@ -152,7 +152,7 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
     if not user:
         log.info(f"group_member.project() blocking: user {event_data['user_id']} not found")
-        queues.blocked.add(member_id, recorded_by, [event_data['user_id']], safedb)
+        # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
     # Check authorization: added_by == creator OR added_by is member
@@ -176,10 +176,9 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             log.info(f"group_member.project() not authorized: {added_by} is not creator or member")
 
     if not authorized:
-        # Block on missing membership - use synthetic dep_id
-        dep_id = f"group_membership_{event_data['group_id']}_{added_by}"
-        log.info(f"group_member.project() blocking on missing membership: {dep_id}")
-        queues.blocked.add(member_id, recorded_by, [dep_id], safedb)
+        # Block on missing membership
+        log.info(f"group_member.project() blocking on missing membership")
+        # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
     # Insert into group_members_wip table
