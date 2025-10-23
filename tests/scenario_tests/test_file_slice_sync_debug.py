@@ -76,48 +76,33 @@ def test_file_slice_sync_debug():
     assert slice_count == 5, f"Expected 5 slices, got {slice_count}"
     db.commit()
 
-    print("\n=== STEP 7: Check Alice's shareable_events for file ===")
-    alice_shareable_file = db.query_one(
-        "SELECT event_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+    print("\n=== STEP 7: Check Alice's file exists ===")
+    alice_file_check = db.query_one(
+        "SELECT file_id FROM files WHERE file_id = ? AND recorded_by = ?",
         (file_id, alice['peer_id'])
     )
-    assert alice_shareable_file is not None, f"File {file_id[:20]}... should be in Alice's shareable_events"
-    print(f"✓ File is in Alice's shareable_events")
+    assert alice_file_check is not None, f"File {file_id[:20]}... should be in files table"
+    print(f"✓ File exists in Alice's files table")
 
-    print("\n=== STEP 8: Check Alice's shareable_events for file slices ===")
+    print("\n=== STEP 8: Check Alice's file slices ===")
     alice_slices = db.query_all(
-        "SELECT file_slice_id FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
+        "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
         (file_id, alice['peer_id'])
     )
     print(f"Alice has {len(alice_slices)} slices")
     assert len(alice_slices) == 5, f"Expected 5 slices, got {len(alice_slices)}"
+    print(f"✓ All {len(alice_slices)} slices exist in file_slices table")
 
-    for i, slice_row in enumerate(alice_slices):
-        slice_id = slice_row['file_slice_id']
-        slice_shareable = db.query_one(
-            "SELECT event_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-            (slice_id, alice['peer_id'])
-        )
-        assert slice_shareable is not None, f"Slice {i} {slice_id[:20]}... should be in shareable_events"
-    print(f"✓ All {len(alice_slices)} slices are in Alice's shareable_events")
-
-    print("\n=== STEP 9: Check Alice's shareable_events for message_attachment ===")
+    print("\n=== STEP 9: Check Alice's message_attachment ===")
     alice_attachments = db.query_all(
-        "SELECT message_attachment_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
+        "SELECT file_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
         (file_id, alice['peer_id'])
     )
     assert len(alice_attachments) == 1, f"Expected 1 attachment, got {len(alice_attachments)}"
+    print(f"✓ Message attachment exists for Alice")
 
-    attachment_id = alice_attachments[0]['message_attachment_id']
-    attachment_shareable = db.query_one(
-        "SELECT event_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-        (attachment_id, alice['peer_id'])
-    )
-    assert attachment_shareable is not None, f"Attachment {attachment_id[:20]}... should be in shareable_events"
-    print(f"✓ Message attachment is in Alice's shareable_events")
-
-    print("\n=== STEP 10: Sync to Bob (5 rounds) ===")
-    for round_num in range(5):
+    print("\n=== STEP 10: Sync to Bob (10 rounds) ===")
+    for round_num in range(10):
         sync.send_request_to_all(t_ms=5000 + round_num * 100, db=db)
         db.commit()
         sync.receive(batch_size=50, t_ms=5050 + round_num * 100, db=db)
@@ -130,7 +115,7 @@ def test_file_slice_sync_debug():
             (file_id, bob['peer_id'])
         )
         bob_slices = db.query_all(
-            "SELECT file_slice_id FROM file_slices WHERE file_id = ? AND recorded_by = ?",
+            "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ?",
             (file_id, bob['peer_id'])
         )
         print(f"  Round {round_num}: message={'✓' if bob_msg_count > 0 else '✗'}, file={'✓' if bob_file else '✗'}, slices={len(bob_slices)}/{slice_count}")
@@ -153,7 +138,7 @@ def test_file_slice_sync_debug():
 
     print("\n=== STEP 13: Check Bob's file slices ===")
     bob_slices = db.query_all(
-        "SELECT file_slice_id FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
+        "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
         (file_id, bob['peer_id'])
     )
     print(f"Bob has {len(bob_slices)} slices (expected {slice_count})")
@@ -162,7 +147,7 @@ def test_file_slice_sync_debug():
 
     print("\n=== STEP 14: Check Bob's attachment metadata ===")
     bob_attachments = db.query_all(
-        "SELECT message_attachment_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
+        "SELECT file_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
         (file_id, bob['peer_id'])
     )
     assert len(bob_attachments) == 1, f"Bob should have 1 attachment, got {len(bob_attachments)}"

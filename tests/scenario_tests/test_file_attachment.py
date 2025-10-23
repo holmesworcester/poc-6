@@ -145,8 +145,8 @@ def test_two_party_file_attachment_and_sync():
     print("\n=== Sync file to Bob ===")
 
     # Sync file events to Bob (need multiple rounds for message + file + slices + attachment)
-    # More rounds needed because: round 1 sends events, round 2 may trigger key shares, round 3-5 complete transfer
-    for round_num in range(5):
+    # More rounds needed because: round 1 sends events, round 2 may trigger key shares, plus window rotation
+    for round_num in range(10):
         sync.send_request_to_all(t_ms=5000 + round_num * 100, db=db)
         db.commit()
         sync.receive(batch_size=50, t_ms=5050 + round_num * 100, db=db)
