@@ -55,12 +55,13 @@ print(f"Message ID: {message_id[:20]}...")
 
 # Check if message is in Alice's shareable_events
 shareable_check = db.query_one(
-    "SELECT event_id, created_at FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+    "SELECT event_id, created_at, window_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
     (message_id, alice['peer_id'])
 )
 print(f"Message in Alice's shareable_events: {shareable_check is not None}")
 if shareable_check:
     print(f"  created_at: {shareable_check['created_at']}")
+    print(f"  window_id: {shareable_check['window_id']}")
 
 # Check if message is in Alice's valid_events
 valid_check = db.query_one(
@@ -87,29 +88,24 @@ bob_bootstrap = db.query_one(
 )
 print(f"Bob bootstrap before sync: created={bob_bootstrap['created_network'] if bob_bootstrap else None}, joined={bob_bootstrap['joined_network'] if bob_bootstrap else None}, received={bob_bootstrap['received_sync_request'] if bob_bootstrap else None}")
 
-# Check outgoing queue before sending
-outgoing_before = db.query_all("SELECT COUNT(*) as cnt FROM outgoing_transit")
-print(f"Outgoing transit queue before send: {outgoing_before[0]['cnt'] if outgoing_before else 0}")
+# Check what window Alice will sync next
+alice_sync_state = db.query_one(
+    "SELECT last_window, w_param FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
+    (alice['peer_id'], bob_peer_shared['peer_shared_id'])
+)
+if alice_sync_state:
+    from events.transit.sync import compute_window_count
+    total_windows = compute_window_count(alice_sync_state['w_param'])
+    next_window = (alice_sync_state['last_window'] + 1) % total_windows
+    print(f"Alice's sync state: last_window={alice_sync_state['last_window']}, w_param={alice_sync_state['w_param']}, next_window={next_window}")
 
 print("Sending sync requests...")
 sync.send_request_to_all(t_ms=4000, db=db)
 db.commit()
 
-# Check outgoing queue after sending
-outgoing_after = db.query_all("SELECT COUNT(*) as cnt FROM outgoing_transit")
-print(f"Outgoing transit queue after send: {outgoing_after[0]['cnt'] if outgoing_after else 0}")
-
-# Check incoming queue before receiving
-incoming_before = db.query_all("SELECT COUNT(*) as cnt FROM incoming_transit")
-print(f"Incoming transit queue before receive: {incoming_before[0]['cnt'] if incoming_before else 0}")
-
 print("Processing sync responses...")
 sync.receive(batch_size=50, t_ms=4100, db=db)
 db.commit()
-
-# Check incoming queue after receiving
-incoming_after = db.query_all("SELECT COUNT(*) as cnt FROM incoming_transit")
-print(f"Incoming transit queue after receive: {incoming_after[0]['cnt'] if incoming_after else 0}")
 
 # Check if Bob received the message
 bob_messages = db.query_all(

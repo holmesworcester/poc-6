@@ -222,12 +222,6 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     )
     log.info(f"message_deletion.project() marked message {message_id[:20]}... as deleted in deleted_events")
 
-    # Remove from valid_events if it was marked valid
-    safedb.execute(
-        "DELETE FROM valid_events WHERE event_id = ? AND recorded_by = ?",
-        (message_id, recorded_by)
-    )
-
     # Remove from shareable_events if it was marked shareable
     safedb.execute(
         "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
