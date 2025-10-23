@@ -11,10 +11,65 @@ import queues
 log = logging.getLogger(__name__)
 
 
+def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
+    """Validate that added_by has authorization to add members to the group.
+
+    Authorization rule:
+    - added_by must be a member of the network's admins group
+
+    Args:
+        group_id: Group to check membership for
+        added_by: peer_shared_id attempting to add members
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if authorized, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get group's network ID by finding the all_users group (every group is in a network)
+    network_row = safedb.query_one(
+        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+    if not network_row or not network_row['admins_group_id']:
+        return False
+
+    admins_group_id = network_row['admins_group_id']
+
+    # Get added_by's user_id (map peer_shared_id to user_id)
+    user_row = safedb.query_one(
+        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (added_by, recorded_by)
+    )
+    if not user_row:
+        return False
+
+    added_by_user_id = user_row['user_id']
+
+    # Check if added_by is a member of the admins group (check both tables since network.project() inserts to group_members_wip)
+    is_admin = safedb.query_one(
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        (admins_group_id, added_by_user_id, recorded_by)
+    )
+
+    if is_admin is not None:
+        return True
+
+    # Also check group_members_wip for entries added directly by network.project()
+    is_admin_wip = safedb.query_one(
+        "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        (admins_group_id, added_by_user_id, recorded_by)
+    )
+
+    return is_admin_wip is not None
+
+
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
     """Create a group_member event to add a user to a group.
 
-    Only group creator or existing members can add new members (hierarchy-free).
+    Only admins can add new members to groups.
     Automatically shares group key with the new member.
 
     Args:
@@ -41,14 +96,9 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     if not group:
         raise ValueError(f"Group {group_id} not found")
 
-    # Check permission: creator OR existing member
-    if peer_shared_id != group['created_by']:
-        member = safedb.query_one(
-            "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
-            (group_id, peer_shared_id, peer_id)
-        )
-        if not member:
-            raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id}")
+    # Check authorization using shared validate() function
+    if not validate(group_id, peer_shared_id, peer_id, db):
+        raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id} (only admins can add members)")
 
     # Create event data
     event_data = {
@@ -155,35 +205,14 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
-    # Check authorization: added_by == creator OR added_by is member
-    authorized = False
-
-    if added_by == group['created_by']:
-        # Bootstrap case: group creator can add members
-        authorized = True
-        log.debug(f"group_member.project() authorized: {added_by} is group creator")
-    else:
-        # Check if added_by is an existing member
-        member = safedb.query_one(
-            "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
-            (event_data['group_id'], added_by, recorded_by)
-        )
-        authorized = member is not None
-
-        if authorized:
-            log.debug(f"group_member.project() authorized: {added_by} is existing member")
-        else:
-            log.info(f"group_member.project() not authorized: {added_by} is not creator or member")
-
-    if not authorized:
-        # Block on missing membership
-        log.info(f"group_member.project() blocking on missing membership")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
+    # Check authorization using shared validate() function
+    if not validate(event_data['group_id'], added_by, recorded_by, db):
+        log.warning(f"group_member.project() authorization FAILED: {added_by} cannot add members to group {event_data['group_id']} (only admins can add members)")
         return None
 
-    # Insert into group_members_wip table
+    # Insert into group_members table
     safedb.execute(
-        """INSERT OR IGNORE INTO group_members_wip
+        """INSERT OR IGNORE INTO group_members
            (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
@@ -228,12 +257,22 @@ def is_member(peer_shared_id: str, group_id: str, recorded_by: str, db: Any) -> 
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
+    # Check both tables: group_members (from group_member events) and group_members_wip (from network.project())
     member = safedb.query_one(
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
+        (group_id, peer_shared_id, recorded_by)
+    )
+
+    if member is not None:
+        return True
+
+    # Also check group_members_wip for entries added directly by network.project()
+    member_wip = safedb.query_one(
         "SELECT 1 FROM group_members_wip WHERE group_id = ? AND user_id = ? AND recorded_by = ?",
         (group_id, peer_shared_id, recorded_by)
     )
 
-    return member is not None
+    return member_wip is not None
 
 
 def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any]]:
@@ -249,10 +288,15 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
+    # Query both tables and union results (avoid duplicates)
     return safedb.query(
         """SELECT user_id, added_by, created_at
+           FROM group_members
+           WHERE group_id = ? AND recorded_by = ?
+           UNION
+           SELECT user_id, added_by, created_at
            FROM group_members_wip
            WHERE group_id = ? AND recorded_by = ?
            ORDER BY created_at ASC""",
-        (group_id, recorded_by)
+        (group_id, recorded_by, group_id, recorded_by)
     )
