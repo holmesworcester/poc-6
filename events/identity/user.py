@@ -244,10 +244,10 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     Creates:
     - peer (local + shared)
-    - groups (members + admins)
+    - groups (all_users + admins)
     - network event (binds groups, adds creator to admin)
     - channel (default channel)
-    - user (membership record in members group)
+    - user (membership record in all_users group)
 
     Args:
         name: Username/display name
@@ -260,7 +260,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
             'peer_shared_id': str,
             'prekey_id': str,
             'network_id': str,
-            'members_group_id': str,
+            'all_users_group_id': str,
             'admins_group_id': str,
             'channel_id': str,
             'user_id': str,
@@ -276,8 +276,8 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # 1. Create peer (local + shared)
     peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
 
-    # 2. Create MEMBERS group (main group for all users)
-    members_group_id, members_key_id = group.create(
+    # 2. Create ALL_USERS group (main group for all users)
+    all_users_group_id, all_users_key_id = group.create(
         name=f"{name}",
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
@@ -299,32 +299,32 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # 4. Create default channel
     channel_id = channel.create(
         name='general',
-        group_id=members_group_id,
+        group_id=all_users_group_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        key_id=members_key_id,
+        key_id=all_users_key_id,
         t_ms=t_ms + 30,
         db=db,
         is_main=True  # This is the main channel
     )
 
     # 5. Create user membership record (auto-creates transit_prekey + transit_prekey_shared)
-    # Network creator - no invite, will be added to members group by user.project()
+    # Network creator - no invite, will be added to all_users group by user.project()
     user_id, transit_prekey_shared_id, prekey_id = create(
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         name=name,
         t_ms=t_ms + 40,
         db=db,
-        group_id=members_group_id,
+        group_id=all_users_group_id,
         channel_id=channel_id
     )
 
     log.info(f"new_network() created user '{name}': peer={peer_id}, user_id={user_id}")
 
-    # 6. Create NETWORK event (binds members + admins groups, adds creator to admin group)
+    # 6. Create NETWORK event (binds all_users + admins groups, adds creator to admin group)
     network_id = network.create(
-        members_group_id=members_group_id,
+        all_users_group_id=all_users_group_id,
         admins_group_id=admins_group_id,
         creator_user_id=user_id,
         peer_id=peer_id,
@@ -360,13 +360,13 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'transit_prekey_shared_id': transit_prekey_shared_id,
         'user_id': user_id,
         'network_id': network_id,
-        'members_group_id': members_group_id,
+        'all_users_group_id': all_users_group_id,
         'admins_group_id': admins_group_id,
         'channel_id': channel_id,
         'network_created_id': network_created_id,
-        # Backward compatibility - group_id and key_id reference members group
-        'group_id': members_group_id,
-        'key_id': members_key_id,
+        # Backward compatibility - group_id and key_id reference all_users group
+        'group_id': all_users_group_id,
+        'key_id': all_users_key_id,
     }
 
 

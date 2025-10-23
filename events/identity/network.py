@@ -1,4 +1,4 @@
-"""Network event type - binds members and admins groups, adds creator to admin group."""
+"""Network event type - binds all_users and admins groups, adds creator to admin group."""
 from typing import Any
 import logging
 import crypto
@@ -9,15 +9,15 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(members_group_id: str, admins_group_id: str, creator_user_id: str,
+def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
            peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
-    """Create a network event binding members and admins groups.
+    """Create a network event binding all_users and admins groups.
 
     The network_id is the event_id (hash of the network event).
     During projection, creator_user_id is automatically added to admin group.
 
     Args:
-        members_group_id: Main group for all users
+        all_users_group_id: Main group for all users
         admins_group_id: Admin-only group
         creator_user_id: User to add to admin group during projection
         peer_id: Local peer ID (for signing)
@@ -28,12 +28,12 @@ def create(members_group_id: str, admins_group_id: str, creator_user_id: str,
     Returns:
         network_id: The stored network event ID (hash of event)
     """
-    log.info(f"network.create() creating network with members={members_group_id}, admins={admins_group_id}, creator={creator_user_id}")
+    log.info(f"network.create() creating network with all_users={all_users_group_id}, admins={admins_group_id}, creator={creator_user_id}")
 
     # Create event data
     event_data = {
         'type': 'network',
-        'members_group_id': members_group_id,
+        'all_users_group_id': all_users_group_id,
         'admins_group_id': admins_group_id,
         'creator_user_id': creator_user_id,
         'created_by': peer_shared_id,
@@ -94,17 +94,17 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
         log.warning(f"network.project() signature verification FAILED for network_id={network_id}")
         return None
 
-    members_group_id = event_data['members_group_id']
+    all_users_group_id = event_data['all_users_group_id']
     admins_group_id = event_data['admins_group_id']
     creator_user_id = event_data['creator_user_id']
 
     # Check if groups exist
-    members_group = safedb.query_one(
+    all_users_group = safedb.query_one(
         "SELECT 1 FROM groups WHERE group_id = ? AND recorded_by = ?",
-        (members_group_id, recorded_by)
+        (all_users_group_id, recorded_by)
     )
-    if not members_group:
-        log.info(f"network.project() blocking on missing members group {members_group_id}")
+    if not all_users_group:
+        log.info(f"network.project() blocking on missing all_users group {all_users_group_id}")
         # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
@@ -130,11 +130,11 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     # Insert into networks table
     safedb.execute(
         """INSERT OR IGNORE INTO networks
-           (network_id, members_group_id, admins_group_id, creator_user_id, created_by, created_at, recorded_by, recorded_at)
+           (network_id, all_users_group_id, admins_group_id, creator_user_id, created_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             network_id,
-            members_group_id,
+            all_users_group_id,
             admins_group_id,
             creator_user_id,
             created_by,
@@ -195,8 +195,8 @@ def get_admin_group_id(network_id: str, recorded_by: str, db: Any) -> str:
     return network['admins_group_id']
 
 
-def get_members_group_id(network_id: str, recorded_by: str, db: Any) -> str:
-    """Get members group ID for a network.
+def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
+    """Get all_users group ID for a network.
 
     Args:
         network_id: Network ID
@@ -204,7 +204,7 @@ def get_members_group_id(network_id: str, recorded_by: str, db: Any) -> str:
         db: Database connection
 
     Returns:
-        Members group ID
+        All users group ID
 
     Raises:
         ValueError: If network not found
@@ -212,11 +212,11 @@ def get_members_group_id(network_id: str, recorded_by: str, db: Any) -> str:
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     network = safedb.query_one(
-        "SELECT members_group_id FROM networks WHERE network_id = ? AND recorded_by = ?",
+        "SELECT all_users_group_id FROM networks WHERE network_id = ? AND recorded_by = ?",
         (network_id, recorded_by)
     )
 
     if not network:
         raise ValueError(f"Network {network_id} not found")
 
-    return network['members_group_id']
+    return network['all_users_group_id']

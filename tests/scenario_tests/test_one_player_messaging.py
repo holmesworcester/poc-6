@@ -110,16 +110,16 @@ def test_alice_sends_to_herself():
     assert 'general' in channel_names
     assert 'random' in channel_names
 
-    # Verify groups are queryable (members + admins groups)
+    # Verify groups are queryable (all_users + admins groups)
     from events.group import group
     from events.identity import network
     groups_list = group.list_all_groups(alice['peer_id'], db)
-    assert len(groups_list) == 2  # Members + Admins groups
+    assert len(groups_list) == 2  # all_users + admins groups
 
-    # Get members group using network projection
-    members_group_id = network.get_members_group_id(alice['network_id'], alice['peer_id'], db)
-    assert members_group_id == alice['members_group_id']  # Verify projection matches creation
-    assert members_group_id == alice['group_id']  # Backward compat
+    # Get all_users group using network projection
+    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+    assert all_users_group_id == alice['all_users_group_id']  # Verify projection matches creation
+    assert all_users_group_id == alice['group_id']  # Backward compat
 
     print("✓ All tests passed! Alice can send messages to herself and see them.")
 

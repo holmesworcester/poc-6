@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS networks (
     network_id TEXT NOT NULL,
-    members_group_id TEXT NOT NULL,
+    all_users_group_id TEXT NOT NULL,
     admins_group_id TEXT NOT NULL,
     creator_user_id TEXT NOT NULL,
     created_by TEXT NOT NULL,
