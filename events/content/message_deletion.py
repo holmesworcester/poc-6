@@ -2,6 +2,9 @@
 
 Analogous to blocking/unblocking: deletion events act as a permanent block on message projection.
 If a deletion exists for a message, the message projection is skipped (like a blocked event).
+
+Forward Secrecy: When messages are deleted, their encryption keys are marked for purging.
+Batch rekeying operations move all content to new "clean" keys before old keys are destroyed.
 """
 from typing import Any
 import logging
@@ -159,6 +162,9 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     The message is removed from the messages table, the blob is deleted from store,
     and future message projections are skipped (via deleted_events table).
 
+    For forward secrecy: marks the encryption key for purging so it can be rekeyed
+    and later destroyed.
+
     Args:
         deletion_id: Deletion event ID
         recorded_by: Peer who recorded this event
@@ -207,6 +213,25 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
         (deletion_id, message_id, deleted_by, created_at, recorded_by, recorded_at)
     )
 
+    # Get message blob to extract the key_id it was encrypted with
+    message_blob = store.get(message_id, unsafedb)
+    if message_blob:
+        try:
+            # Extract key_id from blob (first 16 bytes)
+            key_id_bytes = message_blob[:crypto.ID_SIZE]
+            key_id_b64 = crypto.b64encode(key_id_bytes)
+
+            # Mark this key for purging (for forward secrecy)
+            safedb.execute(
+                """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
+                   VALUES (?, ?, ?)""",
+                (key_id_b64, recorded_at, recorded_by)
+            )
+            log.info(f"message_deletion.project() marked key {key_id_b64[:20]}... for purging (forward secrecy)")
+        except Exception as e:
+            log.warning(f"message_deletion.project() failed to mark key for purging: {e}")
+            # Continue anyway - forward secrecy is best-effort
+
     # Delete the message if it exists (analogous to unblocking - but we remove instead of project)
     safedb.execute(
         "DELETE FROM messages WHERE message_id = ? AND recorded_by = ?",
@@ -237,3 +262,153 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
 
     # Return deletion_id to mark as valid
     return deletion_id
+
+
+def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
+    """Execute forward secrecy purge cycle for messages with deleted content.
+
+    After messages are deleted, their encryption keys are marked for purging.
+    This batch operation:
+    1. Finds all messages encrypted with keys in keys_to_purge
+    2. Re-encrypts each message with a new "clean" key using message_rekey events
+    3. Deletes old keys from group_keys table
+    4. Clears keys_to_purge entries
+
+    Args:
+        peer_id: Local peer ID running the purge
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Dict with stats: {
+            'messages_rekeyed': int,
+            'keys_purged': int,
+            'errors': list[str]
+        }
+    """
+    log.info(f"message_deletion.run_message_purge_cycle() starting for peer={peer_id[:20]}...")
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    unsafedb = create_unsafe_db(db)
+
+    stats = {
+        'messages_rekeyed': 0,
+        'keys_purged': 0,
+        'errors': []
+    }
+
+    # Find all keys marked for purging
+    purge_keys = safedb.query(
+        "SELECT key_id FROM keys_to_purge WHERE recorded_by = ? ORDER BY marked_at ASC",
+        (peer_id,)
+    )
+
+    if not purge_keys:
+        log.info(f"message_deletion.run_message_purge_cycle() no keys marked for purging")
+        return stats
+
+    log.info(f"message_deletion.run_message_purge_cycle() found {len(purge_keys)} keys to purge")
+
+    # Import here to avoid circular dependency (message_rekey imports message_deletion)
+    from events.content import message_rekey
+    from events.group import group_key
+
+    # For each key marked for purging, rekey all messages that used it
+    for purge_key_row in purge_keys:
+        purge_key_id = purge_key_row['key_id']
+        log.info(f"message_deletion.run_message_purge_cycle() processing key_id={purge_key_id[:20]}...")
+
+        # Find all messages encrypted with this key
+        all_messages = safedb.query(
+            """SELECT message_id FROM messages
+               WHERE recorded_by = ?
+               AND message_id NOT IN (SELECT event_id FROM deleted_events WHERE recorded_by = ?)""",
+            (peer_id, peer_id)
+        )
+
+        messages_using_purge_key = []
+        for msg_row in all_messages:
+            message_id = msg_row['message_id']
+            blob = unsafedb.query_one(
+                "SELECT blob FROM store WHERE id = ?",
+                (message_id,)
+            )
+            if not blob:
+                continue
+
+            # Extract key_id hint from blob (first 16 bytes, then base64 encode)
+            try:
+                key_id_bytes = blob['blob'][:crypto.ID_SIZE]
+                key_id_b64 = crypto.b64encode(key_id_bytes)
+                if key_id_b64 == purge_key_id:
+                    messages_using_purge_key.append(message_id)
+            except Exception as e:
+                log.warning(f"message_deletion.run_message_purge_cycle() error checking message {message_id[:20]}...: {e}")
+                continue
+
+        if not messages_using_purge_key:
+            log.info(f"message_deletion.run_message_purge_cycle() no messages found using key {purge_key_id[:20]}...")
+            # Still purge the key even if no messages use it
+            safedb.execute(
+                "DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+                (purge_key_id, peer_id)
+            )
+            safedb.execute(
+                "DELETE FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?",
+                (purge_key_id, peer_id)
+            )
+            stats['keys_purged'] += 1
+            continue
+
+        log.info(f"message_deletion.run_message_purge_cycle() found {len(messages_using_purge_key)} messages using key {purge_key_id[:20]}...")
+
+        # Get a clean key to rekey these messages with
+        try:
+            # Need group_id - extract from one of the messages
+            msg_row = safedb.query_one(
+                "SELECT group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+                (messages_using_purge_key[0], peer_id)
+            )
+            if not msg_row:
+                error = f"Could not find group_id for message {messages_using_purge_key[0][:20]}..."
+                log.warning(f"message_deletion.run_message_purge_cycle() {error}")
+                stats['errors'].append(error)
+                continue
+
+            group_id = msg_row['group_id']
+            clean_key_id = group_key.get_or_create_clean_key(group_id, peer_id, t_ms, db)
+            log.info(f"message_deletion.run_message_purge_cycle() using clean key {clean_key_id[:20]}... for rekeying")
+        except Exception as e:
+            error = f"Failed to get clean key: {e}"
+            log.error(f"message_deletion.run_message_purge_cycle() {error}")
+            stats['errors'].append(error)
+            continue
+
+        # Rekey each message
+        for message_id in messages_using_purge_key:
+            try:
+                rekey_id = message_rekey.create(message_id, clean_key_id, peer_id, t_ms, db)
+                # Immediately project the rekey
+                message_rekey.project(rekey_id, peer_id, t_ms, db)
+                log.info(f"message_deletion.run_message_purge_cycle() rekeyed message {message_id[:20]}...")
+                stats['messages_rekeyed'] += 1
+            except Exception as e:
+                error = f"Failed to rekey message {message_id[:20]}...: {e}"
+                log.warning(f"message_deletion.run_message_purge_cycle() {error}")
+                stats['errors'].append(error)
+                continue
+
+        # Purge the old key
+        safedb.execute(
+            "DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (purge_key_id, peer_id)
+        )
+        safedb.execute(
+            "DELETE FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?",
+            (purge_key_id, peer_id)
+        )
+        log.info(f"message_deletion.run_message_purge_cycle() purged key {purge_key_id[:20]}...")
+        stats['keys_purged'] += 1
+
+    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged")
+    return stats

@@ -42,6 +42,8 @@ SUBJECTIVE_TABLES = {
     'files',                       # File metadata (peer-scoped)
     'file_slices',                 # File slice storage (peer-scoped)
     'message_attachments',         # Message-file links (peer-scoped)
+    'keys_to_purge',               # Forward secrecy: keys marked for purging (peer-scoped)
+    'message_rekeys',              # Forward secrecy: rekeyed messages (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

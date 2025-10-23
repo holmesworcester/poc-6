@@ -124,3 +124,45 @@ def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
         'key': row['key'],  # Already bytes from DB
         'type': 'symmetric'
     }
+
+
+def get_or_create_clean_key(group_id: str, peer_id: str, t_ms: int, db: Any) -> str:
+    """Get an existing clean key or create a new one if needed.
+
+    A "clean" key is one NOT in the keys_to_purge table (not encrypting deleted messages).
+    Used during forward secrecy rekeying to find a key safe to re-encrypt with.
+
+    Args:
+        group_id: Group that owns the key
+        peer_id: Local peer ID
+        t_ms: Timestamp for creating new key if needed
+        db: Database connection
+
+    Returns:
+        key_id: A clean group key suitable for rekeying
+
+    Raises:
+        ValueError: If no group key exists and cannot create one
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Find an existing clean key (not in keys_to_purge)
+    clean_key_row = safedb.query_one(
+        """SELECT gk.key_id FROM group_keys gk
+           LEFT JOIN keys_to_purge ktp ON gk.key_id = ktp.key_id AND ktp.recorded_by = ?
+           WHERE gk.recorded_by = ? AND ktp.key_id IS NULL
+           ORDER BY gk.created_at DESC
+           LIMIT 1""",
+        (peer_id, peer_id)
+    )
+
+    if clean_key_row:
+        key_id = clean_key_row['key_id']
+        log.info(f"group_key.get_or_create_clean_key() found existing clean key {key_id[:20]}...")
+        return key_id
+
+    # No clean key exists, create a new one
+    log.info(f"group_key.get_or_create_clean_key() no clean key found, creating new one")
+    key_id = create(peer_id, t_ms, db)
+    log.info(f"group_key.get_or_create_clean_key() created new key {key_id[:20]}...")
+    return key_id

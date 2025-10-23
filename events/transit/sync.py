@@ -418,7 +418,7 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
         log.error(f"sync.receive: CALL LIMIT EXCEEDED count={_receive_call_count} - possible infinite loop!")
         return
 
-    transit_blobs = queues.incoming.drain(batch_size, db)
+    transit_blobs = queues.incoming.drain(batch_size, t_ms, db)
     log.info(f"sync.receive: processing {len(transit_blobs)} blobs (call_count={_receive_call_count})")
 
     # unwrap_and_store returns list of recorded_ids (one per peer who can decrypt)

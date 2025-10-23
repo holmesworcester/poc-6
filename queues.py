@@ -2,7 +2,9 @@
 from typing import Any
 import json
 import logging
+import random
 from db import UnsafeDB, SafeDB
+import network_config
 
 log = logging.getLogger(__name__)
 
@@ -14,16 +16,49 @@ class incoming:
 
     @staticmethod
     def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB) -> None:
-        """Add an incoming transit blob to the queue."""
+        """Add an incoming transit blob to the queue with packet loss and latency simulation.
+
+        Packets may be dropped based on configured packet loss rate.
+        Delivery is delayed by the configured latency.
+        """
+        cfg = network_config.get_network_config()
+
         log.debug(f"queues.incoming.add() adding blob size={len(blob)}B, t_ms={t_ms}")
-        unsafedb.execute("INSERT INTO incoming_blobs (blob, sent_at) VALUES (?, ?)", (blob, t_ms))
+
+        # Check packet size limit
+        if len(blob) > cfg.max_packet_size:
+            log.debug(f"queues.incoming.add() dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")
+            return
+
+        # Apply packet loss
+        if random.random() < cfg.packet_loss_rate:
+            log.debug(f"queues.incoming.add() dropping packet due to loss simulation")
+            return
+
+        # Calculate delivery time
+        deliver_at = t_ms + cfg.latency_ms
+
+        # Insert with delivery time
+        unsafedb.execute(
+            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at, dropped) VALUES (?, ?, ?, ?)",
+            (blob, t_ms, deliver_at, False)
+        )
 
     @staticmethod
-    def drain(batch_size: int, unsafedb: UnsafeDB) -> list[bytes]:
-        """Drain (select and delete) incoming transit blobs up to batch_size."""
-        log.debug(f"queues.incoming.drain() draining up to {batch_size} blobs")
-        blobs = unsafedb.query("SELECT blob FROM incoming_blobs LIMIT ?", (batch_size,))
-        unsafedb.execute("DELETE FROM incoming_blobs WHERE id IN (SELECT id FROM incoming_blobs LIMIT ?)", (batch_size,))
+    def drain(batch_size: int, current_time_ms: int, unsafedb: UnsafeDB) -> list[bytes]:
+        """Drain (select and delete) incoming transit blobs that are ready for delivery.
+
+        Only blobs where deliver_at <= current_time_ms are returned.
+        """
+        log.debug(f"queues.incoming.drain() draining up to {batch_size} blobs at t_ms={current_time_ms}")
+        blobs = unsafedb.query(
+            "SELECT blob FROM incoming_blobs WHERE deliver_at <= ? AND dropped = FALSE LIMIT ?",
+            (current_time_ms, batch_size)
+        )
+        unsafedb.execute(
+            "DELETE FROM incoming_blobs WHERE id IN (SELECT id FROM incoming_blobs WHERE deliver_at <= ? LIMIT ?)",
+            (current_time_ms, batch_size)
+        )
         result = [row['blob'] for row in blobs]
         log.info(f"queues.incoming.drain() drained {len(result)} blobs")
         return result

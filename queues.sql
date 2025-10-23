@@ -39,5 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_blocked_deps_ephemeral_lookup
 CREATE TABLE IF NOT EXISTS incoming_blobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     blob BLOB NOT NULL,
-    sent_at INTEGER NOT NULL
+    sent_at INTEGER NOT NULL,
+    deliver_at INTEGER NOT NULL DEFAULT 0,  -- When packet will be delivered (sent_at + latency)
+    dropped BOOLEAN DEFAULT FALSE            -- Whether packet was dropped due to packet loss
 );
