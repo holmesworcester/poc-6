@@ -239,15 +239,45 @@ All projected state is scoped per-peer via `recorded_by`:
 **Problem:** Events must be marked as shareable (for bloom-filtered sync) before we know their exact `created_at` timestamp. This is because some events are encrypted and can't be decrypted until later when keys arrive. Without a consistent `created_at` value, different projection orders produce different final states, breaking convergence.
 
 **Solution:** Two-phase approach with centralized update:
-1. **Early marking:** When an event enters the projection pipeline, mark it as shareable immediately (with best-guess `created_at`)
-   - Ensures blocked/encrypted events can still be synced (haven't decrypted them yet)
-   - Uses `event_data.get('created_at', recorded_at)` as fallback
+1. **Early marking:** When an event enters the projection pipeline, mark it as shareable immediately (with explicit `created_at` from event data)
+   - Only adds shareable_events if `event_data.created_at` is present in the event blob
+   - For encrypted events with no plaintext metadata, defers shareable marking to projection phase
+   - Ensures blocked/encrypted events can still be synced once decoded
 2. **Authoritative update:** After successful projection to the event's table, query that table to get the true `created_at` and update `shareable_events`
    - Single centralized location in `recorded.project()` after validation
    - Uses `_get_authoritative_created_at()` helper with table mapping
-   - Updates via: `UPDATE shareable_events SET created_at = ? WHERE event_id = ? AND can_share_peer_id = ?`
+   - Updates via: `INSERT OR REPLACE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id) VALUES (...)`
+   - This ensures shareable_events always has authoritative `created_at` from projection table
+
+**Critical Invariant:** `shareable_events.created_at` is ALWAYS canonical from the event's projection table - NEVER from `recorded_at`. This is essential for convergence:
+- Different peers may record the same event at different times (`recorded_at` differs)
+- But all peers must agree on when the event was originally created (`created_at` is the same)
+- Using `recorded_at` as a fallback would create different `created_at` values depending on projection order
+- The `INSERT OR REPLACE` pattern ensures even if an event is marked shareable early, it gets corrected to the authoritative value during projection
 
 **Design invariant:** All shareable event types store `created_at` in their projection tables (strict enforcement). Users table renamed from `joined_at` → `created_at` for consistency. This guarantees we can always query the authoritative value after projection.
+
+**Example - Message Event Convergence:**
+```
+Scenario: Peers A and B receive the same message from C in different orders
+
+Without the fix:
+- A processes: recorded event at t=1000 → creates shareable_event with created_at=1000 (recorded_at fallback) → BAD
+- B processes: recorded event at t=2000 → creates shareable_event with created_at=2000 (recorded_at fallback) → BAD
+- Result: Different created_at values, convergence broken!
+
+With the fix:
+- Both A and B: message event has explicit created_at=500 (from message.created_at field)
+- Both A and B: insert shareable_event with created_at=500 (from event data)
+- Both A and B: during projection, INSERT OR REPLACE updates with created_at=500 (from messages table)
+- Result: Same created_at=500 on both peers, convergence guaranteed!
+```
+
+**Storage Pattern:**
+- `shareable_events.created_at` - Canonical event creation time (from projection table)
+- `shareable_events.recorded_at` - When this peer recorded the referenced event (from recorded.created_at)
+- These are two **independent** timestamps that serve different purposes
+- Never use recorded_at as a fallback for created_at
 
 ### Invite Link Design
 

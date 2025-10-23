@@ -281,7 +281,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     if should_mark_shareable:
         # Mark event as shareable in shareable_events table
         # For decrypted events: add with created_at from event_data
-        # For encrypted events: add placeholder, update after projection with authoritative created_at
+        # For encrypted events: add with placeholder created_at=0, will be updated by projection
         # CRITICAL: Never use recorded_at as created_at (would violate convergence)
         if event_data:
             created_at_from_event = event_data.get('created_at')
@@ -300,10 +300,19 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             else:
                 log.debug(f"Event data exists but no created_at for {event_type} {ref_id[:20]}...")
         elif event_data is None:
-            # Encrypted event - can't decrypt yet, defer shareable_events insert to projection phase
-            # (it will be added/updated with authoritative created_at after projection)
-            log.debug(f"Encrypted {event_type} - deferring shareable_events insert to projection phase")
-        # Note: We don't add placeholder with recorded_at here to maintain convergence invariant
+            # Encrypted event we can't decrypt yet - add with placeholder created_at
+            # This allows the event to be synced to other peers even while blocked
+            # The actual created_at will be set during projection (via INSERT OR REPLACE at line 464)
+            from events.transit import sync
+            log.debug(f"Encrypted {event_type} {ref_id[:20]}... - adding to shareable_events with placeholder created_at=0")
+            sync.add_shareable_event(
+                ref_id,
+                recorded_by,
+                created_at=0,  # Placeholder - will be updated by INSERT OR REPLACE during projection
+                recorded_at=recorded_at,
+                db=db
+            )
+        # Note: We don't add recorded_at as created_at here to maintain convergence invariant
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
