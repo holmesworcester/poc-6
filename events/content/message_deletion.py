@@ -15,6 +15,65 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
+def _cascade_delete_from_valid_events(
+    event_id: str,
+    recorded_by: str,
+    safedb: Any,
+    _visited: set = None
+) -> int:
+    """Recursively delete event and all dependents from valid_events.
+
+    When an event is deleted, this ensures all dependent events are also removed
+    from valid_events to maintain convergence. Regardless of event ordering,
+    the final valid_events table will be the same.
+
+    Args:
+        event_id: The event being deleted
+        recorded_by: Peer scope (SafeDB is already scoped to this peer)
+        safedb: SafeDB instance
+        _visited: Internal cycle detection set (prevents infinite recursion)
+
+    Returns:
+        Total number of events deleted from valid_events (including recursively deleted dependents)
+    """
+    if _visited is None:
+        _visited = set()
+
+    # Cycle detection
+    if event_id in _visited:
+        return 0
+
+    _visited.add(event_id)
+    deleted_count = 0
+
+    # Find all children (events that depend on this one)
+    children = safedb.query(
+        """SELECT DISTINCT child_event_id
+           FROM event_dependencies
+           WHERE parent_event_id = ? AND recorded_by = ?""",
+        (event_id, recorded_by)
+    )
+
+    # Recursively delete children first (depth-first traversal)
+    for child in children:
+        deleted_count += _cascade_delete_from_valid_events(
+            child['child_event_id'],
+            recorded_by,
+            safedb,
+            _visited
+        )
+
+    # Delete this event from valid_events
+    safedb.execute(
+        "DELETE FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (event_id, recorded_by)
+    )
+
+    log.debug(f"_cascade_delete_from_valid_events() deleted {event_id[:20]}... and {deleted_count} dependents for peer {recorded_by[:20]}...")
+
+    return deleted_count + 1
+
+
 def validate(message_id: str, deleted_by: str, recorded_by: str, db: Any) -> bool:
     """Validate that deleted_by has authorization to delete the message.
 
@@ -200,10 +259,21 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
 
     log.info(f"message_deletion.project() deleting message_id={message_id[:20]}... deleted_by={deleted_by[:20]}...")
 
-    # Authorization check using shared validate() function
-    if not validate(message_id, deleted_by, recorded_by, db):
-        log.warning(f"message_deletion.project() authorization FAILED: {deleted_by[:20]}... cannot delete message {message_id[:20]}...")
-        return None
+    # Check if message exists for authorization validation
+    message_row = safedb.query_one(
+        "SELECT author_id, group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+        (message_id, recorded_by)
+    )
+
+    # If message exists, validate authorization strictly
+    if message_row:
+        if not validate(message_id, deleted_by, recorded_by, db):
+            log.warning(f"message_deletion.project() authorization FAILED: {deleted_by[:20]}... cannot delete message {message_id[:20]}...")
+            return None
+    else:
+        # Message doesn't exist yet - accept deletion as a "pre-block"
+        # Authorization will be validated if/when message arrives and tries to project
+        log.info(f"message_deletion.project() message not found yet - accepting deletion as pre-block")
 
     # Insert deletion record (idempotent with PRIMARY KEY on message_id, recorded_by)
     safedb.execute(
@@ -248,8 +318,7 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     log.info(f"message_deletion.project() marked message {message_id[:20]}... as deleted in deleted_events")
 
     # Cascade delete from valid_events to ensure convergence
-    from events import cascade
-    deleted_count = cascade.cascade_delete_from_valid_events(message_id, recorded_by, safedb)
+    deleted_count = _cascade_delete_from_valid_events(message_id, recorded_by, safedb)
     log.info(f"message_deletion.project() cascaded deletion of {deleted_count} events from valid_events (message + dependents)")
 
     # Remove from shareable_events if it was marked shareable

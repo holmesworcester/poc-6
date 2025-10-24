@@ -95,15 +95,14 @@ def project(group_prekey_shared_id: str, recorded_by: str, recorded_at: int, db:
     prekey_public = crypto.b64decode(event_data['public_key'])
     safedb.execute(
         """INSERT OR IGNORE INTO group_prekeys_shared
-           (group_prekey_shared_id, peer_id, public_key, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (group_prekey_shared_id, peer_id, public_key, created_at, recorded_by)
+           VALUES (?, ?, ?, ?, ?)""",
         (
             group_prekey_shared_id,
             event_data['peer_id'],
             prekey_public,
             event_data['created_at'],
-            recorded_by,
-            recorded_at
+            recorded_by
         )
     )
 

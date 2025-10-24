@@ -141,7 +141,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     # Get prekey_shared_id from transit_prekeys_shared table
     inviter_prekey_shared_row = safedb.query_one(
-        "SELECT transit_prekey_shared_id FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
         (peer_shared_id, peer_id)
     )
 
@@ -149,6 +149,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         raise ValueError(f"No prekey_shared found for inviter {peer_id}. Cannot create invite.")
 
     inviter_transit_prekey_shared_id = inviter_prekey_shared_row['transit_prekey_shared_id']
+    inviter_transit_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
 
     # Address info (hardcoded for now, would come from address table in production)
     inviter_ip = '127.0.0.1'
@@ -169,6 +170,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'inviter_user_id': inviter_user_id,  # NEW - for admin validation during projection
         'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
         'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
+        'inviter_transit_prekey_shared_created_at': inviter_transit_prekey_shared_created_at,  # For correct created_at in transit_prekeys_shared
         'inviter_transit_prekey_id': inviter_prekey_id,
         'created_by': peer_shared_id,
         'created_at': t_ms
@@ -335,16 +337,15 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     # Insert into invites table
     safedb.execute(
         """INSERT OR IGNORE INTO invites
-           (invite_id, invite_pubkey, group_id, inviter_id, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (invite_id, invite_pubkey, group_id, inviter_id, created_at, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?)""",
         (
             invite_id,
             event_data['invite_pubkey'],
             event_data['group_id'],
             created_by,  # Use created_by (inviter's peer_shared_id)
             event_data['created_at'],
-            recorded_by,
-            recorded_at
+            recorded_by
         )
     )
 
@@ -354,10 +355,14 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         inviter_prekey_public_key_bytes = crypto.b64decode(event_data['inviter_transit_prekey_public_key'])
         inviter_peer_shared_id = event_data['inviter_peer_shared_id']
 
+        # Use inviter_transit_prekey_shared_created_at if available, otherwise fall back to invite's created_at
+        # (for backwards compatibility with old invites that don't have this field)
+        prekey_created_at = event_data.get('inviter_transit_prekey_shared_created_at', event_data['created_at'])
+
         log.info(f"invite.project() projecting inviter's prekey for {recorded_by[:20]}... to contact {inviter_peer_shared_id[:20]}...")
         safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event_data['inviter_transit_prekey_shared_id'], event_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, event_data['created_at'], recorded_by, recorded_at)
+            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
+            (event_data['inviter_transit_prekey_shared_id'], event_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, recorded_by)
         )
 
     # Mark invite as valid for this peer (required for invite_accepted dependencies)

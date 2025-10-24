@@ -153,9 +153,33 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
-    # Note: Deletion check is now handled upstream in recorded.project()
-    # If a message is deleted, recorded.project() prevents projection entirely
-    # via the deleted_events table before calling this function
+    # Check if deletion exists (may have arrived before message)
+    deletion_check = safedb.query_one(
+        "SELECT deleted_by FROM message_deletions WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+        (message_id, recorded_by)
+    )
+
+    if deletion_check:
+        # Deletion exists - validate it now that we have the message
+        from events.content import message_deletion
+        deleted_by = deletion_check['deleted_by']
+
+        if message_deletion.validate(message_id, deleted_by, recorded_by, db):
+            log.info(f"message.project() message {message_id[:20]}... has valid deletion - skipping projection")
+            # Add to deleted_events so upstream knows it was deleted
+            safedb.execute(
+                "INSERT OR IGNORE INTO deleted_events (event_id, recorded_by) VALUES (?, ?)",
+                (message_id, recorded_by)
+            )
+            return None  # Don't project the message
+        else:
+            # Deletion was invalid - remove it
+            log.warning(f"message.project() removing invalid deletion for message {message_id[:20]}...")
+            safedb.execute(
+                "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
+                (message_id, recorded_by)
+            )
+            # Continue to project the message normally
 
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(

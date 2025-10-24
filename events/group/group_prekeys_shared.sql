@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS group_prekeys_shared (
     public_key BLOB NOT NULL,
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
-    recorded_at INTEGER NOT NULL,
     PRIMARY KEY (group_prekey_shared_id, recorded_by)
 );
 

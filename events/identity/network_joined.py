@@ -52,7 +52,7 @@ def create(peer_id: str, peer_shared_id: str, inviter_peer_shared_id: str,
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project network_joined event into bootstrap_status.
+    """Project network_joined event into network_joiners table.
 
     Marks this peer as joined network (bootstrap complete).
     """
@@ -82,10 +82,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Mark this peer as joined network (subjective table, use safedb)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
-        """INSERT OR REPLACE INTO bootstrap_status
-           (peer_id, recorded_by, created_network, joined_network, inviter_peer_shared_id)
-           VALUES (?, ?, 0, 1, ?)""",
-        (peer_id, recorded_by, inviter_peer_shared_id)
+        """INSERT OR IGNORE INTO network_joiners (peer_id, recorded_by) VALUES (?, ?)""",
+        (peer_id, recorded_by)
     )
 
     log.info(f"network_joined.project() marked {peer_id[:20]}... as joined network")

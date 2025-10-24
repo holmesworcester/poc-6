@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS invites (
     inviter_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
-    recorded_at INTEGER NOT NULL,
     PRIMARY KEY (invite_id, recorded_by)
 );
 

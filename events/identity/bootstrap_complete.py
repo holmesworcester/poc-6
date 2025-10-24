@@ -50,7 +50,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project bootstrap_complete event into bootstrap_status.
+    """Project bootstrap_complete event into bootstrap_completers table.
 
     Marks this peer as having received their first sync request (bootstrap acknowledged).
     """
@@ -79,13 +79,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Mark this peer as having received sync acknowledgment (subjective table, use safedb)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
-        """INSERT OR REPLACE INTO bootstrap_status
-           (peer_id, recorded_by, created_network, joined_network, received_sync_request)
-           VALUES (?, ?,
-                   COALESCE((SELECT created_network FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?), 0),
-                   COALESCE((SELECT joined_network FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?), 0),
-                   1)""",
-        (peer_id, recorded_by, peer_id, recorded_by, peer_id, recorded_by)
+        """INSERT OR IGNORE INTO bootstrap_completers (peer_id, recorded_by) VALUES (?, ?)""",
+        (peer_id, recorded_by)
     )
 
     log.info(f"bootstrap_complete.project() marked {peer_id[:20]}... as received sync request")

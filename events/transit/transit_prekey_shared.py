@@ -87,16 +87,15 @@ def project(transit_prekey_shared_id: str, recorded_by: str, recorded_at: int, d
     log.info(f"transit_prekey_shared.project() storing transit_prekey_id={event_data['transit_prekey_id'][:30]}... for peer={event_data['peer_id'][:20]}..., recorded_by={recorded_by[:20]}...")
     safedb.execute(
         """INSERT OR IGNORE INTO transit_prekeys_shared
-           (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?)""",
         (
             transit_prekey_shared_id,
             event_data['transit_prekey_id'],
             event_data['peer_id'],
             public_key,
             event_data['created_at'],
-            recorded_by,
-            recorded_at
+            recorded_by
         )
     )
 

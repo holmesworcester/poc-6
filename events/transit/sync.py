@@ -319,19 +319,19 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
         from events.identity import bootstrap_complete
 
         for recorded_by in recorded_by_peers:
-            # Check if this peer is a joiner (joined_network=1, created_network=0)
+            # Check if this peer is a joiner (in network_joiners but not in network_creators)
             safedb = create_safe_db(db, recorded_by=recorded_by)
-            status = safedb.query_one(
-                "SELECT created_network, joined_network FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?",
+            is_creator = safedb.query_one(
+                "SELECT 1 FROM network_creators WHERE peer_id = ? AND recorded_by = ?",
+                (recorded_by, recorded_by)
+            )
+            is_joiner = safedb.query_one(
+                "SELECT 1 FROM network_joiners WHERE peer_id = ? AND recorded_by = ?",
                 (recorded_by, recorded_by)
             )
 
-            if status:
-                created_network = status['created_network']
-                joined_network = status['joined_network']
-
-                # Only mark bootstrap complete if this peer is a joiner
-                if joined_network == 1 and created_network == 0:
+            # Only mark bootstrap complete if this peer is a joiner (not a creator)
+            if is_joiner and not is_creator:
                     try:
                         bootstrap_complete.create(recorded_by, t_ms, db)
                         logger.info(f"handle_ephemeral_event: created bootstrap_complete for joiner {recorded_by[:20]}...")
@@ -481,19 +481,27 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
 
     # Check my bootstrap status (subjective table, use safedb)
     safedb = create_safe_db(db, recorded_by=from_peer_id)
-    status = safedb.query_one(
-        "SELECT created_network, joined_network, received_sync_request FROM bootstrap_status WHERE peer_id = ? AND recorded_by = ?",
+    is_creator = safedb.query_one(
+        "SELECT 1 FROM network_creators WHERE peer_id = ? AND recorded_by = ?",
+        (from_peer_id, from_peer_id)
+    )
+    is_joiner = safedb.query_one(
+        "SELECT 1 FROM network_joiners WHERE peer_id = ? AND recorded_by = ?",
+        (from_peer_id, from_peer_id)
+    )
+    received_sync_request = safedb.query_one(
+        "SELECT 1 FROM bootstrap_completers WHERE peer_id = ? AND recorded_by = ?",
         (from_peer_id, from_peer_id)
     )
 
-    created_network = status['created_network'] if status else 0
-    joined_network = status['joined_network'] if status else 0
-    received_sync_request = status['received_sync_request'] if status else 0
+    created_network = 1 if is_creator else 0
+    joined_network = 1 if is_joiner else 0
+    received_sync_request = 1 if received_sync_request else 0
 
     # Bootstrap complete if:
-    # 1. We created the network (created_network=1), OR
-    # 2. We joined the network AND received first sync request back (joined_network=1 AND received_sync_request=1)
-    my_bootstrap_complete = (created_network == 1) or (joined_network == 1 and received_sync_request == 1)
+    # 1. We created the network (is_creator), OR
+    # 2. We joined the network AND received first sync request back (is_joiner AND received_sync_request)
+    my_bootstrap_complete = is_creator or (is_joiner and received_sync_request)
 
     log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... created={created_network} joined={joined_network} received_sync={received_sync_request} my_bootstrap_complete={my_bootstrap_complete}")
 

@@ -39,7 +39,9 @@ SUBJECTIVE_TABLES = {
     'projected_events',            # Projected events with created_at for lazy loading (peer-scoped)
     'invites',
     'networks',                    # Networks are subjective (peer-scoped)
-    'bootstrap_status',            # Bootstrap status (network creator/joiner status)
+    'network_creators',            # Peers who created a network (peer-scoped)
+    'network_joiners',             # Peers who joined a network (peer-scoped)
+    'bootstrap_completers',        # Peers who received first sync response (peer-scoped)
     'files',                       # File metadata (peer-scoped)
     'file_slices',                 # File slice storage (peer-scoped)
     'message_attachments',         # Message-file links (peer-scoped)

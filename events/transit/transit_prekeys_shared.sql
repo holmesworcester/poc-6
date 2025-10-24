@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS transit_prekeys_shared (
     public_key BLOB NOT NULL,
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
-    recorded_at INTEGER NOT NULL,
     PRIMARY KEY (transit_prekey_shared_id, recorded_by)
 );
 

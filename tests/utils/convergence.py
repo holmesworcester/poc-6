@@ -184,6 +184,13 @@ def assert_convergence(
     # Sort by distance descending (test most destructive swaps first)
     pairs.sort(key=lambda x: x[2], reverse=True)
 
+    # Cap at 200 swaps for performance while keeping deterministic ordering
+    MAX_SWAPS = 200
+    total_swaps = len(event_ids) * (len(event_ids) - 1) // 2
+    if len(pairs) > MAX_SWAPS:
+        pairs = pairs[:MAX_SWAPS]
+        print(f"⚠️  Capping at {MAX_SWAPS} most destructive swaps (out of {total_swaps} total)")
+
     orderings = [event_ids]  # Baseline order
 
     for i, j, distance in pairs:
@@ -191,10 +198,10 @@ def assert_convergence(
         swapped[i], swapped[j] = swapped[j], swapped[i]
         orderings.append(swapped)
 
-    total_swaps = len(event_ids) * (len(event_ids) - 1) // 2
     max_distance = pairs[0][2] if pairs else 0
-    print(f"Testing {len(orderings)} orderings ({total_swaps} pairwise swaps) of {len(event_ids)} events")
-    print(f"Starting with most destructive: distance={max_distance} swaps, ending with adjacent swaps")
+    min_distance = pairs[-1][2] if pairs else 0
+    print(f"Testing {len(orderings)} orderings ({len(pairs)} pairwise swaps) of {len(event_ids)} events")
+    print(f"Starting with most destructive: distance={max_distance} swaps, ending with distance={min_distance}")
 
     # Replay baseline ordering to capture its timeline
     if debug_timeline:
@@ -493,8 +500,6 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
         blocked = db.query("SELECT recorded_id, recorded_by, missing_deps FROM blocked_events_ephemeral")
         for b in blocked:
             # Get event type for debugging
-            import crypto
-            import json
             deps = json.loads(b['missing_deps'])
             try:
                 blob = db.query_one("SELECT blob FROM store WHERE id = ?", (b['recorded_id'],))

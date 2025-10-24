@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project network_created event into bootstrap_status.
+    """Project network_created event into network_creators table.
 
     Marks this peer as network creator.
     """
@@ -38,9 +38,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Mark this peer as network creator (subjective table, use safedb)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
-        """INSERT OR REPLACE INTO bootstrap_status
-           (peer_id, recorded_by, created_network, joined_network)
-           VALUES (?, ?, 1, 0)""",
+        """INSERT OR IGNORE INTO network_creators (peer_id, recorded_by) VALUES (?, ?)""",
         (peer_id, recorded_by)
     )
 
