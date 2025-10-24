@@ -51,7 +51,24 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     user_id = user_row['user_id']
     network_id = user_row['network_id']
 
-    log.info(f"link_invite.create() for user_id={user_id}, peer_id={peer_id}")
+    # If network_id is not in user row, query from networks table using group membership
+    if not network_id:
+        # Get the group_id from group_members table (user is member of some group in the network)
+        group_member_row = safedb.query_one(
+            "SELECT group_id FROM group_members WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+            (user_id, peer_id)
+        )
+        if group_member_row:
+            group_id = group_member_row['group_id']
+            # Get network_id from networks table using all_users_group_id
+            network_row = safedb.query_one(
+                "SELECT network_id FROM networks WHERE all_users_group_id = ? AND recorded_by = ? LIMIT 1",
+                (group_id, peer_id)
+            )
+            if network_row:
+                network_id = network_row['network_id']
+
+    log.info(f"link_invite.create() for user_id={user_id}, peer_id={peer_id}, network_id={network_id[:20] if network_id else 'None'}...")
 
     # Generate Ed25519 keypair for link proof + GKS decryption
     # Same pattern as invite
@@ -85,6 +102,24 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     existing_prekey_shared_id = existing_prekey_shared_row['transit_prekey_shared_id']
     existing_prekey_shared_created_at = existing_prekey_shared_row['created_at']
 
+    # Get channel_id from default channel (user's main channel)
+    # If network_id is still None, we can't proceed - this is a fatal error
+    if not network_id:
+        raise ValueError(f"Could not determine network_id for user {user_id}")
+
+    channel_row = safedb.query_one(
+        "SELECT channel_id FROM channels WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (network_id, peer_id)
+    )
+    channel_id = channel_row['channel_id'] if channel_row else None
+
+    # Get key_id for the network key
+    key_row = safedb.query_one(
+        "SELECT key_id FROM group_keys WHERE key_id IN (SELECT key_id FROM groups WHERE group_id = ?) AND recorded_by = ? LIMIT 1",
+        (network_id, peer_id)
+    )
+    key_id = key_row['key_id'] if key_row else None
+
     # Address info (hardcoded for now)
     existing_ip = '127.0.0.1'
     existing_port = 6100
@@ -97,6 +132,8 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'link_prekey_id': link_prekey_id,  # Crypto hint for GKS (deterministic hash)
         'user_id': user_id,  # User being linked to
         'network_id': network_id,
+        'channel_id': channel_id,  # Default channel for new device
+        'key_id': key_id,  # Network key for new device
         'existing_peer_shared_id': peer_shared_id,  # Existing device's peer
         'existing_transit_prekey_public_key': crypto.b64encode(existing_prekey_public_key),
         'existing_transit_prekey_shared_id': existing_prekey_shared_id,
@@ -122,29 +159,43 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # So the new device can immediately decrypt group keys
     from events.group import group_key_shared
 
-    group_rows = safedb.query(
-        "SELECT DISTINCT g.group_id, g.key_id FROM groups g WHERE g.recorded_by = ? ORDER BY g.group_id",
-        (peer_id,)
+    # Get the network's all_users_group_id to share keys from
+    network_row = safedb.query_one(
+        "SELECT all_users_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+        (network_id, peer_id)
     )
 
-    ts = t_ms + 1
-    for group_row in group_rows:
-        group_id = group_row['group_id']
-        key_id = group_row['key_id']
+    if network_row:
+        all_users_group_id = network_row['all_users_group_id']
 
-        # Create group_key_shared sealed to link_prekey
-        # This follows the same pattern as create_for_invite
-        group_key_shared_id = group_key_shared.create_for_link_invite(
-            key_id=key_id,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            link_invite_id=link_invite_id,
-            t_ms=ts,
-            db=db
+        # Get all groups that contain this user (they're in the all_users_group)
+        # Also get channels within those groups
+        # For now, just share the all_users_group key
+        group_rows = safedb.query(
+            "SELECT DISTINCT group_id, key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
+            (all_users_group_id, peer_id)
         )
-        ts += 1
 
-        log.info(f"link_invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
+        ts = t_ms + 1
+        for group_row in group_rows:
+            group_id = group_row['group_id']
+            key_id = group_row['key_id']
+
+            # Create group_key_shared sealed to link_prekey
+            # This follows the same pattern as create_for_invite
+            group_key_shared_id = group_key_shared.create_for_link_invite(
+                key_id=key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                link_invite_id=link_invite_id,
+                t_ms=ts,
+                db=db
+            )
+            ts += 1
+
+            log.info(f"link_invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
+    else:
+        log.warning(f"link_invite.create() network not found for network_id")
 
     # Get existing device's peer_shared and user blobs for new device to immediately project
     existing_peer_shared_blob = store.get(peer_shared_id, unsafedb)
@@ -169,6 +220,8 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'link_private_key': crypto.b64encode(link_private_key),  # Key material for GKS + proof
         'user_id': user_id,  # User being linked to
         'network_id': network_id,
+        'channel_id': channel_id,  # Default channel for new device
+        'key_id': key_id,  # Network key for new device
         'existing_peer_shared_id': peer_shared_id,  # Existing device's peer
         'existing_peer_shared_blob': existing_peer_shared_blob_b64,  # For immediate projection
         'existing_user_blob': existing_user_blob_b64,  # User event for dependency resolution
@@ -187,7 +240,12 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
 
 def project(link_invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project link_invite event into link_invites table."""
+    """Project link_invite event into link_invites table.
+
+    Matches invite.py pattern:
+    - Bootstrap link_invite (first join via URL): skip validation, trust root of trust
+    - Sync-sourced link_invite (received from network): validate signature and expiry
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
 
@@ -201,7 +259,9 @@ def project(link_invite_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
     created_by = event_data['created_by']
 
-    # Check if bootstrap (peer has no networks yet - first bootstrap)
+    # Check if this is a bootstrap link_invite (first link via URL)
+    # Bootstrap link_invites are processed before peer has any networks, and before link_invite_accepted is created
+    # If peer has no networks, this is a bootstrap - skip validation (root of trust from URL)
     peer_networks = safedb.query_one(
         "SELECT 1 FROM networks WHERE recorded_by = ? LIMIT 1",
         (recorded_by,)
@@ -209,23 +269,23 @@ def project(link_invite_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
     is_bootstrap = (peer_networks is None)
 
-    # Validate link_invite if not bootstrap
+    # If not bootstrap, this came via sync or is a second link - validate it
     if not is_bootstrap:
         log.info(f"link_invite.project() sync-sourced link_invite, validating...")
 
-        # Verify creator exists
+        # 1. Verify creator (created_by) exists
         from events.identity import peer_shared
         creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
         if not creator_public_key:
             log.warning(f"link_invite.project() creator not found: {created_by[:20]}...")
             return None
 
-        # Verify signature
+        # 2. Verify signature
         if not crypto.verify_event(event_data, creator_public_key):
             log.warning(f"link_invite.project() signature verification FAILED")
             return None
 
-        # Verify not expired
+        # 3. Verify not expired
         expiry_ms = event_data.get('expiry_ms', recorded_at + 86400000)
         if recorded_at > expiry_ms:
             log.warning(f"link_invite.project() EXPIRED: recorded_at={recorded_at} > expiry_ms={expiry_ms}")
@@ -233,7 +293,7 @@ def project(link_invite_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
         log.info(f"link_invite.project() validation passed")
     else:
-        log.info(f"link_invite.project() bootstrap link_invite, skipping validation")
+        log.info(f"link_invite.project() bootstrap link_invite (first join via URL), skipping validation")
 
     # Insert into link_invites table
     safedb.execute(

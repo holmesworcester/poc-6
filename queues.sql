@@ -35,6 +35,22 @@ CREATE TABLE IF NOT EXISTS blocked_event_deps_ephemeral (
 CREATE INDEX IF NOT EXISTS idx_blocked_deps_ephemeral_lookup
     ON blocked_event_deps_ephemeral(dep_id, recorded_by);
 
+-- Removed peers (device-wide) - peers that have been removed and cannot sync
+CREATE TABLE IF NOT EXISTS removed_peers (
+    peer_shared_id TEXT PRIMARY KEY,
+    removed_by TEXT NOT NULL,
+    removed_at INTEGER NOT NULL,
+    reason TEXT
+);
+
+-- Removed users (device-wide) - users that have been removed and cannot sync
+CREATE TABLE IF NOT EXISTS removed_users (
+    user_id TEXT PRIMARY KEY,
+    removed_by TEXT NOT NULL,
+    removed_at INTEGER NOT NULL,
+    reason TEXT
+);
+
 -- Incoming transit blobs queue
 CREATE TABLE IF NOT EXISTS incoming_blobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

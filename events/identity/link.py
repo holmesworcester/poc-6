@@ -89,7 +89,12 @@ def create(peer_id: str, peer_shared_id: str, link_invite_id: str,
 
 
 def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project link event into linked_peers and users tables."""
+    """Project link event into linked_peers and users tables.
+
+    Matches user.py pattern:
+    - Bootstrap link (first link via URL): skip validation, trust root of trust
+    - Sync-sourced link (received from network): validate signature, proof, and link_invite
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
 
@@ -102,52 +107,79 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     event_data = crypto.parse_json(blob)
 
     created_by = event_data['created_by']
+    user_id = event_data['user_id']  # Get user_id from event regardless of bootstrap status
 
     log.info(f"link.project() link_id={link_id[:20]}..., created_by={created_by[:20]}...")
 
-    # Verify creator (created_by) exists
-    from events.identity import peer_shared
-    creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
-    if not creator_public_key:
-        log.warning(f"link.project() creator not found: {created_by[:20]}...")
-        return None
+    # Check if this is a bootstrap link (first device linking)
+    # Bootstrap links are processed before peer has any networks
+    # If peer has no networks, this is a bootstrap - skip validation (root of trust from URL)
+    peer_networks = safedb.query_one(
+        "SELECT 1 FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
 
-    # Verify link event signature
-    if not crypto.verify_event(event_data, creator_public_key):
-        log.warning(f"link.project() signature verification FAILED")
-        return None
+    is_bootstrap = (peer_networks is None)
 
-    # Get the link_invite event
-    link_invite_id = event_data['link_invite_id']
-    link_invite_blob = store.get(link_invite_id, unsafedb)
-    if not link_invite_blob:
-        log.warning(f"link.project() link_invite not found: {link_invite_id[:20]}...")
-        return None
+    # Initialize link_invite_event_data for later use
+    link_invite_event_data = None
 
-    link_invite_event_data = crypto.parse_json(link_invite_blob)
+    # If not bootstrap, this came via sync or is a second link - validate it
+    if not is_bootstrap:
+        log.info(f"link.project() sync-sourced link, validating...")
 
-    # Verify link_pubkey matches link_invite_pubkey
-    if event_data['link_pubkey'] != link_invite_event_data['link_pubkey']:
-        log.warning(f"link.project() link_pubkey mismatch - invalid link")
-        return None
+        # 1. Verify creator (created_by) exists
+        from events.identity import peer_shared
+        creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+        if not creator_public_key:
+            log.warning(f"link.project() creator not found: {created_by[:20]}...")
+            return None
 
-    # Verify link_invite hasn't expired
-    expiry_ms = link_invite_event_data.get('expiry_ms', recorded_at + 86400000)
-    if recorded_at > expiry_ms:
-        log.warning(f"link.project() link_invite EXPIRED: recorded_at={recorded_at} > expiry_ms={expiry_ms}")
-        return None
+        # 2. Verify link event signature
+        if not crypto.verify_event(event_data, creator_public_key):
+            log.warning(f"link.project() signature verification FAILED")
+            return None
 
-    # Verify link proof signature: sign(peer_id + ":" + user_id) with link_pubkey
-    user_id = event_data['user_id']
-    proof_message = f"{created_by}:{user_id}".encode('utf-8')
-    link_pubkey = crypto.b64decode(event_data['link_pubkey'])
-    link_signature = crypto.b64decode(event_data['link_signature'])
+        # 3. Get the link_invite event
+        link_invite_id = event_data['link_invite_id']
+        link_invite_blob = store.get(link_invite_id, unsafedb)
+        if not link_invite_blob:
+            log.warning(f"link.project() link_invite not found: {link_invite_id[:20]}...")
+            return None
 
-    if not crypto.verify(proof_message, link_signature, link_pubkey):
-        log.warning(f"link.project() proof signature verification FAILED")
-        return None
+        link_invite_event_data = crypto.parse_json(link_invite_blob)
 
-    log.info(f"link.project() validation passed - link is valid")
+        # 4. Verify link_pubkey matches link_invite_pubkey
+        if event_data['link_pubkey'] != link_invite_event_data['link_pubkey']:
+            log.warning(f"link.project() link_pubkey mismatch - invalid link")
+            return None
+
+        # 5. Verify link_invite hasn't expired
+        expiry_ms = link_invite_event_data.get('expiry_ms', recorded_at + 86400000)
+        if recorded_at > expiry_ms:
+            log.warning(f"link.project() link_invite EXPIRED: recorded_at={recorded_at} > expiry_ms={expiry_ms}")
+            return None
+
+        # 6. Verify link proof signature: sign(peer_id + ":" + user_id) with link_pubkey
+        proof_message = f"{created_by}:{user_id}".encode('utf-8')
+        link_pubkey = crypto.b64decode(event_data['link_pubkey'])
+        link_signature = crypto.b64decode(event_data['link_signature'])
+
+        if not crypto.verify(proof_message, link_signature, link_pubkey):
+            log.warning(f"link.project() proof signature verification FAILED")
+            return None
+
+        log.info(f"link.project() validation passed - link is valid")
+    else:
+        log.info(f"link.project() bootstrap link (first link via URL), skipping validation")
+        # For bootstrap links, we need to get link_invite_event_data from the event_data
+        # since it's not validated, we trust the data from the event
+        # Get link_invite from the event data (for bootstrap)
+        link_invite_id = event_data.get('link_invite_id')
+        if link_invite_id:
+            link_invite_blob = store.get(link_invite_id, unsafedb)
+            if link_invite_blob:
+                link_invite_event_data = crypto.parse_json(link_invite_blob)
 
     # Insert into linked_peers table
     safedb.execute(
@@ -165,7 +197,7 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
     # Also insert into users table so new peer has all groups/channels
     # Get the network_id from link_invite
-    network_id = link_invite_event_data.get('network_id')
+    network_id = link_invite_event_data.get('network_id') if link_invite_event_data else None
 
     # Insert into users table with same user_id (different peer_id)
     # This gives the new device access to all groups
@@ -277,11 +309,13 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
 
         log.info(f"link.join() projected existing device's user event: {existing_user_id[:20]}...")
 
-    # Extract secrets from link URL
+    # Extract secrets and metadata from link URL
     link_prekey_id = link_data['link_prekey_id']
     link_private_key = crypto.b64decode(link_data['link_private_key'])
     user_id = link_data['user_id']
     network_id = link_data['network_id']
+    channel_id = link_data.get('channel_id')
+    key_id = link_data.get('key_id')
 
     log.info(f"link.join() extracted link_prekey_id={link_prekey_id[:20]}..., user_id={user_id[:20]}...")
 
@@ -314,6 +348,8 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         'peer_shared_id': peer_shared_id,
         'user_id': user_id,
         'network_id': network_id,
+        'channel_id': channel_id,
+        'key_id': key_id,
         'link_invite_id': link_invite_id,
         'link_invite_accepted_id': link_invite_accepted_id,
         'link_id': link_id,

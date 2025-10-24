@@ -318,6 +318,44 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
     if event_type == 'sync':
         from events.identity import bootstrap_complete
 
+        # Get sender's peer_shared_id from the sync request
+        sender_peer_shared_id = event_data.get('created_by')
+        if not sender_peer_shared_id:
+            logger.warning(f"handle_ephemeral_event: sync request missing created_by field, dropping")
+            return True  # Drop this malformed sync request
+
+        # Check if sender is removed (reject sync from removed peers)
+        unsafedb = create_unsafe_db(db)
+        sender_peer_removed = unsafedb.query_one(
+            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+            (sender_peer_shared_id,)
+        )
+
+        if sender_peer_removed:
+            logger.info(f"handle_ephemeral_event: dropping sync request from removed peer {sender_peer_shared_id[:20]}...")
+            return True  # Drop this sync request
+
+        # Also check if sender's user is removed (for unseen devices of removed users)
+        sender_user_removed = False
+        for recorded_by in recorded_by_peers:
+            safedb_check = create_safe_db(db, recorded_by=recorded_by)
+            sender_user_row = safedb_check.query_one(
+                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+                (sender_peer_shared_id, recorded_by)
+            )
+            if sender_user_row:
+                user_removed_check = safedb_check.query_one(
+                    "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+                    (sender_user_row['user_id'], recorded_by)
+                )
+                if user_removed_check:
+                    sender_user_removed = True
+                    logger.info(f"handle_ephemeral_event: dropping sync request from user-removed peer {sender_peer_shared_id[:20]}...")
+                    break
+
+        if sender_user_removed:
+            return True  # Drop this sync request
+
         for recorded_by in recorded_by_peers:
             # Check if this peer is a joiner (in network_joiners but not in network_creators)
             safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -479,6 +517,9 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     else:
         peer_id_str = from_peer_id
 
+    # Get device-wide access for checking removed peers
+    unsafedb = create_unsafe_db(db)
+
     # Check my bootstrap status (subjective table, use safedb)
     safedb = create_safe_db(db, recorded_by=from_peer_id)
     is_creator = safedb.query_one(
@@ -519,6 +560,32 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
         # Skip self (don't sync with yourself)
         if ps_id == from_peer_shared_id:
             log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_self={ps_id[:20]}...")
+            continue
+
+        # Skip removed peers (they cannot sync)
+        # Check 1: Direct peer removal (device-wide removed_peers table)
+        removed_peer = unsafedb.query_one(
+            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+            (ps_id,)
+        )
+
+        # Check 2: User removal (dynamic check for unseen devices)
+        # Maps peer_shared_id -> user_id and checks if user is removed
+        removed_user = None
+        if not removed_peer:
+            peer_user_row = safedb.query_one(
+                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+                (ps_id, from_peer_id)
+            )
+            if peer_user_row:
+                removed_user = safedb.query_one(
+                    "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+                    (peer_user_row['user_id'], from_peer_id)
+                )
+
+        if removed_peer or removed_user:
+            reason = "peer" if removed_peer else "user"
+            log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_removed_{reason}={ps_id[:20]}...")
             continue
 
         # Use bootstrap mode only if WE haven't completed bootstrap yet (per-peer, not per-relationship)

@@ -140,6 +140,19 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Deletion events only depend on the creator (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
         dep_fields = ['created_by']
+    elif event_type == 'link_invite':
+        # Link invites are like invites - metadata about device linking
+        # Only depend on creator (existing device) for signature verification
+        # user_id is metadata, doesn't need to exist yet
+        dep_fields = ['created_by']
+    elif event_type == 'link':
+        # Link events prove new device ownership via cryptographic proof
+        # Only depend on creator (self) for signature verification
+        dep_fields = ['created_by']
+    elif event_type == 'link_invite_accepted':
+        # Local-only event storing link secrets
+        # Only depend on creator for basic validation
+        dep_fields = ['created_by']
 
     missing_deps = []
 
@@ -303,7 +316,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'bootstrap_complete'}
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'link_invite_accepted', 'bootstrap_complete'}
 
     should_mark_shareable = False
     if event_type:
@@ -329,9 +342,13 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             db=db
         )
 
-    # Handle crypto blocking (after shareable marking)
-    # Block events we can't decrypt - they'll still be shareable and sent during sync
-    if missing_key_ids:
+    # NOTE: Crypto blocking is now handled below with semantic dependencies combined
+
+    # Phase 1: Handle encrypted blobs that can't be decrypted (missing crypto keys)
+    # These need to be blocked until the key arrives
+    if not plaintext and missing_key_ids:
+        # Encrypted blob we can't decrypt - block on the missing keys
+        log.warning(f"Blocking encrypted event {ref_id[:20]}... recorded_by={recorded_by[:20]}... due to missing crypto keys: {[k[:20] for k in missing_key_ids]}")
         timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
                      status='blocked_crypto', blocked_on=missing_key_ids)
         queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
@@ -366,21 +383,38 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         created_by = event_data.get('created_by')
         # Do NOT skip dep check - we need peer event to be projected first
 
+    if event_type == 'link_invite_accepted':
+        # link_invite_accepted events are root-of-trust for linkers - they capture out-of-band
+        # trusted data from the link URL. Only self-created ones are valid.
+        # However, we still need to check created_by dependency (peer event must exist first)
+        created_by = event_data.get('created_by')
+        # Do NOT skip dep check - we need peer event to be projected first
+
+    # Combine crypto and semantic dependencies
+    all_missing_deps = list(missing_key_ids) if missing_key_ids else []
+
     if not skip_dep_check:
-        missing_deps = check_deps(event_data, recorded_by, db)
-        if missing_deps:
-            # Event dependencies missing - block this event for this peer
-            requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
-            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
+        semantic_deps = check_deps(event_data, recorded_by, db)
+        if semantic_deps:
+            all_missing_deps.extend(semantic_deps)
 
-            # DEBUG: If this is a channel event, log the actual dep_ids
-            if event_type == 'channel':
-                log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
+    if all_missing_deps:
+        # Event dependencies missing - block this event for this peer
+        requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+        if missing_key_ids:
+            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps (crypto+semantic): {[d[:20] for d in all_missing_deps]}")
+        else:
+            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in all_missing_deps]}")
 
-            timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
-                         status='blocked_deps', blocked_on=missing_deps)
-            queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
-            return [None, recorded_id]
+        # DEBUG: If this is a channel event, log the actual dep_ids
+        if event_type == 'channel':
+            log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={all_missing_deps}")
+
+        status = 'blocked_crypto_and_semantic' if missing_key_ids and semantic_deps else ('blocked_crypto' if missing_key_ids else 'blocked_deps')
+        timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
+                     status=status, blocked_on=all_missing_deps)
+        queues.blocked.add(recorded_id, recorded_by, all_missing_deps, safedb)
+        return [None, recorded_id]
 
     # All dependencies satisfied - proceed with projection
     projected_id = None
@@ -460,6 +494,16 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.identity import invite_accepted
         log.warning(f"DISPATCHER: Calling invite_accepted.project() for ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
         invite_accepted.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'link_invite_accepted':
+        from events.identity import link_invite_accepted
+        log.warning(f"DISPATCHER: Calling link_invite_accepted.project() for ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
+        link_invite_accepted.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'link':
+        from events.identity import link
+        projected_id = link.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'link_invite':
+        from events.identity import link_invite
+        projected_id = link_invite.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'group_member':
         from events.group import group_member
         projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)
