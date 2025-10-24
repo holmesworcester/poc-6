@@ -490,6 +490,12 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.content import message_attachment
         message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
         projected_id = ref_id
+    elif event_type == 'network_address':
+        from events.network import address as network_address
+        projected_id = network_address.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'network_intro':
+        from events.network import intro as network_intro
+        projected_id = network_intro.project(ref_id, recorded_by, recorded_at, db)
 
     # Mark event as valid for this peer
     log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
