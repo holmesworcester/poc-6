@@ -36,6 +36,7 @@ SUBJECTIVE_TABLES = {
     'blocked_events_ephemeral',
     'blocked_event_deps_ephemeral',
     'shareable_events',
+    'projected_events',            # Projected events with created_at for lazy loading (peer-scoped)
     'invites',
     'networks',                    # Networks are subjective (peer-scoped)
     'bootstrap_status',            # Bootstrap status (network creator/joiner status)

@@ -40,3 +40,18 @@ CREATE TABLE IF NOT EXISTS sync_state_ephemeral (
 
 CREATE INDEX IF NOT EXISTS idx_sync_state_ephemeral_from_peer
     ON sync_state_ephemeral(from_peer_id);
+
+-- Projected events table: tracks decrypted/projected events with created_at for lazy loading
+-- This table is populated during successful projection and used for UI pagination
+-- Separate from shareable_events (which is for sync protocol, not UI)
+CREATE TABLE IF NOT EXISTS projected_events (
+    event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    created_at INTEGER NOT NULL,     -- When the event was originally created (from event data)
+    recorded_by TEXT NOT NULL,       -- Peer who projected this event
+    PRIMARY KEY (event_id, recorded_by)
+);
+
+-- Index for lazy loading events by creation time
+CREATE INDEX IF NOT EXISTS idx_projected_events_peer_created
+    ON projected_events(recorded_by, created_at DESC);

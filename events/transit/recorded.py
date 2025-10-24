@@ -283,6 +283,19 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
     log.info(f"Parsed event data, type={event_type}")
 
+    # Timeline: Log event type and plaintext data for debugging
+    if event_data:
+        import json
+        # Truncate large fields for readability
+        timeline_data = {}
+        for k, v in event_data.items():
+            if k in ('ciphertext', 'blob', 'data') and isinstance(v, (str, bytes)) and len(str(v)) > 50:
+                timeline_data[k] = f"{str(v)[:50]}..."
+            else:
+                timeline_data[k] = v
+        timeline.log('event_data', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
+                    data=json.dumps(timeline_data, default=str))
+
     # DEBUG: Log if this is a channel event
     if event_type == 'channel':
         log.error(f"[CHANNEL_AFTER_PARSE] type=channel, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
@@ -303,39 +316,18 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
     if should_mark_shareable:
         # Mark event as shareable in shareable_events table
-        # For decrypted events: add with created_at from event_data
-        # For encrypted events: add with placeholder created_at=0, will be updated by projection
-        # CRITICAL: Never use recorded_at as created_at (would violate convergence)
-        if event_data:
-            created_at_from_event = event_data.get('created_at')
-            log.debug(f"shareable mark: type={event_type}, event_data exists, created_at={created_at_from_event}")
-            if created_at_from_event:
-                # Decrypted event with created_at - add immediately with correct created_at
-                from events.transit import sync
-                log.debug(f"Adding {event_type} {ref_id[:20]}... to shareable_events with created_at={created_at_from_event}")
-                sync.add_shareable_event(
-                    ref_id,
-                    recorded_by,  # This peer recorded the event and can share it
-                    created_at_from_event,
-                    recorded_at,
-                    db
-                )
-            else:
-                log.debug(f"Event data exists but no created_at for {event_type} {ref_id[:20]}...")
-        elif event_data is None:
-            # Encrypted event we can't decrypt yet - add with placeholder created_at
-            # This allows the event to be synced to other peers even while blocked
-            # The actual created_at will be set during projection (via INSERT OR REPLACE at line 464)
-            from events.transit import sync
-            log.debug(f"Encrypted {event_type} {ref_id[:20]}... - adding to shareable_events with placeholder created_at=NULL")
-            sync.add_shareable_event(
-                ref_id,
-                recorded_by,
-                created_at=None,  # Placeholder - will be updated by INSERT OR REPLACE during projection
-                recorded_at=recorded_at,
-                db=db
-            )
-        # Note: We don't add recorded_at as created_at here to maintain convergence invariant
+        # Always use created_at=None for simplicity and determinism
+        # Sync protocol doesn't need created_at - it uses recorded_at for ordering
+        # UI lazy loading will use separate projected_events table with created_at
+        from events.transit import sync
+        log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None")
+        sync.add_shareable_event(
+            ref_id,
+            recorded_by,
+            created_at=None,
+            recorded_at=recorded_at,
+            db=db
+        )
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
@@ -531,23 +523,14 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     else:
         log.error(f"[VALID_EVENT_FAILED] ✗ Event {ref_id[:20]}... NOT in valid_events after insert! peer={recorded_by[:20]}...")
 
-    # Ensure shareable_events has the authoritative created_at from projection table
-    # This is critical for convergence: created_at must come from the projection table, not from initial insertion
-    if should_mark_shareable and projected_id:
-        actual_created_at = _get_authoritative_created_at(event_type, ref_id, recorded_by, safedb)
-        if actual_created_at is not None:
-            # Use INSERT OR REPLACE to ensure the row exists with correct created_at
-            # (for encrypted events that weren't added initially, or to update existing rows)
-            from events.transit import sync
-            event_id_bytes = crypto.b64decode(ref_id)
-            window_id = sync.compute_storage_window_id(event_id_bytes)
-            safedb.execute(
-                """INSERT OR REPLACE INTO shareable_events
-                   (event_id, can_share_peer_id, created_at, recorded_at, window_id)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (ref_id, recorded_by, actual_created_at, recorded_at, window_id)
-            )
-            log.debug(f"Set shareable_events created_at={actual_created_at} for {event_type} {ref_id[:20]}... (from projection table)")
+    # Add to projected_events if event has created_at (for UI lazy loading)
+    if event_data and event_data.get('created_at') is not None and event_type:
+        safedb.execute(
+            """INSERT OR IGNORE INTO projected_events (event_id, event_type, created_at, recorded_by)
+               VALUES (?, ?, ?, ?)""",
+            (ref_id, event_type, event_data['created_at'], recorded_by)
+        )
+        log.debug(f"Added {event_type} {ref_id[:20]}... to projected_events with created_at={event_data['created_at']}")
 
     # Notify blocked queue - unblock events that were waiting for this event
     unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
