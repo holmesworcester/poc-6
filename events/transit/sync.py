@@ -578,9 +578,9 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
                 (ps_id, from_peer_id)
             )
             if peer_user_row:
-                removed_user = safedb.query_one(
-                    "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-                    (peer_user_row['user_id'], from_peer_id)
+                removed_user = unsafedb.query_one(
+                    "SELECT 1 FROM removed_users WHERE user_id = ? LIMIT 1",
+                    (peer_user_row['user_id'],)
                 )
 
         if removed_peer or removed_user:

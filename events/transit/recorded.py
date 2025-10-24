@@ -344,27 +344,25 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
     # NOTE: Crypto blocking is now handled below with semantic dependencies combined
 
-    # Phase 1: Handle encrypted blobs that can't be decrypted (missing crypto keys)
-    # These need to be blocked until the key arrives
-    if not plaintext and missing_key_ids:
-        # Encrypted blob we can't decrypt - block on the missing keys
-        log.warning(f"Blocking encrypted event {ref_id[:20]}... recorded_by={recorded_by[:20]}... due to missing crypto keys: {[k[:20] for k in missing_key_ids]}")
-        timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
-                     status='blocked_crypto', blocked_on=missing_key_ids)
-        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
-        return [None, recorded_id]
-
-    # If we got here without event_data, return early
+    # If we got here without event_data, we need special handling:
+    # - If encrypted with missing keys: block on crypto dependencies, continue to Phase 2 for semantic deps
+    # - If plaintext but unparseable: return early (can't proceed without event_data)
     if not event_data:
-        return [None, recorded_id]
+        if not plaintext and missing_key_ids:
+            # Encrypted blob - continue to Phase 2 to check semantic dependencies
+            # We'll combine crypto + semantic deps before blocking
+            log.debug(f"Encrypted event {ref_id[:20]}... - continuing to Phase 2 to check semantic dependencies")
+        else:
+            # Can't parse plaintext or other error - can't proceed
+            return [None, recorded_id]
 
     # Phase 2: Check semantic dependencies
     # Special case: Self-created user events with invite proof - creator doesn't have invite as valid event
     # (invite comes from out-of-band link, not network sync)
-    event_type = event_data.get('type')
+    event_type = event_data.get('type') if event_data else None
     skip_dep_check = False
 
-    if event_type == 'user' and 'invite_pubkey' in event_data:
+    if event_data and event_type == 'user' and 'invite_pubkey' in event_data:
         # Self-created user with invite proof: creator doesn't have invite in valid_events
         # (invite comes from out-of-band link, not network sync)
         created_by = event_data.get('created_by')
@@ -375,7 +373,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Invites from URLs (with invite_accepted) skip validation in projector
     # Invites from sync are validated (signature, network, creator) in projector
 
-    if event_type == 'invite_accepted':
+    if event_data and event_type == 'invite_accepted':
         # invite_accepted events are root-of-trust for joiners - they capture out-of-band
         # trusted data from the invite link. Only self-created ones are valid.
         # However, we still need to check created_by dependency (peer event must exist first
@@ -383,7 +381,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         created_by = event_data.get('created_by')
         # Do NOT skip dep check - we need peer event to be projected first
 
-    if event_type == 'link_invite_accepted':
+    if event_data and event_type == 'link_invite_accepted':
         # link_invite_accepted events are root-of-trust for linkers - they capture out-of-band
         # trusted data from the link URL. Only self-created ones are valid.
         # However, we still need to check created_by dependency (peer event must exist first)
@@ -391,20 +389,24 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         # Do NOT skip dep check - we need peer event to be projected first
 
     # Combine crypto and semantic dependencies
+    # For encrypted events (no event_data), we can only block on crypto keys
+    # Semantic dependencies will be checked after decryption
     all_missing_deps = list(missing_key_ids) if missing_key_ids else []
+    semantic_deps = []
 
-    if not skip_dep_check:
+    if not skip_dep_check and event_data:
+        # Only check semantic dependencies if we have event_data (plaintext/decrypted)
         semantic_deps = check_deps(event_data, recorded_by, db)
         if semantic_deps:
             all_missing_deps.extend(semantic_deps)
 
     if all_missing_deps:
         # Event dependencies missing - block this event for this peer
-        requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+        requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A') if event_data else 'N/A'
         if missing_key_ids:
-            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps (crypto+semantic): {[d[:20] for d in all_missing_deps]}")
+            log.warning(f"Blocking {event_type or 'encrypted'} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20] if requester_peer_shared_id != 'N/A' else 'N/A'}... missing deps (crypto+semantic): {[d[:20] for d in all_missing_deps]}")
         else:
-            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in all_missing_deps]}")
+            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20] if requester_peer_shared_id != 'N/A' else 'N/A'}... missing deps: {[d[:20] for d in all_missing_deps]}")
 
         # DEBUG: If this is a channel event, log the actual dep_ids
         if event_type == 'channel':
