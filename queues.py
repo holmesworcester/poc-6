@@ -261,4 +261,9 @@ class blocked:
         if unblocked:
             log.info(f"queues.blocked.notify_event_valid() UNBLOCKED (awaiting re-projection confirmation) {len(unblocked)} events: {unblocked}")
 
+            # Timeline: Log unblocking event
+            from tests.utils import timeline
+            timeline.log('unblock', ref_id=event_id, recorded_by=recorded_by,
+                         count=len(unblocked), unblocked=unblocked[:3])  # First 3 IDs
+
         return unblocked

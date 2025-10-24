@@ -22,6 +22,8 @@ Observations:
 
 # TODO:
 
+- some events are over the max size now. get a handle on that.
+- consider a wire format that is regular with fixed field lengths for each event type
 - check how bootstrap works. it should not be per-peer-relationship it
   should be per network (per user.join attempt) 
 - transit_prekey_shared.py is another place where we could be calling it with more useful parameters to save a lookup and remove brittleness, but I'm not sure. maybe we should just have a store.get_json)id, db)

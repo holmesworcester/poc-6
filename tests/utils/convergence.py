@@ -144,7 +144,8 @@ def assert_convergence(
     db: Any,
     num_trials: int = 10,
     save_failures: bool = True,
-    stop_on_first_failure: bool = True
+    stop_on_first_failure: bool = True,
+    debug_timeline: bool = True
 ) -> None:
     """Test that projecting events in different orders produces identical final state.
 
@@ -154,10 +155,17 @@ def assert_convergence(
                    If total events <= 8, tests ALL permutations instead
         save_failures: Whether to save failed orderings to disk (default True)
         stop_on_first_failure: Whether to stop on first failure or continue testing (default True)
+        debug_timeline: Whether to enable timeline debugging (default True)
 
     Raises:
         AssertionError: If any ordering produces different final state
     """
+    from . import timeline
+
+    # Enable timeline debugging
+    if debug_timeline:
+        timeline.enable(phase='baseline')
+
     # Get all recorded event IDs
     event_ids = _get_projectable_event_ids(db)
 
@@ -165,26 +173,56 @@ def assert_convergence(
         print("⚠ No recorded events found, skipping convergence test")
         return
 
-    # Generate orderings
-    if len(event_ids) <= 8:
-        # Small dataset: test ALL permutations
-        orderings = list(itertools.permutations(event_ids))
-        print(f"Testing {len(orderings)} permutations of {len(event_ids)} events")
-    else:
-        # Large dataset: reduced random sample (was 1000, now 10 for speed)
-        orderings = [event_ids]  # Original order
-        for _ in range(num_trials - 1):
-            shuffled = event_ids.copy()
-            random.shuffle(shuffled)
-            orderings.append(shuffled)
-        print(f"Testing {num_trials} random orderings of {len(event_ids)} events")
+    # Generate all pairwise swaps, sorted by distance (most destructive first)
+    # This prioritizes finding failures by testing long-distance swaps first
+    pairs = []
+    for i in range(len(event_ids)):
+        for j in range(i + 1, len(event_ids)):
+            distance = j - i
+            pairs.append((i, j, distance))
 
-    # Project in original order and capture baseline
+    # Sort by distance descending (test most destructive swaps first)
+    pairs.sort(key=lambda x: x[2], reverse=True)
+
+    orderings = [event_ids]  # Baseline order
+
+    for i, j, distance in pairs:
+        swapped = event_ids.copy()
+        swapped[i], swapped[j] = swapped[j], swapped[i]
+        orderings.append(swapped)
+
+    total_swaps = len(event_ids) * (len(event_ids) - 1) // 2
+    max_distance = pairs[0][2] if pairs else 0
+    print(f"Testing {len(orderings)} orderings ({total_swaps} pairwise swaps) of {len(event_ids)} events")
+    print(f"Starting with most destructive: distance={max_distance} swaps, ending with adjacent swaps")
+
+    # Replay baseline ordering to capture its timeline
+    if debug_timeline:
+        _recreate_projection_tables(db)
+        _replay_events(event_ids, db)
+
+    # Capture baseline state
     baseline_state = _dump_projection_state(db)
+
+    # Export baseline timeline if debugging
+    baseline_timeline_file = None
+    if debug_timeline:
+        failures_dir = os.path.join('tests', 'failures')
+        os.makedirs(failures_dir, exist_ok=True)
+        baseline_timeline_file = os.path.join(failures_dir, f'convergence_baseline_{int(time.time())}.txt')
+        timeline.export(baseline_timeline_file)
+        print(f"📊 Baseline timeline saved to: {baseline_timeline_file}")
 
     # Test each alternative ordering
     failures = []
-    for i, ordering in enumerate(orderings[1:], start=1):
+    for idx, ordering in enumerate(orderings[1:], start=1):
+        # Get the swap info for this ordering (idx-1 since we skip baseline)
+        swap_i, swap_j, swap_distance = pairs[idx - 1]
+
+        # Set timeline phase for this ordering
+        if debug_timeline:
+            timeline.set_phase(f'swap_{swap_i}_{swap_j}_dist{swap_distance}')
+
         # Reset projection tables
         _recreate_projection_tables(db)
 
@@ -196,10 +234,13 @@ def assert_convergence(
         equal, diff_msg = _states_equal(baseline_state, current_state)
 
         if not equal:
-            print(f"\n❌ Convergence FAILED on ordering #{i}")
-            print(f"Baseline order: {event_ids}")
-            print(f"Failed order:   {list(ordering)}")
-            print(f"Difference: {diff_msg}")
+            # Format event IDs for display
+            event_a = event_ids[swap_i][:20] + '...' if len(event_ids[swap_i]) > 20 else event_ids[swap_i]
+            event_b = event_ids[swap_j][:20] + '...' if len(event_ids[swap_j]) > 20 else event_ids[swap_j]
+
+            print(f"\n❌ Convergence FAILED on swap #{idx}: positions {swap_i} ↔ {swap_j} (distance={swap_distance})")
+            print(f"   Swapped: {event_a} ↔ {event_b}")
+            print(f"   Difference: {diff_msg}")
 
             # Save failure data with store table for replay
             store_rows = db.query("SELECT * FROM store")
@@ -212,8 +253,11 @@ def assert_convergence(
                 })
 
             failure_data = {
-                'ordering_number': i,
+                'ordering_number': idx,
                 'total_orderings': len(orderings),
+                'swap_positions': [swap_i, swap_j],
+                'swap_distance': swap_distance,
+                'swapped_events': [event_ids[swap_i], event_ids[swap_j]],
                 'baseline_order': event_ids,
                 'failed_order': list(ordering),
                 'baseline_state': baseline_state,
@@ -228,6 +272,12 @@ def assert_convergence(
             if save_failures:
                 failure_file = _save_failure(failure_data)
                 print(f"💾 Failure saved to: {failure_file}")
+
+                # Export timeline if debugging is enabled
+                if debug_timeline:
+                    timeline_file = failure_file.replace('.json', '_timeline.txt')
+                    timeline.export(timeline_file)
+                    print(f"📊 Timeline saved to: {timeline_file}")
 
             if stop_on_first_failure:
                 raise AssertionError(f"Projection order matters! {diff_msg}")

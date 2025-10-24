@@ -192,17 +192,21 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
     return projected_ids
 
 
-def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | None]:
+def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial') -> list[str | None]:
     """Project recorded event with two-phase dependency checking.
 
     Phase 1: Check encryption keys (block if missing).
     Phase 2: Check event dependencies (block if missing).
     Dispatches to type-specific projector if all deps satisfied.
+
+    Args:
+        _triggered_by: What triggered this projection (for debugging causality)
     """
     from events.identity import peer
     from events.content import channel
     import queues
     import json
+    from tests.utils import timeline
 
     unsafedb = create_unsafe_db(db)
 
@@ -230,6 +234,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
                 log.info(f"recorded.project(): SYNC EVENT FOUND! Processing sync request recorded_by={recorded_by[:20]}...")
         except:
             pass
+
+    # Timeline: Log projection start
+    timeline.log('proj_start', ref_id=ref_id, ref_type=temp_type, recorded_by=recorded_by,
+                 triggered_by=_triggered_by, depth=_recursion_depth)
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -332,6 +340,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
     if missing_key_ids:
+        timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
+                     status='blocked_crypto', blocked_on=missing_key_ids)
         queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
         return [None, recorded_id]
 
@@ -375,12 +385,15 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
             if event_type == 'channel':
                 log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
 
+            timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
+                         status='blocked_deps', blocked_on=missing_deps)
             queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
 
     # All dependencies satisfied - proceed with projection
     projected_id = None
     log.info(f"Projecting event type: {event_type}")
+    timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
 
     # Check if this event has been marked as deleted (prevents projection of deleted messages)
     # This handles the case where a deletion arrives before or after the message
@@ -544,6 +557,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0) -> list[str | 
         project_ids(unblocked_ids, db, _recursion_depth + 1)
     else:
         log.debug(f"No events to unblock after {ref_id[:20]}... for peer {recorded_by[:20]}...")
+
+    # Timeline: Log successful projection completion
+    timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='success')
 
     return [projected_id, recorded_id]
 

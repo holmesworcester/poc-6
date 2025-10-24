@@ -889,8 +889,10 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
 
         # Double-wrap with transit key
         hint_for_wrapping = crypto.b64encode(transit_key_dict['id'])
+        log.warning(f"[SYNC_RESPONSE] wrapping event={event_id[:20]}... plaintext_size={len(event_blob)}B with transit_key_hint={hint_for_wrapping} ({len(hint_for_wrapping)} chars)")
         log.debug(f"[SYNC_RESPONSE] wrapping event={event_id[:20]}... with transit_key_hint={hint_for_wrapping} ({len(hint_for_wrapping)} chars)")
         wrapped_blob = crypto.wrap(event_blob, transit_key_dict, db)
+        log.warning(f"[SYNC_RESPONSE] wrapped result: wrapped_blob_size={len(wrapped_blob)}B")
         actual_hint_in_blob = crypto.b64encode(wrapped_blob[:16])
         log.debug(f"[SYNC_RESPONSE] wrapped blob hint={actual_hint_in_blob} ({len(actual_hint_in_blob)} chars), matches_expected={actual_hint_in_blob == hint_for_wrapping}")
 
