@@ -45,6 +45,11 @@ def event(event_blob: bytes, recorded_by: str, t_ms: int, db: Any) -> str:
     """
     from events.transit import recorded
     from db import create_unsafe_db
+    import crypto
+
+    # Log the first 16 bytes to see what hint/key is being stored
+    first_16 = event_blob[:16] if len(event_blob) >= 16 else b''
+    log.warning(f"[STORE_EVENT] blob_size={len(event_blob)}, first_16_bytes={crypto.b64encode(first_16)}, recorded_by={recorded_by[:20]}...")
     log.info(f"store.event() called: recorded_by={recorded_by}, t_ms={t_ms}")
 
     unsafedb = create_unsafe_db(db)

@@ -221,6 +221,7 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
     event_id_bytes = crypto.b64decode(event_id)
     window_id = compute_storage_window_id(event_id_bytes)
 
+    log.warning(f"[ADD_SHAREABLE] event={event_id[:20]}..., can_share_peer_id={can_share_peer_id[:20]}..., window={window_id}")
     log.debug(f"add_shareable_event: event={event_id[:20]}..., peer={can_share_peer_id[:20]}..., window={window_id}")
 
     safedb = create_safe_db(db, recorded_by=can_share_peer_id)
@@ -595,13 +596,28 @@ def send_bootstrap_to_peer(to_peer_shared_id: str, from_peer_id: str, from_peer_
     log.info(f"send_bootstrap_to_peer: from={from_peer_id[:20]}... to={to_peer_shared_id[:20]}... sending_all_shareable_events")
 
     # Get ALL shareable events for this peer (no window filtering)
+    from db import create_unsafe_db
     safedb = create_safe_db(db, recorded_by=from_peer_id)
     all_shareable = safedb.query(
         "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ? ORDER BY created_at ASC",
         (from_peer_id,)
     )
+    log.warning(f"[BOOTSTRAP_QUERY_RESULT] found {len(all_shareable)} shareable events for {from_peer_id[:20]}...")
 
-    log.info(f"send_bootstrap_to_peer: found {len(all_shareable)} shareable events to send")
+    log.warning(f"[BOOTSTRAP_QUERY] from_peer_id={from_peer_id[:20]}..., querying shareable_events with NO filter")
+
+    # Also query ALL shareable events for this peer to see what's there
+    all_shareable_unfiltered = safedb.query(
+        "SELECT event_id, created_at FROM shareable_events WHERE can_share_peer_id = ? ORDER BY created_at",
+        (from_peer_id,)
+    )
+    log.warning(f"[BOOTSTRAP_UNFILTERED] ALL shareable events for peer (count={len(all_shareable_unfiltered)}):")
+    for evt in all_shareable_unfiltered[:20]:  # Log first 20
+        log.warning(f"  {evt['event_id'][:20]}... created_at={evt['created_at']}")
+
+    for i, evt in enumerate(all_shareable):
+        log.warning(f"  [BOOTSTRAP_EVENT] {i}: {evt['event_id'][:20]}...")
+    log.info(f"send_bootstrap_to_peer: found {len(all_shareable)} shareable events to send (query returned {len(all_shareable)} rows)")
 
     if not all_shareable:
         log.info(f"send_bootstrap_to_peer: no events to send, skipping")
@@ -615,14 +631,20 @@ def send_bootstrap_to_peer(to_peer_shared_id: str, from_peer_id: str, from_peer_
         return
 
     # Wrap and send each event
+    unsafedb = create_unsafe_db(db)
+
     for row in all_shareable:
         event_id = row['event_id']
-        event_blob = store.get(event_id, db)
+        event_blob = store.get(event_id, unsafedb)
         if not event_blob:
+            log.warning(f"[SYNC_SEND_SKIP] event_id={event_id[:20]}... blob not found in store")
             continue
 
         # Wrap with recipient's prekey (asymmetric encryption) including hint
+        inner_first_16 = event_blob[:16] if len(event_blob) >= 16 else b''
         wrapped = crypto.wrap(event_blob, recipient_key_dict, db)
+        outer_first_16 = wrapped[:16] if len(wrapped) >= 16 else b''
+        log.warning(f"[SYNC_WRAP] event_id={event_id[:20]}..., inner_first_16={crypto.b64encode(inner_first_16)}, outer_first_16={crypto.b64encode(outer_first_16)}, recipient={to_peer_shared_id[:20]}...")
         queues.incoming.add(wrapped, t_ms, db)
 
     log.info(f"send_bootstrap_to_peer: sent {len(all_shareable)} events to {to_peer_shared_id[:20]}...")

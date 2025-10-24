@@ -9,8 +9,9 @@ from events.identity import user, link_invite, link
 def setup_logging():
     """Setup detailed logging for debugging."""
     logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(levelname)-8s %(name)s:%(lineno)d %(message)s'
+        level=logging.WARNING,  # Show all warnings and errors
+        format='%(levelname)-8s %(name)s:%(lineno)d %(message)s',
+        force=True
     )
 
 
@@ -185,14 +186,25 @@ def test_methodical_gks_sync():
 
     safedb_phone = create_safe_db(db, recorded_by=alice_phone['peer_id'])
 
-    gks_events_from_phone = safedb_phone.query(
+    # Query shareable events in two ways:
+    # 1. With created_at filter (like the test was doing)
+    gks_events_from_phone_filtered = safedb_phone.query(
         """SELECT event_id, created_at FROM shareable_events
            WHERE can_share_peer_id = ? AND (created_at IS NULL OR (created_at >= 2000 AND created_at < 3000))
            ORDER BY created_at""",
         (alice_phone['peer_id'],)
     )
 
-    print(f"Found {len(gks_events_from_phone)} shareable events created by phone during link_invite.create()")
+    # 2. All shareable events for the phone (what send_bootstrap_to_peer sends)
+    gks_events_from_phone = safedb_phone.query(
+        """SELECT event_id, created_at FROM shareable_events
+           WHERE can_share_peer_id = ?
+           ORDER BY created_at""",
+        (alice_phone['peer_id'],)
+    )
+
+    print(f"Found {len(gks_events_from_phone_filtered)} shareable events with created_at filter")
+    print(f"Found {len(gks_events_from_phone)} shareable events total (what bootstrap sends)")
 
     if len(gks_events_from_phone) == 0:
         print("✗ BUG FOUND: No GKS events were created by link_invite.create()!")
@@ -219,6 +231,25 @@ def test_methodical_gks_sync():
         return  # Stop here since the bug is found
 
     print(f"✓ Found {len(gks_events_from_phone)} GKS events")
+    print(f"  Phone's shareable events:")
+
+    # Load each event to see its type
+    unsafedb = create_unsafe_db(db)
+    for i, evt in enumerate(gks_events_from_phone):
+        evt_id = evt['event_id']
+        evt_blob = store.get(evt_id, unsafedb)
+        evt_type = "unknown"
+        if evt_blob:
+            try:
+                import crypto
+                import json
+                # Try to parse as JSON (unencrypted events)
+                evt_data = json.loads(evt_blob.decode())
+                evt_type = evt_data.get('type', 'unknown')
+            except:
+                # Encrypted event or other format
+                evt_type = "encrypted"
+        print(f"    Event {i}: {evt_id[:20]}... type={evt_type} created_at={evt['created_at']}")
 
     # Now join with laptop
     alice_laptop = link.join(
@@ -255,7 +286,35 @@ def test_methodical_gks_sync():
                WHERE can_share_peer_id = ? ORDER BY created_at""",
             (alice_laptop['peer_id'],)
         )
-        print(f"  Laptop received {len(laptop_gks)} events")
+        print(f"  Laptop received {len(laptop_gks)} events (out of {len(gks_events_from_phone)} created):")
+        for evt in laptop_gks:
+            print(f"    {evt['event_id'][:20]}...")
+
+        # Compare: which events from phone are missing on laptop?
+        phone_event_ids = set(evt['event_id'] for evt in gks_events_from_phone)
+        laptop_event_ids = set(evt['event_id'] for evt in laptop_gks)
+        missing_on_laptop = phone_event_ids - laptop_event_ids
+        extra_on_laptop = laptop_event_ids - phone_event_ids
+
+        if missing_on_laptop:
+            print(f"  Missing on laptop ({len(missing_on_laptop)} events):")
+            for evt_id in list(missing_on_laptop)[:5]:
+                print(f"    {evt_id[:20]}...")
+
+        if extra_on_laptop:
+            print(f"  Extra on laptop ({len(extra_on_laptop)} events NOT in phone's shareable_events):")
+            for evt_id in list(extra_on_laptop):
+                # Try to find what this event is
+                evt_blob = store.get(evt_id, unsafedb)
+                evt_type = "unknown"
+                if evt_blob:
+                    try:
+                        import json
+                        evt_data = json.loads(evt_blob.decode())
+                        evt_type = evt_data.get('type', 'unknown')
+                    except:
+                        evt_type = "encrypted/other"
+                print(f"    {evt_id[:20]}... type={evt_type}")
 
         # Check blocked events on laptop
         blocked_events = safedb_laptop.query(

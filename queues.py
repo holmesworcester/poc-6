@@ -27,8 +27,9 @@ class incoming:
 
         # Check packet size limit
         if len(blob) > cfg.max_packet_size:
-            log.error(f"queues.incoming.add() dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")
+            log.error(f"[PACKET_DROPPED_SIZE] dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")
             return
+        log.warning(f"[PACKET_QUEUED] blob_size={len(blob)}B (limit={cfg.max_packet_size}B), deliver_at={t_ms}+{cfg.latency_ms}")
 
         # Apply packet loss
         if random.random() < cfg.packet_loss_rate:
