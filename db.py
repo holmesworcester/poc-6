@@ -47,6 +47,8 @@ SUBJECTIVE_TABLES = {
     'files',                       # File metadata (peer-scoped)
     'file_slices',                 # File slice storage (peer-scoped)
     'message_attachments',         # Message-file links (peer-scoped)
+    'file_sync_wanted',            # Files wanted for active syncing (peer-scoped)
+    'file_sync_state_ephemeral',   # Per-file per-peer-pair sync state (peer-scoped)
     'keys_to_purge',               # Forward secrecy: keys marked for purging (peer-scoped)
     'message_rekeys',              # Forward secrecy: rekeyed messages (peer-scoped)
     'event_dependencies',          # Event dependency tracking for cascading deletion (peer-scoped)
