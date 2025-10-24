@@ -17,7 +17,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite
-from events.content import channel, message, file
+from events.content import channel, message, message_attachment
 from events.transit import sync
 import crypto
 
@@ -79,7 +79,7 @@ def test_two_party_file_attachment_and_sync():
     assert len(file_data) == 2000
 
     # Alice attaches file to message
-    file_result = file.create_with_attachment(
+    file_result = message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         file_data=file_data,
@@ -96,7 +96,7 @@ def test_two_party_file_attachment_and_sync():
     assert slice_count == 5, f"Expected 5 slices, got {slice_count}"
 
     # Verify Alice can retrieve the file
-    alice_retrieved = file.get_file(file_id, alice['peer_id'], db)
+    alice_retrieved = message_attachment.get_file_data(file_id, alice['peer_id'], db)
     assert alice_retrieved is not None
     assert alice_retrieved == file_data
     print(f"✓ Alice retrieved file successfully, matches original")
@@ -173,7 +173,7 @@ def test_two_party_file_attachment_and_sync():
     print(f"✓ Bob sees message with attachment metadata")
 
     # Bob should be able to retrieve and decrypt the file
-    bob_retrieved = file.get_file(file_id, bob['peer_id'], db)
+    bob_retrieved = message_attachment.get_file_data(file_id, bob['peer_id'], db)
     assert bob_retrieved is not None, "Bob should be able to retrieve the file"
     assert bob_retrieved == file_data, "Bob's retrieved file should match original"
     print(f"✓ Bob retrieved and decrypted file successfully, matches original")

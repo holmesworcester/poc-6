@@ -130,7 +130,7 @@ def test_file_attachment_sync_only():
     assert len(file_data) == 1000
 
     # Create file and attachment
-    file_result = file.create_with_attachment(
+    file_result = message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         file_data=file_data,
@@ -204,7 +204,7 @@ def test_file_attachment_sync_only():
     print(f"✓ Bob has attachment metadata")
 
     # Bob should be able to retrieve the file
-    bob_retrieved = file.get_file(file_id, bob['peer_id'], db)
+    bob_retrieved = message_attachment.get_file_data(file_id, bob['peer_id'], db)
     assert bob_retrieved == file_data, "Bob's file should match original"
     print(f"✓ Bob can retrieve and decrypt file (matches original)")
 

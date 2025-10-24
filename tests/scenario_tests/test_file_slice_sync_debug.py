@@ -61,7 +61,7 @@ def test_file_slice_sync_debug():
     file_data = b'This is a test file. ' * 100
     file_data = file_data[:2000]
 
-    file_result = file.create_with_attachment(
+    file_result = message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         file_data=file_data,
@@ -154,7 +154,7 @@ def test_file_slice_sync_debug():
     print(f"✓ Bob received attachment metadata")
 
     print("\n=== STEP 15: Bob can retrieve file ===")
-    bob_retrieved = file.get_file(file_id, bob['peer_id'], db)
+    bob_retrieved = message_attachment.get_file_data(file_id, bob['peer_id'], db)
     assert bob_retrieved is not None, "Bob should be able to retrieve file"
     assert bob_retrieved == file_data, "Bob's file should match original"
     print(f"✓ Bob can retrieve and decrypt file")
