@@ -38,6 +38,8 @@ SUBJECTIVE_TABLES = {
     'shareable_events',
     'projected_events',            # Projected events with created_at for lazy loading (peer-scoped)
     'invites',
+    'link_invites',                # Link invites for multi-device linking (peer-scoped)
+    'linked_peers',                # Linked peers for multi-device linking (peer-scoped)
     'networks',                    # Networks are subjective (peer-scoped)
     'network_creators',            # Peers who created a network (peer-scoped)
     'network_joiners',             # Peers who joined a network (peer-scoped)
