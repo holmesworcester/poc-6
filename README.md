@@ -592,5 +592,7 @@ Networks include two groups:
 
 Non-admin members cannot add other users to any group. The admin check is enforced via the `group_member.validate()` function which is called by both `create()` and `project()` to ensure consistency.
 
+**Peer Removal Authorization:** Only admins can remove peers (devices). This prevents non-admin peers from rotating group keys to exclude other members from group messages. When a peer is removed, group keys are automatically rotated for all groups the removed peer's user belonged to, ensuring the removed peer cannot decrypt future messages. **Future work:** Consider delegating peer removal decisions to a decentralized consensus mechanism or relaxing the admin-only requirement with additional safeguards.
+
 **Future work:** Admins will need a private communication channel. Consider adding a private admin-only group separate from the visibility-tracking admins group.
 

@@ -12,9 +12,9 @@ def validate(removed_peer_shared_id: str, removed_by_peer_shared_id: str, record
     """Validate that removed_by has authorization to remove the peer.
 
     Authorization rule:
-    - Peer can remove itself (same peer_shared_id)
-    - Peer can remove linked peers (same user)
-    - Admin can remove any peer
+    - Only admins can remove peers
+
+    This prevents non-admin peers from rotating group keys and excluding other members.
 
     Args:
         removed_peer_shared_id: peer_shared_id being removed
@@ -23,13 +23,9 @@ def validate(removed_peer_shared_id: str, removed_by_peer_shared_id: str, record
         db: Database connection
 
     Returns:
-        True if authorized, False otherwise
+        True if authorized (is admin), False otherwise
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Rule 1: Self-removal (same peer_shared_id)
-    if removed_by_peer_shared_id == removed_peer_shared_id:
-        return True
 
     # Get removed_by's user_id from peer_shared_id
     user_row = safedb.query_one(
@@ -41,21 +37,7 @@ def validate(removed_peer_shared_id: str, removed_by_peer_shared_id: str, record
 
     removed_by_user_id = user_row['user_id']
 
-    # Get removed_peer's user_id from peer_shared_id
-    target_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (removed_peer_shared_id, recorded_by)
-    )
-    if not target_row:
-        return False
-
-    target_user_id = target_row['user_id']
-
-    # Rule 2: Linked peer removal (same user)
-    if removed_by_user_id == target_user_id:
-        return True
-
-    # Rule 3: Admin can remove any peer
+    # Check if removed_by is an admin
     network_row = safedb.query_one(
         "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (recorded_by,)
@@ -70,10 +52,8 @@ def validate(removed_peer_shared_id: str, removed_by_peer_shared_id: str, record
         "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
         (admins_group_id, removed_by_user_id, recorded_by)
     )
-    if admin_member:
-        return True
 
-    return False
+    return admin_member is not None
 
 
 def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_by_local_peer_id: str, t_ms: int, db: Any) -> str:
@@ -158,18 +138,34 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
         removed_user_id = user_row['user_id']
 
         # Check if user has any other peers that are NOT removed
-        other_peers = safedb.query(
-            """SELECT COUNT(*) as count FROM users u
-               WHERE u.user_id = ? AND u.recorded_by = ?
-               AND NOT EXISTS (
-                   SELECT 1 FROM removed_peers rp
-                   WHERE rp.peer_shared_id = (
-                       SELECT peer_shared_id FROM peer_self ps
-                       WHERE ps.peer_id = u.peer_id AND ps.recorded_by = u.recorded_by
-                   )
-               )""",
+        # Get all peers of this user, then check if any are NOT in removed_peers
+        all_user_peers = safedb.query(
+            """SELECT u.peer_id FROM users u
+               WHERE u.user_id = ? AND u.recorded_by = ?""",
             (removed_user_id, recorded_by)
         )
+
+        # Check how many of these peers are NOT in removed_peers
+        unsafe_db = create_unsafe_db(db)
+        active_peer_count = 0
+        for peer in all_user_peers:
+            peer_id = peer['peer_id']
+            # Get peer_shared_id for this peer
+            peer_self_row = safedb.query_one(
+                "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+                (peer_id, recorded_by)
+            )
+            if peer_self_row:
+                peer_shared_id_check = peer_self_row['peer_shared_id']
+                # Check if this peer is NOT removed
+                removed_check = unsafe_db.query_one(
+                    "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+                    (peer_shared_id_check,)
+                )
+                if not removed_check:
+                    active_peer_count += 1
+
+        other_peers = [{'count': active_peer_count}]
 
         # If no other peers remain (this was the last one), rotate keys
         if other_peers and other_peers[0]['count'] == 0:
