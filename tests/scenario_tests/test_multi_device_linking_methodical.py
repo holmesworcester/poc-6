@@ -265,10 +265,12 @@ def test_methodical_gks_sync():
     # Check: Did laptop get the GKS events?
     from events.transit import sync
 
-    # Run sync
+    # Run sync: send and receive
     sync.send_request_to_all(t_ms=4000, db=db)
     db.commit()
-    print(f"✓ Sync round 1 completed")
+    sync.receive(batch_size=100, t_ms=4000, db=db)
+    db.commit()
+    print(f"✓ Sync round 1 completed (send + receive)")
 
     # Check: Does laptop have the group key now?
     safedb_laptop = create_safe_db(db, recorded_by=alice_laptop['peer_id'])
