@@ -522,10 +522,11 @@ def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Get all wanted files (that haven't expired)
+    # Note: SafeDB requires recorded_by filter for subjective tables, which is already scoped
     wanted_files = safedb.query(
-        "SELECT file_id, priority FROM file_sync_wanted WHERE peer_id = ? AND (ttl_ms = 0 OR ttl_ms > ?) "
+        "SELECT file_id, priority FROM file_sync_wanted WHERE recorded_by = ? AND peer_id = ? AND (ttl_ms = 0 OR ttl_ms > ?) "
         "ORDER BY priority DESC, requested_at ASC",
-        (peer_id, t_ms)
+        (peer_id, peer_id, t_ms)
     )
 
     log.debug(f"send_file_sync_requests: peer={peer_id[:20]}... has {len(wanted_files)} files to sync")
