@@ -50,7 +50,6 @@ SUBJECTIVE_TABLES = {
     'keys_to_purge',               # Forward secrecy: keys marked for purging (peer-scoped)
     'message_rekeys',              # Forward secrecy: rekeyed messages (peer-scoped)
     'event_dependencies',          # Event dependency tracking for cascading deletion (peer-scoped)
-    'removed_users',               # Removed users tracking (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
@@ -61,7 +60,6 @@ DEVICE_TABLES = {
     'store',
     'incoming_blobs',
     'sync_state_ephemeral',
-    'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
 }
 
 

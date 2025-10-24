@@ -391,7 +391,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Combine crypto and semantic dependencies
     # For encrypted events (no event_data), we can only block on crypto keys
     # Semantic dependencies will be checked after decryption
-    all_missing_deps = list(missing_key_ids) if missing_key_ids else []
+    # Convert bytes to strings for database storage
+    all_missing_deps = [d.decode('utf-8') if isinstance(d, bytes) else d for d in missing_key_ids] if missing_key_ids else []
     semantic_deps = []
 
     if not skip_dep_check and event_data:

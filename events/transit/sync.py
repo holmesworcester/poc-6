@@ -562,31 +562,7 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
             log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_self={ps_id[:20]}...")
             continue
 
-        # Skip removed peers (they cannot sync)
-        # Check 1: Direct peer removal (device-wide removed_peers table)
-        removed_peer = unsafedb.query_one(
-            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
-            (ps_id,)
-        )
-
-        # Check 2: User removal (dynamic check for unseen devices)
-        # Maps peer_shared_id -> user_id and checks if user is removed
-        removed_user = None
-        if not removed_peer:
-            peer_user_row = safedb.query_one(
-                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-                (ps_id, from_peer_id)
-            )
-            if peer_user_row:
-                removed_user = unsafedb.query_one(
-                    "SELECT 1 FROM removed_users WHERE user_id = ? LIMIT 1",
-                    (peer_user_row['user_id'],)
-                )
-
-        if removed_peer or removed_user:
-            reason = "peer" if removed_peer else "user"
-            log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_removed_{reason}={ps_id[:20]}...")
-            continue
+        # TODO: Peer/user removal checks will be added in future work
 
         # Use bootstrap mode only if WE haven't completed bootstrap yet (per-peer, not per-relationship)
         # Once we receive any sync request, we're done bootstrapping and use bloom-filtered sync
