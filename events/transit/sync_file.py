@@ -128,9 +128,9 @@ def request_file_sync(file_id: str, peer_id: str, priority: int, ttl_ms: int, t_
     safedb = create_safe_db(db, recorded_by=peer_id)
     safedb.execute(
         """INSERT OR REPLACE INTO file_sync_wanted
-           (file_id, peer_id, priority, ttl_ms, requested_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (file_id, peer_id, priority, ttl_ms, t_ms)
+           (file_id, peer_id, recorded_by, priority, ttl_ms, requested_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (file_id, peer_id, peer_id, priority, ttl_ms, t_ms)
     )
 
 
@@ -146,8 +146,8 @@ def cancel_file_sync(file_id: str, peer_id: str, db: Any) -> None:
 
     safedb = create_safe_db(db, recorded_by=peer_id)
     safedb.execute(
-        "DELETE FROM file_sync_wanted WHERE file_id = ? AND peer_id = ?",
-        (file_id, peer_id)
+        "DELETE FROM file_sync_wanted WHERE file_id = ? AND peer_id = ? AND recorded_by = ?",
+        (file_id, peer_id, peer_id)
     )
 
 

@@ -126,8 +126,9 @@ def test_two_party_file_attachment_and_sync():
     print(f"✓ File slices are encrypted (ciphertext ≠ plaintext)")
 
     # Verify root_hash computation
+    # File metadata is now stored in message_attachments for attachments
     alice_file_meta = db.query_one(
-        "SELECT root_hash FROM files WHERE file_id = ? AND recorded_by = ?",
+        "SELECT root_hash FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
         (file_id, alice['peer_id'])
     )
     assert alice_file_meta is not None

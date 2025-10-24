@@ -5,10 +5,11 @@
 CREATE TABLE IF NOT EXISTS file_sync_wanted (
     file_id TEXT NOT NULL,
     peer_id TEXT NOT NULL,              -- Local peer wanting to sync this file
+    recorded_by TEXT NOT NULL,          -- Who recorded this want (same as peer_id for subjective table)
     priority INTEGER NOT NULL DEFAULT 1, -- Higher = more urgent (1-10)
     ttl_ms INTEGER NOT NULL,            -- When to stop trying (0 = forever)
     requested_at INTEGER NOT NULL,
-    PRIMARY KEY (file_id, peer_id)
+    PRIMARY KEY (file_id, peer_id, recorded_by)
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_sync_wanted_peer
