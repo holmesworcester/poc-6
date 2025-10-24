@@ -9,6 +9,9 @@ from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
+# Default message TTL: 1 week (in milliseconds)
+DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
 
 def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages.
@@ -117,7 +120,11 @@ def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, 
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project a single message event into the database."""
+    """Project a single message event into the database.
+
+    Messages have TTL (time-to-live) set to created_at + DEFAULT_MESSAGE_TTL_MS (1 week).
+    In future: TTL can be customized per-channel via channel.disappearing_time field.
+    """
     import json
     log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
 
@@ -153,6 +160,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
+    # Calculate TTL for this message (absolute timestamp)
+    # For now: default 1 week. In future: get from channel's disappearing_time
+    ttl_ms = created_at + DEFAULT_MESSAGE_TTL_MS
+
     # Check if deletion exists (may have arrived before message)
     deletion_check = safedb.query_one(
         "SELECT deleted_by FROM message_deletions WHERE message_id = ? AND recorded_by = ? LIMIT 1",
@@ -184,9 +195,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(
         """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, content, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, content, created_at, recorded_by, recorded_at)
+           (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, recorded_by, recorded_at)
     )
 
     # Record dependency: message depends on channel (for cascading deletion)
