@@ -438,5 +438,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_fil
 
     log.info(f"sync_file.project() sending {len(slices_to_send)} slices to requester")
 
-    # TODO: Actually send the slices (would be wrapped in transit encryption)
-    # For now, just log
+    # TODO: Implement actual slice sending
+    # This requires:
+    # 1. Getting slice event IDs from file_slices table (need to add event_id column)
+    # 2. Wrapping slice blobs with requester's transit prekey
+    # 3. Adding wrapped slices to incoming queue
+    # 4. Updating file_sync_state with progress
+    #
+    # For now, just log that slices would be sent
+    log.debug(f"sync_file.project() would send slices: {slices_to_send}")
