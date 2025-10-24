@@ -8,6 +8,40 @@ from db import create_safe_db
 
 log = logging.getLogger(__name__)
 
+# Group prekeys expire after 30 days (in milliseconds)
+GROUP_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+
+def generate_batch(peer_id: str, count: int, t_ms: int, db: Any) -> list[str]:
+    """Generate N group prekeys at once.
+
+    Convenience function that calls create() N times with incremented timestamps.
+
+    Args:
+        peer_id: Local peer ID creating the prekeys
+        count: Number of prekeys to generate
+        t_ms: Base timestamp (will be incremented for each prekey)
+        db: Database connection (caller handles commit)
+
+    Returns:
+        List of group_prekey_id's created
+
+    Example:
+        >>> prekey_ids = generate_batch(alice_peer_id, count=5, t_ms=1000, db=db)
+        >>> db.commit()
+        >>> assert len(prekey_ids) == 5
+    """
+    log.info(f"group_prekey.generate_batch() peer_id={peer_id[:20]}..., count={count}, t_ms={t_ms}")
+
+    prekey_ids = []
+    for i in range(count):
+        timestamp = t_ms + i
+        prekey_id, _ = create(peer_id, timestamp, db)
+        prekey_ids.append(prekey_id)
+
+    log.info(f"group_prekey.generate_batch() generated {len(prekey_ids)} prekeys")
+    return prekey_ids
+
 
 def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     """Create a subjective group prekey event.
@@ -61,12 +95,16 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
     # Parse JSON
     event_data = crypto.parse_json(blob)
     owner_peer_id = event_data['created_by']
+    created_at = event_data['created_at']
+
+    # Calculate TTL: absolute time when this prekey expires
+    ttl_ms = created_at + GROUP_PREKEY_TTL_MS
 
     # Insert into group_prekeys table with recorded_by (subjective)
     safedb.execute(
-        "INSERT OR IGNORE INTO group_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO group_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
-         crypto.b64decode(event_data['private_key']), event_data['created_at'], recorded_by)
+         crypto.b64decode(event_data['private_key']), created_at, ttl_ms, recorded_by)
     )
 
     # Mark as valid for this peer

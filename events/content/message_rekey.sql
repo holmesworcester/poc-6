@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS message_rekeys (
     new_key_id TEXT NOT NULL,
     new_ciphertext BLOB NOT NULL,
     created_at INTEGER NOT NULL,
+    ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,
     PRIMARY KEY (rekey_id, recorded_by)
@@ -16,6 +17,9 @@ CREATE INDEX IF NOT EXISTS idx_message_rekeys_by_message
 
 CREATE INDEX IF NOT EXISTS idx_message_rekeys_by_peer
     ON message_rekeys(recorded_by, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_message_rekeys_ttl
+    ON message_rekeys(ttl_ms) WHERE ttl_ms > 0;
 
 -- Keys marked for purging (from deleted messages)
 -- These keys encrypted deleted messages and should be purged along with their content

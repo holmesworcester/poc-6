@@ -6,8 +6,12 @@ CREATE TABLE IF NOT EXISTS transit_prekeys (
     public_key BLOB NOT NULL,
     private_key BLOB NOT NULL,
     created_at INTEGER NOT NULL,
+    ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
     FOREIGN KEY (owner_peer_id) REFERENCES local_peers(peer_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transit_prekeys_owner
 ON transit_prekeys(owner_peer_id);
+
+CREATE INDEX IF NOT EXISTS idx_transit_prekeys_ttl
+ON transit_prekeys(ttl_ms) WHERE ttl_ms > 0;

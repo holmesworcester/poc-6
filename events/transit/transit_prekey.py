@@ -8,6 +8,40 @@ from db import create_unsafe_db, create_safe_db
 
 log = logging.getLogger(__name__)
 
+# Transit prekeys expire after 30 days (in milliseconds)
+TRANSIT_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+
+def generate_batch(peer_id: str, count: int, t_ms: int, db: Any) -> list[str]:
+    """Generate N transit prekeys at once.
+
+    Convenience function that calls create() N times with incremented timestamps.
+
+    Args:
+        peer_id: Local peer ID creating the prekeys
+        count: Number of prekeys to generate
+        t_ms: Base timestamp (will be incremented for each prekey)
+        db: Database connection (caller handles commit)
+
+    Returns:
+        List of transit_prekey_id's created
+
+    Example:
+        >>> prekey_ids = generate_batch(alice_peer_id, count=5, t_ms=1000, db=db)
+        >>> db.commit()
+        >>> assert len(prekey_ids) == 5
+    """
+    log.info(f"transit_prekey.generate_batch() peer_id={peer_id[:20]}..., count={count}, t_ms={t_ms}")
+
+    prekey_ids = []
+    for i in range(count):
+        timestamp = t_ms + i
+        prekey_id, _ = create(peer_id, timestamp, db)
+        prekey_ids.append(prekey_id)
+
+    log.info(f"transit_prekey.generate_batch() generated {len(prekey_ids)} prekeys")
+    return prekey_ids
+
 
 def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     """Create a device-wide transit prekey event.
@@ -45,12 +79,21 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     prekey_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
     log.info(f"transit_prekey.create() generated prekey_id={prekey_id}")
 
+    # Calculate TTL: absolute time when this prekey expires
+    ttl_ms = t_ms + TRANSIT_PREKEY_TTL_MS
+
+    # Insert into transit_prekeys table with TTL
+    unsafedb.execute(
+        "INSERT OR IGNORE INTO transit_prekeys (transit_prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms) VALUES (?, ?, ?, ?, ?, ?)",
+        (prekey_id, peer_id, prekey_public, prekey_private, t_ms, ttl_ms)
+    )
+
     # Create recorded wrapper where peer sees itself
     from events.transit import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 
-    log.info(f"transit_prekey.create() projected prekey_id={prekey_id}")
+    log.info(f"transit_prekey.create() projected prekey_id={prekey_id}, ttl_ms={ttl_ms}")
     return prekey_id, prekey_private
 
 
@@ -86,12 +129,21 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     prekey_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
     log.info(f"transit_prekey.create_with_material() generated prekey_id={prekey_id}")
 
+    # Calculate TTL: absolute time when this prekey expires
+    ttl_ms = t_ms + TRANSIT_PREKEY_TTL_MS
+
+    # Insert into transit_prekeys table with TTL
+    unsafedb.execute(
+        "INSERT OR IGNORE INTO transit_prekeys (transit_prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms) VALUES (?, ?, ?, ?, ?, ?)",
+        (prekey_id, peer_id, public_key, private_key, t_ms, ttl_ms)
+    )
+
     # Create recorded wrapper where peer sees itself
     from events.transit import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 
-    log.info(f"transit_prekey.create_with_material() projected prekey_id={prekey_id}")
+    log.info(f"transit_prekey.create_with_material() projected prekey_id={prekey_id}, ttl_ms={ttl_ms}")
     return prekey_id
 
 
@@ -111,12 +163,16 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
     # Parse JSON
     event_data = crypto.parse_json(blob)
     owner_peer_id = event_data['created_by']
+    created_at = event_data['created_at']
+
+    # Calculate TTL: absolute time when this prekey expires
+    ttl_ms = created_at + TRANSIT_PREKEY_TTL_MS
 
     # Insert into transit_prekeys table with owner (device-wide)
     unsafedb.execute(
-        "INSERT OR IGNORE INTO transit_prekeys (transit_prekey_id, owner_peer_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO transit_prekeys (transit_prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms) VALUES (?, ?, ?, ?, ?, ?)",
         (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
-         crypto.b64decode(event_data['private_key']), event_data['created_at'])
+         crypto.b64decode(event_data['private_key']), created_at, ttl_ms)
     )
 
     # Mark as valid for this peer

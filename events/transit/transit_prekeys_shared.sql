@@ -9,9 +9,13 @@ CREATE TABLE IF NOT EXISTS transit_prekeys_shared (
     peer_id TEXT NOT NULL,  -- peer_shared_id (public identity)
     public_key BLOB NOT NULL,
     created_at INTEGER NOT NULL,
+    ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
     recorded_by TEXT NOT NULL,
     PRIMARY KEY (transit_prekey_shared_id, recorded_by)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transit_prekeys_shared_peer
 ON transit_prekeys_shared(peer_id, recorded_by);
+
+CREATE INDEX IF NOT EXISTS idx_transit_prekeys_shared_ttl
+ON transit_prekeys_shared(ttl_ms) WHERE ttl_ms > 0;
