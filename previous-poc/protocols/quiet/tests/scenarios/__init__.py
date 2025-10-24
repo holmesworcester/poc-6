@@ -1,3 +1,1 @@
-"""
-Scenario tests for Quiet protocol.
-"""
+"""Scenario tests for user removal feature."""
