@@ -1,5 +1,7 @@
 """
 Transit decryption handler and helper.
+
+Includes check to reject sync requests from removed peers/users.
 """
 from typing import Any
 import hashlib
@@ -9,6 +11,55 @@ from .crypto_utils import as_bytes
 from core.handlers import Handler
 import sqlite3
 from typing import List
+
+
+def is_sender_removed(envelope: dict[str, Any], db: sqlite3.Connection) -> bool:
+    """
+    Check if the sender of this transit message has been removed.
+
+    Returns True if sender (extracted from transit_dep metadata) is in
+    removed_peers or removed_users tables.
+    """
+    resolved = envelope.get('resolved_deps', {})
+    tkid = envelope.get('transit_secret_id')
+
+    if not tkid:
+        return False
+
+    transit_dep = resolved.get(f'transit_secret:{tkid}')
+    if not transit_dep:
+        return False
+
+    # Extract sender peer_id from transit secret metadata
+    sender_peer_id = transit_dep.get('to_peer') or envelope.get('from_peer')
+    if not sender_peer_id:
+        return False
+
+    # Check if sender is in removed_peers
+    cursor = db.execute(
+        "SELECT 1 FROM removed_peers WHERE peer_id = ? LIMIT 1",
+        (sender_peer_id,)
+    )
+    if cursor.fetchone():
+        return True
+
+    # Check if sender's user is in removed_users
+    # First, find the user_id for this peer_id
+    cursor = db.execute(
+        "SELECT user_id FROM users WHERE peer_id = ? LIMIT 1",
+        (sender_peer_id,)
+    )
+    row = cursor.fetchone()
+    if row:
+        user_id = row['user_id']
+        cursor = db.execute(
+            "SELECT 1 FROM removed_users WHERE user_id = ? LIMIT 1",
+            (user_id,)
+        )
+        if cursor.fetchone():
+            return True
+
+    return False
 
 
 def unwrap_transit(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +147,11 @@ class TransitUnwrapHandler(Handler):
         )
 
     def process(self, envelope: dict[str, Any], db: sqlite3.Connection) -> List[dict[str, Any]]:
+        # Check if sender is removed - if so, drop the envelope
+        if is_sender_removed(envelope, db):
+            # Removed peer/user's sync request is silently dropped
+            # This prevents removed peers from monitoring online status
+            return []
+
         env2 = unwrap_transit(envelope)
         return [env2]
-
