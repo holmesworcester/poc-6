@@ -179,13 +179,15 @@ def create_for_link_invite(key_id: str, peer_id: str, peer_shared_id: str,
     link_pubkey_b64 = link_invite_data['link_pubkey']
 
     # Build recipient prekey dict from link_invite data
+    link_prekey_id_bytes = crypto.b64decode(link_prekey_id)
     recipient_prekey_dict = {
-        'id': crypto.b64decode(link_prekey_id),
+        'id': link_prekey_id_bytes,
         'public_key': crypto.b64decode(link_pubkey_b64),
         'type': 'asymmetric'
     }
 
-    log.info(f"key_shared.create_for_link_invite() extracted link_prekey_id={link_prekey_id[:20]}... from link_invite")
+    log.info(f"key_shared.create_for_link_invite() extracted link_prekey_id={link_prekey_id[:20]}... (bytes_len={len(link_prekey_id_bytes)}) from link_invite")
+    log.warning(f"[GKS_CREATE_LINK] prekey_id_str={link_prekey_id}, prekey_id_bytes={crypto.b64encode(link_prekey_id_bytes)}")
 
     # Create inner event
     inner_event_data = {

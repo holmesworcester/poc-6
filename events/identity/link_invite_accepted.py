@@ -77,6 +77,7 @@ def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db
     link_public_key = crypto.b64decode(link_invite_event['link_pubkey'])
 
     # Store link proof keypair in group_prekeys table (for GKS decryption)
+    log.warning(f"[LINK_INVITE_ACCEPTED_STORE_PREKEY] prekey_id_str={link_prekey_id}, prekey_id_bytes={crypto.b64encode(crypto.b64decode(link_prekey_id))}")
     safedb.execute(
         """INSERT OR IGNORE INTO group_prekeys
            (prekey_id, owner_peer_id, public_key, private_key, created_at, recorded_by)

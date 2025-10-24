@@ -602,7 +602,7 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes 
     key_data = get_event_key_by_id(id_bytes, recorded_by, db)
     if not key_data:
         key_id_b64 = b64encode(id_bytes)
-        log.warning(f"crypto.unwrap_event() key not found for id={key_id_b64} (should block until key arrives)")
+        log.warning(f"[UNWRAP_KEY_MISSING] id_bytes_len={len(id_bytes)}, key_id={key_id_b64}, recorded_by={recorded_by[:20]}... (should block until key arrives)")
         return (None, [key_id_b64])  # Always block on event layer
 
     # Extract the encrypted portion (after the id)
