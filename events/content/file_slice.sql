@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS file_slices (
     nonce BLOB NOT NULL,
     ciphertext BLOB NOT NULL,
     poly_tag BLOB NOT NULL,
+    event_id TEXT,  -- Event ID of the file_slice event (for sync_file)
     created_at INTEGER NOT NULL DEFAULT 0,
     ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
     recorded_by TEXT NOT NULL,

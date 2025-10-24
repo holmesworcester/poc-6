@@ -438,12 +438,61 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_fil
 
     log.info(f"sync_file.project() sending {len(slices_to_send)} slices to requester")
 
-    # TODO: Implement actual slice sending
-    # This requires:
-    # 1. Getting slice event IDs from file_slices table (need to add event_id column)
-    # 2. Wrapping slice blobs with requester's transit prekey
-    # 3. Adding wrapped slices to incoming queue
-    # 4. Updating file_sync_state with progress
-    #
-    # For now, just log that slices would be sent
-    log.debug(f"sync_file.project() would send slices: {slices_to_send}")
+    # Get requester's transit prekey for wrapping response slices
+    from events.transit import transit_prekey
+    try:
+        requester_prekey_dict = transit_prekey.get_transit_prekey_for_peer(requester_peer_id, recorded_by, db)
+        if not requester_prekey_dict:
+            log.warning(f"sync_file.project() no prekey for requester {requester_peer_id[:20]}...")
+            return
+    except Exception as e:
+        log.warning(f"sync_file.project() failed to get requester prekey: {e}")
+        return
+
+    import queues
+    slices_sent = 0
+
+    # Send each slice wrapped with requester's prekey
+    for slice_num in slices_to_send:
+        try:
+            # Get slice from file_slices table
+            slice_row = safedb.query_one(
+                "SELECT event_id, ciphertext, nonce, poly_tag FROM file_slices "
+                "WHERE file_id = ? AND slice_number = ? AND recorded_by = ? LIMIT 1",
+                (file_id, slice_num, recorded_by)
+            )
+
+            if not slice_row:
+                log.warning(f"sync_file.project() slice not found: {file_id[:20]}.../{slice_num}")
+                continue
+
+            slice_event_id = slice_row['event_id']
+            if not slice_event_id:
+                # Event ID should have been stored during projection, log warning
+                log.warning(f"sync_file.project() slice event_id missing for {file_id[:20]}.../{slice_num}")
+                continue
+
+            # Get the slice event blob from store
+            slice_blob = store.get(slice_event_id, db)
+            if not slice_blob:
+                log.warning(f"sync_file.project() slice blob not found: {slice_event_id[:20]}...")
+                continue
+
+            # Wrap slice with requester's transit prekey
+            wrapped_slice = crypto.wrap(slice_blob, requester_prekey_dict, db)
+
+            # Add to incoming queue for requester to receive
+            queues.incoming.add(wrapped_slice, recorded_at, db)
+
+            slices_sent += 1
+            log.debug(f"sync_file.project() queued slice {slice_num} for requester")
+
+        except Exception as e:
+            log.warning(f"sync_file.project() failed to send slice {slice_num}: {e}")
+            continue
+
+    log.info(f"sync_file.project() successfully queued {slices_sent}/{len(slices_to_send)} slices")
+
+    # Update file_sync_state with current progress
+    update_file_sync_state(file_id, requester_peer_id, recorded_by,
+                          window_id, w_param, slices_sent, len(responder_slices), recorded_at, db)

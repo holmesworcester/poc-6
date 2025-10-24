@@ -89,12 +89,12 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Insert or ignore
+    # Insert or ignore (now includes event_id for sync_file)
     safedb.execute(
         """INSERT OR IGNORE INTO file_slices
-           (file_id, slice_number, nonce, ciphertext, poly_tag, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (file_id, slice_number, nonce, ciphertext, poly_tag, recorded_by, recorded_at)
+           (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
     )
 
     # Record dependency: slice depends on file (for cascading deletion)
