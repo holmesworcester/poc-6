@@ -565,14 +565,18 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
 
         # TODO: Peer/user removal checks will be added in future work
 
-        # Use bootstrap mode only if WE haven't completed bootstrap yet (per-peer, not per-relationship)
-        # Once we receive any sync request, we're done bootstrapping and use bloom-filtered sync
-        if not my_bootstrap_complete:
-            # Bootstrap mode: only for joiners who haven't received sync acknowledgment yet
-            log.debug(f"[BOOTSTRAP_MODE] {peer_id_str[:20]}... -> {ps_id[:20]}... mode=bootstrap (my_complete={my_bootstrap_complete})")
+        # Use bootstrap mode if:
+        # 1. WE (the sender) haven't completed bootstrap yet, OR
+        # 2. WE are a creator (should send all data on first sync)
+        # This ensures all data is sent to new joiners in multi-device linking scenarios
+        use_bootstrap = not my_bootstrap_complete or is_creator
+
+        if use_bootstrap:
+            # Bootstrap mode: sender sends all events
+            log.warning(f"[BOOTSTRAP_SEND] {peer_id_str[:20]}... (is_creator={is_creator}) -> {ps_id[:20]}... mode=bootstrap")
             send_bootstrap_to_peer(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
         else:
-            # Use normal bloom-filtered sync (creators always use this, joiners use it after receiving sync)
+            # Use normal bloom-filtered sync
             log.info(f"send_requests: {peer_id_str[:20]}... -> {ps_id[:20]}... mode=sync")
             send_request(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
 

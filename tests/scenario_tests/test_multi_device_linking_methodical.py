@@ -104,6 +104,7 @@ def test_methodical_link_join():
     # Setup: Create phone and link invite
     alice_phone = user.new_network(name='Alice', t_ms=1000, db=db)
     db.commit()
+    print(f"  PHONE peer_id={alice_phone['peer_id'][:20]}...")
 
     link_invite_id, link_url, link_data = link_invite.create(
         peer_id=alice_phone['peer_id'],
@@ -185,6 +186,7 @@ def test_methodical_gks_sync():
     import store
 
     safedb_phone = create_safe_db(db, recorded_by=alice_phone['peer_id'])
+    print(f"  Querying shareable_events for PHONE peer_id={alice_phone['peer_id'][:20]}...")
 
     # Query shareable events in two ways:
     # 1. With created_at filter (like the test was doing)
@@ -258,7 +260,7 @@ def test_methodical_gks_sync():
         db=db
     )
     db.commit()
-    print(f"✓ Laptop joined")
+    print(f"✓ Laptop joined: peer_id={alice_laptop['peer_id'][:20]}...")
 
     # Check: Did laptop get the GKS events?
     from events.transit import sync
