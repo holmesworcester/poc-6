@@ -623,16 +623,55 @@ def send_bootstrap_to_peer(to_peer_shared_id: str, from_peer_id: str, from_peer_
         log.info(f"send_bootstrap_to_peer: no events to send, skipping")
         return
 
-    # Get recipient's prekey for wrapping using standard helper
-    recipient_key_dict = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+    # Get recipient's prekey for bootstrap wrapping
+    # Bootstrap uses the invite_prekey (same as GKS wrapping) since recipient has the invite_private_key
+    # This avoids the deadlock where recipient's transit_prekey hasn't been synced yet
+
+    unsafedb = create_unsafe_db(db)
+    recipient_key_dict = None
+
+    # Try to find any invite we created (they should all have the same prekey_id and pubkey for this user)
+    all_invites = safedb.query(
+        "SELECT invite_id, invite_pubkey FROM invites WHERE recorded_by = ? LIMIT 1",
+        (from_peer_id,)
+    )
+
+    if all_invites:
+        # Get the invite details from the store
+        for invite_row in all_invites:
+            invite_id = invite_row['invite_id']
+            invite_blob = store.get(invite_id, unsafedb)
+            if not invite_blob:
+                continue
+
+            try:
+                invite_data = crypto.parse_json(invite_blob)
+                # Extract the prekey that was used for this invite
+                invite_prekey_id = invite_data.get('invite_prekey_id')
+                invite_pubkey_b64 = invite_data.get('invite_pubkey')
+
+                if invite_prekey_id and invite_pubkey_b64:
+                    # Build prekey dict for wrapping (same pattern as create_for_invite)
+                    recipient_key_dict = {
+                        'id': crypto.b64decode(invite_prekey_id),
+                        'public_key': crypto.b64decode(invite_pubkey_b64),
+                        'type': 'asymmetric'
+                    }
+                    log.info(f"send_bootstrap_to_peer: using invite prekey for {to_peer_shared_id[:20]}... from invite {invite_id[:20]}...")
+                    break
+            except Exception as e:
+                log.debug(f"send_bootstrap_to_peer: error processing invite {invite_id[:20]}...: {e}")
+                continue
+
+    # Fallback: try recipient's transit prekey (for backwards compatibility)
+    if not recipient_key_dict:
+        recipient_key_dict = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
 
     if not recipient_key_dict:
-        log.warning(f"send_bootstrap_to_peer: no prekey found for {to_peer_shared_id[:20]}..., cannot send")
+        log.warning(f"send_bootstrap_to_peer: no prekey found for {to_peer_shared_id[:20]}... (no invite, no transit prekey), cannot send")
         return
 
     # Wrap and send each event
-    unsafedb = create_unsafe_db(db)
-
     for row in all_shareable:
         event_id = row['event_id']
         event_blob = store.get(event_id, unsafedb)
