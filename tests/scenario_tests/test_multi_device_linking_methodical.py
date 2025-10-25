@@ -4,6 +4,7 @@ import logging
 from db import Database
 import schema
 from events.identity import user, link_invite, link
+from events.transit import sync
 
 
 def setup_logging():
@@ -262,6 +263,25 @@ def test_methodical_gks_sync():
     db.commit()
     print(f"✓ Laptop joined: peer_id={alice_laptop['peer_id'][:20]}...")
 
+    # Debug: Check shareable_events for phone AFTER link.join()
+    gks_events_after_join = safedb_phone.query(
+        """SELECT event_id, created_at FROM shareable_events
+           WHERE can_share_peer_id = ?
+           ORDER BY created_at""",
+        (alice_phone['peer_id'],)
+    )
+    print(f"  After link.join(): phone has {len(gks_events_after_join)} shareable events (was {len(gks_events_from_phone)})")
+    if len(gks_events_after_join) != len(gks_events_from_phone):
+        print(f"  Event count changed! Checking which ones...")
+        before_set = set(e['event_id'] for e in gks_events_from_phone)
+        after_set = set(e['event_id'] for e in gks_events_after_join)
+        removed = before_set - after_set
+        added = after_set - before_set
+        if removed:
+            print(f"    Removed ({len(removed)}): {list(removed)[:3]}")
+        if added:
+            print(f"    Added ({len(added)}): {list(added)[:3]}")
+
     # Check: Did laptop get the GKS events?
     from events.transit import sync
 
@@ -329,6 +349,58 @@ def test_methodical_gks_sync():
         print(f"  Laptop has {len(blocked_events)} blocked events:")
         for evt in blocked_events:
             print(f"    {evt['recorded_id'][:20]}... blocked on: {evt['missing_deps']}")
+
+    # Test 3b: Create messages and verify laptop can decrypt and see them
+    print(f"\n=== TEST 3b: Message sync and decryption ===")
+    from events.content import message
+
+    # Create a message on the phone
+    msg_result = message.create(
+        peer_id=alice_phone['peer_id'],
+        channel_id=alice_phone['channel_id'],
+        content="Test message for linked device",
+        t_ms=5000,
+        db=db
+    )
+    message_id = msg_result['id']
+    db.commit()
+    print(f"✓ Phone created message: {message_id[:20]}...")
+
+    # Sync message to laptop
+    sync.send_request_to_all(t_ms=6000, db=db)
+    db.commit()
+    sync.receive(batch_size=100, t_ms=6000, db=db)
+    db.commit()
+    print(f"✓ Message synced (send + receive)")
+
+    # Check: Does laptop have the message?
+    laptop_msg = safedb_laptop.query_one(
+        "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (message_id, alice_laptop['peer_id'])
+    )
+
+    if laptop_msg:
+        print(f"✓ ASSERTION PASSED: Laptop can see message")
+        print(f"  Message content: '{laptop_msg['content']}'")
+        assert laptop_msg['content'] == "Test message for linked device", "Message content should match"
+        print(f"✓ ASSERTION PASSED: Message content matches")
+    else:
+        print(f"✗ ASSERTION FAILED: Laptop cannot see message")
+        print(f"  This means GKS events were not synced correctly or laptop cannot decrypt them")
+
+        # Debug: Check if message event is on laptop
+        safedb_laptop_unsafe = create_unsafe_db(db)
+        msg_blob = store.get(message_id, safedb_laptop_unsafe)
+        if msg_blob:
+            print(f"  ✓ Message blob is on laptop (but not in messages table - decryption failed?)")
+        else:
+            print(f"  ✗ Message blob is NOT on laptop (sync didn't send it)")
+
+        # Check if GKS was the issue
+        if not laptop_has_key:
+            print(f"  ✗ Laptop still doesn't have group key (GKS sync failed)")
+
+        raise AssertionError("Linked device should be able to see messages created before linking")
 
 
 if __name__ == '__main__':
