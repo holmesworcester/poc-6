@@ -186,13 +186,17 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     if network_row:
         all_users_group_id = network_row['all_users_group_id']
 
-        # Get all groups that contain this user (they're in the all_users_group)
-        # Also get channels within those groups
-        # For now, just share the all_users_group key
+        # Get all groups in the network that the user is a member of
+        # Query for all groups that have members (user is member of all_users_group, which contains all groups)
         group_rows = safedb.query(
-            "SELECT DISTINCT group_id, key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
-            (all_users_group_id, peer_id)
+            """SELECT DISTINCT g.group_id, g.key_id
+               FROM groups g
+               WHERE g.recorded_by = ?
+               ORDER BY g.group_id""",
+            (peer_id,)
         )
+
+        log.info(f"link_invite.create() found {len(group_rows)} groups to share keys for")
 
         ts = t_ms + 1
         for group_row in group_rows:
@@ -201,6 +205,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
             # Create group_key_shared sealed to link_prekey
             # This follows the same pattern as create_for_invite
+            # Share the group key so the linked device can immediately decrypt messages in all groups
             group_key_shared_id = group_key_shared.create_for_link_invite(
                 key_id=key_id,
                 peer_id=peer_id,

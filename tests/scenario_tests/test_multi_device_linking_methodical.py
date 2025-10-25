@@ -10,7 +10,7 @@ from events.transit import sync
 def setup_logging():
     """Setup detailed logging for debugging."""
     logging.basicConfig(
-        level=logging.WARNING,  # Show all warnings and errors
+        level=logging.INFO,  # Show all info, warnings and errors
         format='%(levelname)-8s %(name)s:%(lineno)d %(message)s',
         force=True
     )
@@ -354,6 +354,148 @@ def test_methodical_gks_sync():
     print(f"\n=== TEST 3b: Message sync and decryption ===")
     from events.content import message
 
+    # Debug: Check if PHONE has GKS events in shareable_events
+    print(f"DEBUG: Checking if phone has GKS events in shareable_events...")
+    safedb_phone = create_safe_db(db, recorded_by=alice_phone['peer_id'])
+    phone_gks_shareable = safedb_phone.query_one(
+        """SELECT COUNT(*) as count FROM shareable_events
+           WHERE can_share_peer_id = ?""",
+        (alice_phone['peer_id'],)
+    )
+    print(f"  Phone has {phone_gks_shareable['count']} shareable events")
+
+    # Also check projected events
+    phone_projected = safedb_phone.query_one(
+        """SELECT COUNT(*) as count FROM projected_events
+           WHERE recorded_by = ? AND event_type = 'group_key_shared'""",
+        (alice_phone['peer_id'],)
+    )
+    print(f"  Phone has {phone_projected['count']} GKS projected events")
+
+    # Debug: List the shareable events to see what types they are
+    shareable_list = safedb_phone.query(
+        """SELECT event_id FROM shareable_events
+           WHERE can_share_peer_id = ? ORDER BY created_at ASC LIMIT 20""",
+        (alice_phone['peer_id'],)
+    )
+    print(f"  Shareable events (first {len(shareable_list)}):")
+    gks_count_encrypted = 0
+    for evt in shareable_list:
+        # Try to peek at the event type
+        evt_blob = store.get(evt['event_id'], unsafedb)
+        if evt_blob:
+            try:
+                import json
+                evt_data = json.loads(evt_blob.decode())
+                print(f"    {evt['event_id'][:20]}... type={evt_data.get('type', 'unknown')}")
+            except:
+                print(f"    {evt['event_id'][:20]}... (encrypted or unparseable)")
+                gks_count_encrypted += 1
+        else:
+            print(f"    {evt['event_id'][:20]}... (blob not found)")
+
+    print(f"  Encrypted (GKS) events in shareable: {gks_count_encrypted}")
+    print(f"  GKS projected on phone: {phone_projected['count']}")
+    print(f"  Difference (encrypted GKS not being projected): {gks_count_encrypted - phone_projected['count']}")
+
+    # Debug: Check if PHONE has the link_private_key
+    print(f"DEBUG: Checking if phone has link_private_key...")
+    phone_has_link_key = safedb_phone.query_one(
+        "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
+        (link_data['link_prekey_id'], alice_phone['peer_id'], alice_phone['peer_id'])
+    )
+    if phone_has_link_key:
+        print(f"  ✓ Phone HAS link_private_key in group_prekeys")
+    else:
+        print(f"  ✗ Phone MISSING link_private_key!")
+        # Check what prekeys phone has
+        phone_prekeys = safedb_phone.query(
+            "SELECT prekey_id FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ?",
+            (alice_phone['peer_id'], alice_phone['peer_id'])
+        )
+        print(f"  Phone has {len(phone_prekeys)} group_prekeys:")
+        for pk in phone_prekeys:
+            print(f"    {pk['prekey_id'][:30]}...")
+
+    # Debug: Check if laptop has the link_private_key (needed to decrypt GKS)
+    print(f"DEBUG: Checking if laptop can decrypt GKS events...")
+    print(f"  Looking for link_prekey_id={link_data['link_prekey_id'][:20]}...")
+    link_prekey_check = safedb_laptop.query_one(
+        "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
+        (link_data['link_prekey_id'], alice_laptop['peer_id'], alice_laptop['peer_id'])
+    )
+    if link_prekey_check:
+        print(f"  ✓ Laptop has link_private_key in group_prekeys")
+    else:
+        print(f"  ✗ Laptop MISSING link_private_key - GKS decryption will fail!")
+        # List all prekeys laptop has
+        all_prekeys = safedb_laptop.query(
+            "SELECT prekey_id FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ?",
+            (alice_laptop['peer_id'], alice_laptop['peer_id'])
+        )
+        print(f"  Laptop has {len(all_prekeys)} prekeys:")
+        for pk in all_prekeys:
+            print(f"    {pk['prekey_id'][:30]}...")
+
+    # Debug: Check what GKS events the laptop has
+    print(f"DEBUG: Checking laptop's GKS events...")
+    laptop_gks_shared = safedb_laptop.query_one(
+        """SELECT COUNT(*) as count FROM group_prekeys_shared
+           WHERE recorded_by = ?""",
+        (alice_laptop['peer_id'],)
+    )
+    print(f"  Laptop has {laptop_gks_shared['count']} group_prekeys_shared entries")
+
+    # Check if laptop has valid group keys
+    laptop_keys = safedb_laptop.query_one(
+        """SELECT COUNT(*) as count FROM group_keys
+           WHERE recorded_by = ?""",
+        (alice_laptop['peer_id'],)
+    )
+    print(f"  Laptop has {laptop_keys['count']} group_keys entries")
+
+    # List the group keys
+    laptop_keys_list = safedb_laptop.query(
+        """SELECT key_id FROM group_keys
+           WHERE recorded_by = ?""",
+        (alice_laptop['peer_id'],)
+    )
+    print(f"  Key IDs:")
+    for key in laptop_keys_list:
+        print(f"    {key['key_id'][:30]}...")
+
+    # Debug: Check if GKS events are synced at all
+    print(f"DEBUG: Checking if GKS events are synced to laptop...")
+    from db import create_unsafe_db
+    unsafedb_laptop = create_unsafe_db(db)
+    gks_count = safedb_laptop.query_one(
+        """SELECT COUNT(*) as count FROM projected_events
+           WHERE event_type = 'group_key_shared' AND recorded_by = ?""",
+        (alice_laptop['peer_id'],)
+    )
+    if gks_count and gks_count['count'] > 0:
+        print(f"  ✓ Laptop has {gks_count['count']} GKS events projected")
+        # Try to list them
+        gks_list = safedb_laptop.query(
+            """SELECT event_id FROM projected_events
+               WHERE event_type = 'group_key_shared' AND recorded_by = ?
+               LIMIT 5""",
+            (alice_laptop['peer_id'],)
+        )
+        for gks in gks_list:
+            # Try to check if it was successfully projected
+            print(f"    {gks['event_id'][:20]}... (already projected)")
+    else:
+        print(f"  ✗ Laptop has NO GKS events projected")
+        # Check if they're in shareable_events at all
+        shareable_count = safedb_laptop.query_one(
+            """SELECT COUNT(*) as count FROM shareable_events
+               WHERE can_share_peer_id = ?""",
+            (alice_laptop['peer_id'],)
+        )
+        print(f"  Laptop has {shareable_count['count']} shareable events total")
+        print(f"  This means GKS events were not synced or not projected")
+
     # Create a message on the phone
     msg_result = message.create(
         peer_id=alice_phone['peer_id'],
@@ -366,12 +508,13 @@ def test_methodical_gks_sync():
     db.commit()
     print(f"✓ Phone created message: {message_id[:20]}...")
 
-    # Sync message to laptop
-    sync.send_request_to_all(t_ms=6000, db=db)
-    db.commit()
-    sync.receive(batch_size=100, t_ms=6000, db=db)
-    db.commit()
-    print(f"✓ Message synced (send + receive)")
+    # Sync message to laptop (may need multiple rounds to fully converge)
+    for sync_round in range(5):
+        sync.send_request_to_all(t_ms=6000 + sync_round * 100, db=db)
+        db.commit()
+        sync.receive(batch_size=100, t_ms=6050 + sync_round * 100, db=db)
+        db.commit()
+    print(f"✓ Message synced (5 sync rounds completed)")
 
     # Check: Does laptop have the message?
     laptop_msg = safedb_laptop.query_one(
