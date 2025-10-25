@@ -329,3 +329,157 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
     log.info(f"message_attachment.get_file_data() successfully retrieved {file_id[:20]}..., "
              f"size={len(plaintext_full)}B")
     return plaintext_full
+
+
+def get_file_download_progress(file_id: str, recorded_by: str, db: Any,
+                               prev_progress: dict[str, Any] | None = None,
+                               elapsed_ms: int | None = None) -> dict[str, Any] | None:
+    """Get download progress for a file attachment.
+
+    Returns progress information for UI/frontend display:
+    - slices_received: Number of slices downloaded so far
+    - total_slices: Total slices in the file
+    - percentage_complete: 0-100 (int)
+    - is_complete: Boolean (all slices received)
+    - filename: Original filename
+    - size_bytes: Total file size
+    - size_human: Human-readable size (e.g., "1.2 MB")
+    - speed_bytes_per_sec: Download speed in bytes/second (requires elapsed_ms)
+    - speed_human: Human-readable speed (e.g., "1.2 MB/s")
+    - eta_seconds: Estimated seconds to complete (requires elapsed_ms)
+
+    For calculating speed:
+    1. Call progress = get_file_download_progress(file_id, peer_id, db)
+    2. Wait some time (e.g., 100ms or 1 second)
+    3. Call progress = get_file_download_progress(file_id, peer_id, db,
+                                                   prev_progress=progress,
+                                                   elapsed_ms=time_waited_in_ms)
+
+    This enables progress displays like:
+    "Downloading file.pdf (3 of 5 slices, 60% complete) - 2.3 MB/s, ETA 2s"
+
+    Args:
+        file_id: File ID to check progress
+        recorded_by: Peer requesting progress (access control)
+        db: Database connection
+        prev_progress: Previous progress dict (for speed calculation)
+        elapsed_ms: Milliseconds elapsed since prev_progress (for speed calculation)
+
+    Returns:
+        Progress dict, or None if attachment not found
+
+    Example:
+        progress = get_file_download_progress(file_id, peer_id, db)
+        if progress:
+            print(f"Downloading {progress['filename']}: "
+                  f"{progress['slices_received']}/{progress['total_slices']} slices "
+                  f"({progress['percentage_complete']}%)")
+
+        # To show speed and ETA:
+        time.sleep(0.1)
+        progress = get_file_download_progress(file_id, peer_id, db,
+                                             prev_progress=progress,
+                                             elapsed_ms=100)
+        if progress:
+            print(f"{progress['filename']}: {progress['percentage_complete']}% "
+                  f"({progress['speed_human']}, ETA {progress['eta_seconds']}s)")
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get attachment metadata
+    attachment_row = safedb.query_one(
+        "SELECT filename, blob_bytes, total_slices "
+        "FROM message_attachments WHERE file_id = ? AND recorded_by = ? LIMIT 1",
+        (file_id, recorded_by)
+    )
+    if not attachment_row:
+        return None
+
+    total_slices = attachment_row['total_slices']
+    size_bytes = attachment_row['blob_bytes']
+    filename = attachment_row['filename'] or 'untitled'
+
+    # Count received slices
+    slice_rows = safedb.query_all(
+        "SELECT COUNT(*) as count FROM file_slices "
+        "WHERE file_id = ? AND recorded_by = ?",
+        (file_id, recorded_by)
+    )
+    slices_received = slice_rows[0]['count'] if slice_rows else 0
+
+    # Calculate percentage
+    if total_slices > 0:
+        percentage_complete = int((slices_received / total_slices) * 100)
+    else:
+        percentage_complete = 0
+
+    is_complete = (slices_received == total_slices)
+
+    # Human-readable size
+    size_human = _format_bytes(size_bytes)
+
+    # Calculate speed and ETA if we have previous progress
+    speed_bytes_per_sec = 0
+    speed_human = "0 B/s"
+    eta_seconds = None
+
+    if prev_progress is not None and elapsed_ms is not None and elapsed_ms > 0:
+        # Calculate bytes transferred
+        prev_slices = prev_progress.get('slices_received', 0)
+        slices_transferred = slices_received - prev_slices
+
+        # Each slice is approximately (blob_bytes / total_slices)
+        bytes_per_slice = size_bytes // total_slices if total_slices > 0 else 0
+        bytes_transferred = slices_transferred * bytes_per_slice
+
+        # Calculate speed in bytes/second
+        elapsed_seconds = elapsed_ms / 1000.0
+        if elapsed_seconds > 0:
+            speed_bytes_per_sec = int(bytes_transferred / elapsed_seconds)
+            speed_human = _format_bytes(speed_bytes_per_sec) + "/s"
+
+            # Calculate ETA
+            if speed_bytes_per_sec > 0 and not is_complete:
+                remaining_bytes = size_bytes - (slices_received * bytes_per_slice)
+                eta_seconds = int(remaining_bytes / speed_bytes_per_sec)
+
+    log.debug(f"get_file_download_progress() file_id={file_id[:20]}..., "
+              f"progress={slices_received}/{total_slices} ({percentage_complete}%), "
+              f"speed={speed_human}")
+
+    result = {
+        'file_id': file_id,
+        'filename': filename,
+        'slices_received': slices_received,
+        'total_slices': total_slices,
+        'percentage_complete': percentage_complete,
+        'is_complete': is_complete,
+        'size_bytes': size_bytes,
+        'size_human': size_human,
+        'speed_bytes_per_sec': speed_bytes_per_sec,
+        'speed_human': speed_human,
+    }
+
+    if eta_seconds is not None:
+        result['eta_seconds'] = eta_seconds
+
+    return result
+
+
+def _format_bytes(num_bytes: int) -> str:
+    """Convert bytes to human-readable format.
+
+    Args:
+        num_bytes: Number of bytes
+
+    Returns:
+        String like "1.2 MB" or "45 KB"
+    """
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if num_bytes < 1024:
+            if unit == 'B':
+                return f"{num_bytes} {unit}"
+            else:
+                return f"{num_bytes / 1024:.1f} {unit}"
+        num_bytes /= 1024
+    return f"{num_bytes / 1024:.1f} PB"

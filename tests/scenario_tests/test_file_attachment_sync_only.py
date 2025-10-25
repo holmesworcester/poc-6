@@ -14,7 +14,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite
-from events.content import channel, message, file
+from events.content import channel, message, message_attachment
 from events.transit import sync
 
 
@@ -164,24 +164,23 @@ def test_file_attachment_sync_only():
         sync.receive(batch_size=50, t_ms=6050 + round_num * 100, db=db)
         db.commit()
 
-        # Check progress
-        bob_file = db.query_one(
-            "SELECT file_id FROM files WHERE file_id = ? AND recorded_by = ?",
-            (file_id, bob['peer_id'])
-        )
-        bob_slices = db.query_all(
-            "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
-            (file_id, bob['peer_id'])
-        )
-        print(f"  Round {round_num}: file={'✓' if bob_file else '✗'}, slices={len(bob_slices)}/{slice_count}")
+        # Check progress using API (what frontends would use)
+        progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
+        if progress:
+            print(f"  Round {round_num}: {progress['filename']} - "
+                  f"{progress['slices_received']}/{progress['total_slices']} slices "
+                  f"({progress['percentage_complete']}%) "
+                  f"[{progress['size_human']}]")
+        else:
+            print(f"  Round {round_num}: File not yet available")
 
     print("✓ Sync completed")
 
     print("\n=== Verify Bob received file ===")
 
-    # Bob should have file metadata
+    # Bob should have file metadata (in message_attachments)
     bob_file = db.query_one(
-        "SELECT file_id FROM files WHERE file_id = ? AND recorded_by = ?",
+        "SELECT file_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
         (file_id, bob['peer_id'])
     )
     assert bob_file is not None, "Bob should have file metadata"

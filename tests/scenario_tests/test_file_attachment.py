@@ -153,6 +153,12 @@ def test_two_party_file_attachment_and_sync():
         sync.receive(batch_size=50, t_ms=5050 + round_num * 100, db=db)
         db.commit()
 
+        # Show progress (demonstrating the progress API for frontends)
+        if round_num % 2 == 0:  # Show every other round to reduce noise
+            progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
+            if progress and not progress['is_complete']:
+                print(f"  Sync round {round_num}: {progress['slices_received']}/{progress['total_slices']} slices ({progress['percentage_complete']}%)")
+
     print("✓ Sync completed")
 
     print("\n=== Verify Bob received file ===")
