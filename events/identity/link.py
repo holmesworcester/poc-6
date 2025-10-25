@@ -343,6 +343,43 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     )
     log.info(f"link.join() created link_id={link_id[:20]}...")
 
+    # Create network_joined event to mark bootstrap intent (same as user.join)
+    # Gets existing_peer_shared_id from link_invite or user event
+    existing_peer_shared_id = None
+
+    # Try to get it from link_invite event data
+    if 'existing_peer_shared_blob' in link_data:
+        existing_peer_shared_blob_b64 = link_data['existing_peer_shared_blob']
+        existing_peer_shared_blob = base64.urlsafe_b64decode(existing_peer_shared_blob_b64 + '===')
+        try:
+            existing_peer_shared_data = crypto.parse_json(existing_peer_shared_blob)
+            existing_peer_shared_id = existing_peer_shared_data.get('peer_id')
+        except Exception as e:
+            log.debug(f"link.join() could not parse existing_peer_shared_blob: {e}")
+
+    if not existing_peer_shared_id:
+        # Try to get it from the link_invite event itself
+        link_invite_blob_check = store.get(link_invite_id, create_unsafe_db(db))
+        if link_invite_blob_check:
+            try:
+                link_invite_event_data = crypto.parse_json(link_invite_blob_check)
+                existing_peer_shared_id = link_invite_event_data.get('existing_peer_shared_id')
+            except Exception as e:
+                log.debug(f"link.join() could not parse link_invite: {e}")
+
+    if existing_peer_shared_id:
+        from events.identity import network_joined
+        network_joined_id = network_joined.create(
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            inviter_peer_shared_id=existing_peer_shared_id,
+            t_ms=t_ms + 3,  # After link creation
+            db=db
+        )
+        log.info(f"link.join() created network_joined {network_joined_id[:20]}... for peer {peer_id[:20]}...")
+    else:
+        log.warning(f"link.join() could not find existing_peer_shared_id, skipping network_joined creation")
+
     return {
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
