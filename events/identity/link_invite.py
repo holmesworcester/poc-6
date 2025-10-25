@@ -78,6 +78,24 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # Generate deterministic prekey ID from public key hash
     link_prekey_id = crypto.b64encode(crypto.hash(link_public_key)[:16])
 
+    # Store link_private_key in group_prekeys table for this peer
+    # This allows the creator (phone) to decrypt GKS events wrapped to link_prekey
+    # Same as how invite_accepted.project() stores invite_private_key
+    safedb.execute(
+        """INSERT OR IGNORE INTO group_prekeys
+           (prekey_id, owner_peer_id, public_key, private_key, created_at, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (
+            link_prekey_id,
+            peer_id,
+            link_public_key,
+            link_private_key,
+            t_ms,
+            peer_id
+        )
+    )
+    log.info(f"link_invite.create() stored link_private_key in group_prekeys with prekey_id={link_prekey_id[:20]}...")
+
     # Get existing device's transit prekey for new device to send sync requests
     existing_prekey_row = unsafedb.query_one(
         "SELECT transit_prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
