@@ -26,6 +26,7 @@ SUBJECTIVE_TABLES = {
     'addresses',
     'group_keys',                  # NEW: subjective group encryption keys
     'group_keys_shared',           # Group keys shared (subjective)
+    'invite_proofs',               # Invite proof validation (subjective)
     'group_prekeys',               # NEW: subjective group prekeys
     'group_prekeys_shared',        # Group prekeys shared (subjective)
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)
@@ -54,6 +55,7 @@ SUBJECTIVE_TABLES = {
     'network_addresses',           # Network address observations (peer-scoped)
     'pending_intros',              # Pending intro events for hole punching (peer-scoped)
     'removed_users',               # Removed users tracking (peer-scoped)
+    'invite_accepteds',            # Invite acceptance metadata (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
@@ -65,6 +67,7 @@ DEVICE_TABLES = {
     'incoming_blobs',
     'sync_state_ephemeral',
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
+    'sync_connections',            # Established connections for sync (device-wide)
 }
 
 

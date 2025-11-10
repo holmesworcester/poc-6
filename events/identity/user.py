@@ -71,25 +71,8 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     if network_id:
         event_data['network_id'] = network_id
 
-    # If joining via invite, add invite proof fields
-    if invite_private_key:
-        # Derive public key from private key
-        import nacl.signing
-        signing_key = nacl.signing.SigningKey(invite_private_key)
-        invite_public_key = bytes(signing_key.verify_key)
-        invite_pubkey_b64 = crypto.b64encode(invite_public_key)
-
-        # Sign proof message: peer_shared_id + ":" + invite_id
-        # This proves Bob knows the invite private key and is joining via this specific invite
-        proof_message = f"{peer_shared_id}:{invite_id}".encode('utf-8')
-        invite_signature = crypto.sign(proof_message, invite_private_key)
-        invite_signature_b64 = crypto.b64encode(invite_signature)
-
-        event_data['invite_pubkey'] = invite_pubkey_b64
-        event_data['invite_signature'] = invite_signature_b64
-
-        # Note: invite prekey is restored via invite_accepted.project()
-        # invite_accepted is created before user.create() in user.join()
+    # Note: Invite proof is now created as a separate invite_proof event
+    # (removed from user event to decouple invite validation)
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -178,24 +161,8 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         channel_id = invite_data['channel_id']
         key_id = invite_data['key_id']
 
-        # Validate invite proof if present (Bob proving he has invite private key)
-        if 'invite_pubkey' in event_data:
-            if not event_data.get('invite_signature'):
-                return None  # Missing signature
-
-            # Verify invite_pubkey matches invite event
-            if event_data['invite_pubkey'] != invite_data['invite_pubkey']:
-                log.warning(f"user.project() invite_pubkey mismatch")
-                return None
-
-            # Verify the Ed25519 signature: peer_id + ":" + invite_id
-            proof_message = f"{event_data['peer_id']}:{invite_id}".encode('utf-8')
-            invite_pubkey = crypto.b64decode(event_data['invite_pubkey'])
-            invite_signature = crypto.b64decode(event_data['invite_signature'])
-
-            if not crypto.verify(proof_message, invite_signature, invite_pubkey):
-                log.warning(f"user.project() invite proof signature verification failed")
-                return None
+        # Note: Invite proof validation is now handled by separate invite_proof event
+        # (removed from user.project() to decouple invite validation)
 
     # Insert into users table
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -216,23 +183,25 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         )
     )
 
-    # Insert into group_members table
-    # TODO: This should be refactored to use group_member events instead of direct insertion
-    # For now, we keep this to maintain functionality while we work on other features
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_members
-           (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            user_id,  # Use user_id as member_id for bootstrap membership
-            group_id,  # Extracted from invite event (or event_data for network creator)
-            user_id,
-            event_data['created_by'],  # Self-added for invite joins
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
+    # Add to group_members
+    # For invite joiners, this is handled by invite_proof.project()
+    # For network creators (no invite_id), we add directly here
+    if not invite_id:
+        # Network creator - add to group directly
+        safedb.execute(
+            """INSERT OR IGNORE INTO group_members
+               (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user_id,  # Use user_id as member_id for bootstrap membership
+                group_id,  # From event_data for network creator
+                user_id,
+                event_data['created_by'],  # Self-added
+                event_data['created_at'],
+                recorded_by,
+                recorded_at
+            )
         )
-    )
 
     # Mark user event as valid for this peer
     safedb.execute(
@@ -479,9 +448,9 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db
     )
 
-    # 2. Create user membership with invite proof (auto-creates transit_prekey + transit_prekey_shared)
+    # 2. Create user membership (auto-creates transit_prekey + transit_prekey_shared)
     # User event references invite_id (contains group/channel/key metadata)
-    # The invite private key is now available via invite_accepted projection
+    # Invite proof is created separately below
     user_id, transit_prekey_shared_id, prekey_id = create(
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
@@ -489,10 +458,24 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         t_ms=t_ms + 2,
         db=db,
         invite_id=invite_id,
-        invite_private_key=invite_private_key
+        invite_private_key=None  # No longer embedded in user event
     )
 
-    log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}")
+    # 3. Create separate invite_proof event
+    from events.identity import invite_proof
+    invite_proof_id = invite_proof.create(
+        invite_id=invite_id,
+        mode='user',
+        joiner_peer_shared_id=peer_shared_id,
+        user_id=user_id,
+        link_user_id=None,
+        invite_private_key=invite_private_key,
+        peer_id=peer_id,
+        t_ms=t_ms + 3,  # After user creation
+        db=db
+    )
+
+    log.info(f"join() user '{name}' joined: peer={peer_id}, group={group_id}, invite_proof={invite_proof_id[:20]}...")
 
     # Create network_joined event immediately to mark bootstrap intent
     # The inviter_peer_shared_id comes from the invite event
@@ -503,7 +486,7 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
             inviter_peer_shared_id=inviter_peer_shared_id,
-            t_ms=t_ms + 3,  # After user creation
+            t_ms=t_ms + 4,  # After invite_proof creation
             db=db
         )
         log.info(f"join() created network_joined {network_joined_id[:20]}... for peer {peer_id[:20]}...")

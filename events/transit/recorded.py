@@ -135,6 +135,10 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Invite events need creator to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet
         dep_fields = ['created_by']
+    elif event_type == 'invite_proof':
+        # Invite proof only depends on invite and created_by
+        # user_id/link_user_id are string IDs, not event IDs, so they're not dependencies
+        dep_fields = ['created_by', 'invite_id']
     elif event_type == 'message_deletion':
         # Deletion events only depend on the creator (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
@@ -302,7 +306,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'bootstrap_complete'}
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'bootstrap_complete', 'sync_connect'}
 
     should_mark_shareable = False
     if event_type:
@@ -427,9 +431,16 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.transit import sync
         sync.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
+    elif event_type == 'sync_connect':
+        from events.transit import sync_connect
+        sync_connect.project(ref_id, recorded_by, recorded_at, db)
+        projected_id = ref_id
     elif event_type == 'invite':
         from events.identity import invite
         projected_id = invite.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'invite_proof':
+        from events.identity import invite_proof
+        projected_id = invite_proof.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'user':
         from events.identity import user
         projected_id = user.project(ref_id, recorded_by, recorded_at, db)

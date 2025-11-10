@@ -119,4 +119,34 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         (invite_id, recorded_by)
     )
 
+    # Store inviter metadata in invite_accepteds table for connection establishment
+    # Extract inviter info from invite event
+    inviter_peer_shared_id = invite_event.get('created_by')
+    inviter_transit_prekey_id = invite_event.get('inviter_transit_prekey_id')
+    inviter_transit_prekey_public_key = None
+
+    if inviter_transit_prekey_id:
+        inviter_transit_prekey_public_key = crypto.b64decode(
+            invite_event.get('inviter_transit_prekey_public_key', '')
+        )
+
+    # Note: address and port would come from invite link OOB data
+    # For now, they remain NULL until we have network layer integration
+    safedb.execute("""
+        INSERT OR IGNORE INTO invite_accepteds
+        (invite_id, inviter_peer_shared_id, address, port,
+         inviter_transit_prekey_id, inviter_transit_prekey_public_key,
+         created_at, recorded_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        invite_id,
+        inviter_peer_shared_id,
+        None,  # address - TODO: extract from invite link
+        None,  # port - TODO: extract from invite link
+        inviter_transit_prekey_id,
+        inviter_transit_prekey_public_key,
+        event_data['created_at'],
+        recorded_by
+    ))
+
     log.info(f"invite_accepted.project() completed for {recorded_by}")

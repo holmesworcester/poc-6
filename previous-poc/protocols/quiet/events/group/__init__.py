@@ -1,1 +1,0 @@
-"""Group event type module."""
