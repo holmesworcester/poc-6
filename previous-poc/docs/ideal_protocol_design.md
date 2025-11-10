@@ -25,7 +25,7 @@ We have some levers:
 
 # Introduction
 
-We describe the protocol beginning with [Events](#Events) (how we store, transmit, and reconcile data) and moving into how we achieve specific kinds of functionality like group key agreement ([Groups](#Groups)), [Event-layer Encryption](#Event-Layer-Encryption), [Blobs](#Blobs), and optional server support. We include a [Threat Model](#appendix-f-threat-model) listing security invariants and known weaknesses.
+We describe the protocol beginning with [Events](#Events) (how we store, transmit, and reconcile data) and moving into how we achieve specific kinds of functionality like group key agreement ([Groups](#Groups)), [Event-layer Encryption](#Event-Layer-Encryption), [Files](#Files), and optional server support. We include a [Threat Model](#appendix-f-threat-model) listing security invariants and known weaknesses.
 
 # Events
 
@@ -41,9 +41,9 @@ Duplicate id's are rejected.
 
 ## Encoding
 
-All events are 512 bytes and contain fixed-length fields. See [Appendix A: Types and Layouts](#Appendix-A-—-Types-and-Layouts) for all event types and their content.
+All events are 512 bytes and contain fixed-length fields so that they can be handled by the simplest (regular) parsers. See [Appendix A: Types and Layouts](#Appendix-A-—-Types-and-Layouts) for all event types and their content.
 
-Except for `slice` events (see: [Blobs](#Blobs)) all events include a signature over their contents:
+Except for `slice` events (see: [Files](#Files)) all events include a signature over their contents:
 
 ```
 sign(evt, sk)   = crypto_sign_detached(evt, sk)
@@ -54,13 +54,9 @@ verify(evt, pk) = crypto_sign_verify_detached(sig, evt, pk)
 
 Some events' validity depends on the prior validation of other events. For example, an event that requires admin privileges depends on the event that made the user an admin.
 
-In this case we follow a *Block and Unblock* pattern whenever an event depends on another event or privilege we do not have: when an event depends on one we don't have yet, we mark it "blocked" and then search appropriately for events to *unblock* after validating each new event.
+In this case we follow a *Block and Unblock* pattern whenever an event depends on another event we do not have. When an event depends on one we don't have yet, we add it to a "blocked" table indexed by the events it is blocked by, and then search appropriately for events to *unblock* after validating each new event.
 
-To prevent infinite loops from cyclical dependencies or persistent validation failures, implementations should track a `retry_count` for each event. When an event is unblocked, its retry count is incremented. Events that reach 100 retry attempts are purged from the system rather than being unblocked again.
-
-We can add a `reason_blocked` field to all blocked events for observability, testing, and debugging.
-
-See [Appendix H: Implementation Notes](#appendix-h-implementation-notes) for notes on efficiency.
+This is a [topological sorting](https://en.wikipedia.org/wiki/Topological_sorting) problem for which there are efficient algorithms, such as Khan's algorithm. We can use queue's of incoming and unblocked events, as well as SQLite's atomicity guarantees, to ensure that no blocked event is left behind.
 
 ## Wire Protocol 
 
@@ -70,59 +66,92 @@ Events are small enough to travel between peers as UDP packets. All messages on 
 
 A group of peers securely sharing data (messages, channels, and file attachments) is a "network". 
 
-## Identity Creation
-
-Identity is a special event type that is not signed and only used locally. When joining or creating a network, Alice first creates a keypair. It contains this keypair and is never shared.
-
-This event is specific to the application, the device, and the network. If Alice joins 5 networks in 2 different applications on her phone, she will have 10 such keypairs.
-
-Choice: 1. include identity-id in events sealed to peer, so that on receiving side identity is resolved as any dependency OR 2. add special dependency resolution logic for identity so that sealers can use peer-id for it. 1 seems the better choice to begin with because it doesn't require special casing anything, and peers creating sealed keys or sync_requests can store identity if it is included in the peer events they know about. 
-
 ## Peer Creation
 
-Peer is the publicly shared version of `identity` containing the public key.   
+We call each device-specific identity a peer. Before creating or joining a network, Alice creates a fresh peer, a local-only, never-shared `peer` event with keypair and a shared `peer_shared` event with its public key. 
 
-The public key of an idenitity keypair is contained in the `peer` event and identified by `peer-id`, which also contains the `identity-id` (event-id of identity event).
+This event is specific to the application, the device, and the network. If Alice joins 5 networks in 2 different applications on her phone, she will have 10 `peer` and `peer_shared` events.
+
+## Event Signing
+
+All events except `peer` and `peer_shared` include a `created_by` field that references the `peer_shared_id`, and all events include a `signed_by` field that includes the signature over all other fields canonicalized, by the `peer` private key. This signature must validate for an event to be valid. 
+
+TODO: how does `recorded_by` work again? What events can't include `created_by`?
+
+## Recording
+
+A single instance may have many different peers. Some may be active in the same network as distinct users, as the same user with distinct linked devices, or both.
+
+As soon as an event is "first seen" by a peer we create a `recorded` event, referencing the `event_id` and `recorded_by` (the `peer_id`). 
+
+When the network is encrypted, by "first seen" we mean after the transit decryption layer has been unwrapped, revealing which peer the event is for, and before the event-layer encryption has been unwrapped. (An undecryptable event is still recorded.)
+
+When an event is created locally it is recorded upon creation. 
+
+This allows us to have shared tables for most event types (such as messages, users, etc.) indexed by (`event_id`, `recorded_by`) to distinguish between which peers they are visible to. This also lets us scope database access by `peer_id`. 
 
 ## Network Creation
 
-To create a network, Alice creates a `group` event with an optional name (see: [Groups](#groups)).
+To create a network, Alice creates a `network` event with `created_by` equal to her `peer_shared_id`.
 
-She then creates a `network` event that mentions this `group-id`. 
+She then creates an `admin` event with network equal to `network_id` and its `created_by` equal to her `peer_shared_id` also.  
 
-The `event-id` for the `network` event becomes the `network-id` for the new network.
-
-## Admin Group
-
-If the network requires a separate group of admins, Alice names two groups in network: members=`group-id` and admins=`group-id`. 
-
-This way, all joiners who know the `network` event will know who the admins are. 
-
-## Address Publishing
-
-To make her peer reachable on the network, Alice creates an `address` event that includes her `peer-id`, a network transport (e.g. UDP), her network address, and a port. Every peer on the network periodically creates `address` events with their own latest address information. Other peers use the latest `address` events for each peer.
+Note that all of these are blocked until [Joining](#joining) concludes and blesses Alice's `peer_shared_id` as the `first_peer`. That is, Alice must invite herself to the network and join to complete network creation.
 
 ## Invitation
 
-To invite users to the network, Alice creates a new secret (`invite-secret`) that is not shared (or is shared but sealed to per peer-id only, which makes more sense?) and derives a keypair from it using a KDF. 
+To invite users to the network, including herself, Alice creates  `group_prekey` event (see: [Forward Secrecy](#forward-secrecy)) and an `add_users` event referencing her `admin` and `user` events and the `group_prekey_id`.
 
-She creates an `invite` event that includes the `network-id` and public key of this keypair and the `key-id` of the secret, never-shared `invite-secret` used. The `invite` event also seals an event-layer encryption to all existing members and names it by its `key-id` (encrypt_to=`key-id`) in the invite event, and provides this secret in the link. 
+She then creates a new public/private keypair, an `invite` event and a corresponding Signal-style "invite link" that can be shared in an out-of-band message or QR code: e.g. `https://app.com/join#[invite_data]`
 
-She then generates a Signal-style "invite link" by base64 encoding the original secret, the `network-id`, and a recent `address` event into a URL that can be shared in an out-of-band message or QR code: `https://app.com/join#[encoded-data]`
+`invite` contains:
+- add_users=`add_users_id`
+- the invite public key
+- Alice's `admin_id`
 
-To be valid, `invite` events must name the correct `network-id`. Later we may require that they be created by an admin. (TODO)
+To be valid, `invite` events' `created_by` must match created by an `admin` identified in the `network` event. (TODO: ensure `admin` events are by peer and not by user!)
 
-## Joining
+The `invite_data` is base64 encoded and includes:
+- `first_peer` (the `peer_shared_id` of the first peer in the network)
+- `invite_id` - the event id of the `invite` event 
+- `invite_private_key` - the invite private key
+- the `group_prekey_id` and its corresponding private key (see: [Forward Secrecy](#forward-secrecy))
+- the `public_ip` and `port` of the most available peer in the network (initially, Alice's own)
+- the public key of a `transit_prekey_shared` event and the `transit_prekey_shared_id` for use as a key hint.
+- the `group_prekey` private key and the `group_prekey_id`
 
-Alice then joins the network. She derives the keypair from the secret using the KDF, creates a `user` event that includes a signed proof of her own `invite` data wrapping her `peer-id` and the `network-id` and including her username.  
+Notes: 
 
-The `event-id` of this `user` event is her `user-id`. (Really, this process of "joining" happens back in the network creation step in a single flow, but we separate it out here to describe the invitation process separately.)
+1. Referencing an `add_users_id` or an `add_devices_id` lets us re-use the invitation mechanism for multi-device linking (see: [Linking Peers on Multiple Devices](#linking-peers-on-multiple-devices)).
+1. Making the first user Alice join herself using an invite link eliminates (mostly) the special case of the first user. (For this simplifation to work, `admin` events must be per-peer and not per-user, or alternatively the `first_peer` must be special-cased as an admin.) 
 
-Once Alice provides an invite link to Bob, he creates an identity and peer (see: [Identity Creation](#identity-creation)) and joins using the same process. He then sends his `user` and `peer` and `address` events to Alice, event encrypted to the secret in the invite, transit-encrypted by being sealed to the public key in the invite, making as many attempts as needed. When the invite expires, Alice purges the invite private key.
+## Joining (Graph)
 
-When Alice receives them, she can send events to Bob too. We have a network! Bob also sends `sync-request` events to Alice (see: [Sync](#sync)) (sealed to the invite secret, and encrypted to the `key` included in the invite, like other events he is sending, until he sync successfully and learns prekeys and other group keys for Alice and other peers). Once Alice receives and validates his `user` event and `peer` event, she will respond to his `sync-request` events and beging sending `sync-request`s to Bob too!
+Alice then joins herself. She creates a local-only `invite_accepted` event containing all invite data, for playback and testing purposes. 
 
-TODO: is there a way to simplify this? 
+(Implementation note: for testing and reliability, all invite data should be stored in its own table, not mingled with other addresses, prekeys, etc.)
+
+Then she creates an `invite_proof` event consisting of a canonicalized string of `invite_id`, her own own `peer_shared_id`, and `first_peer` by the `invite_private_key` (both are the same in Alice's case).
+
+She then creates a `user` event that names the `invite_proof_id`, where the`created_by` is her `peer_shared_id`. The `event-id` of this `user` event is her `user-id`. 
+
+When Alice invites Bob, Bob does the same, using the IP address, port, and `transit_prekey` information to seal and send `connection` events to Alice until he receives a `sync` request back (see: [Sync](#sync) and [Connection](#connection)). 
+
+If messages on the network are encrypted (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates `group_key_shared` events, sealed to the `group_prekey` of each non-expired `add_users` event, for every `group_key` used for the initial "all members" group that all users join by default. All new `group_key`s are sealed  to this prekey too, until the `add_users` event expires.  
+
+Note that `invite_proof` depends on `invite` and its dependents, which Bob does not have until he syncs them, so Bob's device will not appear (to Bob) to have joined until this data syncs. 
+
+## Joining (Event-Layer Encryption)
+
+To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `prekey_shared` event, includes its `id` in the `invite` event, and includes its private key in `invite_data`.
+
+She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are wrapped to all invite event prekeys just as they would to individual group member prekeys.
+
+## Address Publishing
+
+To make her peer reachable on the network, Alice creates an `address` event that includes her `peer-id`, a network transport (e.g. UDP), her network address, and a port. 
+
+Every peer on the network periodically creates `address` events with their own latest address information. Other peers use the latest `address` events for each peer.
 
 ## Multiple networks
 
@@ -146,29 +175,23 @@ To validate a `member` event, the recipient peer checks that it is signed by an 
 
 In future iterations we will make it so that only admins can add new members to groups. (Question: should take this step now because it's actually simpler?)
 
-## Fixed Groups (Future iterations only)
-
-In some cases (such as individual or group DMs) we may want fixed-membership groups. Peers can create `fixed-group` events naming up to 20 `user-id`'s, sorted ascending.
-
-`fixed-group` id's can be used interchangeably with `group-id`, except that `grant` events with `fixed-group` id's will be invalid.
-
 # Linking Peers on Multiple Devices
 
-Users often work on multiple devices, e.g. a phone and a laptop. To do this, Bob creates a `link-invite` event with an expiry time, a max number of joiners, and a public key derived from a secret he has created. 
+Users often work on multiple devices, e.g. a phone and a laptop and must link them to the same user. Linking works similar to [invitation](#invitation) and uses the same `invite` event type.
 
-He then provides the secret, his `user-id`, the `network-id` and a recent `address` event to the new device with a URL in a QR code: `https://app.com/join#[encoded-data]`
+To add new linked devices Bob creates new `group_prekey` and `group_prekey_shared` events (see: [Forward Secrecy](#forward-secrecy)) and an `add_devices` event referencing his `user` event and the `group_prekey_id`. 
 
-The new device creates its own new `peer` and creates a `link` event with a signed proof (like with invites) wrapping the `user-id` and `network-id`.
+He creates `group_key_shared` events for each group key he possesses, sealed to this new `group_prekey_shared`, and all peers do that see Bob's `add_devices` will create a `group_key_shared` event in any case where they would send `group_key_shared` events to Bob's devices (creating a new group, removing a user).
 
-Any linked device (`peer`) can update the username or profile information for the `user-id`.
+Bob then creates a new public/private keypair, an `invite` event and a corresponding Signal-style "invite link" that can be shared in an out-of-band message or QR code: e.g. `https://app.com/join#[invite_data]`
 
-TODO: add something about linked peers and prekeys.
+The `invite_link` events and `invite_data` are the same, as is the joining process for the new peer. The difference: because the `invite` event refers to an `add_devices` event, each `invite_proof` will add a device to an existing user, rather than add a new user.
+
+Bob's new device uses the `group_prekey` private key to unseal `group_prekey_shared` events and use them to decrypt messages to all of the groups Bob belongs to. 
 
 ## Validation
 
-`link-invite` events are valid if signed by the same `peer-id` as the `user-id` or by a previously-linked `peer-id`. 
-
-`link` events are valid with a valid signed proof corresponding to any existing `link-invite` event's public key and wrapping the `network` event and the same `peer-id` as the `link` event signer.
+`add_devices` events are valid if signed by the same `peer-id` as the `user-id` or by a previously-linked `peer-id`. 
 
 Any linked peer can add `update` events to that `user-id` to e.g. update a username or avatar (see: [Updating Events](#updating-events)).
 
@@ -178,22 +201,21 @@ We [block](#blocking-and-unblocking) `link-invite`, `link`, and `user-id` update
 
 We can now discuss how messages are encrypted between peers.
 
-## prekey Publishing
+## Prekey Publishing
 
-For each group and channel (see: [Channels](#channels)) peers periodically replenish short-lived and long-lived `ephemeral-secret` and `prekey` events. The former includes the full keypair for our ephemeral public key which is never shared, and the latter including an ephemeral public key, the `group-id`, and (if applicable) `channel-id`.
+For each group and channel (see: [Channels](#channels)) peers periodically replenish `group_prekey` and `group_prekey_shared` events. The former includes the full keypair for our ephemeral public key which is never shared, and the latter includes an ephemeral public key, the `group-id`, and (if applicable) `channel-id`.
 
-`prekey` events are deleted on ttl but `ephemeral-secret` private keys are kept until explicitly deleted (see: [Transit-Layer Encryption](#transit-layer-encryption) and [Forward Secrecy](#forward-secrecy)).
+`group_prekey_shared` events are deleted on ttl but `group_prekey` private keys are kept until explicitly deleted ([Forward Secrecy](#forward-secrecy)).
 
 ## Event-Layer Encryption
 
-Whenever Alice creates a group, she also creates a `key-secret` that is local-only and never shared. Then:
+Whenever Alice creates a group, she creates a `group_key` that is local-only and never shared. Then:
 
-For each known `peer-id` belonging to each known `user-id` in a group, Alice chooses an prekey (with a not-expiring-too-soon `ttl`) and creates a `key` event sealing the secret key to the chosen prekey. 
+For each known `peer_id_shared` belonging to each known `user_id` in a group, Alice chooses an prekey (with a not-expiring-too-soon `ttl`) and creates a `group_key_shared` event sealing the secret key to the chosen prekey. 
 
 Whenever someone adds a member to the group, they seal the existing group key to the member.
 
-TODO: there are fewer concurrency problems if peers rotate a user key, like the LFA design, because then any peer can update the prekeys and do key rotations and peers. It also cuts down on prekeys. Consider this change.  
-
+TODO: align this with the existing prototype
 ```
 inner := {
     type: 0x04                // KEM
@@ -210,25 +232,21 @@ inner := {
 sodium_memzero(G, sizeof G);
 ``` 
 
-She then uses XChaCha20-Poly1305 with a 24-byte nonce and an HMAC identifying the `prekey`.
+She then uses XChaCha20-Poly1305 with a 24-byte nonce and the `id` of the `group_prekey` event identifying the key.
+
+TODO: align this with the existing prototype
 
 ```
 seal(k,n,pt,ad) = crypto_aead_xchacha20poly1305_ietf_encrypt(pt,ad,-,n,k)
 open(k,n,ct,ad) = crypto_aead_xchacha20poly1305_ietf_decrypt(-,ct,ad,n,k)
-hint64(k,n)     = crypto_auth_hmacsha256(n, k)[0..1]       # TODO: not the first 2 bytes, the whole thing
+hint64(k,n)     = **TODO: UPDATE THIS** crypto_auth_hmacsha256(n, k)[0..1]       # TODO: not the first 2 bytes, the whole thing
 ```
 
 `created_at` and `ttl` live outside this encryption layer so that peers can support lazy loading (see: [Sync](#Sync)). (Because active peers can infer this timestamp from "received at", the metadata leak is insignificant and outweighed by the benefits.)
 
-Senders can re-use previously sent secrets until a new `remove-user` or `remove-peer` event, at which point they must use a new secret. 
+Senders can re-use previously sent secrets until a new `remove-user` or `remove-peer` event, at which point do not they must use a new secret. 
 
-Peers in a group know when a `key` event *claims* to share a secret with another peer, but they cannot be sure, so depending on the situation, peers might only trust the `key` events they created themselves. When adding a peer to a group, they can issue the new `key` themselves to be sure.
-
-We can let members `request-key` (TODO: consider naming all `key` events with `key` first, like `key-ephemeral`, `key-secret-local`, `key-sealed` etc.)
-
-### Event-Layer Encryption and Invites
-
-`key` events can wrap group secrets to invites, for old history e.g. The `ttl` should be equal to the `ttl` of the invite so that they expire, but invitees can keep them much longer (i.e. until all events that require them are deleted).
+Peers in a group do not know when a `group_key_shared` event includes another peer, but they cannot be sure. For this reason, peers might only trust the `group_key_shared` events they created themselves. In sufficiently small groups they can afford to rely on this exclusively (this is the "sender keys" approach) while in large groups with frequent membership changes it would be impractical to do so. In any case, we only accept `group_key_shared` events from our own user (for device linking) or admins, since only admins are allowed to add and remove users. 
 
 ### Forward Secrecy
 
@@ -267,9 +285,9 @@ All users must be able to remove peers on lost or stolen devices. Admins must be
 
 When encrypting a new event, a peer MUST choose a key whose recipient set excludes every user-id and `peer-id` present in any accepted `remove-user` or `remove-peer` event. If no such key exists, it MUST create a fresh key event for all remaining members and use that.
 
-To prevent the removed user from being able to monitor user's online status, all peers must issue new `address` events and switch to them after a short delay to allow for propagation and reconnection. 
+To ensure a convergent historical record, events from removed users are still valid. However, peers check their set of `remove-peer` and `remove-user` events and reject any [Transit-layer Encryption](#transit-layer-encryption) connection, request, or response from removed peers. 
 
-To ensure a convergent historical record, events from removed users are still valid. However, peers check their set of `remove-peer` and `remove-user` events and reject any [Transit-layer Encryption](#transit-layer-encryption) handshake or response from removed peers.
+(Implementation note: projection of the removed_user event deletes connection information and with it transit keys.)
 
 If an [optional server](#optional-servers) uses another form of transit-layer encryption (e.g. QUIC) it immediately disconnects from and refuses connections with all removed peers.
 
@@ -287,13 +305,50 @@ We [blocking and unblocking](#blocking-and-unblocking) `remove-user` events that
 
 ## Post-Quantum
 
-We choose to wait until Post Quantum support exists in libsodium, but the design remains sound: larger PQ signatures can span multiple packets by including an arbitrary number of keys in [Blobs](#Blobs) or by [RS erasure coded](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction) keys spanning sufficient events as to be reliable. Events [Blocking and Unblocking](#blocking-and-unblocking) until sigs arrive. Once libsodium ships hybrid HPKE and ML-DSA, we replace X25519 with X25519∥Kyber and drop the legacy Ed25519 field.
+We choose to wait until Post Quantum support exists in libsodium, but the design remains sound: larger PQ signatures can span multiple packets by including an arbitrary number of keys in [Files](#Files) or by [RS erasure coded](https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction) keys spanning sufficient events as to be reliable. Events [Blocking and Unblocking](#blocking-and-unblocking) until sigs arrive. Once libsodium ships hybrid HPKE and ML-DSA, we replace X25519 with X25519∥Kyber and drop the legacy Ed25519 field.
 
-# Sync
+# Connection
 
-To sync events (e.g. messages) they don't have, peers create a sync event containing a "window" describing a range of ~100 events and a small bloom filter. (Bloom filters have false positive rates, so some events could fail to sync forever if we did not limit our search)
+To share data between peers, peers must first connect to each other. A "connection" is the successful receipt of a valid `connect` event by Bob from Alice.
 
-The responder replies with all events in the window that fail to match the bloom filter. If the transport is UDP, the responser extracts IP and port from the UDP header and replies to that. Dropped or duplicate events affect performance but not reliability. Events sync eventually.
+`connect` events are [`recipient_peer_shared_id`, `ciphertext`] where `ciphertext` is the following, sealed to a soon-to-expire `prekey` for the recipient:
+
+* `transit_key` - a secret used for all subsequent symmetric encryption
+* `ttl` - the time in ms the connection expires.
+* `created_by` - the sender's `peer_shared_id`
+* `invite_id` - the `invite` the user joined with
+* `invite_proof` - `invite_id` and `created_by` signed by the `invite` private key (this is only required for validation if `peer_shared_id` is unknown to the recipient, but we always include it anyway for simplicity, and because there's always some chance Bob does not yet know Alice has joined.)
+
+Upon validation, Bob stores this data in a `connections` table along with the `origin_ip` and `origin_port` of the message. (We don't include ip and port in the message because many peers will not know their public ip and port.)
+
+The `connection_id` serves as a nonce. Replayed connection events will be naturally filtered out as duplicates and not update address information.
+
+These `connection` events are stored but they are not shared, as they would be undecryptable by any other peer.
+
+Peers periodically send connection requests to the latest address they know about for all peers, including the address in the invite link.
+
+Peers send more frequent connection requests to peers they have recently received sync requests from (see: [Sync](#sync))
+
+Connections give us:
+
+- A set of recently online peers with their public IP and ports, including recently-invited online peers whose peer information we do not yet have. 
+- A periodically-replenished set of peers to pursue syncing with
+- A set of peers to maintain holepunches with (see: [Hole Punching](#hole-punching)) 
+- Transit secrets private to each pair that we can use for syncing
+- Forward secrecy for transit, because the prekeys the transit secrets were encrypted to will be purged soon
+- Resistance to replay attacks (nonce)
+
+# Sync 
+
+To sync data, peers periodically send `sync` events to all connections. 
+
+First they create a sync event containing a "window" describing a range of ~100 events and a small bloom filter. (Bloom filters have false positive rates, so some events could fail to sync forever if we did not limit our search).
+
+The sync event and all respones are symmetrically encrypted to the `transit_secret` for that connection. (see: [Connection](#connection)), with the `connection_id` as the hint. On the wire, sync events are `connection_id`, `ciphertext`.
+
+The responder replies, to the address for that connection, with all events in the window that fail to match the bloom filter. Dropped or duplicate events affect performance but not reliability. Events sync eventually. 
+
+The number of windows increases only in relation to the number of known shareable events, so if a sync request is lost and a window missed, the sync process will always naturally return to cover that window again.
 
 It is useful to sync auth-related events like keys and groups as quickly as possible. We can do this by sending a `sync-auth` event with its own bloom and window. This ensures all received messages can be decrypted, outgoing messages can be encrypted to the most recent set of member peers that peer has access to, and network-wide `remove-user` or `remove-peer` events are received as soon as possible. See: [Appendix D: Auth-Related Events]()
 
@@ -303,6 +358,9 @@ See [Appendix A: Types and Layouts](#Appendix-A-—-Types-and-Layouts) and [Even
 
 See: [Window Strategy](#window-strategy) in [Appendix H - Implementation Notes](#appendix-h-implementation-notes) for how state is tracked and windows are created.
 
+While it is not useful to share `sync` events, since they are specific to a window that has most likely already been addressed by the.
+
+When making connections (see: [Connection](#connection)) peers preferentially pick other peers that they have recently received `sync` requests from, so while sync is "half-duplex" (one-way), in practice we tend to "full-duplex" (two-way) connections.
 
 ## Informal Convergence Proof 
 
@@ -313,25 +371,19 @@ Our Bloom is 512 bits (64 bytes), ~100 IDs and k = 5 hashes. Probability a singl
 Missed items in one pass will surface on the next pass with probability
 `p = (FPR)^k ≈ 3 %^5 ≈ 2.4 × 10⁻⁸` (or lower given packet loss) so each event is delivered with probability 1.
 
-## Transit-layer Encryption
-
-For Foward Secrecy and Post-Compromise Security against a network-surveilling attacker, all sync requests and responses are sealed to a short-lived recipient prekey. The first response includes the handshake secret, followed by events wrapped in the secret.
-
-The handshake includes `peer` and `network` packets, so that even if multiple networks (or the same network, with multiple peers) are running on the same device, the receiving client application can distinguish them. 
-
-Handshake requests and responses are not valid if signed by a removed user or peer (see: [Removal](#removal)).
-
 ## Hole Punching
 
-A peer can create an `intro` event that names two valid `address` events by their `id`, with an optional external port for each. (The peer sending the `intro` might know the peers' external ports when they themselves do not.) Upon receiving a valid `intro`, each peer immediately sends UDP bursts of `sync` events to the other. `intro` events should be processed as quickly as possible, and invalid `intro` events need not be buffered.
+Peers periodically create an `intro` events naming the `public_ip` and `public_port` and `peer_shared_id` of two peers. (The peer sending the `intro` might know the peers' external ports when they themselves do not.)
 
-Once hole punching is successful (after the first `sync` response) peers send periodic sync events and at least one response (even if empty) as a "keep alive".
+Upon receiving a valid `intro`, each peer immediately sends UDP bursts of `connection` events to the other, which then result in `sync` requests as responses. `intro` events should be processed as quickly as possible, and `intro` events need not be blocked because they will likely be too-late and useless by the time they are unblocked.
+
+Periodic re-sending of `connection` and `sync_request` events have sufficient frequency to be a "keep alive".
 
 Our approach does not need to match the state of the art for hole-punching: hole-punching will never be 100% reliable and many users (e.g. those on iOS) must rely on [Optional Servers](#Optional-Servers) in any case.
 
 # Channels
 
-To create a channel, peers create `channel` events naming a `group-id` or `fixed-group-id`, a `channel-name`, and a `disappearing-time`. Its `event-id` is its `channel-id`.
+To create a channel, peers create `channel` events naming a `group-id`, a `channel-name`, and a `disappearing-time`. Its `event-id` is its `channel-id`.
 
 All channel messages use the latest known `disappearing-time` (default 0 for permanent.) Backend generates `ttl`. 
 
@@ -365,7 +417,7 @@ Modern messengers sync unread counts across devices and many share read receipts
 
 Backend computes per-user/channel: `last_seen_message_id` (from latest seen event), `last_seen_at_ms`. Unreads: Messages > last_seen_at_ms (fallback) or > last_seen_message_id.
 
-# Blocking
+# Blocking Users
 
 Users sometimes need to block others. They do so with a `block` event naming a `user-id` encrypted to all their own peers.
 
@@ -374,6 +426,8 @@ Users sometimes need to block others. They do so with a `block` event naming a `
 When another user is blocked, messages are invisible, and their user status displays blocked.
 
 # Updating Events
+
+TODO: update this section to align it with the doc. I think it makes more sense to simply have updates be their own first class event named like `message_update`.
 
 We must update events, e.g. to edit a message, add attachments, give a `user-id` a username (or change it), add unfurl metadata to a message, update a profile image, or change a setting. To do so we create `update` events than name an `event-id`, specify an `update-type`, and include a `global-count`, along with the type-specific update content.
 
@@ -385,29 +439,29 @@ The root `event-id` must be repeated outside the [Event-layer Encryption](#Event
 
 Updates must be done by a peer linked to the same `user-id` as the original event.
 
-# Blobs
+# Files
 
-Many messages will include images, video, or too much text to fit in one event. These are held in blobs, which reference blob-parts called "slices".
+Many messages will include images, video, or too much text to fit in one event. These are held in files, which reference file parts called "slices".
 
 For example, to add a message attachment (the `message` event has already been created) we create our slices, encrypt them with XChaCha20-Poly1305, create their ciphertext `slice` events, then create the following event:
 
-`update|message-id|add-attachment|blob-id|blob-bytes|nonce-prefix|enc-key|root-hash`
+`update|message-id|add-attachment|file-id|file-bytes|nonce-prefix|enc-key|root-hash`
 
 - `message-id` is the `event-id` of the message we want to attach to 
-- `blob-id` is a BLAKE2b-128 of the *complete* ciphertext stream
+- `file-id` is a BLAKE2b-128 of the *complete* ciphertext stream
 - `enc-key` is an XChaCha key
 - `root-hash` is a BLAKE2b-256 over all ciphertext slices
 
 Our `slice` events are:
 
-`slice|blob-id|slice-number|nonce24|ciphertext|tag`
+`slice|file-id|slice-number|nonce24|ciphertext|tag`
 
 ```
 # slice encryption
 slice.tag = seal(enc_key, nonce24, ciphertext)                 # XChaCha20-Poly1305
 
-# blob identifiers
-blob_id   = crypto_generichash(16, full_ciphertext)            # BLAKE2b-128  (2⁶⁴-collision)
+# file identifiers
+file_id   = crypto_generichash(16, full_ciphertext)            # BLAKE2b-128  (2⁶⁴-collision)
 root_hash = crypto_generichash(32, concat(slices))             # BLAKE2b-256  (2¹²⁸-collision)
 ```
 
@@ -415,13 +469,13 @@ We leave `slice-number` in plaintext so the receiver can drop the bytes straight
 
 A future refinement is to include a merkle proof in each slice, so that each slice can be validated upon receipt, e.g. for DoS resilience.
 
-Blobs should not be re-used across messages. For example, if a user forwards a blob, it should be re-created.
+Files should not be re-used across messages. For example, if a user forwards a file, it should be re-created.
 
-## Syncing Blobs
+## Syncing Files
 
-While slices are normal events and will sync eventually (see [Sync](#Sync)) we often want to prioritize and fetch slices for a wanted blob, and show download progress. We do this with a special sync event:
+While slices are normal events and will sync eventually (see [Sync](#Sync)) we often want to prioritize and fetch slices for a wanted file, and show download progress. We do this with a special sync event:
 
-`sync-blob|peer|blob-id|window|bloom|limit`
+`sync-file|peer|file-id|window|bloom|limit`
 
 ```
 # for each slice received:
@@ -431,18 +485,18 @@ store(slice_number, pt)
 # after last slice arrives
 reassembled   = concat( slice[i] for i = 0 … last )
 computed_root = crypto_generichash(32, reassembled)       # BLAKE2b-256 (2¹²⁸-collision)
-assert computed_root == root_hash                         # blob integrity OK
+assert computed_root == root_hash                         # file integrity OK
 ```
 
-Larger blobs require more windows:
+Larger files require more windows:
 
 ```
-windows(blob_bytes) = clamp(2^ceil(log2(ceil(blob_bytes / 450) / 100)), 1, 4096)  
+windows(file_bytes) = clamp(2^ceil(log2(ceil(file_bytes / 450) / 100)), 1, 4096)  
 ```
 
-Except for the new `blob-id`, `sync-blob` works the same as `sync`.
+Except for the new `file-id`, `sync-file` works the same as `sync`.
 
-For performant file retrieval, we recommend storing blob slices sequentially, reserving space based on `blob-size`. 
+For performant file retrieval, we recommend storing file slices sequentially, reserving space based on `file-size`. 
 
 # Deletion
 
@@ -456,7 +510,7 @@ Two rules: 1. Delete all existing events or updates when you get a `delete-messa
 
 For perfectly reliable deletion, `delete-message` events should last forever. In practice, the `ttl` can be sufficiently greater than the event it deletes so that it always outlives its deleted events.
 
-Blob-related `slice` events may be unknown when the blob root event is deleted. Unknown blobs are deleted via "cryptographic shredding" once the originating event has been deleted, and again once their `ttl` arrives.
+File-related `slice` events may be unknown when the file root event is deleted. Unknown files are deleted via "cryptographic shredding" once the originating event has been deleted, and again once their `ttl` arrives.
 
 # Optional Servers
 
@@ -464,7 +518,7 @@ It is good if users can add a server: most people need a level of performance an
 
 For simplicity it is desirable that servers are just another peer running the same protocol and code.
 
-We add servers with a normal invite (see: [Joining](#Joining)). The blob associated with the `invite` event can include the server's `address` event. (Peers that see the proof can then connect to the server, which is more reliable.)
+We add servers with a normal invite (see: [Joining](#Joining)). The file associated with the `invite` event can include the server's `address` event. (Peers that see the proof can then connect to the server, which is more reliable.)
 
 The invite secret is provided to the server out of band. At this point the server can request payment, account creation, ToS and Privacy Policy approval, or CAPTCHA out of band.
 
@@ -512,9 +566,9 @@ Goal: ensure this protocol is practical on mobile devices and typical network co
 
 A few inefficiencies raise eyebrows. 
 
-First is the storage of large blobs as UDP-datagram-sized packets in a relational database. For networks with 10 million events (100,000 messages and many images) performance is adequate on mobile devices. Fully p2p networks are primarily constrained by device size, and server-assisted networks benefit from adding events and blobs in large, sequential batches. Deduplication, eventual consistency, and a consistent source of truth across platforms are worth the performance sacrifice.
+First is the storage of large files as UDP-datagram-sized packets in a relational database. For networks with 10 million events (100,000 messages and many images) performance is adequate on mobile devices. Fully p2p networks are primarily constrained by device size, and server-assisted networks benefit from adding events and files in large, sequential batches. Deduplication, eventual consistency, and a consistent source of truth across platforms are worth the performance sacrifice.
 
-Second is the large amount of outgoing bloom traffic users must send to sync. The good news here is that blobs are the dominant bandwidth factor and there are much more efficient mechanisms for syncing known blobs, including very simple ones, such as [LT codes](https://en.wikipedia.org/wiki/Luby_transform_code). We are free to implement these in the future as needed.
+Second is the large amount of outgoing bloom traffic users must send to sync. The good news here is that files are the dominant bandwidth factor and there are much more efficient mechanisms for syncing known files, including very simple ones, such as [LT codes](https://en.wikipedia.org/wiki/Luby_transform_code). We are free to implement these in the future as needed.
 
 See [Implementation Notes](#appendix-h-implementation-notes) for performance-related recommendations.  
  
@@ -533,9 +587,9 @@ Key cases:
 
 Heavy writes are manageable on mobile devices with a WAL and batching according to tests in React Native on Android devices. There is a convenient relationship between traffic and our ability to batch: the heavier the incoming traffic, the less UX penalty we incur from holding on to 1000 unprocessed events and inserting them in a batch (we may receive thousands in a second).
 
-For scrolling and lazy loading, queries to a local database behave as one would expect in a modern messaging app handling many messages. Standard lazy loading / progressive hydration techniques apply. Events can be indexed by createdAt, eventId, and blobId as needed. We can include blurhash in image blob events, and fetch all of an events updates when we fetch the event.
+For scrolling and lazy loading, queries to a local database behave as one would expect in a modern messaging app handling many messages. Standard lazy loading / progressive hydration techniques apply. Events can be indexed by createdAt, eventId, and fileId as needed. We can include blurhash in image file events, and fetch all of an events updates when we fetch the event.
 
-Rendering images while scrolling can be made efficient by storing all blob slices in sequence. SQLite in WAL mode is efficient at reads while handling many writes.
+Rendering images while scrolling can be made efficient by storing all file slices in sequence. SQLite in WAL mode is efficient at reads while handling many writes.
 
 The CPU cost of decryption on the fly is dominated by the data retrieval cost (the former is a rounding error on the later).
 
@@ -556,24 +610,24 @@ Then the following are just the last outgoing sync events to and from each peer,
 
 * **LOCAL-ONLY-last-sync** 
 * **LOCAL-ONLY-last-sync-auth** 
-* **LOCAL-ONLY-last-sync-blob** 
+* **LOCAL-ONLY-last-sync-file** 
 * **LOCAL-ONLY-last-sync-lazy** 
 
 Note that these events might make sense in an in-memory database.
 
-##### Blob Slice (type `0x03`)  
+##### File Slice (type `0x03`)  
 
 | Offset | Bytes | Field        |
 |--------|-------|--------------|
 | 0      | 1     | `version`    |
 | 1      | 1     | `type`       |
-| 2      | 16    | `blob_id`    |
+| 2      | 16    | `file_id`    |
 | 18     | 4     | `slice_no`   |
 | 22     | 24    | `nonce`      |
 | 46     | 450   | `ciphertext` |
 | 496    | 16    | `poly_tag`   |                                                                  
 
-*Nonce is reconstructed as `nonce_prefix ∥ slice_no`; the 24-byte prefix is stored once in the original event mentioning the blob. Blob slices are not signed and are not wrapped in additional group event-layer encryption. Total size: 512 bytes exact (no pad).*
+*Nonce is reconstructed as `nonce_prefix ∥ slice_no`; the 24-byte prefix is stored once in the original event mentioning the file. File slices are not signed and are not wrapped in additional group event-layer encryption. Total size: 512 bytes exact (no pad).*
 
 ##### Common Header  
 
@@ -600,7 +654,7 @@ Note that these events might make sense in an in-memory database.
 | **sync**           | 0x07 | `window` 2 · `bloom_bits` 64 · pad (328)                 | No                     |
 | **sync-auth**      | 0x08 | `window` 2 · `bloom_bits` 64 · `limit` 2 · pad (326)    | No                     |
 | **sync-lazy**      | 0x09 | `cursor` 16 · `bloom_bits` 64 · `limit` 2 · `channel_id` 16 · pad (296)   | No                     |
-| **sync-blob**      | 0x0A | `blob_id` 16 · `window` 2 · `bloom_bits` 64 · `limit` 2 · pad (310) | No                     |
+| **sync-file**      | 0x0A | `file_id` 16 · `window` 2 · `bloom_bits` 64 · `limit` 2 · pad (310) | No                     |
 | **intro**          | 0x0B | `address1_id` 16 · `address2_id` 16 · `nonce` 32 · pad (330)                 | No                     |
 | **address**        | 0x0C | `transport` 1 · `addr` 128 · `port` 2 · pad (263)                      | No                     |
 | **invite**         | 0x0D | `invite_pk` 32 · `max_join` 2 · `expiry_ms` 8 · `network_id` 16 · pad (336) | No                     |
@@ -640,12 +694,12 @@ This table applies to the **update** plaintext payload block: `event_id` 16 | `g
 | Name / Purpose              | Hex  | 321-byte **Body** Layout (fixed-length, zero-pad remainder)                               |
 |-----------------------------|------|-------------------------------------------------------------------------------------------|
 | **edit-message-text**       | 0x00 | `utf-8 text` ≤321 B                                                                       |
-| **add-attachment**          | 0x01 | `blob_id` 16 · `blob_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (229) |
-| **add-unfurl** (Open Graph) | 0x02 | `url_hash` 16 · `thumb_blob_id` 16 · `og_title` 64 · `og_description` 128 · `blob_id` 16 · `blob_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (5)    |
+| **add-attachment**          | 0x01 | `file_id` 16 · `file_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (229) |
+| **add-unfurl** (Open Graph) | 0x02 | `url_hash` 16 · `thumb_file_id` 16 · `og_title` 64 · `og_description` 128 · `file_id` 16 · `file_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (5)    |
 | **add-reaction**            | 0x03 | `emoji_utf32` 4 · `user_group_id` 16 · pad (301)                                          |
 | **remove-reaction**         | 0x04 | `emoji_utf32` 4 · `user_group_id` 16 · pad (301)                                          |
 | **update-username**         | 0x05 | `utf-8 new name` ≤321 B (targets a `user` event’s `id`)                                   |
-| **update-profile-image**    | 0x06 | `blob_id` 16 · `blob_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (229)                                                                  |
+| **update-profile-image**    | 0x06 | `file_id` 16 · `file_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (229)                                                                  |
 | **add-prekey**              | 0x07 | `prekey_pub` 32 · `eol_ms` 8 · pad (281)                                                  |
 | *reserved*                  | ≥0x08| zero-filled until defined                                                                 
 
@@ -705,7 +759,7 @@ This appendix describes a RESTful API for frontend applications to interact with
 
 ### General Principles
 - Aggregate data backend-side (e.g., updates into messages, seen events into unreads/seen_by) for "dumb frontend"—no client-side reconstruction.
-- Responses: Denormalized, ready-to-render. Reference blobs by ID (fetch separately via GET /blobs/{blob_id} for perf). Add ETag for efficient polling.
+- Responses: Denormalized, ready-to-render. Reference files by ID (fetch separately via GET /files/{file_id} for perf). Add ETag for efficient polling.
 - Authentication: PSK via IPC, TLS.
 
 ### Error Responses
@@ -748,7 +802,7 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
   Response: Single user object.
 
 - **PATCH /networks/{network_id}/users/{user_id}**  
-  Update profile (self). Request: `{"username": "string", "avatar_data": "base64"}` (creates blob).  
+  Update profile (self). Request: `{"username": "string", "avatar_data": "base64"}` (creates file).  
   Response: Updated user.  
   403 if not self or linked peer.
 
@@ -853,7 +907,7 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
 - **GET /networks/{network_id}/channels/{channel_id}/messages**  
   List (paginated). Query: `?cursor=hex&limit=50&since_ms=int`.  
   Query: `?cursor=hex&limit=50&since_ms=int`.  
-  Response: `{"items": [{"message_id": "hex", "user_id": "hex", "text": "string" (latest from edits), "created_at_ms": int, "edited_at_ms": int or null, "attachments": [{"blob_id": "hex", "blob_bytes": int, "filename": "string" or null, "blurhash": "string" or null, "mime_type": "string" or null}], "unfurls": [{"url": "string", "og_title": "string", "og_description": "string", "og_image_blob_id": "hex" or null, "og_site_name": "string" or null, "og_url": "string" or null}], "reactions": [{"emoji": "string", "count": int, "user_ids": ["hex"]}], "is_unread": bool (true if > user's last_seen_at_ms), "seen_by": [{"user_id": "hex", "viewed_at_ms": int}] (users with last_seen >= this message; optional, config-enabled for read receipts)}], "next_cursor": "hex", "has_more": bool}`.  
+  Response: `{"items": [{"message_id": "hex", "user_id": "hex", "text": "string" (latest from edits), "created_at_ms": int, "edited_at_ms": int or null, "attachments": [{"file_id": "hex", "file_bytes": int, "filename": "string" or null, "blurhash": "string" or null, "mime_type": "string" or null}], "unfurls": [{"url": "string", "og_title": "string", "og_description": "string", "og_image_file_id": "hex" or null, "og_site_name": "string" or null, "og_url": "string" or null}], "reactions": [{"emoji": "string", "count": int, "user_ids": ["hex"]}], "is_unread": bool (true if > user's last_seen_at_ms), "seen_by": [{"user_id": "hex", "viewed_at_ms": int}] (users with last_seen >= this message; optional, config-enabled for read receipts)}], "next_cursor": "hex", "has_more": bool}`.  
   Aggregation: Collect unique attachments/unfurls; net reactions; ignore buffered/invalid updates. Exclude deleted messages (or return tombstone: {"message_id": "hex", "deleted": true}).
 
 - **POST /networks/{network_id}/channels/{channel_id}/messages**  
@@ -880,12 +934,12 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
   Remove reaction.  
   Response: `{"success": true}`
 
-#### Blobs
-- **GET /networks/{network_id}/blobs/{blob_id}**  
+#### Files
+- **GET /networks/{network_id}/files/{file_id}**  
   Download.  
   Response: Binary (streamed).
 
-- **GET /networks/{network_id}/blobs/{blob_id}/status**  
+- **GET /networks/{network_id}/files/{file_id}/status**  
   Progress.  
   Response: `{"status": "downloading|complete|failed", "progress": 0.75, "bytes_downloaded": int, "bytes_total": int}`
 
@@ -902,11 +956,11 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
   Response: `{"peers_connected": int, "events_pending": int}`
 
 - **POST /networks/{network_id}/sync-requests**  
-  Force sync. Request: `{"type": "full|auth|lazy|blob"}` (optional).  
+  Force sync. Request: `{"type": "full|auth|lazy|file"}` (optional).  
   Response: 201 Created, `{"success": true}`
 
-- **POST /networks/{network_id}/sync-blob**  
-  Sync specific blob. Request: `{"blob_id": "hex", "window": int, "bloom": "base64", "limit": int}`.  
+- **POST /networks/{network_id}/sync-file**  
+  Sync specific file. Request: `{"file_id": "hex", "window": int, "bloom": "base64", "limit": int}`.  
   Response: `{"success": true}`
 
 #### Debug (Dev/testing only; MUST NOT be in prod builds)
@@ -1156,7 +1210,7 @@ To minimize "drift" between frontend and backend state, we tear down and re-poll
 
 The API provides a `tick` endpoint that takes a`time_ms` parameter and triggers all event processing, creation, and deletion. 
 
-For events that are constructed or processed periodically, such as `sync`, `prekey`, and `rekey`, we use [Local-only Events](#local-only-events-1) to track the last time these events were executed and determine whether they should be executed again in this `tick`. For any events that are more efficient to process in large batches (like `blob`s) we can use the same approach: track the last time they were performed and do a big batch.
+For events that are constructed or processed periodically, such as `sync`, `prekey`, and `rekey`, we use [Local-only Events](#local-only-events-1) to track the last time these events were executed and determine whether they should be executed again in this `tick`. For any events that are more efficient to process in large batches (like `file`s) we can use the same approach: track the last time they were performed and do a big batch.
 
 In production use, `tick` can be triggered as often as is practical, with the current time. We can also limit the number of events processed in a typical `tick`. 
 
@@ -1204,11 +1258,11 @@ Each transport has a loop that queries `LOCAL-ONLY-outbox` events for `due` even
 
 `LOCAL-ONLY-inbox` events include `origin_ip`, `origin_port`, and `received_at_ms` fields. These are added by our network interface.
 
-#### Blobs
+#### Files
 
-When the API requests a `blob`, we remember that it is desired with a `LOCAL-ONLY-blob-wanted` event with a `ttl`. 
+When the API requests a `file`, we remember that it is desired with a `LOCAL-ONLY-file-wanted` event with a `ttl`. 
 
-The `ttl` here functions as a timeout and can be set depending on the type of blob: a large file might have a 0 (forever) `ttl` until complete, at which point it is deleted. A `blob` for an image loaded while scrolling might have a very near/short `ttl`, under the assumption that the user might soon scroll on to other images and prefer to prioritize those. 
+The `ttl` here functions as a timeout and can be set depending on the type of file: a large file might have a 0 (forever) `ttl` until complete, at which point it is deleted. A `file` for an image loaded while scrolling might have a very near/short `ttl`, under the assumption that the user might soon scroll on to other images and prefer to prioritize those. 
 
 ##### Transit-layer Encryption 
 
@@ -1229,11 +1283,13 @@ We walk windows in a pseudo-random permutation (PRP), remembering the last windo
 
 When total events seen > `W * 450`, increase `w` by 1. This makes windows smaller to keep a low false-positive rate. 
 
-For blobs, number of windows W = max(1, ceil(total_slices / 100)) up to 4096 (w=12), where total_slices = ceil(blob_bytes / 450), ensuring ~50-100 slices per window for low FPR.
+For files, number of windows W = max(1, ceil(total_slices / 100)) up to 4096 (w=12), where total_slices = ceil(file_bytes / 450), ensuring ~50-100 slices per window for low FPR.
 
 ##### Congestion control
 
-When using a transport without congestion control, such as UDP, the requester avoids congestion collapse by adjusting the rate of `sync` events using Additive Increase Multiplicative Decrease (AIMD) when incoming packets drop below an Exponential Moving Average (EMA). EMA formula: 
+When using a transport without congestion control, such as UDP, the requester avoids congestion collapse for each given connection by adjusting the rate of `sync` events using Additive Increase Multiplicative Decrease (AIMD) when incoming events drop below an Exponential Moving Average (EMA). 
+
+EMA formula: 
 
 ```
 # Initial values
@@ -1312,7 +1368,7 @@ Simulate can also save the state at each `tick` in a `simulations` table for ins
 
 #### User Behavior Simulation
 
-Future refinements can add a `user_behavior` function passable to `simulate` that consumes a `post-tick` state and passes a new array of `api_calls[]` to the next state, to simulate behavior such as users sending messages, downloading blobs, scrolling with lazy loading, adding other users, etc.
+Future refinements can add a `user_behavior` function passable to `simulate` that consumes a `post-tick` state and passes a new array of `api_calls[]` to the next state, to simulate behavior such as users sending messages, downloading files, scrolling with lazy loading, adding other users, etc.
 
 #### Property-based Testing
 
