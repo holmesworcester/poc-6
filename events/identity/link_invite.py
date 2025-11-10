@@ -86,39 +86,29 @@ def project(link_invite_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
     created_by = event_data['created_by']
 
-    # Check if bootstrap (peer has no networks yet - first bootstrap)
-    peer_networks = safedb.query_one(
-        "SELECT 1 FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
+    # Phase 4: No more bootstrap special case
+    # All link_invites are validated the same way (creator's peer_shared is projected first from URL)
+    log.info(f"link_invite.project() validating link_invite...")
 
-    is_bootstrap = (peer_networks is None)
+    # Verify creator exists
+    from events.identity import peer_shared
+    creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    if not creator_public_key:
+        log.warning(f"link_invite.project() creator not found: {created_by[:20]}...")
+        return None
 
-    # Validate link_invite if not bootstrap
-    if not is_bootstrap:
-        log.info(f"link_invite.project() sync-sourced link_invite, validating...")
+    # Verify signature
+    if not crypto.verify_event(event_data, creator_public_key):
+        log.warning(f"link_invite.project() signature verification FAILED")
+        return None
 
-        # Verify creator exists
-        from events.identity import peer_shared
-        creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
-        if not creator_public_key:
-            log.warning(f"link_invite.project() creator not found: {created_by[:20]}...")
-            return None
+    # Verify not expired
+    expiry_ms = event_data.get('expiry_ms', recorded_at + 86400000)
+    if recorded_at > expiry_ms:
+        log.warning(f"link_invite.project() EXPIRED: recorded_at={recorded_at} > expiry_ms={expiry_ms}")
+        return None
 
-        # Verify signature
-        if not crypto.verify_event(event_data, creator_public_key):
-            log.warning(f"link_invite.project() signature verification FAILED")
-            return None
-
-        # Verify not expired
-        expiry_ms = event_data.get('expiry_ms', recorded_at + 86400000)
-        if recorded_at > expiry_ms:
-            log.warning(f"link_invite.project() EXPIRED: recorded_at={recorded_at} > expiry_ms={expiry_ms}")
-            return None
-
-        log.info(f"link_invite.project() validation passed")
-    else:
-        log.info(f"link_invite.project() bootstrap link_invite, skipping validation")
+    log.info(f"link_invite.project() validation passed")
 
     # Insert into link_invites table
     safedb.execute(

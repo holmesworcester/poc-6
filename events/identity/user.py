@@ -399,13 +399,8 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # Note: invite is now marked as valid via invite_accepted.project() for reprojection
     # During initial join, we'll mark it valid after creating invite_accepted event below
 
-    # Project invite immediately to restore invite_key_secret and invite prekey to prekeys_shared
-    # The invite prekey is reconstructed from invite event data (doesn't require decryption)
-    from events.identity import invite
-    invite.project(invite_id, peer_id, t_ms, db)
-
-    # Project inviter's peer_shared from invite link (allows immediate sync with inviter)
-    # This puts the inviter in joinee's peers_shared table before bootstrap starts
+    # Phase 4: Project inviter's peer_shared FIRST (before invite)
+    # This ensures the creator's public key is available when validating the invite signature
     if 'inviter_peer_shared_blob' in invite_data:
         inviter_peer_shared_blob_b64 = invite_data['inviter_peer_shared_blob']
         inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64 + '===')
@@ -422,6 +417,11 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         recorded.project_ids([recorded_id], db)
 
         log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
+
+    # Now project invite (after peer_shared, so creator's public key is available for validation)
+    from events.identity import invite
+    invite.project(invite_id, peer_id, t_ms, db)
+    log.info(f"join() projected invite: {invite_id[:20]}...")
 
     # Extract secrets from invite link (all b64 encoded)
     invite_prekey_id = invite_data['invite_prekey_id']

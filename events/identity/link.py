@@ -248,11 +248,8 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         link_invite_id = store.event(link_invite_blob, peer_id, t_ms, db)
         log.info(f"link.join() stored link_invite_id={link_invite_id[:20]}...")
 
-    # Project link_invite immediately to restore invite_prekey
-    from events.identity import link_invite
-    link_invite.project(link_invite_id, peer_id, t_ms, db)
-
-    # Project existing device's peer_shared and user event from link URL
+    # Phase 4: Project existing device's peer_shared FIRST (before link_invite)
+    # This ensures the creator's public key is available when validating the link_invite signature
     # Support both unified format (inviter_peer_shared_blob) and legacy (existing_peer_shared_blob)
     peer_shared_blob_key = 'inviter_peer_shared_blob' if 'invite_blob' in link_data else 'existing_peer_shared_blob'
     if peer_shared_blob_key in link_data:
@@ -270,6 +267,11 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         recorded.project_ids([recorded_id], db)
 
         log.info(f"link.join() projected existing device's peer_shared: {existing_peer_shared_id[:20]}...")
+
+    # Now project link_invite (after peer_shared, so creator's public key is available for validation)
+    from events.identity import link_invite
+    link_invite.project(link_invite_id, peer_id, t_ms, db)
+    log.info(f"link.join() projected link_invite: {link_invite_id[:20]}...")
 
     # Project existing device's user event from link URL
     if 'existing_user_blob' in link_data:

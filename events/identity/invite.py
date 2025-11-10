@@ -337,43 +337,32 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
     created_by = event_data['created_by']
 
-    # Check if this is a bootstrap invite (first join via URL)
-    # Bootstrap invites are processed before peer has any networks, and before invite_accepted is created
-    # If peer has no networks, this is a bootstrap - skip validation (root of trust from URL)
-    peer_networks = safedb.query_one(
-        "SELECT 1 FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
+    # Phase 4: No more bootstrap special case
+    # All invites are validated the same way (creator's peer_shared is projected first from URL)
+    log.info(f"invite.project() validating invite...")
 
-    is_bootstrap = (peer_networks is None)
+    # 1. Verify creator (created_by) exists
+    from events.identity import peer_shared
+    creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    if not creator_public_key:
+        log.warning(f"invite.project() creator not found: {created_by[:20]}...")
+        return None
 
-    # If not bootstrap, this came via sync or is a second invite - validate it
-    if not is_bootstrap:
-        log.info(f"invite.project() sync-sourced invite, validating...")
+    # 2. Verify signature
+    if not crypto.verify_event(event_data, creator_public_key):
+        log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
+        return None
 
-        # 1. Verify creator (created_by) exists
-        from events.identity import peer_shared
-        creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
-        if not creator_public_key:
-            log.warning(f"invite.project() creator not found: {created_by[:20]}...")
-            return None
-
-        # 2. Verify signature
-        if not crypto.verify_event(event_data, creator_public_key):
-            log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
-            return None
-
-        # 3. Verify network_id matches peer's network
-        invite_network_id = event_data.get('network_id')
-        if invite_network_id:
-            peer_network = safedb.query_one(
-                "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
-                (invite_network_id, recorded_by)
-            )
-            if not peer_network:
-                log.warning(f"invite.project() network mismatch: invite for {invite_network_id[:20]}... but peer not in that network")
-                return None
-
+    # 3. Verify network_id matches peer's network (if peer already has a network)
+    invite_network_id = event_data.get('network_id')
+    if invite_network_id:
+        peer_network = safedb.query_one(
+            "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+            (invite_network_id, recorded_by)
+        )
+        # Only validate network match if peer already has this network
+        # (new joiners won't have the network yet)
+        if peer_network:
             # 4. Verify inviter is an admin using shared validate() function
             inviter_user_id = event_data.get('inviter_user_id')
             if inviter_user_id and peer_network['admins_group_id']:
@@ -386,9 +375,7 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
                 log.warning(f"invite.project() missing inviter_user_id in invite event - rejecting for security")
                 return None
 
-        log.info(f"invite.project() validation passed for sync-sourced invite")
-    else:
-        log.info(f"invite.project() bootstrap invite (first join via URL), skipping validation")
+    log.info(f"invite.project() validation passed")
 
     # Insert into invites table
     mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility
