@@ -224,13 +224,9 @@ def project(invite_proof_id: str, recorded_by: str, recorded_at: int, db: Any) -
         log.info(f"invite_proof.project() added user {user_id[:20]}... to group {group_id[:20]}...")
 
     else:  # mode == 'link'
-        # Link peer to user (device linking)
-        safedb.execute("""
-            INSERT OR IGNORE INTO linked_peers
-            (user_id, peer_shared_id, recorded_by)
-            VALUES (?, ?, ?)
-        """, (link_user_id, joiner_peer_shared_id, recorded_by))
-        log.info(f"invite_proof.project() linked peer {joiner_peer_shared_id[:20]}... to user {link_user_id[:20]}...")
+        # For mode='link', the link event itself will handle linked_peers insertion
+        # invite_proof just validates the invite signature
+        log.info(f"invite_proof.project() validated link proof for peer {joiner_peer_shared_id[:20]}... to user {link_user_id[:20]}...")
 
     log.info(f"invite_proof.project() completed for {recorded_by[:20]}...")
     return invite_proof_id
