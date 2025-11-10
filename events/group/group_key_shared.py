@@ -140,6 +140,75 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     return key_shared_id
 
 
+def create_for_link_invite(key_id: str, peer_id: str, peer_shared_id: str,
+                           link_invite_id: str, t_ms: int, db: Any) -> str:
+    """Create a shareable key_shared event sealed to link_invite prekey.
+
+    Similar to create_for_invite, but for multi-device linking.
+    Extracts the link prekey from the stored link_invite event.
+
+    Args:
+        key_id: Local key event ID (symmetric key to share)
+        peer_id: Local peer ID (for signing)
+        peer_shared_id: Public peer ID (for created_by)
+        link_invite_id: The link_invite event ID (contains link_prekey_id and link_pubkey)
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        key_shared_id: The stored key_shared event ID
+    """
+    log.info(f"key_shared.create_for_link_invite() creating key_shared for key_id={key_id}, link_invite_id={link_invite_id[:20]}..., t_ms={t_ms}")
+
+    # Get symmetric key from local key event
+    unsafedb = create_unsafe_db(db)
+    key_blob = store.get(key_id, unsafedb)
+    if not key_blob:
+        raise ValueError(f"key not found: {key_id}")
+
+    key_data = crypto.parse_json(key_blob)
+    symmetric_key_b64 = key_data['key']
+
+    # Get link_invite event to extract prekey info
+    link_invite_blob = store.get(link_invite_id, unsafedb)
+    if not link_invite_blob:
+        raise ValueError(f"link_invite not found: {link_invite_id}")
+
+    link_invite_data = crypto.parse_json(link_invite_blob)
+    link_prekey_id = link_invite_data['link_prekey_id']
+    link_pubkey_b64 = link_invite_data['link_pubkey']
+
+    # Build recipient prekey dict from link_invite data
+    recipient_prekey_dict = {
+        'id': crypto.b64decode(link_prekey_id),
+        'public_key': crypto.b64decode(link_pubkey_b64),
+        'type': 'asymmetric'
+    }
+
+    log.info(f"key_shared.create_for_link_invite() extracted link_prekey_id={link_prekey_id[:20]}... from link_invite")
+
+    # Create inner event
+    inner_event_data = {
+        'type': 'group_key_shared',
+        'key_id': key_id,
+        'symmetric_key': symmetric_key_b64,
+        'created_by': peer_shared_id,
+        'created_at': t_ms
+    }
+
+    # Sign and wrap
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    signed_inner_event = crypto.sign_event(inner_event_data, private_key)
+    canonical = crypto.canonicalize_json(signed_inner_event)
+    wrapped_blob = crypto.wrap(canonical, recipient_prekey_dict, db)
+
+    # Store with recorded wrapper (for replay)
+    key_shared_id = store.event(wrapped_blob, peer_id, t_ms, db)
+
+    log.info(f"key_shared.create_for_link_invite() created key_shared_id={key_shared_id}")
+    return key_shared_id
+
+
 def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project key_shared event into keys table and shareable_events."""
     log.warning(f"[GROUP_KEY_SHARED_PROJECT] key_shared_id={key_shared_id[:20]}..., seen_by={recorded_by[:20]}...")

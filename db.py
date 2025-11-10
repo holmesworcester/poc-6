@@ -38,6 +38,8 @@ SUBJECTIVE_TABLES = {
     'shareable_events',
     'projected_events',            # Projected events with created_at for lazy loading (peer-scoped)
     'invites',
+    'link_invites',                # Link invites for multi-device linking (peer-scoped)
+    'linked_peers',                # Linked peers for multi-device linking (peer-scoped)
     'networks',                    # Networks are subjective (peer-scoped)
     'network_creators',            # Peers who created a network (peer-scoped)
     'network_joiners',             # Peers who joined a network (peer-scoped)
@@ -50,6 +52,7 @@ SUBJECTIVE_TABLES = {
     'event_dependencies',          # Event dependency tracking for cascading deletion (peer-scoped)
     'network_addresses',           # Network address observations (peer-scoped)
     'pending_intros',              # Pending intro events for hole punching (peer-scoped)
+    'removed_users',               # Removed users tracking (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
@@ -60,6 +63,7 @@ DEVICE_TABLES = {
     'store',
     'incoming_blobs',
     'sync_state_ephemeral',
+    'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
 }
 
 
