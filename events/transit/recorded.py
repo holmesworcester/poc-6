@@ -135,6 +135,15 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Invite events need creator to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet
         dep_fields = ['created_by']
+    elif event_type == 'invite_proof':
+        # Invite proof depends on invite and the entity being proven (user_id or link_user_id)
+        mode = event_data.get('mode')
+        if mode == 'user':
+            dep_fields = ['created_by', 'invite_id', 'user_id']
+        elif mode == 'link':
+            dep_fields = ['created_by', 'invite_id', 'link_user_id']
+        else:
+            dep_fields = ['created_by', 'invite_id']  # Fallback
     elif event_type == 'message_deletion':
         # Deletion events only depend on the creator (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
@@ -434,6 +443,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'invite':
         from events.identity import invite
         projected_id = invite.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'invite_proof':
+        from events.identity import invite_proof
+        projected_id = invite_proof.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'user':
         from events.identity import user
         projected_id = user.project(ref_id, recorded_by, recorded_at, db)
