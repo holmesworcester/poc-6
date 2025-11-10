@@ -3,7 +3,7 @@
 -- Example: Alice introduces Bob and Charlie so they can communicate directly
 
 CREATE TABLE IF NOT EXISTS pending_intros (
-    intro_id TEXT PRIMARY KEY,
+    intro_id TEXT NOT NULL,
     initiator_peer_id TEXT NOT NULL,  -- Who created this intro (e.g., Alice)
     peer1_id TEXT NOT NULL,  -- First peer to introduce (e.g., Bob)
     peer2_id TEXT NOT NULL,  -- Second peer to introduce (e.g., Charlie)
@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS pending_intros (
     recorded_by TEXT NOT NULL,  -- Which local peer has this event
     recorded_at INTEGER NOT NULL,  -- When event was recorded locally
     processed BOOLEAN DEFAULT FALSE,  -- Whether hole punch was attempted
-    UNIQUE (intro_id, recorded_by)
+    PRIMARY KEY (intro_id, recorded_by)
 );
 
 -- Index for lookups by recorded_by

@@ -44,7 +44,6 @@ SUBJECTIVE_TABLES = {
     'network_creators',            # Peers who created a network (peer-scoped)
     'network_joiners',             # Peers who joined a network (peer-scoped)
     'bootstrap_completers',        # Peers who received first sync response (peer-scoped)
-    'files',                       # File metadata (peer-scoped)
     'file_slices',                 # File slice storage (peer-scoped)
     'message_attachments',         # Message-file links (peer-scoped)
     'file_sync_wanted',            # Files wanted for active syncing (peer-scoped)

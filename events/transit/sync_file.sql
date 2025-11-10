@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS file_sync_state_ephemeral (
     total_slices INTEGER NOT NULL,
     started_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    PRIMARY KEY (file_id, from_peer_id, to_peer_id)
+    recorded_by TEXT NOT NULL,          -- Which local peer has this state
+    PRIMARY KEY (file_id, from_peer_id, to_peer_id, recorded_by)
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_sync_state_ephemeral_file_from

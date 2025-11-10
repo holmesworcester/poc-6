@@ -198,8 +198,8 @@ def get_file_sync_state(file_id: str, from_peer_id: str, to_peer_id: str, t_ms: 
     unsafedb = create_unsafe_db(db)
     row = unsafedb.query_one(
         "SELECT last_window, w_param, slices_received, total_slices FROM file_sync_state_ephemeral "
-        "WHERE file_id = ? AND from_peer_id = ? AND to_peer_id = ?",
-        (file_id, from_peer_id, to_peer_id)
+        "WHERE file_id = ? AND from_peer_id = ? AND to_peer_id = ? AND recorded_by = ?",
+        (file_id, from_peer_id, to_peer_id, from_peer_id)
     )
 
     if row:
@@ -257,15 +257,15 @@ def update_file_sync_state(file_id: str, from_peer_id: str, to_peer_id: str,
     unsafedb = create_unsafe_db(db)
     unsafedb.execute(
         """INSERT INTO file_sync_state_ephemeral
-           (file_id, from_peer_id, to_peer_id, last_window, w_param, slices_received, total_slices, started_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (file_id, from_peer_id, to_peer_id)
+           (file_id, from_peer_id, to_peer_id, last_window, w_param, slices_received, total_slices, started_at, updated_at, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (file_id, from_peer_id, to_peer_id, recorded_by)
            DO UPDATE SET
                last_window = excluded.last_window,
                w_param = excluded.w_param,
                slices_received = excluded.slices_received,
                updated_at = excluded.updated_at""",
-        (file_id, from_peer_id, to_peer_id, last_window, w_param, slices_received, total_slices, t_ms, t_ms)
+        (file_id, from_peer_id, to_peer_id, last_window, w_param, slices_received, total_slices, t_ms, t_ms, from_peer_id)
     )
 
 

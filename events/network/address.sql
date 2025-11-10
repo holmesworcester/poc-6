@@ -3,7 +3,7 @@
 -- This allows Byzantine fault tolerance: multiple peers can attest to same address
 
 CREATE TABLE IF NOT EXISTS network_addresses (
-    address_id TEXT PRIMARY KEY,
+    address_id TEXT NOT NULL,
     observed_peer_id TEXT NOT NULL,  -- Which peer was observed
     observed_by_peer_id TEXT NOT NULL,  -- Which peer made the observation
     ip TEXT NOT NULL,  -- Observed IP address
@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS network_addresses (
     created_at INTEGER NOT NULL,  -- When observation was made
     recorded_by TEXT NOT NULL,  -- Which local peer has this event
     recorded_at INTEGER NOT NULL,  -- When this event was recorded locally
-    UNIQUE (address_id, recorded_by)
+    PRIMARY KEY (address_id, recorded_by)
 );
 
 -- Index for lookups by recorded_by and observed_peer_id
