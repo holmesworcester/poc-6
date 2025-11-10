@@ -48,6 +48,8 @@ SUBJECTIVE_TABLES = {
     'keys_to_purge',               # Forward secrecy: keys marked for purging (peer-scoped)
     'message_rekeys',              # Forward secrecy: rekeyed messages (peer-scoped)
     'event_dependencies',          # Event dependency tracking for cascading deletion (peer-scoped)
+    'network_addresses',           # Network address observations (peer-scoped)
+    'pending_intros',              # Pending intro events for hole punching (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

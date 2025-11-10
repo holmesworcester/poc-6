@@ -398,6 +398,33 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
 _receive_call_count = 0
 
 
+def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any) -> None:
+    """Try to observe source peers from transit blobs (NAT integration).
+
+    This is an optional integration point - if the network layer is initialized,
+    we can use it to create address events. Otherwise, this is a no-op.
+    """
+    try:
+        from core import network
+        from events.network import address as address_module
+
+        engine = network.get_engine()
+        if not engine or not engine.peer_endpoints:
+            # Network engine not initialized, skip observations
+            return
+
+        # For now, we don't have origin_ip/port in the blob metadata,
+        # so we can't truly observe endpoints yet.
+        # This is a placeholder for future integration.
+        log.debug(f"_process_address_observations: network layer available, {len(transit_blobs)} blobs")
+
+    except ImportError:
+        # Network layer not available
+        pass
+    except Exception as e:
+        log.debug(f"_process_address_observations: error: {e}")
+
+
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
     global _receive_call_count
@@ -422,6 +449,12 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
     log.debug(f"sync.receive: projecting {len(valid_recorded_ids)} recorded events")
 
     recorded.project_ids(valid_recorded_ids, db)
+
+    # Try to integrate with network layer for address observations (optional)
+    try:
+        _process_address_observations(transit_blobs, t_ms, db)
+    except Exception as e:
+        log.debug(f"sync.receive: address observation integration not fully ready: {e}")
 
     db.commit()
 
