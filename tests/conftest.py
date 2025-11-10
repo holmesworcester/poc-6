@@ -12,10 +12,6 @@ def reset_global_state():
     import network_config
     network_config.reset_network_config()
 
-    # Reset sync receive call counter
-    from events.transit import sync
-    sync._receive_call_count = 0
-
     yield
 
     # Cleanup after test (if needed)

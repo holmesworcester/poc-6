@@ -363,7 +363,7 @@ def _get_projection_tables(db: Any) -> list[str]:
     rows = db.query("""
         SELECT name FROM sqlite_master
         WHERE type='table'
-        AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence', 'pre_keys', 'transit_keys')
+        AND name NOT IN ('store', 'incoming_blobs', 'sync_connections', 'sqlite_sequence', 'pre_keys', 'transit_keys')
         AND name NOT LIKE '%_ephemeral'
         ORDER BY name
     """)
