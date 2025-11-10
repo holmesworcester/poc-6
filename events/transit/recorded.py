@@ -136,14 +136,9 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Network/group/channel are metadata and don't need to exist yet
         dep_fields = ['created_by']
     elif event_type == 'invite_proof':
-        # Invite proof depends on invite and the entity being proven (user_id or link_user_id)
-        mode = event_data.get('mode')
-        if mode == 'user':
-            dep_fields = ['created_by', 'invite_id', 'user_id']
-        elif mode == 'link':
-            dep_fields = ['created_by', 'invite_id', 'link_user_id']
-        else:
-            dep_fields = ['created_by', 'invite_id']  # Fallback
+        # Invite proof only depends on invite and created_by
+        # user_id/link_user_id are string IDs, not event IDs, so they're not dependencies
+        dep_fields = ['created_by', 'invite_id']
     elif event_type == 'message_deletion':
         # Deletion events only depend on the creator (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
