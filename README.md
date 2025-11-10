@@ -57,6 +57,72 @@ Observations:
 - removal
 - files
 
+# Jobs and Tick System
+
+The codebase includes a simple job/tick system for running periodic operations in a deterministic way. This is especially useful for scenario tests where you want to control exactly when operations occur.
+
+## Tick Function
+
+The `tick()` function in `tick.py` runs all periodic jobs in a single cycle:
+
+```python
+from tick import tick
+
+# Run one cycle of all jobs at time t_ms
+tick(t_ms=1000, db=db)
+```
+
+Each tick cycle:
+1. Sends sync requests from all local peers to all known peers (see: [Sync](#sync))
+2. Receives and processes incoming sync responses
+3. Commits changes to the database
+
+## Job Registry
+
+Jobs are defined in `jobs.py` as a list of periodic operations:
+
+```python
+JOBS = [
+    {
+        'name': 'sync_send',
+        'fn': sync.send_request_to_all,
+        'params': {},
+        'every_ms': 5_000,  # How often to run (informational)
+    },
+    {
+        'name': 'sync_receive',
+        'fn': sync.receive,
+        'params': {'batch_size': 20},
+        'every_ms': 5_000,
+    },
+]
+```
+
+**Current jobs:**
+- `sync_send` - Send sync requests to all peers (see: [Sync](#sync))
+- `sync_receive` - Process incoming sync responses (see: [Sync](#sync))
+
+**Future jobs** (not yet implemented):
+- Transit prekey replenishment - Regenerate transit prekeys when running low
+- Group prekey replenishment - Regenerate group prekeys when running low
+- `purge_expired` - Clean up expired messages and prekeys
+
+## Usage in Tests
+
+Scenario tests use `tick()` to control sync timing deterministically:
+
+```python
+# Run 10 sync cycles
+for i in range(10):
+    tick(t_ms=4000 + i*100, db=db)
+
+# Check convergence
+messages = message.list_messages(channel_id, peer_id, db)
+assert len(messages) == expected_count
+```
+
+This is cleaner than manually calling sync functions and ensures tests remain deterministic as new periodic jobs are added.
+
 # Testing
 
 Run all tests:

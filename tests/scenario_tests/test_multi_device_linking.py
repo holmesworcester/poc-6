@@ -17,7 +17,7 @@ from db import Database
 import schema
 from events.identity import user, link_invite, link
 from events.content import message
-from events.transit import sync
+import tick
 
 
 def test_alice_links_phone_to_laptop():
@@ -81,10 +81,7 @@ def test_alice_links_phone_to_laptop():
 
     for i in range(20):
         print(f"Sync round {i+1}...")
-        sync.send_request_to_all(t_ms=4000 + i*100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=4050 + i*100, db=db)
-        db.commit()
+        tick.tick(t_ms=4000 + i*100, db=db)
 
     # Verify laptop has the group key (from GKS)
     laptop_has_key = db.query_one(
@@ -137,10 +134,7 @@ def test_alice_links_phone_to_laptop():
     print("\n=== Sync messages between devices ===")
 
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=6000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=6050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both devices see both messages
     print("\n=== Verifying message delivery ===")
@@ -225,10 +219,7 @@ def test_alice_laptop_joins_after_phone_has_messages():
     print("\n=== Sync messages to laptop ===")
 
     for i in range(5):
-        sync.send_request_to_all(t_ms=4000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=4100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=4000 + i*200, db=db)
 
     # Laptop should see all historical messages
     laptop_messages = message.list_messages(
@@ -296,10 +287,7 @@ def test_three_devices_all_linked():
     print("\n=== Sync all devices ===")
 
     for i in range(6):
-        sync.send_request_to_all(t_ms=6000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=6100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=6000 + i*200, db=db)
 
     # Each device sends a message
     print("\n=== Each device sends a message ===")
@@ -335,10 +323,7 @@ def test_three_devices_all_linked():
     print("\n=== Sync messages ===")
 
     for i in range(4):
-        sync.send_request_to_all(t_ms=8000 + i*100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=8050 + i*100, db=db)
-        db.commit()
+        tick.tick(t_ms=8000 + i*100, db=db)
 
     # All devices should see all three messages
     phone_msgs = message.list_messages(alice_phone['channel_id'], alice_phone['peer_id'], db)

@@ -11,7 +11,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite
-from events.transit import sync
+import tick
 
 
 def test_sync_three_players_convergence():
@@ -66,13 +66,8 @@ def test_sync_three_players_convergence():
     print("\n=== Running Sync ===")
     max_rounds = 10
     for round_num in range(max_rounds):
-        # All peers send sync requests
-        sync.send_request_to_all(t_ms=4000 + round_num * 100, db=db)
-        db.commit()
-
-        # All peers receive and process
-        sync.receive(batch_size=20, t_ms=4050 + round_num * 100, db=db)
-        db.commit()
+        # Run one tick cycle (send + receive)
+        tick.tick(t_ms=4000 + round_num * 100, db=db)
 
         # Check Bob's progress
         bob_shareable_now = set(row['event_id'] for row in db.query(
