@@ -1,59 +1,63 @@
 """Tick system for running periodic jobs.
 
 This module provides a simple tick() function that runs all recurring
-operations in sequence. It's designed for deterministic testing where
-we want to control exactly when jobs run.
+operations from the jobs registry. Each job decides whether it should run
+based on its own logic (frequency + custom conditions).
 
-Flow:
-1. Send sync requests to all known peers
-2. Receive and process incoming sync responses
-3. Run message rekey and purge cycle (forward secrecy)
-4. Purge expired events based on TTL (forward secrecy)
-5. Replenish transit prekeys if running low
-6. Replenish group prekeys if running low
+tick() maintains state in the job_state database table (survives process
+restarts) and passes last_run_at to jobs as a parameter. Jobs are stateless
+and deterministic.
 """
 from typing import Any
-from events.transit import sync, transit_prekey
-from events.group import group_prekey
-from events.content import message_deletion
-import purge_expired
+from db import create_unsafe_db
+import jobs
+
+
+def reset_state(db: Any) -> None:
+    """Reset tick state (for testing).
+
+    Args:
+        db: Database connection
+    """
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute("DELETE FROM job_state")
+    db.commit()
 
 
 def tick(t_ms: int, db: Any) -> None:
-    """Run all periodic jobs for one tick cycle.
+    """Run jobs that determine they should run.
 
-    This is a simple implementation that runs all jobs every tick,
-    with no frequency control. Perfect for deterministic scenario tests.
+    For each job in jobs.JOBS:
+    1. Get last run time from job_state table
+    2. Ask if it should_run() given current time and last run time
+    3. If yes, run() the job and update job_state
+
+    State is persisted in the database so it survives process restarts
+    (important for mobile where processes are frequently killed).
 
     Args:
         t_ms: Current time in milliseconds
         db: Database connection
     """
-    # Send sync requests from all local peers to all known peers
-    sync.send_request_to_all(t_ms=t_ms, db=db)
-    db.commit()
+    unsafedb = create_unsafe_db(db)
 
-    # Receive and process incoming sync responses
-    sync.receive(batch_size=20, t_ms=t_ms, db=db)
-    db.commit()
+    for job in jobs.JOBS:
+        # Get last run time from database (0 if never run)
+        state = unsafedb.query_one(
+            "SELECT last_run_at FROM job_state WHERE job_name = ?",
+            (job.name,)
+        )
+        last_run_at = state['last_run_at'] if state else 0
 
-    # Run message rekey and purge cycle for forward secrecy
-    # This rekeys messages encrypted with keys marked for purging,
-    # then purges those old keys
-    message_deletion.run_message_purge_cycle_for_all_peers(t_ms=t_ms, db=db)
-    db.commit()
+        # Each job decides if it should run
+        if job.should_run(t_ms, last_run_at, db):
+            # Run the job
+            job.run(t_ms, db)
 
-    # Purge expired events (based on TTL) for forward secrecy
-    # This removes expired prekeys, messages, and other TTL-based data
-    purge_expired.run_purge_expired_for_all_peers(t_ms=t_ms, db=db)
-    db.commit()
-
-    # Replenish transit prekeys if running low (for forward secrecy)
-    # Ensures each peer has enough non-expired prekeys for receiving sync
-    transit_prekey.replenish_for_all_peers(t_ms=t_ms, db=db)
-    db.commit()
-
-    # Replenish group prekeys if running low (for forward secrecy)
-    # Ensures each peer has enough non-expired prekeys for group encryption
-    group_prekey.replenish_for_all_peers(t_ms=t_ms, db=db)
-    db.commit()
+            # Update state in database
+            unsafedb.execute(
+                """INSERT OR REPLACE INTO job_state (job_name, last_run_at, updated_at)
+                   VALUES (?, ?, ?)""",
+                (job.name, t_ms, t_ms)
+            )
+            db.commit()

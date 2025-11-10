@@ -65,6 +65,7 @@ DEVICE_TABLES = {
     'incoming_blobs',
     'sync_state_ephemeral',
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
+    'job_state',                   # Job execution state tracking (device-wide)
 }
 
 

@@ -22,6 +22,7 @@ def test_tick_runs_message_rekey_and_purge():
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
     schema.create_all(db)
+    tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Alice creates network ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -147,6 +148,7 @@ def test_tick_runs_purge_expired():
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
     schema.create_all(db)
+    tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Alice creates network ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -215,6 +217,7 @@ def test_end_to_end_forward_secrecy_with_tick():
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
     schema.create_all(db)
+    tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Alice creates network ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
