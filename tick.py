@@ -7,6 +7,16 @@ based on its own logic (frequency + custom conditions).
 tick() maintains state in the job_state database table (survives process
 restarts) and passes last_run_at to jobs as a parameter. Jobs are stateless
 and deterministic.
+
+Flow (order determined by jobs.JOBS registry):
+1. Send connection announcements (sync_connect)
+2. Receive incoming (sync responses + connects)
+3. Send sync requests
+4. Receive incoming again
+5. Purge expired connections
+6. Message rekey and purge (forward secrecy)
+7. Purge expired events (TTL-based)
+8. Replenish prekeys when low
 """
 from typing import Any
 from db import create_unsafe_db

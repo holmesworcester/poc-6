@@ -172,10 +172,37 @@ class GroupPrekeyReplenishmentJob(Job):
         return group_prekey.replenish_for_all_peers(t_ms, db)
 
 
+class SyncConnectSendJob(Job):
+    """Send connection announcements to establish/refresh connections."""
+
+    def __init__(self):
+        super().__init__('sync_connect_send', every_ms=60_000)  # 1 minute
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.transit import sync_connect
+        sync_connect.send_connect_to_all(t_ms=t_ms, db=db)
+        return {}
+
+
+class SyncConnectPurgeJob(Job):
+    """Purge expired sync connections."""
+
+    def __init__(self):
+        super().__init__('sync_connect_purge', every_ms=60_000)  # 1 minute
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.transit import sync_connect
+        sync_connect.purge_expired(t_ms=t_ms, db=db)
+        return {}
+
+
 # Registry of job instances
 JOBS = [
-    SyncSendJob(),
+    SyncConnectSendJob(),
     SyncReceiveJob(),
+    SyncSendJob(),
+    SyncReceiveJob(),  # Run receive again after send
+    SyncConnectPurgeJob(),
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),
     TransitPrekeyReplenishmentJob(),

@@ -278,13 +278,14 @@ def assert_convergence(
 
             if save_failures:
                 failure_file = _save_failure(failure_data)
-                print(f"💾 Failure saved to: {failure_file}")
+                if failure_file:
+                    print(f"💾 Failure saved to: {failure_file}")
 
-                # Export timeline if debugging is enabled
-                if debug_timeline:
-                    timeline_file = failure_file.replace('.json', '_timeline.txt')
-                    timeline.export(timeline_file)
-                    print(f"📊 Timeline saved to: {timeline_file}")
+                    # Export timeline if debugging is enabled
+                    if debug_timeline:
+                        timeline_file = failure_file.replace('.json', '_timeline.txt')
+                        timeline.export(timeline_file)
+                        print(f"📊 Timeline saved to: {timeline_file}")
 
             if stop_on_first_failure:
                 raise AssertionError(f"Projection order matters! {diff_msg}")
@@ -362,7 +363,7 @@ def _get_projection_tables(db: Any) -> list[str]:
     rows = db.query("""
         SELECT name FROM sqlite_master
         WHERE type='table'
-        AND name NOT IN ('store', 'incoming_blobs', 'sqlite_sequence', 'pre_keys', 'transit_keys')
+        AND name NOT IN ('store', 'incoming_blobs', 'sync_connections', 'sqlite_sequence', 'pre_keys', 'transit_keys')
         AND name NOT LIKE '%_ephemeral'
         ORDER BY name
     """)

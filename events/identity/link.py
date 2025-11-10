@@ -309,6 +309,22 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     )
     log.info(f"link.join() created link_id={link_id[:20]}...")
 
+    # Create separate invite_proof event (Phase 2: Unified Invite Primitive)
+    # This proves possession of link_private_key separately from the link event
+    from events.identity import invite_proof
+    invite_proof_id = invite_proof.create(
+        invite_id=link_invite_id,
+        mode='link',
+        joiner_peer_shared_id=peer_shared_id,
+        user_id=None,  # Not applicable for mode='link'
+        link_user_id=user_id,  # Target user being linked to
+        invite_private_key=link_private_key,
+        peer_id=peer_id,
+        t_ms=t_ms + 3,
+        db=db
+    )
+    log.info(f"link.join() created invite_proof_id={invite_proof_id[:20]}...")
+
     return {
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,

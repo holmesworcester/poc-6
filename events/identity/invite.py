@@ -38,7 +38,7 @@ def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: A
     return is_admin is not None
 
 
-def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
+def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -52,10 +52,21 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         peer_id: Local peer ID of the inviter
         t_ms: Timestamp
         db: Database connection
+        mode: 'user' for network join invites, 'link' for device linking invites
+        user_id: Required for mode='link', target user to link to. Must be None for mode='user'.
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
     """
+    # Validate mode-specific requirements
+    if mode == 'user':
+        if user_id is not None:
+            raise ValueError("mode='user' invites cannot have user_id set")
+    elif mode == 'link':
+        if user_id is None:
+            raise ValueError("mode='link' invites must have user_id set")
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be 'user' or 'link'")
     safedb = create_safe_db(db, recorded_by=peer_id)
     unsafedb = create_unsafe_db(db)
 
@@ -160,6 +171,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
     # Include inviter's prekey so Bob can send sync requests (projection into prekeys_shared)
     invite_event_data = {
         'type': 'invite',
+        'mode': mode,  # NEW - 'user' or 'link'
         'invite_pubkey': invite_pubkey_b64,  # For user proof signature
         'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
         'network_id': network_id,  # NEW - explicit network reference
@@ -175,6 +187,10 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
+
+    # Add mode-specific fields
+    if mode == 'link':
+        invite_event_data['user_id'] = user_id  # Target user for device linking
 
     # Sign the invite event with inviter's peer private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -335,15 +351,20 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         log.info(f"invite.project() bootstrap invite (first join via URL), skipping validation")
 
     # Insert into invites table
+    mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility
+    user_id = event_data.get('user_id')  # None for mode='user', set for mode='link'
+
     safedb.execute(
         """INSERT OR IGNORE INTO invites
-           (invite_id, invite_pubkey, group_id, inviter_id, created_at, recorded_by)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (invite_id, invite_pubkey, group_id, inviter_id, mode, user_id, created_at, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             invite_id,
             event_data['invite_pubkey'],
             event_data['group_id'],
             created_by,  # Use created_by (inviter's peer_shared_id)
+            mode,
+            user_id,
             event_data['created_at'],
             recorded_by
         )

@@ -52,21 +52,11 @@ def test_sync_perf_10k():
     bob_group_id = bob['group_id']
     bob_channel_id = alice_channel_id  # Same channel as Alice
 
-    # Bootstrap: Initial sync rounds to establish connection
+    # Bootstrap: Initial sync rounds to establish connection using tick()
     log.info("Running initial sync rounds to establish connection...")
-    sync.send_request_to_all(t_ms=4000, db=db)
-    sync.receive(batch_size=20, t_ms=4100, db=db)
-    sync.receive(batch_size=20, t_ms=4200, db=db)
-
-    # Continue bloom sync to exchange remaining events
-    sync.send_request_to_all(t_ms=4400, db=db)
-    sync.receive(batch_size=20, t_ms=4500, db=db)
-    sync.receive(batch_size=20, t_ms=4600, db=db)
-
-    # Additional sync rounds to ensure all events flow through
-    sync.send_request_to_all(t_ms=4700, db=db)
-    sync.receive(batch_size=20, t_ms=4800, db=db)
-    sync.receive(batch_size=20, t_ms=4900, db=db)
+    import tick
+    for i in range(5):
+        tick.tick(t_ms=4000 + i*200, db=db)
 
     db.commit()
     log.info("Bootstrap complete - Alice and Bob are connected")
@@ -104,6 +94,12 @@ def test_sync_perf_10k():
 
     while sync_step < max_steps:
         sync_step += 1
+
+        # Refresh connections periodically (every 20 steps)
+        if sync_step % 20 == 1:
+            from events.transit import sync_connect
+            sync_connect.send_connect_to_all(t_ms=30000 + sync_step * 100, db=db)
+            sync.receive(batch_size=100, t_ms=30000 + sync_step * 100 + 5, db=db)
 
         # Step: All peers send sync requests
         sync.send_request_to_all(t_ms=30000 + sync_step * 100, db=db)
