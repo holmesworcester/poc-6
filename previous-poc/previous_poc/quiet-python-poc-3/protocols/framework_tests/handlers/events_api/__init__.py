@@ -1,1 +1,0 @@
-# Events API handler for framework tests

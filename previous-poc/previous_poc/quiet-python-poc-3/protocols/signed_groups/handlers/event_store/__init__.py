@@ -1,1 +1,0 @@
-# Event store handler for signed groups protocol

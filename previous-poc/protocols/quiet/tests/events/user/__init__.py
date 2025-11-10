@@ -1,1 +1,0 @@
-"""Tests for user event type."""

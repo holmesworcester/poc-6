@@ -1,9 +1,0 @@
-{
-  "description": "Database snapshot for debugging and state inspection",
-  "commands": {
-    "get": {
-      "func": "get.execute"
-    }
-  },
-  "tests": []
-}

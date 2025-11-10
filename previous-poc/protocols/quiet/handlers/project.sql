@@ -1,1 +1,0 @@
--- Project handler doesn't define tables - it only projects to tables defined by event types

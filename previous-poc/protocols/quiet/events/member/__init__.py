@@ -1,1 +1,0 @@
-"""Member event type module."""
