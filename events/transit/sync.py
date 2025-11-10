@@ -557,7 +557,12 @@ def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
 
 
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send sync requests to all peers this peer has seen."""
+    """Send sync requests to all active connections.
+
+    Uses the connection layer (sync_connections) instead of querying peers_shared directly.
+    This follows the two-layer architecture: connections are established first via sync_connect,
+    then sync operates on those established connections.
+    """
 
     # Standardize encoding for logging
     if isinstance(from_peer_id, bytes):
@@ -565,114 +570,24 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     else:
         peer_id_str = from_peer_id
 
-    # Check my bootstrap status (subjective table, use safedb)
-    safedb = create_safe_db(db, recorded_by=from_peer_id)
-    is_creator = safedb.query_one(
-        "SELECT 1 FROM network_creators WHERE peer_id = ? AND recorded_by = ?",
-        (from_peer_id, from_peer_id)
-    )
-    is_joiner = safedb.query_one(
-        "SELECT 1 FROM network_joiners WHERE peer_id = ? AND recorded_by = ?",
-        (from_peer_id, from_peer_id)
-    )
-    received_sync_request = safedb.query_one(
-        "SELECT 1 FROM bootstrap_completers WHERE peer_id = ? AND recorded_by = ?",
-        (from_peer_id, from_peer_id)
+    # Query active connections (device-wide, no recorded_by)
+    unsafedb = create_unsafe_db(db)
+    connection_rows = unsafedb.query(
+        """SELECT peer_shared_id FROM sync_connections
+           WHERE last_seen_ms + ttl_ms > ?""",
+        (t_ms,)
     )
 
-    created_network = 1 if is_creator else 0
-    joined_network = 1 if is_joiner else 0
-    received_sync_request = 1 if received_sync_request else 0
+    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... found={len(connection_rows)}_connections")
 
-    # Bootstrap complete if:
-    # 1. We created the network (is_creator), OR
-    # 2. We joined the network AND received first sync request back (is_joiner AND received_sync_request)
-    my_bootstrap_complete = is_creator or (is_joiner and received_sync_request)
+    for row in connection_rows:
+        peer_shared_id = row['peer_shared_id']
 
-    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... created={created_network} joined={joined_network} received_sync={received_sync_request} my_bootstrap_complete={my_bootstrap_complete}")
-
-    # Query all peer_shared events seen by this peer
-    peer_shared_rows = safedb.query(
-        "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
-        (from_peer_id,)
-    )
-
-    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... found={len(peer_shared_rows)}_peers")
-
-    for row in peer_shared_rows:
-        ps_id = row['peer_shared_id']
-
-        # Skip self (don't sync with yourself)
-        if ps_id == from_peer_shared_id:
-            log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... skipping_self={ps_id[:20]}...")
-            continue
-
-        # Use bootstrap mode only if WE haven't completed bootstrap yet (per-peer, not per-relationship)
-        # Once we receive any sync request, we're done bootstrapping and use bloom-filtered sync
-        if not my_bootstrap_complete:
-            # Bootstrap mode: only for joiners who haven't received sync acknowledgment yet
-            log.debug(f"[BOOTSTRAP_MODE] {peer_id_str[:20]}... -> {ps_id[:20]}... mode=bootstrap (my_complete={my_bootstrap_complete})")
-            send_bootstrap_to_peer(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
-        else:
-            # Use normal bloom-filtered sync (creators always use this, joiners use it after receiving sync)
-            log.info(f"send_requests: {peer_id_str[:20]}... -> {ps_id[:20]}... mode=sync")
-            send_request(ps_id, from_peer_id, from_peer_shared_id, t_ms, db)
+        # Send sync request to this connected peer
+        log.info(f"send_requests: {peer_id_str[:20]}... -> {peer_shared_id[:20]}... mode=sync")
+        send_request(peer_shared_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
-
-
-def send_bootstrap_to_peer(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send ALL shareable events to a peer (bootstrap mode).
-
-    Used when bootstrap_complete=0 for a peer relationship.
-    Sends all shareable events without bloom filtering or window restrictions.
-
-    Args:
-        to_peer_shared_id: Recipient's peer_shared_id
-        from_peer_id: Sender's local peer_id
-        from_peer_shared_id: Sender's peer_shared_id
-        t_ms: Current timestamp
-        db: Database connection
-    """
-
-    log.info(f"send_bootstrap_to_peer: from={from_peer_id[:20]}... to={to_peer_shared_id[:20]}... sending_all_shareable_events")
-
-    # Get ALL shareable events for this peer (no window filtering)
-    safedb = create_safe_db(db, recorded_by=from_peer_id)
-    all_shareable = safedb.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ? ORDER BY created_at ASC",
-        (from_peer_id,)
-    )
-
-    log.info(f"send_bootstrap_to_peer: found {len(all_shareable)} shareable events to send")
-
-    if not all_shareable:
-        log.info(f"send_bootstrap_to_peer: no events to send, skipping")
-        return
-
-    # Get recipient's prekey for wrapping using standard helper
-    recipient_key_dict = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
-
-    if not recipient_key_dict:
-        log.warning(f"send_bootstrap_to_peer: no prekey found for {to_peer_shared_id[:20]}..., cannot send")
-        return
-
-    # Wrap and send each event
-    for row in all_shareable:
-        event_id = row['event_id']
-        event_blob = store.get(event_id, db)
-        if not event_blob:
-            continue
-
-        # Wrap with recipient's prekey (asymmetric encryption) including hint
-        wrapped = crypto.wrap(event_blob, recipient_key_dict, db)
-        queues.incoming.add(wrapped, t_ms, db)
-
-    log.info(f"send_bootstrap_to_peer: sent {len(all_shareable)} events to {to_peer_shared_id[:20]}...")
-
-    # Note: We do NOT mark bootstrap as complete here (sender-side marking is incorrect)
-    # Bootstrap completion is determined by the receiver after successful validation
-    # The joiner creates a network_joined event when they receive and validate inviter's events
 
 
 def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
@@ -768,12 +683,32 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Store as signed plaintext
     canonical = crypto.canonicalize_json(signed_request)
 
-    # Wrap with recipient's prekey for transit only
-    to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
-    if to_key:
-        log.info(f"send_request: wrapping with hint={crypto.b64encode(to_key['id'])[:30]}...")
+    # Try to get established connection first (uses symmetric transit key)
+    unsafedb = create_unsafe_db(db)
+    conn = unsafedb.query_one("""
+        SELECT response_transit_key_id, response_transit_key
+        FROM sync_connections
+        WHERE peer_shared_id = ?
+          AND last_seen_ms + ttl_ms > ?
+    """, (to_peer_shared_id, t_ms))
+
+    if conn:
+        # Use established connection's transit key
+        to_key = {
+            'id': crypto.b64decode(conn['response_transit_key_id']),
+            'key': conn['response_transit_key'],
+            'type': 'symmetric'
+        }
+        log.info(f"send_request: using established connection with {to_peer_shared_id[:20]}...")
     else:
-        log.warning(f"send_request: NO PREKEY FOUND for {to_peer_shared_id[:20]}...")
+        # Fall back to transit prekey for initial contact (asymmetric)
+        to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+        if to_key:
+            log.info(f"send_request: falling back to prekey for {to_peer_shared_id[:20]}... hint={crypto.b64encode(to_key['id'])[:30]}...")
+        else:
+            log.warning(f"send_request: NO CONNECTION OR PREKEY for {to_peer_shared_id[:20]}...")
+            return
+
     request_blob = crypto.wrap(canonical, to_key, db)
 
     # simulate sending - add to incoming queue

@@ -302,7 +302,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'bootstrap_complete'}
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'bootstrap_complete', 'sync_connect'}
 
     should_mark_shareable = False
     if event_type:
@@ -426,6 +426,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'sync':
         from events.transit import sync
         sync.project(ref_id, recorded_by, recorded_at, db)
+        projected_id = ref_id
+    elif event_type == 'sync_connect':
+        from events.transit import sync_connect
+        sync_connect.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
     elif event_type == 'invite':
         from events.identity import invite
