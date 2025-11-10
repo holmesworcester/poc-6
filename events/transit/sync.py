@@ -317,29 +317,9 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
     logger.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
     event_id = crypto.b64encode(crypto.hash(unwrapped_blob))
 
-    # Handle sync request: mark joiner peers as having received bootstrap acknowledgment
-    if event_type == 'sync':
-        from events.identity import bootstrap_complete
-
-        for recorded_by in recorded_by_peers:
-            # Check if this peer is a joiner (in network_joiners but not in network_creators)
-            safedb = create_safe_db(db, recorded_by=recorded_by)
-            is_creator = safedb.query_one(
-                "SELECT 1 FROM network_creators WHERE peer_id = ? AND recorded_by = ?",
-                (recorded_by, recorded_by)
-            )
-            is_joiner = safedb.query_one(
-                "SELECT 1 FROM network_joiners WHERE peer_id = ? AND recorded_by = ?",
-                (recorded_by, recorded_by)
-            )
-
-            # Only mark bootstrap complete if this peer is a joiner (not a creator)
-            if is_joiner and not is_creator:
-                    try:
-                        bootstrap_complete.create(recorded_by, t_ms, db)
-                        logger.info(f"handle_ephemeral_event: created bootstrap_complete for joiner {recorded_by[:20]}...")
-                    except Exception as e:
-                        logger.warning(f"handle_ephemeral_event: failed to create bootstrap_complete: {e}")
+    # Phase 3: Bootstrap special case removed
+    # Peers now sync normally via established connections (sync_connect)
+    # No need for bootstrap_complete tracking
 
     # Project event for each peer who can access it
     for recorded_by in recorded_by_peers:
