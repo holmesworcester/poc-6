@@ -169,6 +169,13 @@ def project(rekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     )
     log.info(f"message_rekey.project() replaced message blob in store for {original_message_id[:20]}...")
 
+    # Update key_id in messages table for efficient future purge lookups
+    safedb.execute(
+        "UPDATE messages SET key_id = ? WHERE message_id = ? AND recorded_by = ?",
+        (new_key_id, original_message_id, recorded_by)
+    )
+    log.info(f"message_rekey.project() updated key_id in messages table to {new_key_id[:20]}...")
+
     # Record the rekey event
     safedb.execute(
         """INSERT OR IGNORE INTO message_rekeys

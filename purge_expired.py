@@ -256,7 +256,7 @@ def run_purge_expired_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
     Args:
         t_ms: Current time in milliseconds (cutoff for expiry)
-        db: Database connection
+        db: Database connection (caller must commit)
 
     Returns:
         Dict with stats: {
@@ -264,6 +264,14 @@ def run_purge_expired_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
             'purge_events_created': list[str],  # purge_expired_id's
             'errors': list[str]
         }
+
+    Error Handling:
+        - If an error occurs for one peer, it is logged and added to the
+          'errors' list, but processing continues for other peers
+        - Each peer's changes are committed by the caller, so partial failures
+          leave some peers purged and others unchanged
+        - If projection fails for a peer, that peer's purge_expired event is
+          still created but not marked valid (will retry on next run)
     """
     log.info(f"purge_expired.run_purge_expired_for_all_peers() t_ms={t_ms}")
 

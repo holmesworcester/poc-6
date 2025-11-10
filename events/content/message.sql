@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
+    key_id TEXT,  -- Key ID hint from blob (first 16 bytes, base64) for efficient purge lookups
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,
     PRIMARY KEY (message_id, recorded_by)
@@ -24,3 +25,7 @@ ON messages(author_id);
 -- Index for querying expired messages
 CREATE INDEX IF NOT EXISTS idx_messages_ttl
 ON messages(ttl_ms) WHERE ttl_ms > 0;
+
+-- Index for querying messages by encryption key (for efficient purge cycle)
+CREATE INDEX IF NOT EXISTS idx_messages_key_id
+ON messages(key_id, recorded_by);

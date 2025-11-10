@@ -163,6 +163,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # For now: default 1 week. In future: get from channel's disappearing_time
     ttl_ms = created_at + DEFAULT_MESSAGE_TTL_MS
 
+    # Extract key_id from blob for efficient purge lookups
+    # Key ID is the first 16 bytes of the blob (the hint)
+    key_id_bytes = event_blob[:crypto.ID_SIZE]
+    key_id_b64 = crypto.b64encode(key_id_bytes)
+
     # Check if deletion exists (may have arrived before message)
     deletion_check = safedb.query_one(
         "SELECT deleted_by FROM message_deletions WHERE message_id = ? AND recorded_by = ? LIMIT 1",
@@ -194,9 +199,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(
         """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, recorded_by, recorded_at)
+           (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
     )
 
     # Record dependency: message depends on channel (for cascading deletion)

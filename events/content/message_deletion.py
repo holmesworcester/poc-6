@@ -393,32 +393,14 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
         log.info(f"message_deletion.run_message_purge_cycle() processing key_id={purge_key_id[:20]}...")
 
         # Find all messages encrypted with this key
-        all_messages = safedb.query(
+        # Use key_id column for efficient O(1) lookup instead of O(n) blob scanning
+        messages_using_purge_key_rows = safedb.query(
             """SELECT message_id FROM messages
-               WHERE recorded_by = ?
+               WHERE recorded_by = ? AND key_id = ?
                AND message_id NOT IN (SELECT event_id FROM deleted_events WHERE recorded_by = ?)""",
-            (peer_id, peer_id)
+            (peer_id, purge_key_id, peer_id)
         )
-
-        messages_using_purge_key = []
-        for msg_row in all_messages:
-            message_id = msg_row['message_id']
-            blob = unsafedb.query_one(
-                "SELECT blob FROM store WHERE id = ?",
-                (message_id,)
-            )
-            if not blob:
-                continue
-
-            # Extract key_id hint from blob (first 16 bytes, then base64 encode)
-            try:
-                key_id_bytes = blob['blob'][:crypto.ID_SIZE]
-                key_id_b64 = crypto.b64encode(key_id_bytes)
-                if key_id_b64 == purge_key_id:
-                    messages_using_purge_key.append(message_id)
-            except Exception as e:
-                log.warning(f"message_deletion.run_message_purge_cycle() error checking message {message_id[:20]}...: {e}")
-                continue
+        messages_using_purge_key = [row['message_id'] for row in messages_using_purge_key_rows]
 
         if not messages_using_purge_key:
             log.info(f"message_deletion.run_message_purge_cycle() no messages found using key {purge_key_id[:20]}...")
@@ -498,7 +480,7 @@ def run_message_purge_cycle_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
     Args:
         t_ms: Current time in milliseconds
-        db: Database connection
+        db: Database connection (caller must commit)
 
     Returns:
         Dict with aggregated stats: {
@@ -507,6 +489,14 @@ def run_message_purge_cycle_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
             'total_keys_purged': int,
             'errors': list[str]
         }
+
+    Error Handling:
+        - If an error occurs for one peer, it is logged and added to the
+          'errors' list, but processing continues for other peers
+        - Each peer's changes are committed by the caller, so partial failures
+          leave some peers purged and others unchanged
+        - Per-message errors during rekeying are collected in the peer's stats
+          and aggregated into the total errors list
     """
     log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() t_ms={t_ms}")
 

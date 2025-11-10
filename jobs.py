@@ -4,7 +4,8 @@ This module defines all jobs that should run periodically. Currently it's
 a simple list, but can be extended to support frequency control, job state
 persistence, and other features as needed.
 """
-from events.transit import sync
+from events.transit import sync, transit_prekey
+from events.group import group_prekey
 from events.content import message_deletion
 import purge_expired
 
@@ -40,7 +41,16 @@ JOBS = [
         'params': {},
         'every_ms': 600_000,  # 10 minutes (informational, not enforced)
     },
-    # Future jobs:
-    # - transit_prekey_replenishment (every 1-6 hours)
-    # - group_prekey_replenishment (every 1-6 hours)
+    {
+        'name': 'transit_prekey_replenishment',
+        'fn': transit_prekey.replenish_for_all_peers,
+        'params': {},
+        'every_ms': 3_600_000,  # 1 hour (informational, not enforced)
+    },
+    {
+        'name': 'group_prekey_replenishment',
+        'fn': group_prekey.replenish_for_all_peers,
+        'params': {},
+        'every_ms': 3_600_000,  # 1 hour (informational, not enforced)
+    },
 ]

@@ -12,6 +12,11 @@ log = logging.getLogger(__name__)
 TRANSIT_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 
+# Prekey replenishment configuration
+MIN_TRANSIT_PREKEYS = 10  # Minimum number of non-expired prekeys to maintain
+REPLENISH_TRANSIT_PREKEYS = 20  # Number to generate when below minimum
+
+
 def generate_batch(peer_id: str, count: int, t_ms: int, db: Any) -> list[str]:
     """Generate N transit prekeys at once.
 
@@ -232,3 +237,88 @@ def get_transit_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) 
         'public_key': result['public_key'],
         'type': 'asymmetric'
     }
+
+
+def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
+    """Replenish transit prekeys for all local peers if running low.
+
+    This is a recurring job that should run periodically (every 1-6 hours)
+    to ensure each peer has enough non-expired prekeys available.
+
+    For each local peer:
+    1. Count non-expired transit prekeys
+    2. If count < MIN_TRANSIT_PREKEYS, generate REPLENISH_TRANSIT_PREKEYS new ones
+
+    Args:
+        t_ms: Current time in milliseconds
+        db: Database connection
+
+    Returns:
+        Dict with stats: {
+            'peers_processed': int,
+            'peers_replenished': int,
+            'total_prekeys_generated': int,
+            'errors': list[str]
+        }
+
+    Note: Each peer's prekeys are checked independently. If a peer has enough
+    prekeys, no action is taken. Errors for one peer do not stop processing
+    of other peers.
+    """
+    log.info(f"transit_prekey.replenish_for_all_peers() t_ms={t_ms}")
+
+    unsafedb = create_unsafe_db(db)
+
+    stats = {
+        'peers_processed': 0,
+        'peers_replenished': 0,
+        'total_prekeys_generated': 0,
+        'errors': []
+    }
+
+    # Get all local peers
+    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    if not local_peer_rows:
+        log.info(f"transit_prekey.replenish_for_all_peers() no local peers found")
+        return stats
+
+    log.info(f"transit_prekey.replenish_for_all_peers() found {len(local_peer_rows)} local peers")
+
+    for peer_row in local_peer_rows:
+        peer_id = peer_row['peer_id']
+        try:
+            # Count non-expired prekeys for this peer
+            prekey_count_row = unsafedb.query_one(
+                """SELECT COUNT(*) as count FROM transit_prekeys
+                   WHERE owner_peer_id = ? AND ttl_ms > ?""",
+                (peer_id, t_ms)
+            )
+            prekey_count = prekey_count_row['count'] if prekey_count_row else 0
+
+            log.debug(f"transit_prekey.replenish_for_all_peers() peer {peer_id[:20]}... has {prekey_count} non-expired prekeys")
+
+            stats['peers_processed'] += 1
+
+            # Replenish if below minimum
+            if prekey_count < MIN_TRANSIT_PREKEYS:
+                log.info(f"transit_prekey.replenish_for_all_peers() peer {peer_id[:20]}... has only {prekey_count} prekeys, replenishing with {REPLENISH_TRANSIT_PREKEYS}")
+
+                prekey_ids = generate_batch(peer_id, REPLENISH_TRANSIT_PREKEYS, t_ms, db)
+
+                # Project each prekey
+                for i, prekey_id in enumerate(prekey_ids):
+                    project(prekey_id, peer_id, t_ms + i, db)
+
+                stats['peers_replenished'] += 1
+                stats['total_prekeys_generated'] += len(prekey_ids)
+                log.info(f"transit_prekey.replenish_for_all_peers() generated {len(prekey_ids)} prekeys for peer {peer_id[:20]}...")
+
+        except Exception as e:
+            error = f"Error processing peer {peer_id[:20]}...: {e}"
+            log.error(f"transit_prekey.replenish_for_all_peers() {error}")
+            stats['errors'].append(error)
+            continue
+
+    log.info(f"transit_prekey.replenish_for_all_peers() complete: {stats['peers_processed']} peers processed, {stats['peers_replenished']} replenished, {stats['total_prekeys_generated']} prekeys generated")
+    return stats
