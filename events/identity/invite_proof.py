@@ -210,9 +210,17 @@ def project(invite_proof_id: str, recorded_by: str, recorded_at: int, db: Any) -
         group_id = invite_data['group_id']
         safedb.execute("""
             INSERT OR IGNORE INTO group_members
-            (group_id, user_id, recorded_by)
-            VALUES (?, ?, ?)
-        """, (group_id, user_id, recorded_by))
+            (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,  # Use user_id as member_id for invite joins
+            group_id,
+            user_id,
+            joiner_peer_shared_id,  # Self-added via invite
+            event_data['created_at'],
+            recorded_by,
+            recorded_at
+        ))
         log.info(f"invite_proof.project() added user {user_id[:20]}... to group {group_id[:20]}...")
 
     else:  # mode == 'link'

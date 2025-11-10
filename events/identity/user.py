@@ -183,8 +183,25 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         )
     )
 
-    # Note: Group membership is now added by invite_proof.project()
-    # (moved to decouple group membership from user creation)
+    # Add to group_members
+    # For invite joiners, this is handled by invite_proof.project()
+    # For network creators (no invite_id), we add directly here
+    if not invite_id:
+        # Network creator - add to group directly
+        safedb.execute(
+            """INSERT OR IGNORE INTO group_members
+               (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user_id,  # Use user_id as member_id for bootstrap membership
+                group_id,  # From event_data for network creator
+                user_id,
+                event_data['created_by'],  # Self-added
+                event_data['created_at'],
+                recorded_by,
+                recorded_at
+            )
+        )
 
     # Mark user event as valid for this peer
     safedb.execute(
