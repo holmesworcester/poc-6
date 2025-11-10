@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS sync_connections (
     peer_shared_id TEXT PRIMARY KEY,        -- remote peer
     response_transit_key_id TEXT NOT NULL,  -- how to send to them
     response_transit_key BLOB NOT NULL,     -- key material
-    addr TEXT,                               -- origin IP:port
+    address TEXT,                            -- origin IP address
+    port INTEGER,                            -- origin port number
     last_seen_ms INTEGER NOT NULL,
     ttl_ms INTEGER NOT NULL
 );
@@ -662,7 +663,8 @@ def project(sync_event, db):
 CREATE TABLE IF NOT EXISTS invite_accepteds (
     invite_id TEXT NOT NULL,
     inviter_peer_shared_id TEXT NOT NULL,
-    addr TEXT,                          -- e.g., "127.0.0.1:6100"
+    address TEXT,                       -- Inviter IP address
+    port INTEGER,                       -- Inviter port number
     inviter_transit_prekey_id TEXT,
     inviter_transit_prekey_public_key BLOB,
     created_at INTEGER NOT NULL,
@@ -686,19 +688,20 @@ def project(event, db):
     invite_data = json.loads(invite_blob)
 
     # Get OOB data from invite link
-    inviter_addr = event.get('inviter_addr')  # from URL
+    inviter_address = event.get('inviter_address')  # from URL
+    inviter_port = event.get('inviter_port')  # from URL
     inviter_transit_prekey_id = invite_data.get('inviter_transit_prekey_id')
     inviter_transit_prekey_public_key = invite_data.get('inviter_transit_prekey_public_key')
 
     # Insert into invite_accepteds table
     db.execute("""
         INSERT OR REPLACE INTO invite_accepteds
-        (invite_id, inviter_peer_shared_id, addr,
+        (invite_id, inviter_peer_shared_id, address, port,
          inviter_transit_prekey_id, inviter_transit_prekey_public_key,
          created_at, recorded_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (event['invite_id'], invite_data['inviter_peer_shared_id'],
-          inviter_addr, inviter_transit_prekey_id,
+          inviter_address, inviter_port, inviter_transit_prekey_id,
           inviter_transit_prekey_public_key,
           event['created_at'], event['recorded_by']))
 ```
@@ -712,14 +715,14 @@ def send_connect_to_all(db):
 
     # NEW: Also send to inviter addresses
     invite_accepteds = db.execute("""
-        SELECT inviter_peer_shared_id, addr,
+        SELECT inviter_peer_shared_id, address, port,
                inviter_transit_prekey_id, inviter_transit_prekey_public_key
         FROM invite_accepteds
-        WHERE addr IS NOT NULL
+        WHERE address IS NOT NULL AND port IS NOT NULL
     """).fetchall()
 
     for invite in invite_accepteds:
-        # Send sync_connect to inviter address
+        # Send sync_connect to inviter address:port
         # Sealed to inviter's transit_prekey
 ```
 
