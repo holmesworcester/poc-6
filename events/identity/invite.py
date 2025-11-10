@@ -247,6 +247,35 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             )
             log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
+    # For mode='link', share keys for ALL groups (so new device can decrypt everything)
+    if mode == 'link':
+        log.info(f"invite.create() mode='link' - creating group_key_shared for all groups")
+        group_rows = safedb.query(
+            "SELECT DISTINCT g.group_id, g.key_id FROM groups g WHERE g.recorded_by = ? ORDER BY g.group_id",
+            (peer_id,)
+        )
+
+        ts = t_ms + 5
+        for group_row in group_rows:
+            group_id = group_row['group_id']
+            key_id_for_group = group_row['key_id']
+
+            # Skip if we already created it above (all_users or admins)
+            if key_id_for_group == key_id or (admin_key_id and key_id_for_group == admin_key_id):
+                continue
+
+            # Create group_key_shared sealed to invite_prekey
+            group_key_shared_id = group_key_shared.create_for_invite(
+                key_id=key_id_for_group,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,
+                t_ms=ts,
+                db=db
+            )
+            ts += 1
+            log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
+
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
     inviter_peer_shared_blob = store.get(peer_shared_id, unsafedb)
@@ -270,13 +299,24 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'port': inviter_port,
     }
 
+    # For mode='link', also include the existing user blob (for device linking)
+    if mode == 'link' and user_id:
+        existing_user_blob = store.get(user_id, unsafedb)
+        if existing_user_blob:
+            existing_user_blob_b64 = base64.urlsafe_b64encode(existing_user_blob).decode().rstrip('=')
+            invite_link_data['existing_user_blob'] = existing_user_blob_b64
+            log.info(f"invite.create() added existing_user_blob for mode='link'")
+
     # Encode invite link as base64-urlsafe JSON
     import base64
     invite_json = json.dumps(invite_link_data, separators=(',', ':'), sort_keys=True)
     invite_code = base64.urlsafe_b64encode(invite_json.encode()).decode().rstrip('=')
-    invite_link = f"quiet://invite/{invite_code}"
 
-    log.info(f"invite.create() invite link created with invite_prekey_id={invite_prekey_id[:20]}...")
+    # Use different URL prefix based on mode
+    url_prefix = "link" if mode == "link" else "invite"
+    invite_link = f"quiet://{url_prefix}/{invite_code}"
+
+    log.info(f"invite.create() invite link created (mode={mode}) with invite_prekey_id={invite_prekey_id[:20]}...")
 
     return (invite_id, invite_link, invite_link_data)
 

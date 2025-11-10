@@ -233,19 +233,30 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
     log.info(f"link.join() created new peer: {peer_id[:20]}...")
 
-    # Extract and store link_invite event blob
-    link_invite_blob_b64 = link_data['link_invite_blob']
-    link_invite_blob = base64.urlsafe_b64decode(link_invite_blob_b64 + '===')
-    link_invite_id = store.event(link_invite_blob, peer_id, t_ms, db)
-    log.info(f"link.join() stored link_invite_id={link_invite_id[:20]}...")
+    # Extract and store invite/link_invite event blob
+    # Support both unified invite format (invite_blob) and legacy (link_invite_blob)
+    if 'invite_blob' in link_data:
+        # Unified invite format (mode='link')
+        invite_blob_b64 = link_data['invite_blob']
+        invite_blob = base64.urlsafe_b64decode(invite_blob_b64 + '===')
+        link_invite_id = store.event(invite_blob, peer_id, t_ms, db)
+        log.info(f"link.join() stored unified invite (mode='link') id={link_invite_id[:20]}...")
+    else:
+        # Legacy link_invite format
+        link_invite_blob_b64 = link_data['link_invite_blob']
+        link_invite_blob = base64.urlsafe_b64decode(link_invite_blob_b64 + '===')
+        link_invite_id = store.event(link_invite_blob, peer_id, t_ms, db)
+        log.info(f"link.join() stored link_invite_id={link_invite_id[:20]}...")
 
     # Project link_invite immediately to restore invite_prekey
     from events.identity import link_invite
     link_invite.project(link_invite_id, peer_id, t_ms, db)
 
     # Project existing device's peer_shared and user event from link URL
-    if 'existing_peer_shared_blob' in link_data:
-        existing_peer_shared_blob_b64 = link_data['existing_peer_shared_blob']
+    # Support both unified format (inviter_peer_shared_blob) and legacy (existing_peer_shared_blob)
+    peer_shared_blob_key = 'inviter_peer_shared_blob' if 'invite_blob' in link_data else 'existing_peer_shared_blob'
+    if peer_shared_blob_key in link_data:
+        existing_peer_shared_blob_b64 = link_data[peer_shared_blob_key]
         existing_peer_shared_blob = base64.urlsafe_b64decode(existing_peer_shared_blob_b64 + '===')
 
         from events.transit import recorded
@@ -278,10 +289,27 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         log.info(f"link.join() projected existing device's user event: {existing_user_id[:20]}...")
 
     # Extract secrets from link URL
-    link_prekey_id = link_data['link_prekey_id']
-    link_private_key = crypto.b64decode(link_data['link_private_key'])
-    user_id = link_data['user_id']
-    network_id = link_data['network_id']
+    # For unified format, get invite_prekey_id and invite_private_key
+    # For legacy format, get link_prekey_id and link_private_key
+    if 'invite_blob' in link_data:
+        # Unified format
+        invite_prekey_id = link_data.get('invite_prekey_id')
+        invite_private_key = crypto.b64decode(link_data['invite_private_key'])
+        link_prekey_id = invite_prekey_id
+        link_private_key = invite_private_key
+
+        # Get user_id and network_id from the stored invite event
+        unsafedb = create_unsafe_db(db)
+        invite_blob = store.get(link_invite_id, unsafedb)
+        invite_event = crypto.parse_json(invite_blob)
+        user_id = invite_event.get('user_id')  # For mode='link'
+        network_id = invite_event.get('network_id')
+    else:
+        # Legacy format
+        link_prekey_id = link_data['link_prekey_id']
+        link_private_key = crypto.b64decode(link_data['link_private_key'])
+        user_id = link_data['user_id']
+        network_id = link_data['network_id']
 
     log.info(f"link.join() extracted link_prekey_id={link_prekey_id[:20]}..., user_id={user_id[:20]}...")
 
