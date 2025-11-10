@@ -159,8 +159,7 @@ def test_5mb_file_download_with_progress():
     assert len(bob_slices) == expected_slices, f"Expected {expected_slices} slices, got {len(bob_slices)}"
 
     # Verify Bob can retrieve the file
-    from events.content import file_slice
-    bob_retrieved = file_slice.get_file(file_id, bob['peer_id'], db)
+    bob_retrieved = message_attachment.get_file_data(file_id, bob['peer_id'], db)
     assert bob_retrieved is not None, "Bob should be able to retrieve the file"
     assert len(bob_retrieved) == file_size, f"Expected {file_size} bytes, got {len(bob_retrieved)}"
     assert bob_retrieved == file_data, "Bob's file should match original"

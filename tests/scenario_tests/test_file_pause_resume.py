@@ -201,8 +201,7 @@ def test_pause_and_resume_file_download():
     assert final_progress['slices_received'] == expected_slices
 
     # Verify file integrity
-    from events.content import file_slice
-    bob_retrieved = file_slice.get_file(file_id, bob['peer_id'], db)
+    bob_retrieved = message_attachment.get_file_data(file_id, bob['peer_id'], db)
     assert bob_retrieved == file_data, "Retrieved file should match original"
 
     print(f"\n✅ Pause/Resume test passed!")
