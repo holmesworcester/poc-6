@@ -15,7 +15,7 @@ from db import Database
 import schema
 from events.identity import user, invite
 from events.content import channel, message, message_attachment
-from events.transit import sync
+import tick
 
 
 def test_file_attachment_sync_only():
@@ -49,10 +49,7 @@ def test_file_attachment_sync_only():
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     print("\n=== Initial sync (bootstrap + GKS) ===")
     for i in range(5):
-        sync.send_request_to_all(t_ms=2100 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=2200 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=2100 + i*200, db=db)
 
     print("✓ Initial sync completed")
 
@@ -95,10 +92,7 @@ def test_file_attachment_sync_only():
 
     print("\n=== Sync message to Bob (3 rounds) ===")
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=4000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=50, t_ms=4050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=4000 + round_num * 100, db=db)
 
     # Check if Bob received the message
     bob_msg_count = db.query_all(
@@ -159,10 +153,7 @@ def test_file_attachment_sync_only():
 
     print("\n=== Sync file to Bob (3 rounds) ===")
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=6000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=50, t_ms=6050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=6000 + round_num * 100, db=db)
 
         # Check progress using API (what frontends would use)
         progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)

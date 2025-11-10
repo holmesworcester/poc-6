@@ -18,7 +18,7 @@ from db import Database
 import schema
 from events.identity import user, invite
 from events.content import channel, message, message_attachment
-from events.transit import sync
+import tick
 import crypto
 
 
@@ -53,10 +53,7 @@ def test_two_party_file_attachment_and_sync():
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     for i in range(5):
         print(f"\n=== Sync Round {i+1} ===")
-        sync.send_request_to_all(t_ms=2100 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=2200 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=2100 + i*200, db=db)
 
     print("✓ Initial sync completed")
 
@@ -148,10 +145,7 @@ def test_two_party_file_attachment_and_sync():
     # Sync file events to Bob (need multiple rounds for message + file + slices + attachment)
     # More rounds needed because: round 1 sends events, round 2 may trigger key shares, plus window rotation
     for round_num in range(10):
-        sync.send_request_to_all(t_ms=5000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=50, t_ms=5050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=5000 + round_num * 100, db=db)
 
         # Show progress (demonstrating the progress API for frontends)
         if round_num % 2 == 0:  # Show every other round to reduce noise

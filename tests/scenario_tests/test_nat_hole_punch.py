@@ -14,7 +14,7 @@ import sqlite3
 from db import Database, create_safe_db
 import schema
 from events.identity import user, invite
-from events.transit import sync
+import tick
 from events.network import address as address_module
 from events.network import intro as intro_module
 import network_config
@@ -54,23 +54,15 @@ def test_nat_hole_punch_simple():
 
     # Phase 1: Bob sends sync request to Alice (Alice learns Bob's endpoint)
     print("\n=== Phase 1: Bob syncs with Alice ===")
-    sync.send_request_to_all(t_ms=3000, db=db)
-    db.commit()
-
     # Simulate network tick (advance time, move packets to queues)
-    # For now, since we don't have network.tick() yet, we'll just advance time in sync.receive()
-    sync.receive(batch_size=20, t_ms=3100, db=db)
-    db.commit()
+    # For now, since we don't have network.tick() yet, we'll use regular tick
+    tick.tick(t_ms=3000, db=db)
 
     print("✓ Bob sent sync request to Alice")
 
     # Phase 2: Alice responds with sync (observing Bob's endpoint)
     print("\n=== Phase 2: Alice responds and observes Bob ===")
-    sync.send_request_to_all(t_ms=3200, db=db)
-    db.commit()
-
-    sync.receive(batch_size=20, t_ms=3300, db=db)
-    db.commit()
+    tick.tick(t_ms=3200, db=db)
 
     print("✓ Alice responded to Bob")
 
@@ -104,11 +96,7 @@ def test_nat_hole_punch_simple():
 
     # Phase 4: Sync intro events
     print("\n=== Phase 4: Sync intro events ===")
-    sync.send_request_to_all(t_ms=3500, db=db)
-    db.commit()
-
-    sync.receive(batch_size=20, t_ms=3600, db=db)
-    db.commit()
+    tick.tick(t_ms=3500, db=db)
 
     print("✓ Bob and Charlie received intro and address events")
 

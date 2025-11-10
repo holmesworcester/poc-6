@@ -15,7 +15,7 @@ from db import Database, create_safe_db, create_unsafe_db
 import schema
 from events.identity import user, invite, peer, peer_shared
 from events.identity import user_removed, peer_removed
-from events.transit import sync
+import tick
 from events.content import message
 import store
 from tests.utils import assert_convergence, assert_reprojection, assert_idempotency
@@ -56,10 +56,7 @@ def test_user_removal_blocks_sync_but_preserves_history():
     print("\n=== Initial sync to converge ===")
     for i in range(5):
         print(f"Sync round {i+1}")
-        sync.send_request_to_all(t_ms=3000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + i*200, db=db)
 
     # Verify Bob is in Alice's view
     print("\n=== Verify Bob joined successfully ===")
@@ -289,10 +286,7 @@ def test_receive_path_removal_check():
 
     print("\n=== Initial sync to converge ===")
     for i in range(3):
-        sync.send_request_to_all(t_ms=3000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + i*200, db=db)
 
     # Alice removes Bob
     print("\n=== Alice removes Bob ===")
@@ -318,10 +312,7 @@ def test_receive_path_removal_check():
     # Sync works even after removal (removal events propagate)
     print("\n=== Sync after removal ===")
     try:
-        sync.send_request_to_all(t_ms=5000, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=5100, db=db)
-        db.commit()
+        tick.tick(t_ms=5000, db=db)
         print("✓ Sync completed with removal checks in place")
     except Exception as e:
         print(f"✗ Sync error: {e}")
@@ -366,10 +357,7 @@ def test_user_removal_rotates_group_keys():
     print("\n=== Initial sync to converge ===")
     for i in range(5):
         print(f"Sync round {i+1}")
-        sync.send_request_to_all(t_ms=3000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + i*200, db=db)
 
     # Get original key
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -443,10 +431,7 @@ def test_peer_removal_last_device_rotates_keys():
     print("\n=== Initial sync to converge ===")
     for i in range(5):
         print(f"Sync round {i+1}")
-        sync.send_request_to_all(t_ms=3000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + i*200, db=db)
 
     # Get original key
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])

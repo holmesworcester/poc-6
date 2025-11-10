@@ -14,7 +14,7 @@ from db import Database
 import schema
 from events.identity import user, invite
 from events.content import message
-from events.transit import sync
+import tick
 
 
 def test_three_player_messaging():
@@ -52,10 +52,7 @@ def test_three_player_messaging():
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     for i in range(5):
         print(f"\n=== Sync Round {i+1} ===")
-        sync.send_request_to_all(t_ms=4000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=4100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=4000 + i*200, db=db)
 
     # Check that Bob has Alice's network key (from GKS)
     bob_has_network_key = db.query_one(
@@ -113,10 +110,7 @@ def test_three_player_messaging():
     # Sync messages
     print("\n=== Sync Round 2: Message exchange ===")
     for round_num in range(3):  # A few rounds to ensure convergence
-        sync.send_request_to_all(t_ms=6000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=6050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify message delivery
     print("\n=== Verifying message delivery ===")

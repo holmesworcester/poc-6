@@ -20,7 +20,7 @@ from events.identity import user, invite
 from events.content import message
 from events.content import message_deletion
 from events.group import group_member
-from events.transit import sync
+import tick
 
 
 def test_message_deletion_self():
@@ -129,10 +129,7 @@ def test_message_deletion_admin():
     # Sync to converge
     print("\n=== Sync to converge ===")
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=3000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + round_num * 100, db=db)
 
     # Make Bob an admin
     print("\n=== Alice makes Bob an admin ===")
@@ -149,10 +146,7 @@ def test_message_deletion_admin():
 
     # Sync admin status
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=5000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=5050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=5000 + round_num * 100, db=db)
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
@@ -169,10 +163,7 @@ def test_message_deletion_admin():
 
     # Sync message to Bob
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=7000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=7050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=7000 + round_num * 100, db=db)
 
     # Verify Bob sees the message
     from db import create_safe_db
@@ -205,10 +196,7 @@ def test_message_deletion_admin():
 
     # Sync deletion to Alice
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=9000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=9050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=9000 + round_num * 100, db=db)
 
     # Verify Alice also sees deletion
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -244,10 +232,7 @@ def test_message_deletion_unauthorized():
 
     # Sync
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=3000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + round_num * 100, db=db)
 
     # Make Bob admin
     group_member.create(
@@ -262,10 +247,7 @@ def test_message_deletion_unauthorized():
 
     # Sync Bob's admin status
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=5000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=5050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=5000 + round_num * 100, db=db)
 
     # Charlie joins (will NOT be admin)
     charlie_invite_id, charlie_invite_link, _ = invite.create(
@@ -278,10 +260,7 @@ def test_message_deletion_unauthorized():
 
     # Sync
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=8000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=8050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=8000 + round_num * 100, db=db)
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
@@ -297,10 +276,7 @@ def test_message_deletion_unauthorized():
 
     # Sync message
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=10000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=10050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=10000 + round_num * 100, db=db)
 
     # Charlie (non-admin) tries to delete Alice's message
     print("\n=== Charlie (non-admin) tries to delete Alice's message ===")
@@ -339,10 +315,7 @@ def test_message_deletion_ordering():
 
     # Sync
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=3000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=3050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=3000 + round_num * 100, db=db)
 
     # Alice sends message
     print("\n=== Alice sends message ===")
@@ -369,10 +342,7 @@ def test_message_deletion_ordering():
     # Now sync both message and deletion to Bob
     print("\n=== Sync to Bob (message and deletion together) ===")
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=5000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=5050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=5000 + round_num * 100, db=db)
 
     # Verify Bob never sees the message (deletion blocks it)
     from db import create_safe_db

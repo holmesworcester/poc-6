@@ -19,7 +19,8 @@ from db import Database
 import schema
 from events.identity import user, invite, network, peer, peer_shared
 from events.group import group_member
-from events.transit import sync, transit_prekey
+from events.transit import transit_prekey
+import tick
 import store
 import crypto
 
@@ -57,10 +58,7 @@ def test_admin_group_workflow():
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     for i in range(5):
         print(f"\n=== Sync Round {i+1} ===")
-        sync.send_request_to_all(t_ms=4000 + i*200, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=4100 + i*200, db=db)
-        db.commit()
+        tick.tick(t_ms=4000 + i*200, db=db)
 
     # Get admin group ID from network
     admin_group_id = network.get_admin_group_id(alice['network_id'], alice['peer_id'], db)
@@ -168,10 +166,7 @@ def test_admin_group_workflow():
     # Sync to propagate admin group membership
     print("\n=== Sync to propagate admin membership ===")
     for round_num in range(3):  # A few rounds to ensure convergence
-        sync.send_request_to_all(t_ms=6000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=6050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both peers see Bob as admin
     print("\n=== Verify both peers see Bob as admin after sync ===")
@@ -227,10 +222,7 @@ def test_admin_group_workflow():
     # Sync between all three peers (need more rounds for 3-way sync)
     print("\n=== Sync to integrate Charlie ===")
     for round_num in range(5):  # More rounds for 3-peer convergence
-        sync.send_request_to_all(t_ms=9000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=9050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=9000 + round_num * 100, db=db)
 
     # Verify Charlie can see both Alice and Bob as admins
     print("\n=== Verify Charlie sees both Alice and Bob as admins ===")
@@ -323,10 +315,7 @@ def test_admin_group_workflow():
     # Sync the rogue invite to Alice (who should reject it)
     print("\n=== Syncing rogue invite to Alice ===")
     for round_num in range(3):
-        sync.send_request_to_all(t_ms=12000 + round_num * 100, db=db)
-        db.commit()
-        sync.receive(batch_size=20, t_ms=12050 + round_num * 100, db=db)
-        db.commit()
+        tick.tick(t_ms=12000 + round_num * 100, db=db)
 
     # Verify Alice rejected the rogue invite (should not be in her invites table)
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
