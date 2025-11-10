@@ -112,16 +112,7 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
     # Note: message_attachment_id might not be trackable, so we mark by message_id
     # In practice, deleting the message will cascade delete attachments
 
-    # Check files table
-    files_with_ttl = safedb.query(
-        """SELECT DISTINCT file_id FROM files
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    expired_event_ids.extend([row['file_id'] for row in files_with_ttl])
-    log.info(f"purge_expired.project() found {len(files_with_ttl)} expired files")
-
-    # Check file_slices table
+    # Check file_slices table (no separate files table, just slices)
     slices_with_ttl = safedb.query(
         """SELECT DISTINCT file_id FROM file_slices
            WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
@@ -129,8 +120,8 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
     )
     # Slices are cleaned up by their file, no need to track separately
 
-    # Check transit prekeys
-    transit_prekeys_with_ttl = safedb.query(
+    # Check transit prekeys (device-wide, not subjective)
+    transit_prekeys_with_ttl = unsafedb.query(
         """SELECT transit_prekey_id FROM transit_prekeys
            WHERE ttl_ms > 0 AND ttl_ms <= ?""",
         (cutoff_ms,)
@@ -203,14 +194,7 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
         (recorded_by, cutoff_ms)
     )
 
-    # Files
-    safedb.execute(
-        """DELETE FROM files
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-
-    # File slices
+    # File slices (no separate files table)
     safedb.execute(
         """DELETE FROM file_slices
            WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
@@ -259,3 +243,71 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
 
     log.info(f"purge_expired.project() successfully completed purge_expired")
     return purge_expired_id
+
+
+def run_purge_expired_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
+    """Run purge_expired for all local peers in the database.
+
+    This is the recurring job that should be called periodically to clean up
+    expired events based on their TTL. It:
+    1. Gets all local peers
+    2. For each peer, creates a purge_expired event for cutoff = t_ms
+    3. Projects the purge_expired event to actually delete expired events
+
+    Args:
+        t_ms: Current time in milliseconds (cutoff for expiry)
+        db: Database connection
+
+    Returns:
+        Dict with stats: {
+            'peers_processed': int,
+            'purge_events_created': list[str],  # purge_expired_id's
+            'errors': list[str]
+        }
+    """
+    log.info(f"purge_expired.run_purge_expired_for_all_peers() t_ms={t_ms}")
+
+    unsafedb = create_unsafe_db(db)
+
+    stats = {
+        'peers_processed': 0,
+        'purge_events_created': [],
+        'errors': []
+    }
+
+    # Get all local peers
+    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    if not local_peer_rows:
+        log.info(f"purge_expired.run_purge_expired_for_all_peers() no local peers found")
+        return stats
+
+    log.info(f"purge_expired.run_purge_expired_for_all_peers() found {len(local_peer_rows)} local peers")
+
+    for peer_row in local_peer_rows:
+        peer_id = peer_row['peer_id']
+        try:
+            # Create purge_expired event for this peer
+            purge_expired_id = create(peer_id, cutoff_ms=t_ms, t_ms=t_ms, db=db)
+            log.info(f"purge_expired.run_purge_expired_for_all_peers() created purge_expired_id={purge_expired_id[:20]}... for peer {peer_id[:20]}...")
+
+            # Immediately project it to actually delete expired events
+            result = project(purge_expired_id, recorded_by=peer_id, recorded_at=t_ms, db=db)
+
+            if result:
+                stats['purge_events_created'].append(purge_expired_id)
+                stats['peers_processed'] += 1
+                log.info(f"purge_expired.run_purge_expired_for_all_peers() successfully purged expired events for peer {peer_id[:20]}...")
+            else:
+                error = f"Failed to project purge_expired for peer {peer_id[:20]}..."
+                log.warning(f"purge_expired.run_purge_expired_for_all_peers() {error}")
+                stats['errors'].append(error)
+
+        except Exception as e:
+            error = f"Error processing peer {peer_id[:20]}...: {e}"
+            log.error(f"purge_expired.run_purge_expired_for_all_peers() {error}")
+            stats['errors'].append(error)
+            continue
+
+    log.info(f"purge_expired.run_purge_expired_for_all_peers() complete: {stats['peers_processed']} peers processed")
+    return stats

@@ -5,6 +5,8 @@ a simple list, but can be extended to support frequency control, job state
 persistence, and other features as needed.
 """
 from events.transit import sync
+from events.content import message_deletion
+import purge_expired
 
 
 # Job registry - list of all periodic jobs
@@ -26,8 +28,19 @@ JOBS = [
         'params': {'batch_size': 20},
         'every_ms': 5_000,  # 5 seconds (informational, not enforced)
     },
+    {
+        'name': 'message_rekey_and_purge',
+        'fn': message_deletion.run_message_purge_cycle_for_all_peers,
+        'params': {},
+        'every_ms': 300_000,  # 5 minutes (informational, not enforced)
+    },
+    {
+        'name': 'purge_expired_events',
+        'fn': purge_expired.run_purge_expired_for_all_peers,
+        'params': {},
+        'every_ms': 600_000,  # 10 minutes (informational, not enforced)
+    },
     # Future jobs:
     # - transit_prekey_replenishment (every 1-6 hours)
     # - group_prekey_replenishment (every 1-6 hours)
-    # - purge_expired (every 1-24 hours)
 ]

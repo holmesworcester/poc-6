@@ -486,3 +486,66 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged")
     return stats
+
+
+def run_message_purge_cycle_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
+    """Run message purge cycle for all local peers in the database.
+
+    This is the recurring job that should be called periodically to perform
+    forward secrecy rekeying and key purging. It:
+    1. Gets all local peers
+    2. For each peer, runs run_message_purge_cycle to rekey and purge
+
+    Args:
+        t_ms: Current time in milliseconds
+        db: Database connection
+
+    Returns:
+        Dict with aggregated stats: {
+            'peers_processed': int,
+            'total_messages_rekeyed': int,
+            'total_keys_purged': int,
+            'errors': list[str]
+        }
+    """
+    log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() t_ms={t_ms}")
+
+    unsafedb = create_unsafe_db(db)
+
+    stats = {
+        'peers_processed': 0,
+        'total_messages_rekeyed': 0,
+        'total_keys_purged': 0,
+        'errors': []
+    }
+
+    # Get all local peers
+    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    if not local_peer_rows:
+        log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() no local peers found")
+        return stats
+
+    log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() found {len(local_peer_rows)} local peers")
+
+    for peer_row in local_peer_rows:
+        peer_id = peer_row['peer_id']
+        try:
+            # Run purge cycle for this peer
+            peer_stats = run_message_purge_cycle(peer_id, t_ms, db)
+
+            stats['peers_processed'] += 1
+            stats['total_messages_rekeyed'] += peer_stats['messages_rekeyed']
+            stats['total_keys_purged'] += peer_stats['keys_purged']
+            stats['errors'].extend(peer_stats['errors'])
+
+            log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() peer {peer_id[:20]}...: {peer_stats['messages_rekeyed']} rekeyed, {peer_stats['keys_purged']} purged")
+
+        except Exception as e:
+            error = f"Error processing peer {peer_id[:20]}...: {e}"
+            log.error(f"message_deletion.run_message_purge_cycle_for_all_peers() {error}")
+            stats['errors'].append(error)
+            continue
+
+    log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() complete: {stats['peers_processed']} peers, {stats['total_messages_rekeyed']} messages rekeyed, {stats['total_keys_purged']} keys purged")
+    return stats
