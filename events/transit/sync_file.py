@@ -128,8 +128,8 @@ def request_file_sync(file_id: str, peer_id: str, priority: int, ttl_ms: int, t_
     safedb = create_safe_db(db, recorded_by=peer_id)
     safedb.execute(
         """INSERT OR REPLACE INTO file_sync_wanted
-           (file_id, peer_id, recorded_by, priority, ttl_ms, requested_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (file_id, peer_id, recorded_by, priority, status, ttl_ms, requested_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?)""",
         (file_id, peer_id, peer_id, priority, ttl_ms, t_ms)
     )
 
@@ -147,6 +147,42 @@ def cancel_file_sync(file_id: str, peer_id: str, db: Any) -> None:
     safedb = create_safe_db(db, recorded_by=peer_id)
     safedb.execute(
         "DELETE FROM file_sync_wanted WHERE file_id = ? AND peer_id = ? AND recorded_by = ?",
+        (file_id, peer_id, peer_id)
+    )
+
+
+def pause_file_sync(file_id: str, peer_id: str, db: Any) -> None:
+    """Pause active syncing for a file (can be resumed later).
+
+    Args:
+        file_id: File to pause syncing
+        peer_id: Local peer
+        db: Database connection
+    """
+    log.info(f"sync_file.pause_file_sync() file_id={file_id[:20]}..., peer_id={peer_id[:20]}...")
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        """UPDATE file_sync_wanted SET status = 'paused'
+           WHERE file_id = ? AND peer_id = ? AND recorded_by = ?""",
+        (file_id, peer_id, peer_id)
+    )
+
+
+def resume_file_sync(file_id: str, peer_id: str, db: Any) -> None:
+    """Resume paused syncing for a file.
+
+    Args:
+        file_id: File to resume syncing
+        peer_id: Local peer
+        db: Database connection
+    """
+    log.info(f"sync_file.resume_file_sync() file_id={file_id[:20]}..., peer_id={peer_id[:20]}...")
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        """UPDATE file_sync_wanted SET status = 'active'
+           WHERE file_id = ? AND peer_id = ? AND recorded_by = ?""",
         (file_id, peer_id, peer_id)
     )
 
@@ -281,6 +317,21 @@ def send_request(file_id: str, to_peer: str, from_peer_id: str, t_ms: int, db: A
     """
     log.info(f"sync_file.send_request() file_id={file_id[:20]}..., "
              f"from={from_peer_id[:20]}..., to={to_peer[:20]}...")
+
+    # Check if file sync is active (not paused)
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    wanted_row = safedb.query_one(
+        "SELECT status FROM file_sync_wanted WHERE file_id = ? AND peer_id = ? AND recorded_by = ? LIMIT 1",
+        (file_id, from_peer_id, from_peer_id)
+    )
+
+    if not wanted_row:
+        log.debug(f"sync_file.send_request() file not in wanted list: {file_id[:20]}...")
+        return
+
+    if wanted_row['status'] == 'paused':
+        log.debug(f"sync_file.send_request() file is paused, skipping: {file_id[:20]}...")
+        return
 
     # Get current sync state for this file/peer pair
     state = get_file_sync_state(file_id, from_peer_id, to_peer, t_ms, db)
