@@ -13,9 +13,9 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite
-from events.content import message_attachment
+from events.content import message, message_attachment
 from events.transit import sync_file
-from jobs import tick
+import tick
 
 
 def test_pause_and_resume_file_download():
@@ -47,20 +47,20 @@ def test_pause_and_resume_file_download():
     # Initial sync
     print("\n=== Initial sync ===")
     for i in range(5):
-        tick.execute(t_ms=3000 + i*100, db=db)
+        tick.tick(t_ms=3000 + i*100, db=db)
         db.commit()
 
     print("\n=== Alice creates message with 1 MB file ===")
 
     # Alice sends message
-    msg_result = message_attachment.create_message(
+    msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Pausable file attachment',
         t_ms=4000,
         db=db
     )
-    message_id = msg_result['message_id']
+    message_id = msg_result['id']
 
     # Create 1 MB file (easier to control for testing pause/resume)
     file_size = 1 * 1024 * 1024  # 1 MB
@@ -103,7 +103,7 @@ def test_pause_and_resume_file_download():
 
     target_slices = expected_slices // 2
     for round_num in range(50):  # Should be enough to get to 50%
-        tick.execute(t_ms=7000 + round_num * 100, db=db)
+        tick.tick(t_ms=7000 + round_num * 100, db=db)
         db.commit()
 
         progress = message_attachment.get_file_download_progress(
@@ -143,7 +143,7 @@ def test_pause_and_resume_file_download():
     print("\n=== Running sync while paused (should not receive slices) ===")
 
     for round_num in range(10):
-        tick.execute(t_ms=8000 + round_num * 100, db=db)
+        tick.tick(t_ms=8000 + round_num * 100, db=db)
         db.commit()
 
     progress_after_pause = message_attachment.get_file_download_progress(
@@ -173,7 +173,7 @@ def test_pause_and_resume_file_download():
     print("\n=== Downloading to completion ===")
 
     for round_num in range(100):  # Should be enough to complete
-        tick.execute(t_ms=9000 + round_num * 100, db=db)
+        tick.tick(t_ms=9000 + round_num * 100, db=db)
         db.commit()
 
         progress = message_attachment.get_file_download_progress(
@@ -237,20 +237,20 @@ def test_cancel_file_download():
     # Initial sync
     print("\n=== Initial sync ===")
     for i in range(5):
-        tick.execute(t_ms=3000 + i*100, db=db)
+        tick.tick(t_ms=3000 + i*100, db=db)
         db.commit()
 
     print("\n=== Alice creates message with 500 KB file ===")
 
     # Alice sends message
-    msg_result = message_attachment.create_message(
+    msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='File to be cancelled',
         t_ms=4000,
         db=db
     )
-    message_id = msg_result['message_id']
+    message_id = msg_result['id']
 
     # Create 500 KB file
     file_size = 500 * 1024  # 500 KB
@@ -292,7 +292,7 @@ def test_cancel_file_download():
     print("\n=== Downloading partially ===")
 
     for round_num in range(20):
-        tick.execute(t_ms=7000 + round_num * 100, db=db)
+        tick.tick(t_ms=7000 + round_num * 100, db=db)
         db.commit()
 
     progress_before_cancel = message_attachment.get_file_download_progress(
@@ -328,7 +328,7 @@ def test_cancel_file_download():
     print("\n=== Running sync after cancel (should not receive slices) ===")
 
     for round_num in range(10):
-        tick.execute(t_ms=8000 + round_num * 100, db=db)
+        tick.tick(t_ms=8000 + round_num * 100, db=db)
         db.commit()
 
     progress_after_cancel = message_attachment.get_file_download_progress(
@@ -358,7 +358,7 @@ def test_cancel_file_download():
 
     # Download to completion
     for round_num in range(100):
-        tick.execute(t_ms=10000 + round_num * 100, db=db)
+        tick.tick(t_ms=10000 + round_num * 100, db=db)
         db.commit()
 
         progress = message_attachment.get_file_download_progress(

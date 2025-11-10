@@ -15,9 +15,9 @@ import time
 from db import Database
 import schema
 from events.identity import user, invite
-from events.content import message_attachment
+from events.content import message, message_attachment
 from events.transit import sync_file
-from jobs import tick
+import tick
 
 
 def test_5mb_file_download_with_progress():
@@ -50,7 +50,7 @@ def test_5mb_file_download_with_progress():
     # Initial sync to establish connection
     print("\n=== Initial sync ===")
     for i in range(5):
-        tick.execute(t_ms=3000 + i*100, db=db)
+        tick.tick(t_ms=3000 + i*100, db=db)
         db.commit()
 
     print("✓ Initial sync completed")
@@ -58,14 +58,14 @@ def test_5mb_file_download_with_progress():
     print("\n=== Alice creates message with 5 MB file ===")
 
     # Alice sends message
-    msg_result = message_attachment.create_message(
+    msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this 5 MB file!',
         t_ms=4000,
         db=db
     )
-    message_id = msg_result['message_id']
+    message_id = msg_result['id']
     print(f"✓ Alice created message: {message_id[:20]}...")
 
     # Create 5 MB file (5,000,000 bytes)
@@ -121,7 +121,7 @@ def test_5mb_file_download_with_progress():
         current_time_ms = 7000 + round_num * 100
 
         # Execute tick (runs sync jobs)
-        tick.execute(t_ms=current_time_ms, db=db)
+        tick.tick(t_ms=current_time_ms, db=db)
         db.commit()
 
         # Check progress every 500ms (5 rounds)
@@ -199,20 +199,20 @@ def test_50mb_file_download():
     # Initial sync
     print("\n=== Initial sync ===")
     for i in range(5):
-        tick.execute(t_ms=3000 + i*100, db=db)
+        tick.tick(t_ms=3000 + i*100, db=db)
         db.commit()
 
     print("\n=== Alice creates message with 50 MB file ===")
 
     # Alice sends message
-    msg_result = message_attachment.create_message(
+    msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this 50 MB file!',
         t_ms=4000,
         db=db
     )
-    message_id = msg_result['message_id']
+    message_id = msg_result['id']
 
     # Create 50 MB file
     file_size = 50 * 1024 * 1024  # 50 MB
@@ -266,7 +266,7 @@ def test_50mb_file_download():
     for round_num in range(1000):  # Many rounds for 50 MB
         current_time_ms = 7000 + round_num * 100
 
-        tick.execute(t_ms=current_time_ms, db=db)
+        tick.tick(t_ms=current_time_ms, db=db)
         db.commit()
 
         # Print progress every 20 rounds
