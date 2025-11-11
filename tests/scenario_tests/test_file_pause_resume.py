@@ -12,7 +12,7 @@ Tests:
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from events.transit import sync_file
 import tick
@@ -39,7 +39,8 @@ def test_pause_and_resume_file_download():
     )
 
     # Bob joins
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     print(f"✓ Bob joined network")
 
     db.commit()
@@ -228,7 +229,8 @@ def test_cancel_file_download():
     )
 
     # Bob joins
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     print(f"✓ Bob joined network")
 
     db.commit()
