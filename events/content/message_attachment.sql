@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS message_attachments (
     root_hash BLOB NOT NULL,
     total_slices INTEGER NOT NULL,
 
+    -- Optimization: consolidated blob for fast reads (NULL until download complete)
+    consolidated_blob BLOB,  -- Concatenated ciphertext of all slices
+
     created_at INTEGER NOT NULL DEFAULT 0,
     ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
     recorded_by TEXT NOT NULL,
