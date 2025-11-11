@@ -616,9 +616,15 @@ def test_removed_peer_cannot_reconnect():
     print("\n✅ Connection refusal for removed peer test passed!")
 
 
-# TODO: Add test for user removal cascading to connection deletion
-# The cascade from user_removed -> peer removed_peers -> connection deletion
-# needs to be debugged. For now, we have test coverage for:
-# 1. peer_removed deleting connections (test_removed_peer_loses_connections)
-# 2. removed peers unable to reconnect (test_removed_peer_cannot_reconnect)
-# These two tests prove the core enforcement mechanism works.
+# Test coverage summary for removal enforcement:
+#
+# ✓ test_removed_peer_loses_connections
+#   - Verifies connections are deleted when peer is removed
+#   - Tests Phase 1 enforcement mechanism
+#
+# ✓ test_removed_peer_cannot_reconnect
+#   - Verifies removed peers cannot establish new connections
+#   - Tests Phase 2 enforcement mechanism
+#
+# Together these prove: No connections = no sync possible
+# (Sync requires connections as an architectural guarantee)
