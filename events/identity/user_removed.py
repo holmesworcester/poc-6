@@ -41,25 +41,9 @@ def validate(removed_user_id: str, removed_by_peer_id: str, recorded_by: str, db
         return True
 
     # Rule 2: Admin can remove any user
-    # Get network info and check if removed_by is in admin group
-    network_row = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
-    if not network_row or not network_row['admins_group_id']:
-        return False
-
-    admins_group_id = network_row['admins_group_id']
-
-    # Check if removed_by is in admin group
-    admin_member = safedb.query_one(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, removed_by_user_id, recorded_by)
-    )
-    if admin_member:
-        return True
-
-    return False
+    # Use centralized is_admin() function which handles both normal admins and first_peer
+    from events.identity import invite
+    return invite.is_admin(removed_by_peer_id, recorded_by, db)
 
 
 def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_id: str, t_ms: int, db: Any) -> str:

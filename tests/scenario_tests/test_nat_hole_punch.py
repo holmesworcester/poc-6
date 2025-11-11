@@ -13,7 +13,7 @@ Goal: Verify that address events capture observations and intro events
 import sqlite3
 from db import Database, create_safe_db
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 import tick
 from events.network import address as address_module
 from events.network import intro as intro_module
@@ -42,8 +42,13 @@ def test_nat_hole_punch_simple():
         db=db
     )
 
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    charlie = user.join(invite_link=invite_link, name='Charlie', t_ms=2500, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=2500, db=db)
+
+    charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link, name='Charlie', t_ms=2500, db=db)
 
     db.commit()
 

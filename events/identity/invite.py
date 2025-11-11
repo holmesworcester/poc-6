@@ -12,8 +12,73 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
+def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if a peer is an admin (centralized admin validation).
+
+    A peer is an admin if either:
+    1. Their user_id is in the admins group (normal admin path), OR
+    2. They are the first_peer (network creator via self-invite)
+
+    This centralizes the admin check logic to avoid sprinkling first_peer
+    checks throughout the codebase.
+
+    Args:
+        peer_shared_id: Public peer ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if peer is an admin, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get network's admin group ID
+    network_row = safedb.query_one(
+        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+    if not network_row or not network_row['admins_group_id']:
+        return False
+
+    admins_group_id = network_row['admins_group_id']
+
+    # Get user_id for this peer_shared_id
+    # Note: users.peer_id stores the public peer_shared_id, not local peer_id
+    user_row = safedb.query_one(
+        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    if not user_row:
+        return False
+
+    user_id = user_row['user_id']
+
+    # Check if user is in admin group
+    is_admin_member = safedb.query_one(
+        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+        (admins_group_id, user_id, recorded_by)
+    )
+
+    if is_admin_member:
+        return True
+
+    # Also check if this peer is first_peer (network creator)
+    first_peer_check = safedb.query_one("""
+        SELECT 1 FROM invite_accepteds ia
+        JOIN store s ON ia.invite_id = s.id
+        WHERE ia.recorded_by = ?
+        AND json_extract(s.blob, '$.first_peer') = ?
+        LIMIT 1
+    """, (recorded_by, peer_shared_id))
+
+    return first_peer_check is not None
+
+
 def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: Any) -> bool:
     """Validate that inviter has authorization to create invites.
+
+    DEPRECATED: This function is kept for backward compatibility.
+    New code should use is_admin() instead.
 
     Authorization rule:
     - inviter_user_id must be a member of the network's admins group
@@ -30,15 +95,15 @@ def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: A
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Check if inviter is in admin group
-    is_admin = safedb.query_one(
+    is_admin_check = safedb.query_one(
         "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
         (admins_group_id, inviter_user_id, recorded_by)
     )
 
-    return is_admin is not None
+    return is_admin_check is not None
 
 
-def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
+def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None, first_peer: str | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -54,6 +119,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         db: Database connection
         mode: 'user' for network join invites, 'link' for device linking invites
         user_id: Required for mode='link', target user to link to. Must be None for mode='user'.
+        first_peer: Optional peer_shared_id of network creator (for self-bootstrapping). When set, this
+                   peer will be auto-granted admin privileges when they join via invite_accepted.
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -94,20 +161,26 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     all_users_group_id = network_row['all_users_group_id']
     admins_group_id = network_row['admins_group_id']
 
-    # Check if inviter is an admin (only admins can create invites)
-    # First, get the inviter's user_id (event ID, not peer_shared_id)
-    inviter_user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_shared_id, peer_id)
-    )
-    if not inviter_user_row:
-        raise ValueError(f"User record not found for peer {peer_id}. Cannot create invite.")
+    # Phase 5: Skip admin check for network creator self-invite (first_peer set)
+    # The creator doesn't exist as a user yet, but will become admin on join via first_peer
+    if not first_peer:
+        # Check if inviter is an admin (only admins can create invites)
+        # Use centralized is_admin() function which handles both normal admins and first_peer
+        if not is_admin(peer_shared_id, peer_id, db):
+            raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
-    inviter_user_id = inviter_user_row['user_id']
-
-    # Check authorization using shared validate() function
-    if not validate(inviter_user_id, admins_group_id, peer_id, db):
-        raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
+        # Get inviter's user_id for the invite event
+        inviter_user_row = safedb.query_one(
+            "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+            (peer_shared_id, peer_id)
+        )
+        if not inviter_user_row:
+            raise ValueError(f"User record not found for peer {peer_id}. Cannot create invite.")
+        inviter_user_id = inviter_user_row['user_id']
+    else:
+        # Network creator self-invite - will become admin on join
+        log.info(f"invite.create() skipping admin check for first_peer self-invite")
+        inviter_user_id = None  # Will be set after user.join()
 
     # Get key from all_users group
     group_row = safedb.query_one(
@@ -187,6 +260,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
+
+    # Phase 5: Add first_peer to event data for bootstrap
+    if first_peer:
+        invite_event_data['first_peer'] = first_peer
 
     # Add mode-specific fields
     if mode == 'link':
@@ -299,6 +376,12 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'port': inviter_port,
     }
 
+    # Phase 5: Add first_peer for network creator self-bootstrapping
+    # When present, invite_accepted.project() will auto-grant admin to this peer
+    if first_peer:
+        invite_link_data['first_peer'] = first_peer
+        log.info(f"invite.create() added first_peer={first_peer[:20]}... for self-bootstrapping")
+
     # For mode='link', also include the existing user blob (for device linking)
     if mode == 'link' and user_id:
         existing_user_blob = store.get(user_id, unsafedb)
@@ -365,13 +448,18 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         if peer_network:
             # 4. Verify inviter is an admin using shared validate() function
             inviter_user_id = event_data.get('inviter_user_id')
+            # Phase 5: Allow None inviter_user_id for first_peer self-invites
+            # The creator will become admin on join via invite_accepted first_peer logic
             if inviter_user_id and peer_network['admins_group_id']:
                 admins_group_id = peer_network['admins_group_id']
                 if not validate(inviter_user_id, admins_group_id, recorded_by, db):
                     log.warning(f"invite.project() authorization FAILED: inviter {inviter_user_id[:20]}... is not an admin")
                     return None
+            elif inviter_user_id is None:
+                # Phase 5: Assume first_peer self-invite (creator hasn't joined yet)
+                log.info(f"invite.project() skipping admin validation for first_peer self-invite (inviter_user_id=None)")
             else:
-                # If inviter_user_id is missing (old invite format), reject for safety
+                # If inviter_user_id is missing but not None (old invite format), reject for safety
                 log.warning(f"invite.project() missing inviter_user_id in invite event - rejecting for security")
                 return None
 

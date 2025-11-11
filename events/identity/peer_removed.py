@@ -27,33 +27,10 @@ def validate(removed_peer_shared_id: str, removed_by_peer_shared_id: str, record
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get removed_by's user_id from peer_shared_id
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (removed_by_peer_shared_id, recorded_by)
-    )
-    if not user_row:
-        return False
-
-    removed_by_user_id = user_row['user_id']
-
     # Check if removed_by is an admin
-    network_row = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
-    if not network_row or not network_row['admins_group_id']:
-        return False
-
-    admins_group_id = network_row['admins_group_id']
-
-    # Check if removed_by is in admin group
-    admin_member = safedb.query_one(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, removed_by_user_id, recorded_by)
-    )
-
-    return admin_member is not None
+    # Use centralized is_admin() function which handles both normal admins and first_peer
+    from events.identity import invite
+    return invite.is_admin(removed_by_peer_shared_id, recorded_by, db)
 
 
 def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_by_local_peer_id: str, t_ms: int, db: Any) -> str:

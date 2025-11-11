@@ -50,7 +50,9 @@ def test_admin_group_workflow():
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
@@ -215,7 +217,9 @@ def test_admin_group_workflow():
     print(f"Bob created invite for Charlie: {charlie_invite_id[:20]}...")
 
     # Charlie joins via Bob's invite
-    charlie = user.join(invite_link=charlie_invite_link, name='Charlie', t_ms=8000, db=db)
+    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=8000, db=db)
+
+    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=8000, db=db)
     print(f"Charlie joined network, peer_id: {charlie['peer_id'][:20]}...")
     db.commit()
 

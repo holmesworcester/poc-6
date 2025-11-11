@@ -117,15 +117,18 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
         # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
-    # Check if creator user exists
-    creator_user = safedb.query_one(
-        "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ?",
-        (creator_user_id, recorded_by)
-    )
-    if not creator_user:
-        log.info(f"network.project() blocking on missing creator user {creator_user_id}")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
-        return None
+    # Phase 5: If creator_user_id is empty (bootstrap case), skip creator check
+    # The first_peer will be added to admin group by invite_accepted.project()
+    if creator_user_id:
+        # Check if creator user exists
+        creator_user = safedb.query_one(
+            "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ?",
+            (creator_user_id, recorded_by)
+        )
+        if not creator_user:
+            log.info(f"network.project() blocking on missing creator user {creator_user_id}")
+            # Don't block here - let recorded.project() handle blocking with recorded_id
+            return None
 
     # Insert into networks table
     safedb.execute(
@@ -147,23 +150,27 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     log.info(f"network.project() inserted into networks table")
 
     # Add creator to admin group via group_members
-    # (Don't create a separate group_member event - just insert directly during projection)
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_members
-           (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            f"{network_id}:admin_member",  # Synthetic ID for creator->admin membership
-            admins_group_id,
-            creator_user_id,
-            created_by,  # Added by network creator
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
+    # Phase 5: Skip if creator_user_id is empty (bootstrap case)
+    if creator_user_id:
+        # (Don't create a separate group_member event - just insert directly during projection)
+        safedb.execute(
+            """INSERT OR IGNORE INTO group_members
+               (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                f"{network_id}:admin_member",  # Synthetic ID for creator->admin membership
+                admins_group_id,
+                creator_user_id,
+                created_by,  # Added by network creator
+                event_data['created_at'],
+                recorded_by,
+                recorded_at
+            )
         )
-    )
 
-    log.info(f"network.project() added creator {creator_user_id} to admin group {admins_group_id}")
+        log.info(f"network.project() added creator {creator_user_id} to admin group {admins_group_id}")
+    else:
+        log.info(f"network.project() skipping admin grant (empty creator_user_id, bootstrap case)")
 
     return network_id
 

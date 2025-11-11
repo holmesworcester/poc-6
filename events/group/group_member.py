@@ -15,7 +15,9 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
     """Validate that added_by has authorization to add members to the group.
 
     Authorization rule:
-    - added_by must be a member of the network's admins group
+    - added_by must be a member of the network's admins group OR the first_peer (network creator)
+
+    Uses centralized is_admin() function from events.identity.invite.
 
     Args:
         group_id: Group to check membership for
@@ -26,35 +28,8 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
     Returns:
         True if authorized, False otherwise
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get group's network ID by finding the all_users group (every group is in a network)
-    network_row = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
-    if not network_row or not network_row['admins_group_id']:
-        return False
-
-    admins_group_id = network_row['admins_group_id']
-
-    # Get added_by's user_id (map peer_shared_id to user_id)
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (added_by, recorded_by)
-    )
-    if not user_row:
-        return False
-
-    added_by_user_id = user_row['user_id']
-
-    # Check if added_by is a member of the admins group
-    is_admin = safedb.query_one(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, added_by_user_id, recorded_by)
-    )
-
-    return is_admin is not None
+    from events.identity import invite
+    return invite.is_admin(added_by, recorded_by, db)
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
@@ -197,7 +172,25 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         return None
 
     # Check authorization using shared validate() function
-    if not validate(event_data['group_id'], added_by, recorded_by, db):
+    # Exception: Skip auth check if this is first_peer self-granting admin during bootstrap
+    # We detect this by checking if added_by matches first_peer in ANY invite in the store
+    is_first_peer_grant = False
+    unsafedb = create_unsafe_db(db)
+
+    # Check if added_by is first_peer by looking at all invite events
+    # This works even before first_peer has synced their invite_accepted
+    invites_blobs = unsafedb.query("SELECT id, blob FROM store")
+    for row in invites_blobs:
+        try:
+            event_data_check = crypto.parse_json(row['blob'])
+            if event_data_check.get('type') == 'invite' and event_data_check.get('first_peer') == added_by:
+                is_first_peer_grant = True
+                log.info(f"group_member.project() detected first_peer grant: added_by={added_by[:20]}... matches first_peer in invite")
+                break
+        except:
+            pass  # Skip non-JSON blobs
+
+    if not is_first_peer_grant and not validate(event_data['group_id'], added_by, recorded_by, db):
         log.warning(f"group_member.project() authorization FAILED: {added_by} cannot add members to group {event_data['group_id']} (only admins can add members)")
         return None
 

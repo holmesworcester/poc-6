@@ -11,7 +11,7 @@ Tests that:
 import sqlite3
 from db import Database, create_safe_db, create_unsafe_db
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 from events.content import message, message_deletion
 from events.transit import transit_prekey, transit_key
 from events.group import group_prekey
@@ -197,7 +197,10 @@ def test_forward_secrecy_multi_peer():
         db=db
     )
 
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
     # Sync to converge
@@ -544,7 +547,9 @@ def test_new_user_joins_after_rekey():
         t_ms=1500,
         db=db
     )
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=5000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=5000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=5000, db=db)
     db.commit()
     print(f"Bob joined as peer: {bob['peer_id'][:20]}...")
 
@@ -679,7 +684,9 @@ def test_new_user_with_preexisting_invite_after_rekey():
     print(f"✓ Found {len(key_events)} key encapsulation events in store")
 
     print("\n=== t=5000: Bob joins using PRE-CREATED invite ===")
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=5000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=5000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=5000, db=db)
     db.commit()
     print(f"Bob joined as peer: {bob['peer_id'][:20]}...")
     print("✓ Bob used the invite created before deletion/rekey")
