@@ -210,6 +210,17 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         log.warning(f"sync_connect.project: peer signature verification failed: {e}")
         return
 
+    # ENFORCEMENT: Reject connections from removed peers
+    peer_shared_id = event_data.get('created_by')
+    if peer_shared_id:
+        removed_check = unsafedb.query_one(
+            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+            (peer_shared_id,)
+        )
+        if removed_check:
+            log.info(f"sync_connect.project: rejecting connection from removed peer {peer_shared_id[:20]}...")
+            return
+
     # Verify invite signature if present
     if event_data.get('invite_id') and event_data.get('invite_signature'):
         invite_id = event_data['invite_id']
@@ -236,8 +247,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
                 log.warning(f"sync_connect.project: invite signature check failed: {e}")
                 # Continue anyway - invite auth is opportunistic
 
-    # Extract connection info
-    peer_shared_id = event_data.get('created_by')
+    # Extract connection info (peer_shared_id already extracted above for removal check)
     response_transit_key_id = event_data.get('response_transit_key_id')
     response_transit_key = crypto.b64decode(event_data.get('response_transit_key', ''))
     address = event_data.get('address')

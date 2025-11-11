@@ -139,6 +139,15 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
                 (peer_shared_id, removed_at, removed_by)
             )
 
+            # DELETE ALL CONNECTIONS for this peer (enforcement mechanism)
+            # This mirrors the enforcement in peer_removed.project()
+            cursor = unsafe_db.execute(
+                """DELETE FROM sync_connections WHERE peer_shared_id = ?""",
+                (peer_shared_id,)
+            )
+            deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+            log.info(f"user_removed.project() deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
+
     # Rotate group keys for all groups this user was a member of
     # This prevents the removed user from decrypting future messages
     _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, db)

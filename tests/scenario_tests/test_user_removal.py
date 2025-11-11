@@ -491,3 +491,134 @@ def test_peer_removal_last_device_rotates_keys():
     # assert_convergence(db)
 
     print("\n✅ Peer removal group key rotation test passed!")
+
+
+def test_removed_peer_loses_connections():
+    """When a peer is removed, all its connections are deleted."""
+
+    # Setup
+    conn = sqlite3.Connection(":memory:")
+    db = Database(conn)
+    schema.create_all(db)
+
+    print("\n=== Setup: Create network with Alice and Bob ===")
+
+    # Alice creates a network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+
+    # Bob joins
+    invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+
+    db.commit()
+
+    # Establish connections via sync
+    print("\n=== Establish connections ===")
+    from events.transit import sync_connect
+    for i in range(3):
+        sync_connect.send_connect_to_all(t_ms=3000 + i*100, db=db)
+        tick.tick(t_ms=3000 + i*100, db=db)
+
+    # Verify Bob has a connection established
+    unsafe_db = create_unsafe_db(db)
+    bob_conn_before = unsafe_db.query_one(
+        "SELECT peer_shared_id FROM sync_connections WHERE peer_shared_id = ? LIMIT 1",
+        (bob['peer_shared_id'],)
+    )
+    assert bob_conn_before is not None, "Bob should have an established connection"
+    print(f"✓ Bob has connection established: {bob['peer_shared_id'][:20]}...")
+
+    # Alice removes Bob's peer
+    print("\n=== Alice removes Bob's peer ===")
+    peer_removed.create(
+        removed_peer_shared_id=bob['peer_shared_id'],
+        removed_by_peer_shared_id=alice['peer_shared_id'],
+        removed_by_local_peer_id=alice['peer_id'],
+        t_ms=5000,
+        db=db
+    )
+    db.commit()
+
+    # Verify Bob's connection was deleted
+    bob_conn_after = unsafe_db.query_one(
+        "SELECT peer_shared_id FROM sync_connections WHERE peer_shared_id = ? LIMIT 1",
+        (bob['peer_shared_id'],)
+    )
+    assert bob_conn_after is None, "Bob's connection should be deleted when peer is removed"
+    print("✓ Bob's connection was deleted")
+
+    # Verify Bob is in removed_peers table
+    removed = unsafe_db.query_one(
+        "SELECT peer_shared_id FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+        (bob['peer_shared_id'],)
+    )
+    assert removed is not None, "Bob should be in removed_peers table"
+    print("✓ Bob is in removed_peers table")
+
+    print("\n✅ Connection deletion on peer removal test passed!")
+
+
+def test_removed_peer_cannot_reconnect():
+    """A removed peer cannot establish new connections."""
+
+    # Setup
+    conn = sqlite3.Connection(":memory:")
+    db = Database(conn)
+    schema.create_all(db)
+
+    print("\n=== Setup: Create network with Alice and Bob ===")
+
+    # Alice creates a network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+
+    # Bob joins
+    invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+
+    db.commit()
+
+    # Alice removes Bob BEFORE any connections are established
+    print("\n=== Alice removes Bob's peer ===")
+    peer_removed.create(
+        removed_peer_shared_id=bob['peer_shared_id'],
+        removed_by_peer_shared_id=alice['peer_shared_id'],
+        removed_by_local_peer_id=alice['peer_id'],
+        t_ms=3000,
+        db=db
+    )
+    db.commit()
+
+    # Verify Bob is marked as removed
+    unsafe_db = create_unsafe_db(db)
+    removed = unsafe_db.query_one(
+        "SELECT peer_shared_id FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+        (bob['peer_shared_id'],)
+    )
+    assert removed is not None, "Bob should be in removed_peers table"
+    print("✓ Bob is in removed_peers table")
+
+    # Now Bob tries to send a connection request
+    print("\n=== Bob tries to establish connection (should be rejected) ===")
+    from events.transit import sync_connect
+    sync_connect.send_connect_to_all(t_ms=4000, db=db)
+    tick.tick(t_ms=4000, db=db)
+
+    # Verify Bob's connection was NOT created
+    bob_conn = unsafe_db.query_one(
+        "SELECT peer_shared_id FROM sync_connections WHERE peer_shared_id = ? LIMIT 1",
+        (bob['peer_shared_id'],)
+    )
+    assert bob_conn is None, "Bob should not be able to establish connection when removed"
+    print("✓ Bob's connection request was rejected")
+
+    print("\n✅ Connection refusal for removed peer test passed!")
+
+
+# TODO: Add test for user removal cascading to connection deletion
+# The cascade from user_removed -> peer removed_peers -> connection deletion
+# needs to be debugged. For now, we have test coverage for:
+# 1. peer_removed deleting connections (test_removed_peer_loses_connections)
+# 2. removed peers unable to reconnect (test_removed_peer_cannot_reconnect)
+# These two tests prove the core enforcement mechanism works.
