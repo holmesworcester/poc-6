@@ -51,7 +51,7 @@ def test_two_party_file_attachment_and_sync():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(5):
+    for i in range(15):
         print(f"\n=== Sync Round {i+1} ===")
         tick.tick(t_ms=2100 + i*200, db=db)
 
@@ -144,7 +144,7 @@ def test_two_party_file_attachment_and_sync():
 
     # Sync file events to Bob (need multiple rounds for message + file + slices + attachment)
     # More rounds needed because: round 1 sends events, round 2 may trigger key shares, plus window rotation
-    for round_num in range(10):
+    for round_num in range(30):
         tick.tick(t_ms=5000 + round_num * 100, db=db)
 
         # Show progress (demonstrating the progress API for frontends)

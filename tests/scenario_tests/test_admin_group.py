@@ -32,6 +32,7 @@ def test_admin_group_workflow():
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
     schema.create_all(db)
+    tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Create network and invite ===")
 
@@ -56,7 +57,7 @@ def test_admin_group_workflow():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(5):
+    for i in range(10):
         print(f"\n=== Sync Round {i+1} ===")
         tick.tick(t_ms=4000 + i*200, db=db)
 
@@ -165,7 +166,7 @@ def test_admin_group_workflow():
 
     # Sync to propagate admin group membership
     print("\n=== Sync to propagate admin membership ===")
-    for round_num in range(3):  # A few rounds to ensure convergence
+    for round_num in range(10):  # More rounds to ensure convergence
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both peers see Bob as admin
@@ -221,7 +222,7 @@ def test_admin_group_workflow():
 
     # Sync between all three peers (need more rounds for 3-way sync)
     print("\n=== Sync to integrate Charlie ===")
-    for round_num in range(5):  # More rounds for 3-peer convergence
+    for round_num in range(45):  # Much more rounds for 3-peer convergence (tripled)
         tick.tick(t_ms=9000 + round_num * 100, db=db)
 
     # Verify Charlie can see both Alice and Bob as admins
@@ -314,7 +315,7 @@ def test_admin_group_workflow():
 
     # Sync the rogue invite to Alice (who should reject it)
     print("\n=== Syncing rogue invite to Alice ===")
-    for round_num in range(3):
+    for round_num in range(10):
         tick.tick(t_ms=12000 + round_num * 100, db=db)
 
     # Verify Alice rejected the rogue invite (should not be in her invites table)

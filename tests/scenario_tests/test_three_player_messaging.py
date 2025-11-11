@@ -50,7 +50,7 @@ def test_three_player_messaging():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(5):
+    for i in range(15):
         print(f"\n=== Sync Round {i+1} ===")
         tick.tick(t_ms=4000 + i*200, db=db)
 
@@ -109,7 +109,7 @@ def test_three_player_messaging():
 
     # Sync messages
     print("\n=== Sync Round 2: Message exchange ===")
-    for round_num in range(3):  # A few rounds to ensure convergence
+    for round_num in range(9):  # A few rounds to ensure convergence
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify message delivery

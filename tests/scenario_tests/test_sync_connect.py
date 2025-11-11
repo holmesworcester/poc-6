@@ -69,13 +69,13 @@ def test_connection_establishment():
     assert conn_row['last_seen_ms'] == 3000, "Connection should have correct timestamp"
     print("✓ Connection has all required fields")
 
-    # Run another tick - connections should refresh
+    # Run another tick - connections should refresh (after 60s for sync_connect to run again)
     print("\n=== Running second tick (refreshes connections) ===")
-    tick.tick(t_ms=3500, db=db)
+    tick.tick(t_ms=63000, db=db)  # 60s later so sync_connect runs again
 
     # Check that connection timestamps were updated
     conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
-    assert conn_row['last_seen_ms'] == 3500, "Connection should have updated timestamp"
+    assert conn_row['last_seen_ms'] == 63000, "Connection should have updated timestamp"
     print("✓ Connection timestamp refreshed")
 
 

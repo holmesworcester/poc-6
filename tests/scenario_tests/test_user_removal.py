@@ -54,7 +54,7 @@ def test_user_removal_blocks_sync_but_preserves_history():
 
     # Initial sync to converge (need multiple rounds for GKS to propagate)
     print("\n=== Initial sync to converge ===")
-    for i in range(5):
+    for i in range(15):
         print(f"Sync round {i+1}")
         tick.tick(t_ms=3000 + i*200, db=db)
 
@@ -285,7 +285,7 @@ def test_receive_path_removal_check():
     db.commit()
 
     print("\n=== Initial sync to converge ===")
-    for i in range(3):
+    for i in range(9):
         tick.tick(t_ms=3000 + i*200, db=db)
 
     # Alice removes Bob
@@ -355,7 +355,7 @@ def test_user_removal_rotates_group_keys():
 
     # Initial sync to converge
     print("\n=== Initial sync to converge ===")
-    for i in range(5):
+    for i in range(15):
         print(f"Sync round {i+1}")
         tick.tick(t_ms=3000 + i*200, db=db)
 
@@ -429,7 +429,7 @@ def test_peer_removal_last_device_rotates_keys():
 
     # Initial sync to converge
     print("\n=== Initial sync to converge ===")
-    for i in range(5):
+    for i in range(15):
         print(f"Sync round {i+1}")
         tick.tick(t_ms=3000 + i*200, db=db)
 

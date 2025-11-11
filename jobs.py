@@ -8,6 +8,18 @@ from typing import Any, Dict
 from abc import ABC, abstractmethod
 from db import create_unsafe_db
 
+# Global frequency multiplier for testing (1.0 = production, 0.01 = 100x faster)
+_frequency_multiplier = 1.0
+
+def set_frequency_multiplier(multiplier: float) -> None:
+    """Set global frequency multiplier for testing.
+
+    Args:
+        multiplier: Multiplier for all job frequencies (e.g., 0.01 for 100x faster)
+    """
+    global _frequency_multiplier
+    _frequency_multiplier = multiplier
+
 
 class Job(ABC):
     """Base class for stateless, deterministic jobs.
@@ -44,7 +56,9 @@ class Job(ABC):
         # Always run on first tick
         if last_run_at == 0:
             return True
-        return t_ms - last_run_at >= self.every_ms
+        # Apply frequency multiplier for testing
+        effective_interval = int(self.every_ms * _frequency_multiplier)
+        return t_ms - last_run_at >= effective_interval
 
     @abstractmethod
     def run(self, t_ms: int, db: Any) -> Dict[str, Any]:

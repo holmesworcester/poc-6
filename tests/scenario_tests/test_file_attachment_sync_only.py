@@ -48,7 +48,7 @@ def test_file_attachment_sync_only():
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     print("\n=== Initial sync (bootstrap + GKS) ===")
-    for i in range(5):
+    for i in range(15):
         tick.tick(t_ms=2100 + i*200, db=db)
 
     print("✓ Initial sync completed")
@@ -91,7 +91,7 @@ def test_file_attachment_sync_only():
     db.commit()
 
     print("\n=== Sync message to Bob (3 rounds) ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=4000 + round_num * 100, db=db)
 
     # Check if Bob received the message
@@ -152,7 +152,7 @@ def test_file_attachment_sync_only():
     db.commit()
 
     print("\n=== Sync file to Bob (3 rounds) ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
         # Check progress using API (what frontends would use)

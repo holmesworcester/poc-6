@@ -79,7 +79,7 @@ def test_alice_links_phone_to_laptop():
     # Initial sync to converge (multiple rounds for GKS propagation)
     print("\n=== Initial sync to propagate link event and group keys ===")
 
-    for i in range(20):
+    for i in range(60):
         print(f"Sync round {i+1}...")
         tick.tick(t_ms=4000 + i*100, db=db)
 
@@ -133,7 +133,7 @@ def test_alice_links_phone_to_laptop():
     # Sync messages between devices
     print("\n=== Sync messages between devices ===")
 
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both devices see both messages
@@ -218,7 +218,7 @@ def test_alice_laptop_joins_after_phone_has_messages():
     # Sync to propagate messages to laptop
     print("\n=== Sync messages to laptop ===")
 
-    for i in range(5):
+    for i in range(15):
         tick.tick(t_ms=4000 + i*200, db=db)
 
     # Laptop should see all historical messages
@@ -286,7 +286,7 @@ def test_three_devices_all_linked():
     # Sync
     print("\n=== Sync all devices ===")
 
-    for i in range(6):
+    for i in range(18):
         tick.tick(t_ms=6000 + i*200, db=db)
 
     # Each device sends a message
@@ -322,7 +322,7 @@ def test_three_devices_all_linked():
     # Sync messages
     print("\n=== Sync messages ===")
 
-    for i in range(4):
+    for i in range(12):
         tick.tick(t_ms=8000 + i*100, db=db)
 
     # All devices should see all three messages

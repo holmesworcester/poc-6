@@ -202,7 +202,7 @@ def test_forward_secrecy_multi_peer():
 
     # Sync to converge
     print("\n=== Sync to converge ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=3000 + round_num * 100, db=db)
 
     # Alice sends a message
@@ -220,7 +220,7 @@ def test_forward_secrecy_multi_peer():
 
     # Sync message to Bob
     print("\n=== Sync message to Bob ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=5000 + round_num * 100, db=db)
 
     # Verify Bob sees the message
@@ -250,7 +250,7 @@ def test_forward_secrecy_multi_peer():
 
     # Sync deletion to Bob
     print("\n=== Sync deletion to Bob ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=8000 + round_num * 100, db=db)
 
     # Verify Bob also deleted the message
@@ -550,7 +550,7 @@ def test_new_user_joins_after_rekey():
 
     # Sync to converge
     print("\n=== t=6000+: Sync to converge (3 rounds) ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=6000 + round_num * 100, db=db)
     print("✓ Bob synced with Alice")
 
@@ -686,7 +686,7 @@ def test_new_user_with_preexisting_invite_after_rekey():
 
     # Sync to converge
     print("\n=== t=6000+: Sync to converge (3 rounds) ===")
-    for round_num in range(3):
+    for round_num in range(9):
         tick.tick(t_ms=6000 + round_num * 100, db=db)
     print("✓ Bob synced with Alice")
 
