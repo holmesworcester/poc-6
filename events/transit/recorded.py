@@ -165,6 +165,20 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             log.warning(f"recorded.check_deps() missing dep: {field}={dep_id[:20]}... for peer={recorded_by[:20]}...")
             missing_deps.append(dep_id)
 
+    # Phase 5 BOOTSTRAP: Check for first_peer field (self-invite bootstrap)
+    # If this is an invite with first_peer, artificially block it until invite_accepted resolves the bootstrap
+    # Only block if no invite_accepted event has been created yet for this peer
+    if event_type == 'invite' and event_data.get('first_peer'):
+        # Check if invite_accepteds table has any entries (populated by invite_accepted.project())
+        invite_accepted_exists = safedb.query_one(
+            "SELECT 1 FROM invite_accepteds WHERE recorded_by = ? LIMIT 1",
+            (recorded_by,)
+        )
+        log.warning(f"[BOOTSTRAP_CHECK_DEPS] invite with first_peer, invite_accepted_exists={invite_accepted_exists is not None}, peer={recorded_by[:20]}...")
+        if not invite_accepted_exists:
+            missing_deps.append('__BOOTSTRAP_FIRST_PEER__')
+            log.warning(f"[BOOTSTRAP_BLOCK] blocking invite with first_peer for peer {recorded_by[:20]}...")
+
     if missing_deps:
         log.debug(f"recorded.check_deps() total missing deps: {missing_deps}")
     else:
@@ -306,8 +320,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_created', 'network_joined', 'invite_accepted', 'sync_connect'}
-    # Note: bootstrap_complete removed in Phase 3 (no longer created, but can still project for backward compat)
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_joined', 'invite_accepted', 'sync_connect'}
+    # Note: bootstrap_complete removed in Phase 3, network_created removed in Phase 5 (no longer created, but can still project for backward compat)
 
     should_mark_shareable = False
     if event_type:
@@ -388,7 +402,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
     # All dependencies satisfied - proceed with projection
     projected_id = None
-    log.info(f"Projecting event type: {event_type}")
+    log.warning(f"[PROJECTION_DISPATCH] Projecting event type: {event_type}, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
     timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
 
     # Check if this event has been marked as deleted (prevents projection of deleted messages)
@@ -478,6 +492,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.identity import network
         projected_id = network.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'network_created':
+        # Phase 5: network_created removed - kept for backward compat (old events can still project)
         from events.identity import network_created
         projected_id = network_created.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'network_joined':

@@ -25,7 +25,9 @@ invite_id, invite_link, invite_data = invite.create(
 print(f"Invite ID: {invite_id[:20]}...")
 
 # Bob joins
-bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 print(f"Bob peer_id: {bob['peer_id'][:20]}...")
 print(f"Bob channel_id: {bob['channel_id']}")
 
