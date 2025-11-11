@@ -16,7 +16,7 @@ Tests the API-only (no direct DB inspection except via query functions).
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
 import tick
 import crypto
@@ -45,7 +45,9 @@ def test_two_party_file_attachment_and_sync():
     print(f"✓ Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     print(f"✓ Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()

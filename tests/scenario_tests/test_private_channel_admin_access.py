@@ -3,7 +3,7 @@
 import sqlite3
 from db import Database, create_safe_db
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 from events.content import channel
 from events.group import group_member
 
@@ -22,12 +22,16 @@ print(f"  ✓ Alice created: {alice['user_id']}")
 # Create Bob (initially non-admin)
 print("\nStep 2: Bob joins the network (starts as non-admin)")
 invite_id, invite_link, invite_data = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 print(f"  ✓ Bob joined: {bob['user_id']}")
 
 # Create Charlie (initially non-admin)
 print("\nStep 3: Charlie joins the network (starts as non-admin)")
-charlie = user.join(invite_link=invite_link, name='Charlie', t_ms=2500, db=db)
+charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=2500, db=db)
+
+charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link, name='Charlie', t_ms=2500, db=db)
 print(f"  ✓ Charlie joined: {charlie['user_id']}")
 
 # Get admin group
@@ -159,7 +163,9 @@ if exec_ch:
 # Test adding non-admin member to verify they don't get admin channels
 print("\n\n=== Verification: Non-admins should NOT see all private channels ===")
 print("\nStep 10: Create a non-admin user (David)")
-david = user.join(invite_link=invite_link, name='David', t_ms=3400, db=db)
+david_peer_id, david_peer_shared_id = peer.create(t_ms=3400, db=db)
+
+david = user.join(peer_id=david_peer_id, invite_link=invite_link, name='David', t_ms=3400, db=db)
 print(f"  ✓ David joined (non-admin): {david['user_id']}")
 
 print("\nStep 11: Alice creates private channel 'admin_only' with NO explicit members")

@@ -13,7 +13,7 @@ This test isolates the sync phase to identify which events are/aren't being sync
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
 import tick
 
@@ -41,7 +41,9 @@ def test_file_attachment_sync_only():
     print(f"✓ Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     print(f"✓ Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()

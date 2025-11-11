@@ -110,9 +110,12 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
 
 def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project user event into users and group_members tables."""
+    log.warning(f"[USER_PROJECT_ENTRY] user.project() called: user_id={user_id[:20]}..., recorded_by={recorded_by[:20]}...")
+
     # Get blob from store
     blob = store.get(user_id, db)
     if not blob:
+        log.warning(f"[USER_PROJECT_EARLY_RETURN] Blob not found for user_id={user_id[:20]}...")
         return None
 
     # Parse JSON (signed plaintext, no decryption needed)
@@ -127,10 +130,11 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         # peer_shared not projected yet - return None without blocking
         # (peer_shared_id is not an event_id, so we can't block on it directly)
         # The recorded.project() will handle crypto dependencies via unwrap()
-        log.debug(f"user.project() user_id={user_id} skipping - peer_shared {created_by} not available yet")
+        log.warning(f"[USER_PROJECT_EARLY_RETURN] peer_shared {created_by[:20]}... not available yet")
         return None
 
     if not crypto.verify_event(event_data, public_key):
+        log.warning(f"[USER_PROJECT_EARLY_RETURN] Signature verification failed")
         return None
 
     # Fetch invite event and extract metadata
@@ -146,7 +150,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         invite_blob = store.get(invite_id, db)
         if not invite_blob:
             # invite not projected yet - return None, will retry later
-            log.debug(f"user.project() user_id={user_id} skipping - invite_id={invite_id} not in store yet")
+            log.warning(f"[USER_PROJECT_EARLY_RETURN] invite_id={invite_id[:20]}... not in store yet")
             return None
 
         # Parse invite event (plaintext JSON, not encrypted)
@@ -167,6 +171,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # Insert into users table
     safedb = create_safe_db(db, recorded_by=recorded_by)
     network_id = event_data.get('network_id')  # NEW - may be from invite or event_data
+    log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}..., peer_id={event_data['peer_id'][:20]}...")
     safedb.execute(
         """INSERT OR IGNORE INTO users
            (user_id, peer_id, name, network_id, created_at, invite_pubkey, recorded_by, recorded_at)
@@ -182,6 +187,46 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
             recorded_at
         )
     )
+    log.warning(f"[USER_PROJECT_SUCCESS] User inserted successfully")
+
+    # Phase 5: Check if this user is first_peer (network creator via self-invite)
+    # If so, grant admin privileges by adding to admins group
+    if invite_id:
+        # Check if this invite has first_peer field
+        invite_blob = store.get(invite_id, db)
+        log.warning(f"[FIRST_PEER_CHECK] invite_id={invite_id[:20]}..., invite_blob exists={invite_blob is not None}")
+        if invite_blob:
+            invite_data = crypto.parse_json(invite_blob)
+            first_peer = invite_data.get('first_peer')
+            log.warning(f"[FIRST_PEER_CHECK] first_peer={first_peer[:20] if first_peer else 'None'}..., event_data peer_id={event_data['peer_id'][:20]}...")
+            if first_peer:
+                # Check if this user's peer_id matches first_peer
+                if event_data['peer_id'] == first_peer:
+                    log.warning(f"[FIRST_PEER_MATCH] user.project() detected first_peer user: {user_id[:20]}...")
+                    # Grant admin by adding to admins group
+                    # Get network's admin group
+                    network_row = safedb.query_one(
+                        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+                        (recorded_by,)
+                    )
+                    log.warning(f"[FIRST_PEER_GRANT] network_row={network_row}")
+                    if network_row and network_row['admins_group_id']:
+                        admins_group_id = network_row['admins_group_id']
+
+                        # Create a group_member EVENT so it syncs to other peers
+                        from events.group import group_member
+                        try:
+                            member_event_id = group_member.create(
+                                group_id=admins_group_id,
+                                user_id=user_id,
+                                peer_id=recorded_by,  # Added by self (local peer_id)
+                                peer_shared_id=event_data['peer_id'],  # Creator's public peer_shared_id
+                                t_ms=recorded_at,
+                                db=db
+                            )
+                            log.warning(f"[FIRST_PEER_GRANTED] user.project() granted first_peer admin via event: {member_event_id[:20]}...")
+                        except Exception as e:
+                            log.warning(f"[FIRST_PEER_GRANT_ERROR] Failed to create admin member event: {e}")
 
     # Add to group_members
     # For invite joiners, this is handled by invite_proof.project()
@@ -214,12 +259,15 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Create a new user with their own implicit network.
 
+    Phase 5: Network creator now uses self-invite pattern (same flow as joiners).
+
     Creates:
     - peer (local + shared)
     - groups (all_users + admins)
-    - network event (binds groups, adds creator to admin)
+    - network event (binds groups)
     - channel (default channel)
-    - user (membership record in all_users group)
+    - invite (for self-bootstrapping with first_peer)
+    - user (via join() using self-invite)
 
     Args:
         name: Username/display name
@@ -238,15 +286,32 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
             'user_id': str,
         }
     """
-    from events.transit import transit_prekey
     from events.group import group
-    from events.identity import network
+    from events.identity import network, invite
     from events.content import channel
 
-    log.info(f"new_network() creating user '{name}' at t_ms={t_ms}")
+    log.info(f"new_network() creating network for '{name}' at t_ms={t_ms} (Phase 5: self-invite pattern)")
 
     # 1. Create peer (local + shared)
     peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
+    log.info(f"new_network() created peer: {peer_id[:20]}..., peer_shared={peer_shared_id[:20]}...")
+
+    # 1b. Phase 5: Create transit prekey early (needed for invite.create())
+    # Normally created during user.create(), but we need it before invite
+    from events.transit import transit_prekey, transit_prekey_shared
+    prekey_id, prekey_private = transit_prekey.create(
+        peer_id=peer_id,
+        t_ms=t_ms + 5,
+        db=db
+    )
+    transit_prekey_shared_id = transit_prekey_shared.create(
+        prekey_id=prekey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms + 6,
+        db=db
+    )
+    log.info(f"new_network() created transit prekey: {prekey_id[:20]}..., shared={transit_prekey_shared_id[:20]}...")
 
     # 2. Create ALL_USERS group (main group for all users)
     all_users_group_id, all_users_key_id = group.create(
@@ -257,6 +322,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db,
         is_main=True  # This is the main group for inviting
     )
+    log.info(f"new_network() created all_users group: {all_users_group_id[:20]}...")
 
     # 3. Create ADMINS group (admin-only group)
     admins_group_id, admins_key_id = group.create(
@@ -267,6 +333,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db,
         is_main=False
     )
+    log.info(f"new_network() created admins group: {admins_group_id[:20]}...")
 
     # 4. Create default channel
     channel_id = channel.create(
@@ -279,74 +346,89 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db,
         is_main=True  # This is the main channel
     )
+    log.info(f"new_network() created channel: {channel_id[:20]}...")
 
-    # 5. Create user membership record (auto-creates transit_prekey + transit_prekey_shared)
-    # Network creator - no invite, will be added to all_users group by user.project()
-    user_id, transit_prekey_shared_id, prekey_id = create(
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        name=name,
-        t_ms=t_ms + 40,
-        db=db,
-        group_id=all_users_group_id,
-        channel_id=channel_id
-    )
-
-    log.info(f"new_network() created user '{name}': peer={peer_id}, user_id={user_id}")
-
-    # 6. Create NETWORK event (binds all_users + admins groups, adds creator to admin group)
+    # 5. Create NETWORK event (binds all_users + admins groups)
+    # Note: creator_user_id will be validated after user.join() completes
     network_id = network.create(
         all_users_group_id=all_users_group_id,
         admins_group_id=admins_group_id,
-        creator_user_id=user_id,
+        creator_user_id='',  # Placeholder - will be set by first user
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 60,
+        t_ms=t_ms + 40,
         db=db
     )
+    log.info(f"new_network() created network: {network_id[:20]}...")
 
-    log.info(f"new_network() created network_id={network_id}")
+    # Phase 5: Bootstrap - manually insert network into networks table
+    # This allows invite.create() to query for it before full projection
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        """INSERT OR IGNORE INTO networks
+           (network_id, all_users_group_id, admins_group_id, creator_user_id, created_by, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            network_id,
+            all_users_group_id,
+            admins_group_id,
+            '',  # Placeholder
+            peer_shared_id,
+            t_ms + 40,
+            peer_id,
+            t_ms + 40
+        )
+    )
+    log.info(f"new_network() bootstrap inserted network into networks table")
 
-    # 7. Create network_created event to mark this peer as network creator (self-bootstrapped)
-    network_created_event = {
-        'type': 'network_created',
-        'peer_id': peer_id,
-        'peer_shared_id': peer_shared_id,
-        'network_id': network_id,  # NEW - explicit network reference
-        'created_by': peer_shared_id,
-        'created_at': t_ms + 70
-    }
+    # 6. Phase 5: Create invite for self-bootstrapping with first_peer
+    # This invite will have first_peer=peer_shared_id, granting admin on join
+    invite_id, invite_link, invite_data = invite.create(
+        peer_id=peer_id,
+        t_ms=t_ms + 50,
+        db=db,
+        mode='user',
+        first_peer=peer_shared_id  # THIS IS THE KEY! Grants admin on join
+    )
+    log.info(f"new_network() created self-invite with first_peer: {invite_id[:20]}...")
 
-    # Sign and store the event
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(network_created_event, private_key)
-    network_created_blob = crypto.canonicalize_json(signed_event)
-    network_created_id = store.event(network_created_blob, peer_id, t_ms + 70, db)
+    # 7. Phase 5: Join using own invite (same code path as any joiner!)
+    join_result = join(
+        peer_id=peer_id,  # Phase 5: Pass existing peer_id
+        invite_link=invite_link,
+        name=name,
+        t_ms=t_ms + 100,
+        db=db
+    )
+    log.info(f"new_network() joined via self-invite: user_id={join_result['user_id'][:20]}...")
 
-    log.info(f"new_network() created network_created event: {network_created_id[:20]}...")
+    # Phase 5: Bootstrap cascade is triggered automatically when invite_accepted is projected
+    # by store.event() in user.join(). No manual projection needed.
 
+    db.commit()
+
+    # Return combined result
     return {
-        'peer_id': peer_id,
-        'peer_shared_id': peer_shared_id,
-        'prekey_id': prekey_id,
-        'transit_prekey_shared_id': transit_prekey_shared_id,
-        'user_id': user_id,
+        **join_result,
         'network_id': network_id,
         'all_users_group_id': all_users_group_id,
         'admins_group_id': admins_group_id,
         'channel_id': channel_id,
-        'network_created_id': network_created_id,
+        'invite_id': invite_id,
         # Backward compatibility - group_id and key_id reference all_users group
         'group_id': all_users_group_id,
         'key_id': all_users_key_id,
     }
 
 
-def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
+def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Join an existing network via invite link.
 
+    Phase 5: Peer must be created by caller before calling join().
+    This ensures consistent flow for both network creators and joiners.
+
     Creates:
-    - peer (local + shared)
     - user (membership with invite proof, auto-creates prekey + prekey_shared)
 
     The inviter will share:
@@ -354,6 +436,7 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     - group, channel events (via sync)
 
     Args:
+        peer_id: Local peer ID (must already exist - create with peer.create() first)
         invite_link: Invite link from network creator (format: "quiet://invite/{base64-json}")
         name: Username/display name
         t_ms: Base timestamp
@@ -368,7 +451,18 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
             'invite_data': dict,
         }
     """
-    log.info(f"join() user '{name}' joining via invite at t_ms={t_ms}")
+    log.info(f"join() user '{name}' joining via invite at t_ms={t_ms} with peer_id={peer_id[:20]}...")
+
+    # Phase 5: Get peer_shared_id from existing peer
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if not peer_self_row:
+        raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
+    peer_shared_id = peer_self_row['peer_shared_id']
 
     # Parse invite link
     import base64
@@ -387,9 +481,6 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         invite_data = json.loads(invite_json)
     except Exception as e:
         raise ValueError(f"Failed to decode invite link: {e}")
-
-    # 1. Create peer (local + shared) - must be first for invite storage
-    peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
 
     # Extract and store invite event blob (with recorded wrapper for projection)
     invite_blob_b64 = invite_data['invite_blob']
@@ -435,6 +526,9 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
     channel_id = invite_event_data['channel_id']
     key_id = invite_event_data['key_id']
 
+    # Phase 5: Extract first_peer from invite link (for network creator self-bootstrapping)
+    first_peer = invite_data.get('first_peer')
+
     # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
     # This restores the invite private key via projection BEFORE user.create() is called
     # This allows reprojection to work without the original invite link
@@ -445,7 +539,8 @@ def join(invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
         invite_private_key=invite_private_key,
         peer_id=peer_id,
         t_ms=t_ms + 1,  # Before user creation
-        db=db
+        db=db,
+        first_peer=first_peer  # Phase 5: Pass first_peer for admin grant
     )
 
     # 2. Create user membership (auto-creates transit_prekey + transit_prekey_shared)

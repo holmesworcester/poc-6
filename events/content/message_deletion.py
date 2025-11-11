@@ -105,33 +105,9 @@ def validate(message_id: str, deleted_by: str, recorded_by: str, db: Any) -> boo
             return True
 
     # If not author (or message doesn't exist yet), check if deleted_by is an admin
-    # Get deleter's user_id
-    deleter_user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (deleted_by, recorded_by)
-    )
-    if not deleter_user_row:
-        return False
-
-    deleter_user_id = deleter_user_row['user_id']
-
-    # Get network's admin group ID
-    network_row = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
-    if not network_row or not network_row['admins_group_id']:
-        return False
-
-    admins_group_id = network_row['admins_group_id']
-
-    # Check if deleter is in admin group
-    admin_check = safedb.query_one(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, deleter_user_id, recorded_by)
-    )
-
-    return admin_check is not None
+    # Use centralized is_admin() function which handles both normal admins and first_peer
+    from events.identity import invite
+    return invite.is_admin(deleted_by, recorded_by, db)
 
 
 def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:

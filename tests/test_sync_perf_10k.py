@@ -44,7 +44,9 @@ def test_sync_perf_10k():
 
     # Bob joins Alice's network via invite
     log.info("Bob joining Alice's network...")
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     bob_peer_id = bob['peer_id']
     bob_peer_shared_id = bob['peer_shared_id']
     bob_user_id = bob['user_id']

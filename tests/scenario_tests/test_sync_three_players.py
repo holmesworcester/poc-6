@@ -10,7 +10,7 @@ Goal: Verify that all shareable events sync correctly between Alice and Bob,
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 import tick
 
 
@@ -33,7 +33,9 @@ def test_sync_three_players_convergence():
     )
 
     # Bob joins Alice's network
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 
     # Charlie creates his own separate network
     charlie = user.new_network(name='Charlie', t_ms=3000, db=db)
