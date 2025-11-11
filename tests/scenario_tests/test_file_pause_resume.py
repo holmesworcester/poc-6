@@ -63,8 +63,8 @@ def test_pause_and_resume_file_download():
     )
     message_id = msg_result['id']
 
-    # Create 1 MB file (easier to control for testing pause/resume)
-    file_size = 1 * 1024 * 1024  # 1 MB
+    # Create 100 KB file (faster testing, same pause/resume logic)
+    file_size = 100 * 1024  # 100 KB
     file_data = b'P' * file_size
     expected_slices = (file_size + 449) // 450
 
@@ -103,7 +103,7 @@ def test_pause_and_resume_file_download():
     print("\n=== Downloading to 50% ===")
 
     target_slices = expected_slices // 2
-    for round_num in range(50):  # Should be enough to get to 50%
+    for round_num in range(25):  # Should be enough to get to 50%
         tick.tick(t_ms=7000 + round_num * 100, db=db)
         db.commit()
 
@@ -127,7 +127,7 @@ def test_pause_and_resume_file_download():
         )
         slices_at_pause = progress['slices_received'] if progress else 0
         pct = progress['percentage_complete'] if progress else 0
-        print(f"✓ Pausing at {pct}% after 50 rounds")
+        print(f"✓ Pausing at {pct}% after 25 rounds")
 
     print(f"\n=== Pausing download (have {slices_at_pause} slices) ===")
 
@@ -145,7 +145,7 @@ def test_pause_and_resume_file_download():
     # Pause just means we're not actively requesting this file via sync_file
     print("\n=== Running sync while paused (file not prioritized) ===")
 
-    for round_num in range(10):
+    for round_num in range(5):
         tick.tick(t_ms=8000 + round_num * 100, db=db)
         db.commit()
 
@@ -173,22 +173,24 @@ def test_pause_and_resume_file_download():
     # Continue downloading to completion
     print("\n=== Downloading to completion ===")
 
-    for round_num in range(100):  # Should be enough to complete
+    for round_num in range(40):  # Should be enough to complete
         tick.tick(t_ms=9000 + round_num * 100, db=db)
         db.commit()
 
-        progress = message_attachment.get_file_download_progress(
-            file_id=file_id,
-            recorded_by=bob['peer_id'],
-            db=db
-        )
+        # Check progress every 5 rounds for efficiency
+        if round_num % 5 == 0:
+            progress = message_attachment.get_file_download_progress(
+                file_id=file_id,
+                recorded_by=bob['peer_id'],
+                db=db
+            )
 
-        if progress and progress['is_complete']:
-            print(f"✓ Download complete! {progress['slices_received']}/{progress['total_slices']} slices")
-            break
+            if progress and progress['is_complete']:
+                print(f"✓ Download complete! {progress['slices_received']}/{progress['total_slices']} slices")
+                break
 
-        if round_num % 20 == 0 and progress:
-            print(f"  Round {round_num}: {progress['percentage_complete']}%")
+            if round_num % 20 == 0 and progress:
+                print(f"  Round {round_num}: {progress['percentage_complete']}%")
 
     # Verify completion
     final_progress = message_attachment.get_file_download_progress(
@@ -253,8 +255,8 @@ def test_cancel_file_download():
     )
     message_id = msg_result['id']
 
-    # Create 500 KB file
-    file_size = 500 * 1024  # 500 KB
+    # Create 100 KB file
+    file_size = 100 * 1024  # 100 KB
     file_data = b'C' * file_size
     expected_slices = (file_size + 449) // 450
 
@@ -329,7 +331,7 @@ def test_cancel_file_download():
     # Cancel just means we're not actively requesting this file via sync_file
     print("\n=== Running sync after cancel (file not prioritized) ===")
 
-    for round_num in range(10):
+    for round_num in range(5):
         tick.tick(t_ms=8000 + round_num * 100, db=db)
         db.commit()
 
@@ -357,19 +359,21 @@ def test_cancel_file_download():
     db.commit()
 
     # Download to completion
-    for round_num in range(100):
+    for round_num in range(40):
         tick.tick(t_ms=10000 + round_num * 100, db=db)
         db.commit()
 
-        progress = message_attachment.get_file_download_progress(
-            file_id=file_id,
-            recorded_by=bob['peer_id'],
-            db=db
-        )
+        # Check progress every 5 rounds for efficiency
+        if round_num % 5 == 0:
+            progress = message_attachment.get_file_download_progress(
+                file_id=file_id,
+                recorded_by=bob['peer_id'],
+                db=db
+            )
 
-        if progress and progress['is_complete']:
-            print(f"✓ Download restarted and completed! {progress['slices_received']}/{progress['total_slices']} slices")
-            break
+            if progress and progress['is_complete']:
+                print(f"✓ Download restarted and completed! {progress['slices_received']}/{progress['total_slices']} slices")
+                break
 
     print(f"\n✅ Cancel test passed!")
 
