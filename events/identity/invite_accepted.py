@@ -177,12 +177,13 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         log.info(f"invite_accepted.project() first_peer detected: recorded_by={recorded_by[:20]}... == first_peer={first_peer[:20]}...")
 
         # Check if we've already done the bootstrap unblock (idempotency)
-        # Look for any events with deps_remaining > 0 waiting for __BOOTSTRAP_FIRST_PEER__
+        # Look for any events waiting for __BOOTSTRAP_FIRST_PEER__ (including deps_remaining=0)
+        # Note: deps_remaining can be 0 if other dependencies were satisfied first
         pending_bootstrap = safedb.query_one("""
             SELECT 1 FROM blocked_event_deps_ephemeral bed
             JOIN blocked_events_ephemeral be ON bed.recorded_id = be.recorded_id
                 AND bed.recorded_by = be.recorded_by
-            WHERE bed.dep_id = ? AND bed.recorded_by = ? AND be.deps_remaining > 0
+            WHERE bed.dep_id = ? AND bed.recorded_by = ?
             LIMIT 1
         """, ('__BOOTSTRAP_FIRST_PEER__', recorded_by))
 
