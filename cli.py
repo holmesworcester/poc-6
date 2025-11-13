@@ -51,6 +51,7 @@ class CLISession:
         self.selected_channel_id: Optional[str] = None  # Currently selected channel ID
         self.current_time_ms: int = 0
         self.auto_tick_count: int = 100  # Number of auto-ticks after event commands (default 100)
+        self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.last_invite_link: Optional[str] = None  # Internal - for --join-with-last-invite
         self.last_link_url: Optional[str] = None     # Internal - for --with-last-link
 
@@ -73,6 +74,20 @@ class CLISession:
             return account_list[n - 1]
         return None
 
+    def get_invite_by_number(self, n: int) -> Optional[str]:
+        """Get invite link by number (1-indexed)."""
+        if 1 <= n <= len(self.invites):
+            return self.invites[n - 1]['link']
+        return None
+
+    def add_invite(self, link: str, created_by: str):
+        """Add an invite link to the session."""
+        self.invites.append({
+            'link': link,
+            'created_by': created_by,
+            'created_at': self.current_time_ms
+        })
+
     def add_account(self, account: AccountContext):
         """Add an account to the session."""
         self.accounts[account.full_name] = account
@@ -94,8 +109,10 @@ class CLISession:
 # ============================================================================
 
 def display_state(session: CLISession):
-    """Display the complete three-section state."""
+    """Display the complete state with all sections."""
     display_accounts(session)
+    print()
+    display_invites(session)
     print()
     display_sidebar(session)
     print()
@@ -116,6 +133,19 @@ def display_accounts(session: CLISession):
         short_peer = account.peer_id[:6] if account.peer_id else "???"
         short_net = account.network_id[:6] if account.network_id else "???"
         print(f"  {i}. {selected} {account.full_name} - user_{short_user}, peer_{short_peer}, network_{short_net}")
+
+
+def display_invites(session: CLISession):
+    """Display INVITES section (for convenience only)."""
+    print("INVITES (for convenience only):")
+    if not session.invites:
+        print("  (no invites)")
+        return
+
+    for i, inv in enumerate(session.invites, 1):
+        created_by = inv['created_by']
+        link_preview = inv['link'][:60] + "..." if len(inv['link']) > 60 else inv['link']
+        print(f"  {i}. created by {created_by} - {link_preview}")
 
 
 def display_sidebar(session: CLISession):
@@ -367,6 +397,97 @@ def cmd_create_channel(session: CLISession, name: str):
     display_state(session)
 
 
+def cmd_create_invite(session: CLISession):
+    """Create an invite link for the current network."""
+    account = session.get_selected_account()
+
+    if not account.network_id:
+        print("✗ no network joined")
+        return
+
+    invite_id, invite_link, invite_data = invite.create(
+        peer_id=account.peer_id,
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Store in invites list for convenient reference
+    session.add_invite(invite_link, account.user_name)
+    invite_num = len(session.invites)
+
+    # Store the invite link for --join-with-last-invite shortcut
+    session.last_invite_link = invite_link
+
+    print(f"✓ created invite #{invite_num}")
+    print(f"  use: new-peer --name <name> --device <device> --invite {invite_num}")
+    print()
+
+
+def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
+    """Create a new peer and join a network via invite link or number."""
+    # Resolve invite reference (number or full link)
+    invite_link = invite_ref
+    if invite_ref.isdigit():
+        invite_num = int(invite_ref)
+        resolved_link = session.get_invite_by_number(invite_num)
+        if not resolved_link:
+            print(f"✗ invite #{invite_num} not found")
+            return
+        invite_link = resolved_link
+        print(f"  using invite #{invite_num}")
+
+    # Create the peer first
+    peer_result = peer.create(t_ms=session.current_time_ms, db=session.db)
+    peer_id = peer_result[0]  # peer.create returns (peer_id, peer_shared_id)
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Join the network
+    result = user.join(
+        peer_id=peer_id,
+        invite_link=invite_link,
+        name=name,
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Create account context
+    account = AccountContext(
+        user_name=name.lower(),
+        device_name=device.lower(),
+        peer_id=result['peer_id'],
+        peer_shared_id=result['peer_shared_id']
+    )
+    account.user_id = result['user_id']
+    account.network_id = result.get('network_id')  # May not be available immediately
+
+    session.add_account(account)
+    session.selected_account = account.full_name
+
+    # Auto-select first channel if available
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    if channels:
+        session.selected_channel_id = channels[0]['channel_id']
+
+    account_num = list(session.accounts.keys()).index(account.full_name) + 1
+
+    print(f"✓ created peer and joined network as {name.lower()}")
+    print(f"✓ selected account #{account_num}: {account.full_name}")
+    if channels:
+        print(f"✓ selected channel #1: #{channels[0]['name']}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
 def cmd_quit(session: CLISession):
     """Quit the CLI."""
     print("goodbye!")
@@ -458,18 +579,34 @@ def run_interactive(session: CLISession):
                     name = " ".join(parts[1:]).strip('"')
                     cmd_create_channel(session, name)
 
+            elif cmd == "create-invite":
+                cmd_create_invite(session)
+
+            elif cmd == "new-peer":
+                parser = argparse.ArgumentParser(add_help=False)
+                parser.add_argument("--name", required=True)
+                parser.add_argument("--device", required=True)
+                parser.add_argument("--invite", required=True)
+                try:
+                    args = parser.parse_args(parts[1:])
+                    cmd_new_peer(session, args.name, args.device, args.invite)
+                except SystemExit:
+                    print("usage: new-peer --name <name> --device <device> --invite <link>")
+
             elif cmd == "show":
                 display_state(session)
 
             elif cmd == "help":
                 print("available commands:")
                 print("  new-network --name <name> --device <device>")
+                print("  new-peer --name <name> --device <device> --invite <n|link>")
                 print("  switch <n>")
                 print("  send <message>")
                 print("  sync --ticks <n>")
                 print("  set-auto-tick <n>")
                 print("  select-channel <n>")
                 print("  create-channel <name>")
+                print("  create-invite")
                 print("  show")
                 print("  quit")
 
