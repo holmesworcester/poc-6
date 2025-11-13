@@ -132,18 +132,32 @@ Each workflow shows both interactive and non-interactive usage.
 3. **Create implementation plan** - Break down into concrete tasks with priorities
 4. **Start implementation** - Begin with core commands and session management
 
+## TODOs and Prerequisites
+
+### Backend Changes Needed
+
+See [TODO_DEVICE_NAME.md](./TODO_DEVICE_NAME.md) for details on adding device_name to link events.
+
+**Summary**: The CLI design requires device names (e.g., "Desktop", "Phone") to distinguish between multiple devices for the same user. This needs to be added to:
+- Link events (`link.join()` function)
+- Network creation (`user.new_network()` function)
+- Query functions to retrieve device names
+
+**Estimated effort**: ~3 hours
+
+This should be implemented before or during CLI development.
+
 ## Questions for Discussion
 
 Before implementation, we should discuss:
 
-1. **Command syntax preferences** - Are the current command names intuitive?
-2. **State display details** - Is the ASCII box format good, or prefer something else?
+1. **Auto-tick configuration** - Is default 10 rounds good? Should it be 20?
+2. **Command syntax preferences** - Are the current command names intuitive?
 3. **Priority order** - Which commands should we implement first?
 4. **Testing approach** - Should CLI tests replace/augment scenario tests, or coexist?
 5. **Missing functions** - What query functions do we need to add to event modules?
 6. **Output formats** - Do we need JSON output mode? CSV? Other formats?
 7. **Error handling** - How should errors be displayed in interactive vs non-interactive modes?
-8. **Auto-sync** - Should some commands trigger sync automatically, or always explicit?
 
 ## Implementation Estimate
 

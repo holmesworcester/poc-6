@@ -23,6 +23,35 @@ Commands should work identically in interactive and non-interactive modes:
 - Same output format
 - Same state display between commands
 
+### Auto-Tick After Commands
+To simulate realistic message propagation, the CLI automatically runs sync rounds after commands that generate events:
+- **Default: 10 ticks** after commands like `send`, `create-invite`, `add-admin`, etc.
+- **Configurable**: `--auto-tick 20` to change default
+- **Disable**: `--no-auto-tick` for manual control
+- **Explicit sync**: `sync --rounds N` for additional manual ticks
+
+This makes the CLI more realistic without requiring constant manual syncing. The default of 10 ticks is a good starting point but may need tuning based on scenarios.
+
+Example with auto-tick (default 10):
+```
+> send "Hello"
+✓ Sent message
+⟳ Auto-syncing 10 rounds...
+✓ Synced (t=2000ms -> 3000ms)
+
+MAIN (#general):
+  [2000ms] Alice: Hello
+```
+
+Example with manual control:
+```
+> send "Hello" --no-auto-tick
+✓ Sent message (not synced)
+
+> sync --rounds 20
+✓ Synced 20 rounds
+```
+
 ### Slack-Like Interface
 The UI mimics Slack's layout with three sections shown sequentially:
 1. **Accounts** - List of all accounts (corresponds to peers internally)
@@ -41,11 +70,12 @@ Simple bulleted/nested lists, no boxes or special formatting:
 
 ```
 ACCOUNTS:
-  * Alice - alice@network_abc123
-    Bob - bob@network_abc123
-    Charlie - charlie@network_xyz789
+  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
+    Alice (Phone) - user_nF7kRm, network_uA2vWy
+    Bob (Desktop) - user_wP8qLx, network_uA2vWy
+    Charlie (Desktop) - user_zQ9rMy, network_xyz789
 
-SIDEBAR (Alice):
+SIDEBAR (Alice - Desktop):
   * #general
     #random
 
@@ -55,6 +85,11 @@ MAIN (#general):
 ```
 
 The `*` indicates the currently selected item.
+
+Format notes:
+- Account names show user name + device name (e.g., "Alice (Desktop)")
+- Multiple accounts can have the same user name but different device names
+- IDs are truncated to first 6 characters for readability
 
 ## Interactive Mode
 
@@ -72,15 +107,15 @@ ACCOUNTS:
 ### Session Flow Example: Three Player Messaging
 
 ```
-> new-network --name Alice
+> new-network --name Alice --device Desktop
 ✓ Created network as Alice
-✓ Selected account: Alice
+✓ Selected account: Alice (Desktop)
 ✓ Selected channel: #general
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
+  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
 
-SIDEBAR (Alice):
+SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
@@ -88,40 +123,31 @@ MAIN (#general):
 
 > create-invite
 ✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+⟳ Auto-syncing 10 rounds...
+✓ Synced (t=2000ms -> 3000ms)
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
+  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
 
-SIDEBAR (Alice):
+SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
   (no messages)
 
-> new-account --name Bob --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
-✓ Created account: Bob
+> new-account --name Bob --device Desktop --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+✓ Created account: Bob (Desktop)
 ✓ Joined network: uA2vWy
-✓ Selected account: Bob
+✓ Selected account: Bob (Desktop)
 ✓ Selected channel: #general
+⟳ Auto-syncing 10 rounds...
+✓ Synced (t=3000ms -> 4000ms)
 
 ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
+    Alice (Desktop) - user_nF7kRm, network_uA2vWy
+  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
 
-SIDEBAR (Bob):
-  * #general
-
-MAIN (#general):
-  (no messages)
-
-> sync --rounds 15
-✓ Synced 15 rounds (t=4000ms -> 7000ms)
-
-ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
-
-SIDEBAR (Bob):
+SIDEBAR (Bob - Desktop):
   * #general
 
 MAIN (#general):
@@ -129,96 +155,87 @@ MAIN (#general):
 
 > send "Hello from Bob!"
 ✓ Sent message
+⟳ Auto-syncing 10 rounds...
+✓ Synced (t=5100ms -> 6100ms)
 
 ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
+    Alice (Desktop) - user_nF7kRm, network_uA2vWy
+  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
 
-SIDEBAR (Bob):
+SIDEBAR (Bob - Desktop):
   * #general
 
 MAIN (#general):
   [5100ms] Bob: Hello from Bob!
 
 > switch Alice
-✓ Selected account: Alice
+✓ Selected account: Alice (Desktop)
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
+  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
+    Bob (Desktop) - user_wP8qLx, network_uA2vWy
 
-SIDEBAR (Alice):
+SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
-  (no messages yet - needs sync)
+  [5100ms] Bob: Hello from Bob!
 
 > send "Hello from Alice!"
 ✓ Sent message
+⟳ Auto-syncing 10 rounds...
+✓ Synced (t=6200ms -> 7200ms)
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
+  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
+    Bob (Desktop) - user_wP8qLx, network_uA2vWy
 
-SIDEBAR (Alice):
+SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
-  [5000ms] Alice: Hello from Alice!
-
-> sync --rounds 20
-✓ Synced 20 rounds (t=7000ms -> 11000ms)
-
-ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
-
-SIDEBAR (Alice):
-  * #general
-
-MAIN (#general):
+  [6200ms] Alice: Hello from Alice!
   [5100ms] Bob: Hello from Bob!
-  [5000ms] Alice: Hello from Alice!
 
 > switch Bob
-✓ Selected account: Bob
+✓ Selected account: Bob (Desktop)
 
 ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
+    Alice (Desktop) - user_nF7kRm, network_uA2vWy
+  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
 
-SIDEBAR (Bob):
+SIDEBAR (Bob - Desktop):
   * #general
 
 MAIN (#general):
+  [6200ms] Alice: Hello from Alice!
   [5100ms] Bob: Hello from Bob!
-  [5000ms] Alice: Hello from Alice!
 
 > list-accounts
 ACCOUNTS:
-  * Bob - bob@network_uA2vWy (user_id: wP8qLx...)
-    Alice - alice@network_uA2vWy (user_id: nF7kRm...)
+  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
+    Alice (Desktop) - user_nF7kRm, network_uA2vWy
 
 > show-all
 === ALL ACCOUNTS ===
 
-ACCOUNT: Alice
+ACCOUNT: Alice (Desktop)
   Network: uA2vWy
   User ID: nF7kRm
   Channels: #general
 
   #general:
+    [6200ms] Alice: Hello from Alice!
     [5100ms] Bob: Hello from Bob!
-    [5000ms] Alice: Hello from Alice!
 
-ACCOUNT: Bob
+ACCOUNT: Bob (Desktop)
   Network: uA2vWy
   User ID: wP8qLx
   Channels: #general
 
   #general:
+    [6200ms] Alice: Hello from Alice!
     [5100ms] Bob: Hello from Bob!
-    [5000ms] Alice: Hello from Alice!
 
 > quit
 Goodbye!
@@ -377,10 +394,12 @@ ACCOUNT: Bob
 ## Command Reference
 
 ### Network & Account Management
-- `new-network --name <name>` - Create a new network and first account
-- `new-account --name <name> --invite <invite_link>` - Create account and join network
-- `switch <account_name>` - Switch to a different account
+- `new-network --name <name> --device <device_name>` - Create a new network and first account
+- `new-account --name <name> --device <device_name> --invite <invite_link>` - Create account and join network
+- `switch <account_name>` - Switch to a different account (use full name with device, e.g., "Alice (Desktop)")
 - `list-accounts` - List all accounts in session with details
+
+Note: Device names distinguish multiple accounts for the same user (e.g., "Alice (Desktop)" vs "Alice (Phone)")
 
 ### Invites
 - `create-invite` - Create network invite (requires admin) - shows invite link immediately
@@ -393,7 +412,9 @@ ACCOUNT: Bob
 
 ### Multi-Device (Linking)
 - `create-link-invite` - Create a link invite for same user
-- `link-device --name <name> --link <link_url>` - Link a new device to existing user
+- `link-device --device <device_name> --link <link_url>` - Link a new device to existing user
+
+Note: Linked devices share the same user_id but have different device names (e.g., "Alice (Desktop)" and "Alice (Phone)")
 
 ### Admin Operations
 - `add-admin --user <user_name>` - Add user as admin (requires admin)
@@ -415,14 +436,20 @@ ACCOUNT: Bob
 Shows all accounts in the session with selection indicator:
 ```
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
-    Charlie - charlie@network_xyz789
+  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
+    Alice (Phone) - user_nF7kRm, network_uA2vWy
+    Bob (Desktop) - user_wP8qLx, network_uA2vWy
+    Charlie (Desktop) - user_zQ9rMy, network_xyz789
 ```
 
-Format: `[*] <account_name> - <short_user_id>@network_<short_network_id>`
+Format: `[*] <user_name> (<device_name>) - user_<short_user_id>, network_<short_network_id>`
 
 The `*` indicates the currently selected account.
+
+Notes:
+- Multiple accounts can share the same user name but have different device names
+- Accounts with the same user_id are linked devices for the same user
+- IDs are truncated to first 6 characters
 
 ### SIDEBAR Section
 Shows channels available in the selected account:
@@ -627,12 +654,18 @@ class AccountContext:
     'Account' is the frontend term - internally corresponds to a peer.
     """
 
-    def __init__(self, name, peer_id, peer_shared_id):
-        self.name = name               # Display name
+    def __init__(self, user_name, device_name, peer_id, peer_shared_id):
+        self.user_name = user_name     # User's display name (e.g., "Alice")
+        self.device_name = device_name # Device name (e.g., "Desktop", "Phone")
         self.peer_id = peer_id         # Backend peer ID
         self.peer_shared_id = peer_shared_id
         self.user_id = None            # Set after network join
         self.network_id = None         # Set after network join
+
+    @property
+    def full_name(self):
+        """Full account name for display: 'Alice (Desktop)'"""
+        return f"{self.user_name} ({self.device_name})"
 ```
 
 ### State Display Functions
@@ -654,11 +687,11 @@ def display_accounts(session):
         print("  (no accounts)")
         return
 
-    for name, account in session.accounts.items():
-        selected = "*" if name == session.selected_account else " "
+    for full_name, account in session.accounts.items():
+        selected = "*" if full_name == session.selected_account else " "
         short_user = account.user_id[:6] if account.user_id else "???"
         short_net = account.network_id[:6] if account.network_id else "???"
-        print(f"  {selected} {name} - {short_user}@network_{short_net}")
+        print(f"  {selected} {account.full_name} - user_{short_user}, network_{short_net}")
 
 def display_sidebar(session):
     """Display SIDEBAR section for selected account."""
