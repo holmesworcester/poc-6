@@ -181,11 +181,18 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
                 (event_id, file_id, peer_id, 'file')
             )
 
-        # Note: File slices are NOT marked as shareable because:
-        # 1. Slices are synced via sync_file protocol (focused file sync), not normal bloom filter sync
-        # 2. Adding 116K+ slices to shareable_events would create excessive window_id computation
-        # 3. Normal sync should skip requesting 116K individual events and use sync_file instead
-        # 4. Access control is enforced at message_attachment level (group-encrypted)
+        # Mark slices as shareable (sync via regular bloom filter sync)
+        # File slices are regular shareable events - they sync like any other event type
+        # Access control is enforced at message_attachment level (group-encrypted)
+        from events.network import sync
+        for event_id in event_ids:
+            sync.add_shareable_event(
+                event_id=event_id,
+                can_share_peer_id=peer_id,
+                created_at=None,  # Sync uses recorded_at for ordering
+                recorded_at=t_ms,
+                db=db
+            )
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)
