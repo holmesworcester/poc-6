@@ -226,8 +226,8 @@ def test_admin_group_workflow():
 
     # Sync between all three peers (need more rounds for 3-way sync)
     print("\n=== Sync to integrate Charlie ===")
-    for round_num in range(80):  # Much more rounds for 3-peer convergence with new timing model
-        tick.tick(t_ms=9000 + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
+    # Use convergence_sync for complete event convergence (100 rounds = ~10 seconds)
+    tick_helper.convergence_sync(db, start_t_ms=9000)
 
     # Verify Charlie can see both Alice and Bob as admins
     print("\n=== Verify Charlie sees both Alice and Bob as admins ===")
