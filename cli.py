@@ -495,7 +495,133 @@ def cmd_quit(session: CLISession):
 
 
 # ============================================================================
-# INTERACTIVE MODE
+# COMMAND EXECUTION
+# ============================================================================
+
+def execute_command(session: CLISession, line: str, show_prompt: bool = True) -> bool:
+    """Execute a single command line. Returns False if should quit."""
+    line = line.strip()
+    if not line:
+        return True
+
+    parts = line.split()
+    cmd = parts[0]
+
+    try:
+        if cmd == "quit" or cmd == "exit":
+            if show_prompt:
+                print("goodbye!")
+            return False
+
+        elif cmd == "new-network":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--name", required=True)
+            parser.add_argument("--device", required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_new_network(session, args.name, args.device)
+            except SystemExit:
+                print("usage: new-network --name <name> --device <device>")
+
+        elif cmd == "switch":
+            if len(parts) < 2:
+                print("usage: switch <n>")
+            else:
+                try:
+                    cmd_switch(session, int(parts[1]))
+                except ValueError:
+                    print("error: account number must be an integer")
+
+        elif cmd == "send":
+            if len(parts) < 2:
+                print("usage: send <message>")
+            else:
+                msg = " ".join(parts[1:]).strip('"')
+                cmd_send(session, msg)
+
+        elif cmd == "sync":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--ticks", type=int, required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_sync(session, args.ticks)
+            except SystemExit:
+                print("usage: sync --ticks <n>")
+
+        elif cmd == "set-auto-tick":
+            if len(parts) < 2:
+                print("usage: set-auto-tick <n>")
+            else:
+                try:
+                    cmd_set_auto_tick(session, int(parts[1]))
+                except ValueError:
+                    print("error: count must be an integer")
+
+        elif cmd == "select-channel":
+            if len(parts) < 2:
+                print("usage: select-channel <n>")
+            else:
+                try:
+                    cmd_select_channel(session, int(parts[1]))
+                except ValueError:
+                    print("error: channel number must be an integer")
+
+        elif cmd == "create-channel":
+            if len(parts) < 2:
+                print("usage: create-channel <name>")
+            else:
+                name = " ".join(parts[1:]).strip('"')
+                cmd_create_channel(session, name)
+
+        elif cmd == "create-invite":
+            cmd_create_invite(session)
+
+        elif cmd == "new-peer":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--name", required=True)
+            parser.add_argument("--device", required=True)
+            parser.add_argument("--invite", required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_new_peer(session, args.name, args.device, args.invite)
+            except SystemExit:
+                print("usage: new-peer --name <name> --device <device> --invite <link>")
+
+        elif cmd == "show":
+            display_state(session)
+
+        elif cmd == "help":
+            print("available commands:")
+            print("  new-network --name <name> --device <device>")
+            print("  new-peer --name <name> --device <device> --invite <n|link>")
+            print("  switch <n>")
+            print("  send <message>")
+            print("  sync --ticks <n>")
+            print("  set-auto-tick <n>")
+            print("  select-channel <n>")
+            print("  create-channel <name>")
+            print("  create-invite")
+            print("  show")
+            print("  quit")
+
+        else:
+            print(f"unknown command: {cmd}")
+            print("type 'help' for available commands")
+
+        return True
+
+    except KeyboardInterrupt:
+        print()
+        return False
+    except Exception as e:
+        print(f"error: {e}")
+        import traceback
+        traceback.print_exc()
+        return True
+
+
+# ============================================================================
+# INTERACTIVE AND NON-INTERACTIVE MODES
 # ============================================================================
 
 def run_interactive(session: CLISession):
@@ -510,117 +636,34 @@ def run_interactive(session: CLISession):
     while True:
         try:
             line = input("> ").strip()
-            if not line:
-                continue
-
-            parts = line.split()
-            cmd = parts[0]
-
-            if cmd == "quit" or cmd == "exit":
-                cmd_quit(session)
-
-            elif cmd == "new-network":
-                parser = argparse.ArgumentParser(add_help=False)
-                parser.add_argument("--name", required=True)
-                parser.add_argument("--device", required=True)
-                try:
-                    args = parser.parse_args(parts[1:])
-                    cmd_new_network(session, args.name, args.device)
-                except SystemExit:
-                    print("usage: new-network --name <name> --device <device>")
-
-            elif cmd == "switch":
-                if len(parts) < 2:
-                    print("usage: switch <n>")
-                else:
-                    try:
-                        cmd_switch(session, int(parts[1]))
-                    except ValueError:
-                        print("error: account number must be an integer")
-
-            elif cmd == "send":
-                if len(parts) < 2:
-                    print("usage: send <message>")
-                else:
-                    msg = " ".join(parts[1:]).strip('"')
-                    cmd_send(session, msg)
-
-            elif cmd == "sync":
-                parser = argparse.ArgumentParser(add_help=False)
-                parser.add_argument("--ticks", type=int, required=True)
-                try:
-                    args = parser.parse_args(parts[1:])
-                    cmd_sync(session, args.ticks)
-                except SystemExit:
-                    print("usage: sync --ticks <n>")
-
-            elif cmd == "set-auto-tick":
-                if len(parts) < 2:
-                    print("usage: set-auto-tick <n>")
-                else:
-                    try:
-                        cmd_set_auto_tick(session, int(parts[1]))
-                    except ValueError:
-                        print("error: count must be an integer")
-
-            elif cmd == "select-channel":
-                if len(parts) < 2:
-                    print("usage: select-channel <n>")
-                else:
-                    try:
-                        cmd_select_channel(session, int(parts[1]))
-                    except ValueError:
-                        print("error: channel number must be an integer")
-
-            elif cmd == "create-channel":
-                if len(parts) < 2:
-                    print("usage: create-channel <name>")
-                else:
-                    name = " ".join(parts[1:]).strip('"')
-                    cmd_create_channel(session, name)
-
-            elif cmd == "create-invite":
-                cmd_create_invite(session)
-
-            elif cmd == "new-peer":
-                parser = argparse.ArgumentParser(add_help=False)
-                parser.add_argument("--name", required=True)
-                parser.add_argument("--device", required=True)
-                parser.add_argument("--invite", required=True)
-                try:
-                    args = parser.parse_args(parts[1:])
-                    cmd_new_peer(session, args.name, args.device, args.invite)
-                except SystemExit:
-                    print("usage: new-peer --name <name> --device <device> --invite <link>")
-
-            elif cmd == "show":
-                display_state(session)
-
-            elif cmd == "help":
-                print("available commands:")
-                print("  new-network --name <name> --device <device>")
-                print("  new-peer --name <name> --device <device> --invite <n|link>")
-                print("  switch <n>")
-                print("  send <message>")
-                print("  sync --ticks <n>")
-                print("  set-auto-tick <n>")
-                print("  select-channel <n>")
-                print("  create-channel <name>")
-                print("  create-invite")
-                print("  show")
-                print("  quit")
-
-            else:
-                print(f"unknown command: {cmd}")
-                print("type 'help' for available commands")
-
+            if not execute_command(session, line, show_prompt=True):
+                break
         except KeyboardInterrupt:
             print()
-            cmd_quit(session)
-        except Exception as e:
-            print(f"error: {e}")
-            import traceback
-            traceback.print_exc()
+            print("goodbye!")
+            break
+        except EOFError:
+            print()
+            print("goodbye!")
+            break
+
+
+def run_non_interactive(session: CLISession):
+    """Run non-interactive mode, reading commands from stdin."""
+    import sys
+
+    # Show initial state
+    display_state(session)
+    print()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+
+        print(f"> {line}")
+        if not execute_command(session, line, show_prompt=False):
+            break
 
 
 # ============================================================================
@@ -639,9 +682,7 @@ def main():
     if args.interactive:
         run_interactive(session)
     else:
-        print("non-interactive mode not yet implemented")
-        print("use --interactive for now")
-        sys.exit(1)
+        run_non_interactive(session)
 
 
 if __name__ == "__main__":
