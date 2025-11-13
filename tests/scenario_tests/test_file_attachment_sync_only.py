@@ -92,8 +92,13 @@ def test_file_attachment_sync_only():
 
     db.commit()
 
-    print("\n=== Sync message to Bob (3 rounds) ===")
-    for round_num in range(9):
+    print("\n=== Sync message to Bob ===")
+    # Need extra rounds with new timing model:
+    # - Message needs to be added to shareable_events (1 tick)
+    # - Sync request sent (1 tick)
+    # - Sync response delivered (1 tick)
+    # - Plus initial convergence
+    for round_num in range(15):
         tick.tick(t_ms=4000 + round_num * 100, db=db)
 
     # Check if Bob received the message
@@ -101,10 +106,10 @@ def test_file_attachment_sync_only():
         "SELECT message_id FROM messages WHERE recorded_by = ?",
         (bob['peer_id'],)
     )
-    print(f"Bob has {len(bob_msg_count)} message(s) after 3 sync rounds")
+    print(f"Bob has {len(bob_msg_count)} message(s) after sync")
 
     if len(bob_msg_count) == 0:
-        print("ERROR: Message not synced to Bob after 1 round")
+        print("ERROR: Message not synced to Bob")
         # Check shareable_events to see if message is there
         msg_in_bob_shareable = db.query_one(
             "SELECT event_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",

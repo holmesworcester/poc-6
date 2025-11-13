@@ -66,7 +66,7 @@ def test_sync_three_players_convergence():
 
     # Run sync to convergence
     print("\n=== Running Sync ===")
-    max_rounds = 100  # Increased for job-based tick system
+    max_rounds = 150  # Increased for job-based tick system and new network sim timing
     for round_num in range(max_rounds):
         # Run one tick cycle (send + receive)
         tick.tick(t_ms=4000 + round_num * 100, db=db)

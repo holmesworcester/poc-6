@@ -10,13 +10,15 @@ and deterministic.
 
 Flow (order determined by jobs.JOBS registry):
 1. Send connection announcements (sync_connect)
-2. Receive incoming (sync responses + connects)
-3. Send sync requests
-4. Receive incoming again
-5. Purge expired connections
-6. Message rekey and purge (forward secrecy)
-7. Purge expired events (TTL-based)
-8. Replenish prekeys when low
+2. Receive incoming (messages from previous ticks, respecting deliver_at timestamps)
+3. Send sync requests (added to incoming queue with deliver_at = t_ms + latency)
+4. Purge expired connections
+5. Message rekey and purge (forward secrecy)
+6. Purge expired events (TTL-based)
+7. Replenish prekeys when low
+
+Note: Messages sent in tick N are delivered in tick N+1 or later based on
+network latency configuration.
 """
 from typing import Any
 from db import create_unsafe_db

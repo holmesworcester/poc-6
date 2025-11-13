@@ -491,3 +491,125 @@ def test_peer_removal_last_device_rotates_keys():
     # assert_convergence(db)
 
     print("\n✅ Peer removal group key rotation test passed!")
+
+
+def test_removed_peer_cannot_sync_messages():
+    """Verify that a removed peer cannot sync messages (realistic scenario test).
+
+    This test follows the three-player messaging pattern:
+    - Only uses public APIs (no direct database queries)
+    - Verifies observable behavior (message delivery)
+    - Tests the complete user experience
+    """
+
+    # Setup
+    conn = sqlite3.Connection(":memory:")
+    db = Database(conn)
+    schema.create_all(db)
+
+    print("\n=== Setup: Create network with Alice and Bob ===")
+
+    # Alice creates a network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    print(f"Alice created network, peer_id: {alice['peer_id'][:20]}...")
+
+    # Bob joins Alice's network
+    bob_invite_id, bob_invite_link, _ = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=1500,
+        db=db
+    )
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
+
+    db.commit()
+
+    # Initial sync to converge (like three-player test: multiple rounds for GKS)
+    print("\n=== Initial sync to establish network ===")
+    for i in range(15):
+        tick.tick(t_ms=3000 + i*200, db=db)
+
+    # Alice sends a message before Bob is removed
+    print("\n=== Alice sends message (before Bob removed) ===")
+    alice_msg_before = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Alice before Bob removal',
+        t_ms=6000,
+        db=db
+    )
+    print(f"Alice created message: {alice_msg_before['id'][:20]}...")
+    db.commit()
+
+    # Sync the message
+    print("\n=== Sync Alice's pre-removal message ===")
+    for i in range(10):
+        tick.tick(t_ms=7000 + i*100, db=db)
+
+    # Verify Bob received Alice's message (using public API)
+    bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_contents = [msg['content'] for msg in bob_messages]
+    print(f"Bob sees {len(bob_messages)} messages: {bob_contents}")
+
+    assert 'Alice before Bob removal' in bob_contents, \
+        "Bob should see Alice's pre-removal message"
+
+    print("✓ Bob received Alice's pre-removal message (sync working)")
+
+    # Alice removes Bob
+    print("\n=== Alice removes Bob's peer ===")
+    peer_removed.create(
+        removed_peer_shared_id=bob_peer_shared_id,
+        removed_by_peer_shared_id=alice['peer_shared_id'],
+        removed_by_local_peer_id=alice['peer_id'],
+        t_ms=9000,
+        db=db
+    )
+    db.commit()
+
+    # Sync the removal event
+    print("\n=== Sync removal event ===")
+    for i in range(15):
+        tick.tick(t_ms=10000 + i*100, db=db)
+
+    # Alice sends a message AFTER removing Bob
+    print("\n=== Alice sends message (after Bob removed) ===")
+    alice_msg_after = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Alice after Bob removal',
+        t_ms=12000,
+        db=db
+    )
+    print(f"Alice created message: {alice_msg_after['id'][:20]}...")
+    db.commit()
+
+    # Extensive sync attempts to ensure any queued messages would be delivered
+    print("\n=== Extensive sync attempts (20 rounds) ===")
+    for i in range(20):
+        tick.tick(t_ms=13000 + i*100, db=db)
+
+    # Verify observable behavior: Bob did NOT receive Alice's post-removal message
+    print("\n=== Verifying message delivery (observable behavior) ===")
+
+    bob_messages_after = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_contents_after = [msg['content'] for msg in bob_messages_after]
+    print(f"Bob sees {len(bob_messages_after)} messages: {bob_contents_after}")
+
+    assert 'Alice after Bob removal' not in bob_contents_after, \
+        "Bob should NOT receive messages sent after his removal (no sync)"
+
+    print("✓ Bob did NOT receive post-removal messages (sync blocked)")
+
+    print("\n✅ Removed peer cannot sync messages test passed!")
+
+
+# Test coverage summary for removal enforcement:
+#
+# ✓ test_removed_peer_cannot_sync_messages (REALISTIC SCENARIO TEST)
+#   - Follows three-player messaging pattern
+#   - Only uses public APIs (message.create, message.list_messages, tick.tick)
+#   - Verifies observable behavior (message delivery blocked after removal)
+#   - Proves: Removed peer cannot sync messages with network
+#   - This is the primary test showing removal enforcement works from user perspective

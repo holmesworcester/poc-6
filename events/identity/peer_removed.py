@@ -104,6 +104,16 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
         (removed_peer_shared_id, removed_at, removed_by)
     )
 
+    # DELETE ALL CONNECTIONS with this peer (enforcement mechanism)
+    # No connections = no sync possible
+    # This is the primary enforcement point per the protocol design
+    cursor = unsafe_db.execute(
+        """DELETE FROM sync_connections WHERE peer_shared_id = ?""",
+        (removed_peer_shared_id,)
+    )
+    deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+    log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
+
     # Check if this was the last peer of a user (if so, rotate group keys)
     # Map removed peer to its user_id
     user_row = safedb.query_one(
