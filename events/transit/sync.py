@@ -385,7 +385,7 @@ def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any
     we can use it to create address events. Otherwise, this is a no-op.
     """
     try:
-        from core import network
+        from simulator import network
         from events.network import address as address_module
 
         engine = network.get_engine()
