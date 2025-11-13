@@ -61,6 +61,14 @@ Build the CLI following the prototype:
 
 ## Key Design Decisions
 
+### Slack-Like Interface
+The UI mimics Slack's three-section layout:
+1. **Accounts** - List of all accounts (peers) with selection indicator
+2. **Sidebar** - List of channels in selected account
+3. **Main** - List of messages in selected channel
+
+Simple bulleted lists, no fancy formatting. Groups, invites, and admin status are hidden (under the hood).
+
 ### Function-Only API Access
 The CLI will act as an API client, using ONLY the event functions from `events/` modules. This means:
 - No raw SQL queries in CLI code
@@ -75,16 +83,28 @@ Commands work identically in both modes:
 ```bash
 # Interactive mode
 > new-network --name Alice
-> send --message "Hello"
+> send "Hello"
 
 # Non-interactive mode (same commands)
 ./cli.py --new-network Alice --send "Hello"
 ```
 
 ### State Visibility
-After each command, show the updated state from all relevant perspectives. This helps users understand:
+After each command, show the three-section state display:
+```
+ACCOUNTS:
+  * Alice - alice@network_abc123
+
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  [2000ms] Alice: Hello
+```
+
+This helps users understand:
 - What changed as a result of the command
-- What each peer currently sees
+- What each account currently sees
 - Whether sync is needed for convergence
 - The current state of the distributed system
 

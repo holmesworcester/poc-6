@@ -23,28 +23,38 @@ Commands should work identically in interactive and non-interactive modes:
 - Same output format
 - Same state display between commands
 
+### Slack-Like Interface
+The UI mimics Slack's layout with three sections shown sequentially:
+1. **Accounts** - List of all accounts (corresponds to peers internally)
+2. **Sidebar** - List of channels in the selected account
+3. **Main** - List of messages in the selected channel
+
+**What's hidden (under the hood):**
+- Groups - used internally for permissions but not shown in UI
+- Invites - only displayed at creation time as command output, not persisted in UI
+- Admin status - not explicitly shown (but affects what commands are allowed)
+
+The CLI maintains ephemeral in-memory state for which account and channel are currently selected.
+
 ### State Display Format
-State should be shown after each command in a human and LLM-readable format:
+Simple bulleted/nested lists, no boxes or special formatting:
 
 ```
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (alice_peer_id_abc123...)
-│ USER: Alice (alice_user_id_xyz789...)
-│ NETWORK: network_id_def456...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (group_id_ghi012...)
-│     Members: Alice
-│   • admins (group_id_jkl345...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (channel_id_mno678...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (0):
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_abc123
+    Bob - bob@network_abc123
+    Charlie - charlie@network_xyz789
+
+SIDEBAR (Alice):
+  * #general
+    #random
+
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
+  [5000ms] Alice: Hello from Alice!
 ```
+
+The `*` indicates the currently selected item.
 
 ## Interactive Mode
 
@@ -53,7 +63,9 @@ State should be shown after each command in a human and LLM-readable format:
 $ ./cli.py --interactive
 Welcome to POC-6 CLI (Interactive Mode)
 
-Active peer: (none)
+ACCOUNTS:
+  (none)
+
 >
 ```
 
@@ -62,206 +74,151 @@ Active peer: (none)
 ```
 > new-network --name Alice
 ✓ Created network as Alice
-✓ Switched to peer: Alice
+✓ Selected account: Alice
+✓ Selected channel: #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ USER: Alice (nF7kRm...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (0):
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  (no messages)
 
 > create-invite
-✓ Created invite: invite_vR9sLp...
-✓ Invite link: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ USER: Alice (nF7kRm...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...) - 1 member
-│   • admins (8KwNqY...) - 1 member
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
 
-> new-peer --name Bob --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
-✓ Created peer Bob
-✓ Joined network uA2vWy... as Bob
-✓ Switched to peer: Bob
+SIDEBAR (Alice):
+  * #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ USER: Bob (wP8qLx...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...) - 1 member (pre-sync)
-│   • admins (8KwNqY...) - 1 member (pre-sync)
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (0):
-└─────────────────────────────────────────────────────────
+MAIN (#general):
+  (no messages)
 
-> switch Alice
-✓ Switched to peer: Alice
+> new-account --name Bob --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+✓ Created account: Bob
+✓ Joined network: uA2vWy
+✓ Selected account: Bob
+✓ Selected channel: #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ ... (Alice's current state)
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
+
+SIDEBAR (Bob):
+  * #general
+
+MAIN (#general):
+  (no messages)
 
 > sync --rounds 15
 ✓ Synced 15 rounds (t=4000ms -> 7000ms)
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ USER: Alice (nF7kRm...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
 
-> switch Bob
-✓ Switched to peer: Bob
+SIDEBAR (Bob):
+  * #general
 
-> send --channel general --message "Hello from Bob!"
-✓ Sent message: msg_yH4nVw...
+MAIN (#general):
+  (no messages)
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ USER: Bob (wP8qLx...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...) - 2 members
-│   • admins (8KwNqY...) - 1 member
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (1):
-│       [5100ms] Bob: Hello from Bob!
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp...
-└─────────────────────────────────────────────────────────
+> send "Hello from Bob!"
+✓ Sent message
+
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
+
+SIDEBAR (Bob):
+  * #general
+
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
 
 > switch Alice
-✓ Switched to peer: Alice
+✓ Selected account: Alice
 
-> send --channel general --message "Hello from Alice!"
-✓ Sent message: msg_pQ2rXs...
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (1):
-│       [5000ms] Alice: Hello from Alice!
-└─────────────────────────────────────────────────────────
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  (no messages yet - needs sync)
+
+> send "Hello from Alice!"
+✓ Sent message
+
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
+
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  [5000ms] Alice: Hello from Alice!
 
 > sync --rounds 20
 ✓ Synced 20 rounds (t=7000ms -> 11000ms)
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
+
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
+  [5000ms] Alice: Hello from Alice!
 
 > switch Bob
+✓ Selected account: Bob
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
 
-> list-peers
-Active peers in session:
-  * Bob (tD5mNk...) - USER: Bob (wP8qLx...)
-  - Alice (gBQNZX...) - USER: Alice (nF7kRm...)
+SIDEBAR (Bob):
+  * #general
+
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
+  [5000ms] Alice: Hello from Alice!
+
+> list-accounts
+ACCOUNTS:
+  * Bob - bob@network_uA2vWy (user_id: wP8qLx...)
+    Alice - alice@network_uA2vWy (user_id: nF7kRm...)
 
 > show-all
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ USER: Alice (nF7kRm...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+=== ALL ACCOUNTS ===
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ USER: Bob (wP8qLx...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+ACCOUNT: Alice
+  Network: uA2vWy
+  User ID: nF7kRm
+  Channels: #general
+
+  #general:
+    [5100ms] Bob: Hello from Bob!
+    [5000ms] Alice: Hello from Alice!
+
+ACCOUNT: Bob
+  Network: uA2vWy
+  User ID: wP8qLx
+  Channels: #general
+
+  #general:
+    [5100ms] Bob: Hello from Bob!
+    [5000ms] Alice: Hello from Alice!
 
 > quit
 Goodbye!
@@ -277,7 +234,7 @@ Commands are provided as CLI arguments. State is shown after each command.
 $ ./cli.py \
   --new-network Alice \
   --create-invite \
-  --new-peer Bob --join-with-last-invite \
+  --new-account Bob --join-with-last-invite \
   --sync 15 \
   --switch Bob \
   --send "Hello from Bob!" \
@@ -288,223 +245,223 @@ $ ./cli.py \
 
 [1] new-network --name Alice
 ✓ Created network as Alice
-✓ Switched to peer: Alice
+✓ Selected account: Alice
+✓ Selected channel: #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ USER: Alice (nF7kRm...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (0):
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  (no messages)
 
 [2] create-invite
-✓ Created invite: invite_vR9sLp...
-✓ Invite link: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
 
-[3] new-peer --name Bob --join-with-last-invite
-✓ Created peer Bob
-✓ Joined network uA2vWy... as Bob
-✓ Switched to peer: Bob
+SIDEBAR (Alice):
+  * #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ USER: Bob (wP8qLx...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...) - 1 member (pre-sync)
-│   • admins (8KwNqY...) - 1 member (pre-sync)
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (0):
-├─────────────────────────────────────────────────────────
-│ INVITES (0):
-└─────────────────────────────────────────────────────────
+MAIN (#general):
+  (no messages)
+
+[3] new-account --name Bob --join-with-last-invite
+✓ Created account: Bob
+✓ Joined network: uA2vWy
+✓ Selected account: Bob
+✓ Selected channel: #general
+
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
+
+SIDEBAR (Bob):
+  * #general
+
+MAIN (#general):
+  (no messages)
 
 [4] sync --rounds 15
 ✓ Synced 15 rounds (t=4000ms -> 7000ms)
 
-┌─────────────────────────────────────────────────────────
-│ ALL PEERS STATE AFTER SYNC
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-└─────────────────────────────────────────────────────────
+SIDEBAR (Bob):
+  * #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-└─────────────────────────────────────────────────────────
+MAIN (#general):
+  (no messages)
 
-[5] switch Bob
-✓ Switched to peer: Bob
+[5] send "Hello from Bob!"
+✓ Sent message
 
-[6] send --message "Hello from Bob!"
-✓ Sent message to #general: msg_yH4nVw...
+ACCOUNTS:
+    Alice - alice@network_uA2vWy
+  * Bob - bob@network_uA2vWy
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (1):
-│       [5100ms] Bob: Hello from Bob!
-└─────────────────────────────────────────────────────────
+SIDEBAR (Bob):
+  * #general
 
-[7] switch Alice
-✓ Switched to peer: Alice
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
 
-[8] send --message "Hello from Alice!"
-✓ Sent message to #general: msg_pQ2rXs...
+[6] switch Alice
+✓ Selected account: Alice
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (1):
-│       [5000ms] Alice: Hello from Alice!
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
 
-[9] sync --rounds 20
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  (no messages yet - needs sync)
+
+[7] send "Hello from Alice!"
+✓ Sent message
+
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
+
+SIDEBAR (Alice):
+  * #general
+
+MAIN (#general):
+  [5000ms] Alice: Hello from Alice!
+
+[8] sync --rounds 20
 ✓ Synced 20 rounds (t=7000ms -> 11000ms)
 
-┌─────────────────────────────────────────────────────────
-│ ALL PEERS STATE AFTER SYNC
-└─────────────────────────────────────────────────────────
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-└─────────────────────────────────────────────────────────
+SIDEBAR (Alice):
+  * #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-└─────────────────────────────────────────────────────────
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
+  [5000ms] Alice: Hello from Alice!
 
-[10] show-all
+[9] show-all
 
-┌═════════════════════════════════════════════════════════
-│ COMPLETE SYSTEM STATE
-├═════════════════════════════════════════════════════════
-│ SESSION: 2 peers, 1 network
-└═════════════════════════════════════════════════════════
+=== ALL ACCOUNTS ===
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Alice (gBQNZX...)
-│ USER: Alice (nF7kRm...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+ACCOUNT: Alice
+  Network: uA2vWy
+  User ID: nF7kRm
+  Channels: #general
 
-┌─────────────────────────────────────────────────────────
-│ PEER: Bob (tD5mNk...)
-│ USER: Bob (wP8qLx...)
-│ NETWORK: uA2vWy...
-├─────────────────────────────────────────────────────────
-│ GROUPS (2):
-│   • all_users (3DpXzT...)
-│     Members: Alice, Bob
-│   • admins (8KwNqY...)
-│     Members: Alice
-├─────────────────────────────────────────────────────────
-│ CHANNELS (1):
-│   • #general (hJ6tPm...)
-│     Messages (2):
-│       [5100ms] Bob: Hello from Bob!
-│       [5000ms] Alice: Hello from Alice!
-├─────────────────────────────────────────────────────────
-│ INVITES (1):
-│   • invite_vR9sLp... (created by Alice)
-└─────────────────────────────────────────────────────────
+  #general:
+    [5100ms] Bob: Hello from Bob!
+    [5000ms] Alice: Hello from Alice!
+
+ACCOUNT: Bob
+  Network: uA2vWy
+  User ID: wP8qLx
+  Channels: #general
+
+  #general:
+    [5100ms] Bob: Hello from Bob!
+    [5000ms] Alice: Hello from Alice!
 ```
 
 ## Command Reference
 
-### Network & Peer Management
-- `new-network --name <name>` - Create a new network and become first peer
-- `new-peer --name <name> --invite <invite_link>` - Create peer and join existing network
-- `switch <peer_name|peer_id>` - Switch active peer
-- `list-peers` - List all peers in session
+### Network & Account Management
+- `new-network --name <name>` - Create a new network and first account
+- `new-account --name <name> --invite <invite_link>` - Create account and join network
+- `switch <account_name>` - Switch to a different account
+- `list-accounts` - List all accounts in session with details
 
 ### Invites
-- `create-invite` - Create network invite (requires admin)
-- `list-invites` - List all invites visible to active peer
-
-### Groups & Members
-- `create-group --name <name>` - Create a new group
-- `add-member --group <group_name|group_id> --user <user_name|user_id>` - Add user to group
-- `list-groups` - List all groups visible to active peer
-- `list-members --group <group_name|group_id>` - List members of a group
+- `create-invite` - Create network invite (requires admin) - shows invite link immediately
 
 ### Channels & Messages
-- `create-channel --name <name> --group <group_name|group_id>` - Create a channel
-- `send --channel <channel_name|channel_id> --message <text>` - Send a message
-- `list-messages --channel <channel_name|channel_id>` - List messages in a channel
+- `create-channel --name <name>` - Create a new channel
+- `select-channel <channel_name>` - Select a different channel in current account
+- `send <message>` - Send message to currently selected channel
+- `list-messages` - List messages in current channel (explicit refresh)
 
 ### Multi-Device (Linking)
 - `create-link-invite` - Create a link invite for same user
-- `link-device --link <link_url>` - Link a new device to existing user
+- `link-device --name <name> --link <link_url>` - Link a new device to existing user
+
+### Admin Operations
+- `add-admin --user <user_name>` - Add user as admin (requires admin)
+- `list-admins` - List admin users
 
 ### Sync & State
 - `sync --rounds <n>` - Run n sync rounds (calls `tick.tick()` n times)
-- `show` - Show current peer's state
-- `show-all` - Show all peers' states
+- `show` - Show current account's state (accounts + sidebar + main)
+- `show-all` - Show all accounts' states
 - `time` - Show current simulation time
 
 ### System
 - `quit` / `exit` - Exit CLI (interactive mode)
 - `help [command]` - Show help
+
+## State Display Sections
+
+### ACCOUNTS Section
+Shows all accounts in the session with selection indicator:
+```
+ACCOUNTS:
+  * Alice - alice@network_uA2vWy
+    Bob - bob@network_uA2vWy
+    Charlie - charlie@network_xyz789
+```
+
+Format: `[*] <account_name> - <short_user_id>@network_<short_network_id>`
+
+The `*` indicates the currently selected account.
+
+### SIDEBAR Section
+Shows channels available in the selected account:
+```
+SIDEBAR (Alice):
+  * #general
+    #random
+    #dev-team
+```
+
+Format: `[*] #<channel_name>`
+
+The `*` indicates the currently selected channel.
+
+### MAIN Section
+Shows messages in the selected channel:
+```
+MAIN (#general):
+  [5100ms] Bob: Hello from Bob!
+  [5000ms] Alice: Hello from Alice!
+  [4500ms] Alice: Welcome everyone!
+```
+
+Format: `[<timestamp_ms>] <author_name>: <message_content>`
+
+Messages are shown in reverse chronological order (newest first).
+
+### Empty States
+When sections are empty:
+```
+ACCOUNTS:
+  (no accounts)
+
+SIDEBAR (Alice):
+  (no channels)
+
+MAIN (#general):
+  (no messages)
+```
 
 ## Example Flows from Scenario Tests
 
@@ -517,22 +474,34 @@ $ ./cli.py \
   --send "Hello" \
   --send "World" \
   --create-channel random \
-  --send --channel random "Random thoughts" \
-  --list-messages general \
-  --list-messages random \
+  --select-channel random \
+  --send "Random thoughts" \
   --show-all
 ```
 
 Interactive mode:
 ```
 > new-network --name Alice
-> send --message "Hello"
-> send --message "World"
+> send "Hello"
+> send "World"
 > create-channel --name random
-> send --channel random --message "Random thoughts"
-> list-messages --channel general
-> list-messages --channel random
+> select-channel random
+> send "Random thoughts"
 > show-all
+```
+
+Expected output after all commands:
+```
+ACCOUNT: Alice
+  Network: uA2vWy
+  Channels: #general, #random
+
+  #general:
+    [3000ms] Alice: World
+    [2000ms] Alice: Hello
+
+  #random:
+    [5000ms] Alice: Random thoughts
 ```
 
 ### 2. Three Player Messaging (test_three_player_messaging.py)
@@ -542,7 +511,7 @@ Interactive mode:
 ./cli.py \
   --new-network Alice \
   --create-invite \
-  --new-peer Bob --join-with-last-invite \
+  --new-account Bob --join-with-last-invite \
   --new-network Charlie \
   --sync 15 \
   --switch Bob --send "Hello from Bob!" \
@@ -552,147 +521,283 @@ Interactive mode:
   --show-all
 ```
 
+Expected final state:
+```
+ACCOUNT: Alice
+  Network: uA2vWy (with Bob)
+  #general:
+    [5100ms] Bob: Hello from Bob!
+    [5000ms] Alice: Hello from Alice!
+
+ACCOUNT: Bob
+  Network: uA2vWy (with Alice)
+  #general:
+    [5100ms] Bob: Hello from Bob!
+    [5000ms] Alice: Hello from Alice!
+
+ACCOUNT: Charlie
+  Network: xyz789 (separate)
+  #general:
+    [5200ms] Charlie: Hello from Charlie!
+```
+
 ### 3. Link Device (test_link_device_new_groups.py)
 
 ```bash
 # Non-interactive mode
 ./cli.py \
   --new-network Alice \
-  --create-group "Group A" \
-  --add-member --group "Group A" --user Alice \
+  --create-channel "team-alpha" \
   --sync 5 \
   --create-link-invite \
-  --create-group "Group B" \
-  --add-member --group "Group B" --user Alice \
+  --create-channel "team-beta" \
   --sync 5 \
-  --link-device --with-last-link \
+  --link-device --name "Alice-Phone" --with-last-link \
   --sync 40 \
   --show-all
 ```
 
-### 4. Admin Group (test_admin_group.py)
+Expected final state:
+```
+ACCOUNT: Alice (Desktop)
+  User: alice_user_xyz
+  Network: uA2vWy
+  Channels: #general, #team-alpha, #team-beta
+
+ACCOUNT: Alice-Phone (Linked Device)
+  User: alice_user_xyz (same user!)
+  Network: uA2vWy
+  Channels: #general, #team-alpha, #team-beta
+```
+
+### 4. Admin Operations (test_admin_group.py)
 
 ```bash
 # Non-interactive mode
 ./cli.py \
   --new-network Alice \
   --create-invite \
-  --new-peer Bob --join-with-last-invite \
+  --new-account Bob --join-with-last-invite \
   --sync 10 \
   --switch Alice \
-  --add-member --group admins --user Bob \
+  --add-admin Bob \
   --sync 10 \
   --switch Bob \
   --create-invite \
-  --new-peer Charlie --join-with-last-invite \
+  --new-account Charlie --join-with-last-invite \
   --sync 80 \
   --show-all
 ```
+
+Expected behavior:
+- Alice creates network (becomes admin automatically)
+- Bob joins (not admin initially)
+- Alice adds Bob as admin
+- Bob can now create invites
+- Charlie joins via Bob's invite
 
 ## Implementation Architecture
 
 ### Session State Management
 ```python
 class CLISession:
-    """Manages the CLI session state across all peers."""
+    """Manages the CLI session state."""
 
     def __init__(self):
         self.db = None  # Shared in-memory database
-        self.peers = {}  # peer_id -> PeerContext
-        self.active_peer_id = None
+        self.accounts = {}  # account_name -> AccountContext
+        self.selected_account = None  # Currently selected account name
+        self.selected_channel = None  # Currently selected channel name
         self.current_time_ms = 0
-        self.last_invite_link = None  # For --join-with-last-invite convenience
-        self.last_link_url = None     # For --with-last-link convenience
+        self.last_invite_link = None  # Internal only - for --join-with-last-invite convenience
+        self.last_link_url = None     # Internal only - for --with-last-link convenience
+
+    def get_selected_account(self):
+        """Get the currently selected account context."""
+        if not self.selected_account:
+            raise ValueError("No account selected")
+        return self.accounts[self.selected_account]
 ```
 
-### Peer Context
+### Account Context
 ```python
-class PeerContext:
-    """Represents a peer's context in the session."""
+class AccountContext:
+    """Represents an account in the session.
 
-    def __init__(self, peer_id, peer_shared_id, name):
-        self.peer_id = peer_id
+    'Account' is the frontend term - internally corresponds to a peer.
+    """
+
+    def __init__(self, name, peer_id, peer_shared_id):
+        self.name = name               # Display name
+        self.peer_id = peer_id         # Backend peer ID
         self.peer_shared_id = peer_shared_id
-        self.name = name
-        self.user_id = None        # Set after network join
-        self.network_id = None
-        self.all_users_group_id = None
-        self.admins_group_id = None
+        self.user_id = None            # Set after network join
+        self.network_id = None         # Set after network join
 ```
 
 ### State Display Functions
-All state display must use ONLY the query functions from event modules:
-- `channel.list_channels(peer_id, db)`
-- `message.list_messages(channel_id, peer_id, db)`
-- `group.list_all_groups(peer_id, db)`
-- `group_member.list_members(group_id, peer_id, db)`
-- `invite.list_invites(peer_id, db)` (if it exists)
-- `network.get_all_users_group_id(network_id, peer_id, db)`
-- `network.get_admin_group_id(network_id, peer_id, db)`
+All state display must use ONLY query functions from event modules:
+
+```python
+def display_state(session):
+    """Display the three-section Slack-like state."""
+    display_accounts(session)
+    print()
+    display_sidebar(session)
+    print()
+    display_main(session)
+
+def display_accounts(session):
+    """Display ACCOUNTS section."""
+    print("ACCOUNTS:")
+    if not session.accounts:
+        print("  (no accounts)")
+        return
+
+    for name, account in session.accounts.items():
+        selected = "*" if name == session.selected_account else " "
+        short_user = account.user_id[:6] if account.user_id else "???"
+        short_net = account.network_id[:6] if account.network_id else "???"
+        print(f"  {selected} {name} - {short_user}@network_{short_net}")
+
+def display_sidebar(session):
+    """Display SIDEBAR section for selected account."""
+    account = session.get_selected_account()
+    print(f"SIDEBAR ({account.name}):")
+
+    # Use event function to get channels
+    from events.content import channel
+    channels = channel.list_channels(account.peer_id, session.db)
+
+    if not channels:
+        print("  (no channels)")
+        return
+
+    for ch in channels:
+        selected = "*" if ch['name'] == session.selected_channel else " "
+        print(f"  {selected} #{ch['name']}")
+
+def display_main(session):
+    """Display MAIN section for selected channel."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel:
+        print("MAIN:")
+        print("  (no channel selected)")
+        return
+
+    print(f"MAIN (#{session.selected_channel}):")
+
+    # Find channel_id by name
+    from events.content import channel, message
+    channels = channel.list_channels(account.peer_id, session.db)
+    channel_id = None
+    for ch in channels:
+        if ch['name'] == session.selected_channel:
+            channel_id = ch['channel_id']
+            break
+
+    if not channel_id:
+        print("  (channel not found)")
+        return
+
+    # Use event function to get messages
+    messages = message.list_messages(channel_id, account.peer_id, session.db)
+
+    if not messages:
+        print("  (no messages)")
+        return
+
+    for msg in messages:
+        # Get author name by looking up user_id
+        author_name = get_user_name(msg['author_id'], session)
+        print(f"  [{msg['created_at']}ms] {author_name}: {msg['content']}")
+```
 
 ### Command Implementation Pattern
 Each command must:
 1. Call appropriate event function(s)
-2. Update session state (e.g., last_invite_link)
+2. Update session state (selected account, channel, etc.)
 3. Update current time if needed
 4. Display result message
 5. Display updated state
 
 Example:
 ```python
-def cmd_send_message(session, channel_id, content):
-    """Send a message to a channel."""
-    peer_ctx = session.get_active_peer()
+def cmd_send_message(session, content):
+    """Send a message to the selected channel."""
+    account = session.get_selected_account()
 
-    # 1. Call event function
+    if not session.selected_channel:
+        print("✗ No channel selected")
+        return
+
+    # Find channel_id
+    from events.content import channel, message
+    channels = channel.list_channels(account.peer_id, session.db)
+    channel_id = None
+    for ch in channels:
+        if ch['name'] == session.selected_channel:
+            channel_id = ch['channel_id']
+            break
+
+    if not channel_id:
+        print(f"✗ Channel #{session.selected_channel} not found")
+        return
+
+    # Call event function
     result = message.create(
-        peer_id=peer_ctx.peer_id,
+        peer_id=account.peer_id,
         channel_id=channel_id,
         content=content,
         t_ms=session.current_time_ms,
         db=session.db
     )
 
-    # 2. Update session state
-    session.current_time_ms += 100  # Increment time
+    # Update state
+    session.current_time_ms += 100
     session.db.commit()
 
-    # 3. Display result
-    print(f"✓ Sent message: {result['id'][:10]}...")
+    # Display result
+    print("✓ Sent message")
+    print()
 
-    # 4. Display updated state
-    display_peer_state(session, peer_ctx)
+    # Display updated state
+    display_state(session)
 ```
+
+## Terminology Mapping
+
+### Frontend (CLI UI) ↔ Backend (Code)
+- **Account** ↔ Peer (peer_id, peer_shared_id)
+- **User** ↔ User (user_id) - same term
+- **Channel** ↔ Channel (channel_id) - same term
+- **Message** ↔ Message (message_id) - same term
+
+Groups are hidden from the UI but used internally for permissions.
 
 ## Output Format Details
 
-### State Display Hierarchy
-```
-PEER INFO
-├─ GROUPS
-│  └─ Members
-├─ CHANNELS
-│  └─ Messages
-└─ INVITES
-```
+### Simplicity
+- Use simple bulleted lists with `*` for selection
+- No box drawing characters or fancy formatting
+- Easy to read, easy to parse
 
 ### Truncation Rules
-- IDs: Show first 6-8 characters + "..."
-- Long lists: Show first 5 items + "... (N more)"
-- Messages: Show last 10 messages per channel
-- State changes: Only show changed sections (with flag `--full` to show all)
+- IDs: Show first 6 characters (e.g., `uA2vWy`, `nF7kRm`)
+- Long messages: Truncate at 80 characters with "..."
+- Message lists: Show last 20 messages (most recent first)
 
 ### Color Coding (Terminal)
 - ✓ Success: Green
 - ✗ Error: Red
-- Peer names: Cyan
-- Group names: Yellow
-- Channel names: Blue (with # prefix)
-- IDs: Gray/dim
-- Active peer marker (*): Green bold
+- Account names: Cyan
+- Channel names: Blue
+- Selected indicator (*): Green/bold
+- Timestamps: Gray/dim
 
 ### Machine-Readable Output
-Add `--json` flag to output state as JSON instead of formatted text:
+Add `--json` flag for JSON output:
 ```bash
 ./cli.py --new-network Alice --json
 ```
@@ -702,14 +807,16 @@ Output:
 {
   "command": "new-network",
   "success": true,
-  "peer_id": "gBQNZX...",
-  "user_id": "nF7kRm...",
-  "network_id": "uA2vWy...",
+  "account": {
+    "name": "Alice",
+    "peer_id": "gBQNZX...",
+    "user_id": "nF7kRm...",
+    "network_id": "uA2vWy..."
+  },
   "state": {
-    "peer": { ... },
-    "groups": [ ... ],
-    "channels": [ ... ],
-    "invites": [ ... ]
+    "accounts": [...],
+    "channels": [...],
+    "messages": [...]
   }
 }
 ```
@@ -723,8 +830,6 @@ Each scenario test should have a corresponding CLI script:
 - `test_admin_group.py` → `examples/admin_group.cli`
 - etc.
 
-Running the CLI script should produce equivalent final state to running the test.
-
 ### CLI Script Format
 ```
 # examples/three_player_messaging.cli
@@ -732,28 +837,28 @@ Running the CLI script should produce equivalent final state to running the test
 
 new-network --name Alice
 create-invite
-new-peer --name Bob --join-with-last-invite
+new-account --name Bob --join-with-last-invite
 new-network --name Charlie
 sync --rounds 15
 switch Bob
-send --message "Hello from Bob!"
+send "Hello from Bob!"
 switch Alice
-send --message "Hello from Alice!"
+send "Hello from Alice!"
 switch Charlie
-send --message "Hello from Charlie!"
+send "Hello from Charlie!"
 sync --rounds 20
 show-all
 
 # Assertions (checked automatically)
-assert peer Alice sees message "Hello from Bob!"
-assert peer Alice sees message "Hello from Alice!"
-assert peer Alice does-not-see message "Hello from Charlie!"
-assert peer Bob sees message "Hello from Bob!"
-assert peer Bob sees message "Hello from Alice!"
-assert peer Bob does-not-see message "Hello from Charlie!"
-assert peer Charlie sees message "Hello from Charlie!"
-assert peer Charlie does-not-see message "Hello from Alice!"
-assert peer Charlie does-not-see message "Hello from Bob!"
+assert account Alice has message "Hello from Bob!" in #general
+assert account Alice has message "Hello from Alice!" in #general
+assert account Alice missing message "Hello from Charlie!" in #general
+assert account Bob has message "Hello from Bob!" in #general
+assert account Bob has message "Hello from Alice!" in #general
+assert account Bob missing message "Hello from Charlie!" in #general
+assert account Charlie has message "Hello from Charlie!" in #general
+assert account Charlie missing message "Hello from Alice!" in #general
+assert account Charlie missing message "Hello from Bob!" in #general
 ```
 
 ### Running CLI Tests
@@ -771,36 +876,34 @@ assert peer Charlie does-not-see message "Hello from Bob!"
 ## Future Enhancements
 
 ### Phase 2: Advanced Features
-- File attachments: `attach --channel <channel> --file <path>`
-- Message deletion: `delete-message <message_id>`
-- User removal: `remove-user --user <user_id>`
-- Forward secrecy: `rotate-key --group <group_id>`
-- Pause/resume file transfer
+- File attachments
+- Message deletion
+- User removal
+- Channel management (archive, etc.)
 
 ### Phase 3: Debugging & Inspection
-- Event log: `show-events --peer <peer_id> --type <type>`
-- Sync details: `sync --rounds 10 --verbose`
-- Key inspection: `show-keys --peer <peer_id>`
-- Network graph: `show-network-graph`
+- Event log viewer
+- Sync details (verbose mode)
+- Network graph visualization
 
 ### Phase 4: Performance Testing
-- Benchmarking: `bench --scenario <scenario> --peers <n>`
-- Profiling: `profile --scenario <scenario>`
-- Load testing: `load-test --messages <n> --peers <n>`
+- Benchmarking scenarios
+- Profiling
+- Load testing
 
 ## Next Steps
 
-1. Review this prototype for completeness and clarity
-2. Create implementation plan:
-   - Core session management
+1. **Review this updated prototype** - Does the Slack-like UI work?
+2. **Create implementation plan**:
+   - Core session management (accounts, selection state)
    - Command parser (interactive + non-interactive)
-   - State display engine
+   - State display engine (accounts, sidebar, main)
    - Command implementations (priority order)
    - Testing infrastructure
-3. Implement core commands first:
-   - `new-network`, `new-peer`, `switch`
-   - `send`, `list-messages`
+3. **Implement core commands**:
+   - `new-network`, `new-account`, `switch`
+   - `send`, `select-channel`
    - `sync`, `show`, `show-all`
-4. Add remaining commands iteratively
-5. Build testing framework
-6. Create example CLI scripts for all scenario tests
+4. **Add remaining commands iteratively**
+5. **Build testing framework**
+6. **Create example CLI scripts for all scenario tests**
