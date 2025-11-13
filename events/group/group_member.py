@@ -259,15 +259,16 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
         db: Database connection
 
     Returns:
-        List of member dicts with user_id, added_by, created_at
+        List of member dicts with user_id, name, added_by, created_at
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Query group_members table
+    # Query group_members table with user names joined
     return safedb.query(
-        """SELECT user_id, added_by, created_at
-           FROM group_members
-           WHERE group_id = ? AND recorded_by = ?
-           ORDER BY created_at ASC""",
+        """SELECT gm.user_id, u.name, gm.added_by, gm.created_at
+           FROM group_members gm
+           JOIN users u ON gm.user_id = u.user_id AND gm.recorded_by = u.recorded_by
+           WHERE gm.group_id = ? AND gm.recorded_by = ?
+           ORDER BY gm.created_at ASC""",
         (group_id, recorded_by)
     )

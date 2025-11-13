@@ -97,14 +97,20 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
 
 
 def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List messages in a channel for a specific peer, including attachments.
+    """List messages in a channel for a specific peer, including attachments and author names.
 
-    Returns message dicts with 'attachments' field containing list of attached files:
-    [{'file_id', 'filename', 'mime_type', 'blob_bytes'}, ...]
+    Returns message dicts with 'attachments' field containing list of attached files
+    and 'author_name' field from the users table:
+    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...]}, ...]
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
-        "SELECT * FROM messages WHERE channel_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 50",
+        """SELECT m.*, u.name as author_name
+           FROM messages m
+           JOIN peers_shared ps ON m.author_id = ps.peer_shared_id AND m.recorded_by = ps.recorded_by
+           JOIN users u ON ps.peer_id = u.peer_id AND ps.recorded_by = u.recorded_by
+           WHERE m.channel_id = ? AND m.recorded_by = ?
+           ORDER BY m.created_at DESC LIMIT 50""",
         (channel_id, recorded_by)
     )
 

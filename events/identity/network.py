@@ -227,3 +227,37 @@ def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
         raise ValueError(f"Network {network_id} not found")
 
     return network['all_users_group_id']
+
+
+def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
+    """Get network info for a peer.
+
+    Args:
+        peer_id: Peer ID to get network for
+        recorded_by: Peer ID querying
+        db: Database connection
+
+    Returns:
+        Dict with network_id, all_users_group_id, admins_group_id
+        or None if peer not in a network
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get network_id from users table
+    user_row = safedb.query_one(
+        "SELECT network_id FROM users WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, recorded_by)
+    )
+
+    if not user_row or not user_row['network_id']:
+        return None
+
+    network_id = user_row['network_id']
+
+    # Get network details
+    network = safedb.query_one(
+        "SELECT network_id, all_users_group_id, admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+
+    return network
