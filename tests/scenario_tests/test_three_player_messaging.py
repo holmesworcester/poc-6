@@ -60,13 +60,43 @@ def test_three_player_messaging():
     # Observable behavior (message delivery) will verify this below.
     # Removed DB queries for group_keys and valid_events tables.
 
+    # Discover channels via sync
+    print("\n=== Discovering channels ===")
+
+    alice_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice['peer_id'],)
+    )
+    bob_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (bob['peer_id'],)
+    )
+    charlie_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (charlie['peer_id'],)
+    )
+
+    assert len(alice_channels) == 1, f"Alice should have 1 channel, got {len(alice_channels)}"
+    assert len(bob_channels) == 1, f"Bob should have 1 channel, got {len(bob_channels)}"
+    assert len(charlie_channels) == 1, f"Charlie should have 1 channel, got {len(charlie_channels)}"
+
+    alice_channel_id = alice_channels[0]['channel_id']
+    bob_channel_id = bob_channels[0]['channel_id']
+    charlie_channel_id = charlie_channels[0]['channel_id']
+
+    # Alice and Bob should share the same channel (same network)
+    assert alice_channel_id == bob_channel_id, \
+        "Alice and Bob should share the same channel (same network)"
+    print(f"Alice and Bob share channel: {alice_channel_id[:20]}...")
+    print(f"Charlie has separate channel: {charlie_channel_id[:20]}...")
+
     # Create messages
     print("\n=== Creating messages ===")
 
     # Alice sends a message
     alice_msg = message.create(
         peer_id=alice['peer_id'],
-        channel_id=alice['channel_id'],
+        channel_id=alice_channel_id,
         content="Hello from Alice!",
         t_ms=5000,
         db=db
@@ -77,7 +107,7 @@ def test_three_player_messaging():
     # Bob sends a message
     bob_msg = message.create(
         peer_id=bob['peer_id'],
-        channel_id=bob['channel_id'],
+        channel_id=bob_channel_id,
         content="Hello from Bob!",
         t_ms=5100,
         db=db
@@ -88,7 +118,7 @@ def test_three_player_messaging():
     # Charlie sends a message (in his own network)
     charlie_msg = message.create(
         peer_id=charlie['peer_id'],
-        channel_id=charlie['channel_id'],
+        channel_id=charlie_channel_id,
         content="Hello from Charlie!",
         t_ms=5200,
         db=db
@@ -106,7 +136,7 @@ def test_three_player_messaging():
     print("\n=== Verifying message delivery ===")
 
     # Alice should have received Bob's message
-    alice_messages = message.list_messages(alice['channel_id'], alice['peer_id'], db)
+    alice_messages = message.list_messages(alice_channel_id, alice['peer_id'], db)
     alice_message_contents = [msg['content'] for msg in alice_messages]
     print(f"Alice sees {len(alice_messages)} messages: {alice_message_contents}")
 
@@ -118,7 +148,7 @@ def test_three_player_messaging():
         "Alice should NOT see Charlie's message (different network)"
 
     # Bob should have received Alice's message
-    bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages = message.list_messages(bob_channel_id, bob['peer_id'], db)
     bob_message_contents = [msg['content'] for msg in bob_messages]
     print(f"Bob sees {len(bob_messages)} messages: {bob_message_contents}")
 
@@ -130,7 +160,7 @@ def test_three_player_messaging():
         "Bob should NOT see Charlie's message (different network)"
 
     # Charlie should only see his own message
-    charlie_messages = message.list_messages(charlie['channel_id'], charlie['peer_id'], db)
+    charlie_messages = message.list_messages(charlie_channel_id, charlie['peer_id'], db)
     charlie_message_contents = [msg['content'] for msg in charlie_messages]
     print(f"Charlie sees {len(charlie_messages)} messages: {charlie_message_contents}")
 

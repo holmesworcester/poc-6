@@ -136,6 +136,11 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
             invite_event.get('inviter_transit_prekey_public_key', '')
         )
 
+    # Extract address/port from invite event (for bootstrap connections)
+    # These fields allow send_connect_to_all() to connect to inviter before sync completes
+    address = invite_event.get('address')
+    port = invite_event.get('port')
+
     safedb.execute("""
         INSERT OR IGNORE INTO invite_accepteds
         (invite_id, inviter_peer_shared_id, address, port,
@@ -145,8 +150,8 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     """, (
         invite_id,
         inviter_peer_shared_id,
-        None,  # address - TODO: extract from invite link
-        None,  # port - TODO: extract from invite link
+        address,  # Now extracted from invite event
+        port,     # Now extracted from invite event
         inviter_transit_prekey_id,
         inviter_transit_prekey_public_key,
         event_data['created_at'],

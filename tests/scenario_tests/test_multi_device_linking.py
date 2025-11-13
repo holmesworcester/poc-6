@@ -119,10 +119,10 @@ def test_alice_links_phone_to_laptop():
     db.commit()
     print(f"Alice (phone) created message: {alice_phone_msg['id'][:20]}...")
 
-    # Alice sends from laptop
+    # Alice sends from laptop (uses same channel as phone since same user)
     alice_laptop_msg = message.create(
         peer_id=alice_laptop['peer_id'],
-        channel_id=alice_laptop['channel_id'],
+        channel_id=alice_phone['channel_id'],  # Same user, same channel
         content="Hello from Alice's laptop!",
         t_ms=5100,
         db=db
@@ -133,14 +133,34 @@ def test_alice_links_phone_to_laptop():
     # Sync messages between devices
     print("\n=== Sync messages between devices ===")
 
-    for round_num in range(9):
+    for round_num in range(60):  # Increased sync rounds for message propagation
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both devices see both messages
     print("\n=== Verifying message delivery ===")
 
-    phone_messages = message.list_messages(alice_phone['channel_id'], alice_phone['peer_id'], db)
-    laptop_messages = message.list_messages(alice_laptop['channel_id'], alice_laptop['peer_id'], db)
+    # Discover channels for both devices (they should have the same channel)
+    phone_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_phone['peer_id'],)
+    )
+    laptop_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_laptop['peer_id'],)
+    )
+
+    assert len(phone_channels) == 1, f"Phone should have 1 channel, got {len(phone_channels)}"
+    assert len(laptop_channels) == 1, f"Laptop should have 1 channel, got {len(laptop_channels)}"
+
+    phone_channel_id = phone_channels[0]['channel_id']
+    laptop_channel_id = laptop_channels[0]['channel_id']
+
+    assert phone_channel_id == laptop_channel_id, \
+        "Phone and laptop should share the same channel"
+    print(f"✅ Both devices share channel: {phone_channel_id[:20]}...")
+
+    phone_messages = message.list_messages(phone_channel_id, alice_phone['peer_id'], db)
+    laptop_messages = message.list_messages(laptop_channel_id, alice_laptop['peer_id'], db)
 
     phone_contents = [msg['content'] for msg in phone_messages]
     laptop_contents = [msg['content'] for msg in laptop_messages]
@@ -221,9 +241,22 @@ def test_alice_laptop_joins_after_phone_has_messages():
     for i in range(15):
         tick.tick(t_ms=4000 + i*200, db=db)
 
+    # Discover channel via sync (laptop should have same channel as phone through user linking)
+    laptop_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_laptop['peer_id'],)
+    )
+    print(f"Laptop discovered {len(laptop_channels)} channel(s)")
+
+    assert len(laptop_channels) == 1, \
+        f"Laptop should have exactly one channel (shared with phone), got {len(laptop_channels)}"
+
+    laptop_channel_id = laptop_channels[0]['channel_id']
+    print(f"Laptop using channel: {laptop_channel_id[:20]}...")
+
     # Laptop should see all historical messages
     laptop_messages = message.list_messages(
-        alice_laptop['channel_id'],
+        laptop_channel_id,
         alice_laptop['peer_id'],
         db
     )
@@ -289,12 +322,23 @@ def test_three_devices_all_linked():
     for i in range(18):
         tick.tick(t_ms=6000 + i*200, db=db)
 
+    # Discover the shared channel for all devices
+    print("\n=== Discovering shared channel ===")
+
+    phone_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_phone['peer_id'],)
+    )
+    assert len(phone_channels) == 1, f"Phone should have 1 channel, got {len(phone_channels)}"
+    shared_channel_id = phone_channels[0]['channel_id']
+    print(f"All devices will use shared channel: {shared_channel_id[:20]}...")
+
     # Each device sends a message
     print("\n=== Each device sends a message ===")
 
     msg_phone = message.create(
         peer_id=alice_phone['peer_id'],
-        channel_id=alice_phone['channel_id'],
+        channel_id=shared_channel_id,
         content="From phone",
         t_ms=7000,
         db=db
@@ -303,7 +347,7 @@ def test_three_devices_all_linked():
 
     msg_laptop = message.create(
         peer_id=alice_laptop['peer_id'],
-        channel_id=alice_laptop['channel_id'],
+        channel_id=shared_channel_id,
         content="From laptop",
         t_ms=7100,
         db=db
@@ -312,7 +356,7 @@ def test_three_devices_all_linked():
 
     msg_tablet = message.create(
         peer_id=alice_tablet['peer_id'],
-        channel_id=alice_tablet['channel_id'],
+        channel_id=shared_channel_id,
         content="From tablet",
         t_ms=7200,
         db=db
@@ -322,13 +366,42 @@ def test_three_devices_all_linked():
     # Sync messages
     print("\n=== Sync messages ===")
 
-    for i in range(12):
+    for i in range(60):
         tick.tick(t_ms=8000 + i*100, db=db)
 
+    # Discover channels via sync for each device
+    print("\n=== Discovering channels for each device ===")
+
+    phone_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_phone['peer_id'],)
+    )
+    laptop_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_laptop['peer_id'],)
+    )
+    tablet_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_tablet['peer_id'],)
+    )
+
+    assert len(phone_channels) == 1, f"Phone should have 1 channel, got {len(phone_channels)}"
+    assert len(laptop_channels) == 1, f"Laptop should have 1 channel, got {len(laptop_channels)}"
+    assert len(tablet_channels) == 1, f"Tablet should have 1 channel, got {len(tablet_channels)}"
+
+    phone_channel_id = phone_channels[0]['channel_id']
+    laptop_channel_id = laptop_channels[0]['channel_id']
+    tablet_channel_id = tablet_channels[0]['channel_id']
+
+    # All should be the same channel (same user)
+    assert phone_channel_id == laptop_channel_id == tablet_channel_id, \
+        "All devices should share the same channel"
+    print(f"✅ All devices share channel: {phone_channel_id[:20]}...")
+
     # All devices should see all three messages
-    phone_msgs = message.list_messages(alice_phone['channel_id'], alice_phone['peer_id'], db)
-    laptop_msgs = message.list_messages(alice_laptop['channel_id'], alice_laptop['peer_id'], db)
-    tablet_msgs = message.list_messages(alice_tablet['channel_id'], alice_tablet['peer_id'], db)
+    phone_msgs = message.list_messages(phone_channel_id, alice_phone['peer_id'], db)
+    laptop_msgs = message.list_messages(laptop_channel_id, alice_laptop['peer_id'], db)
+    tablet_msgs = message.list_messages(tablet_channel_id, alice_tablet['peer_id'], db)
 
     print(f"Phone sees: {[m['content'] for m in phone_msgs]}")
     print(f"Laptop sees: {[m['content'] for m in laptop_msgs]}")

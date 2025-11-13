@@ -547,13 +547,14 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
         (t_ms,)
     )
 
-    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... found={len(connection_rows)}_connections")
+    connection_ids = [row['peer_shared_id'][:10] + '...' for row in connection_rows]
+    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(connection_rows)} ids={connection_ids}")
 
     for row in connection_rows:
         peer_shared_id = row['peer_shared_id']
 
         # Send sync request to this connected peer
-        log.info(f"send_requests: {peer_id_str[:20]}... -> {peer_shared_id[:20]}... mode=sync")
+        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to={peer_shared_id[:10]}...")
         send_request(peer_shared_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
@@ -744,15 +745,25 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
         return  # Invalid bloom-based sync request
 
     # Only respond to sync requests from peers we recognize (have their peer_shared valid)
-    # If not valid, discard - the requester will send another sync request in the next round
+    # or that have an active connection entry. This allows multi-device/link bootstrap
+    # where sync_connect established a connection before peer_shared has synced.
     safedb = create_safe_db(db, recorded_by=recorded_by)
     requester_known = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
         (requester_peer_shared_id, recorded_by)
     )
     if not requester_known:
-        log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}...")
-        return
+        # Fallback: allow if we have an active connection for this requester
+        unsafedb = create_unsafe_db(db)
+        conn_ok = unsafedb.query_one(
+            "SELECT 1 FROM sync_connections WHERE peer_shared_id = ? AND last_seen_ms + ttl_ms > ?",
+            (requester_peer_shared_id, recorded_by and recorded_at)
+        )
+        if not conn_ok:
+            log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}... no_active_connection")
+            return
+        else:
+            log.debug(f"[SYNC_PROJECT] ACCEPT via connection requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
 
     log.debug(f"[SYNC_PROJECT] result=ACCEPTED requester={requester_peer_shared_id[:20]}... recognized_by={recorded_by[:10]}... window={window_id}")
 
@@ -850,6 +861,8 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
     # Filter events using bloom: send only events that FAIL bloom check
     # (requester doesn't have them)
     events_to_send = []
+    peer_shared_seen = 0
+    peer_shared_will_send = 0
     for row in shareable_rows:
         event_id_str = row['event_id']
         event_id_bytes = crypto.b64decode(event_id_str)
@@ -864,7 +877,19 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         else:
             log.debug(f"[SYNC_RESPONSE] skipping event_id={event_id_str[:20]}... (in_bloom)")
 
+        # Try to detect peer_shared for instrumentation
+        try:
+            evt_blob_dbg = safedb.get_shareable_blob(event_id_str)
+            evt_json_dbg = crypto.parse_json(evt_blob_dbg)
+            if evt_json_dbg.get('type') == 'peer_shared':
+                peer_shared_seen += 1
+                if not in_bloom:
+                    peer_shared_will_send += 1
+        except Exception:
+            pass
+
     log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
+    log.warning(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
 
     if len(events_to_send) == 0 and len(shareable_rows) > 0:
         log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")

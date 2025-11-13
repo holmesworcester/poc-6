@@ -315,17 +315,20 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     log.info(f"link.join() extracted link_prekey_id={link_prekey_id[:20]}..., user_id={user_id[:20]}...")
 
-    # Create link_invite_accepted event FIRST to capture link URL data for event-sourcing
-    from events.identity import link_invite_accepted
-    link_invite_accepted_id = link_invite_accepted.create(
-        link_invite_id=link_invite_id,
-        link_prekey_id=link_prekey_id,
-        link_private_key=link_private_key,
+    # Create invite_accepted event FIRST to capture invite link data for event-sourcing
+    # Use the SAME invite_accepted as user.join() - this ensures the same code path
+    # and the invite_private_key is stored in group_prekeys for unsealing group_key_shared
+    from events.identity import invite_accepted
+    invite_accepted_id = invite_accepted.create(
+        invite_id=link_invite_id,
+        invite_prekey_id=link_prekey_id,
+        invite_private_key=link_private_key,
         peer_id=peer_id,
         t_ms=t_ms + 1,
-        db=db
+        db=db,
+        first_peer=None  # Not a network creator, this is device linking
     )
-    log.info(f"link.join() created link_invite_accepted_id={link_invite_accepted_id[:20]}...")
+    log.info(f"link.join() created invite_accepted_id={invite_accepted_id[:20]}...")
 
     # Create link event with proof (also creates transit prekey)
     link_id, transit_prekey_shared_id, prekey_id = create(
@@ -338,6 +341,53 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db
     )
     log.info(f"link.join() created link_id={link_id[:20]}...")
+
+    # BOOTSTRAP: Send Device 2's transit_prekey_shared to Device 1
+    # Device 1 needs this to unwrap Device 2's sync_connect messages
+    # We create a recorded event for Device 1, wrap it, and queue it
+    log.warning(f"[BOOTSTRAP] Sending Device 2's transit_prekey_shared to Device 1")
+    try:
+        from events.transit import transit_prekey as tp_module, recorded as recorded_module
+        # Get Device 1's peer_shared_id AND peer_id from the invite event
+        invite_event_data = crypto.parse_json(store.get(link_invite_id, create_unsafe_db(db)))
+        inviter_peer_shared_id = invite_event_data.get('inviter_peer_shared_id')
+        inviter_peer_id = invite_event_data.get('created_by')  # This is Device 1's peer_id
+
+        if inviter_peer_shared_id and inviter_peer_id:
+            # Get Device 1's transit_prekey (from the link URL / invite event)
+            device1_prekey = tp_module.get_transit_prekey_for_peer(inviter_peer_shared_id, peer_id, db)
+
+            if device1_prekey:
+                # Create a recorded event wrapping Device 2's transit_prekey_shared
+                # This tells Device 1 "you (Device 1) are seeing Device 2's prekey"
+                recorded_id = recorded_module.create(
+                    ref_id=transit_prekey_shared_id,
+                    recorded_by=inviter_peer_id,  # Device 1 is the one "recording" this event
+                    t_ms=t_ms + 4,
+                    db=db,
+                    return_dupes=True
+                )
+
+                # Get the recorded blob
+                recorded_blob = store.get(recorded_id, create_unsafe_db(db))
+
+                if recorded_blob:
+                    # Wrap it with Device 1's prekey
+                    wrapped_recorded = crypto.wrap(recorded_blob, device1_prekey, db)
+
+                    # Queue for delivery to Device 1 (will be processed in next sync round)
+                    import queues
+                    queues.incoming.add(wrapped_recorded, t_ms + 5, create_unsafe_db(db))
+
+                    log.warning(f"[BOOTSTRAP] ✓ Queued Device 2's transit_prekey_shared (as recorded) for Device 1")
+                else:
+                    log.warning(f"[BOOTSTRAP] Could not get recorded blob")
+            else:
+                log.warning(f"[BOOTSTRAP] Could not get Device 1's transit_prekey")
+        else:
+            log.warning(f"[BOOTSTRAP] No inviter_peer_shared_id or inviter_peer_id in invite")
+    except Exception as e:
+        log.warning(f"[BOOTSTRAP] Failed to send transit_prekey_shared to Device 1: {e}")
 
     # Create separate invite_proof event (Phase 2: Unified Invite Primitive)
     # This proves possession of link_private_key separately from the link event
@@ -361,7 +411,7 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         'user_id': user_id,
         'network_id': network_id,
         'link_invite_id': link_invite_id,
-        'link_invite_accepted_id': link_invite_accepted_id,
+        'invite_accepted_id': invite_accepted_id,  # Now using unified invite_accepted
         'link_id': link_id,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,

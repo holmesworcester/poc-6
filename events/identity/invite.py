@@ -257,6 +257,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
         'inviter_transit_prekey_shared_created_at': inviter_transit_prekey_shared_created_at,  # For correct created_at in transit_prekeys_shared
         'inviter_transit_prekey_id': inviter_prekey_id,
+        'address': inviter_ip,  # For bootstrap connections (stored in invite_accepteds)
+        'port': inviter_port,   # For bootstrap connections (stored in invite_accepteds)
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -324,13 +326,23 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             )
             log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
-    # For mode='link', share keys for ALL groups (so new device can decrypt everything)
+    # For mode='link', share keys for ALL groups this user is a member of
+    # This ensures the new device can decrypt all groups the user belongs to
     if mode == 'link':
-        log.info(f"invite.create() mode='link' - creating group_key_shared for all groups")
+        log.info(f"invite.create() mode='link' - sharing keys for user {user_id[:20]}...'s group memberships")
+
+        # Query groups that THIS USER is a member of (not all groups peer knows about)
+        # Join group_members with groups to get both group_id and key_id
         group_rows = safedb.query(
-            "SELECT DISTINCT g.group_id, g.key_id FROM groups g WHERE g.recorded_by = ? ORDER BY g.group_id",
-            (peer_id,)
+            """SELECT DISTINCT g.group_id, g.key_id
+               FROM group_members gm
+               JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
+               WHERE gm.user_id = ? AND gm.recorded_by = ?
+               ORDER BY g.group_id""",
+            (user_id, peer_id)
         )
+
+        log.info(f"invite.create() found {len(group_rows)} groups for user {user_id[:20]}...")
 
         ts = t_ms + 5
         for group_row in group_rows:
