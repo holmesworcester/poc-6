@@ -43,29 +43,22 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
 
-        # Find this peer's peer_shared_id
+        # Find this peer's peer_shared_id from peer_self table
         peer_shared_id = None
         safedb = create_safe_db(db, recorded_by=peer_id)
-        candidate_rows = safedb.query(
-            "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
-            (peer_id,)
+        peer_self_row = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (peer_id, peer_id)
         )
-        for row in candidate_rows:
-            ps_id = row['peer_shared_id']
-            try:
-                ps_blob = store.get(ps_id, db)
-                if not ps_blob:
-                    continue
-                ps_data = crypto.parse_json(ps_blob)
-                if ps_data.get('type') == 'peer_shared' and ps_data.get('peer_id') == peer_id:
-                    peer_shared_id = ps_id
-                    break
-            except Exception:
-                continue
+
+        if peer_self_row:
+            peer_shared_id = peer_self_row['peer_shared_id']
 
         if not peer_shared_id:
             log.debug(f"sync_connect: skipping peer {peer_id[:20]}... (no peer_shared_id)")
             continue
+
+        log.warning(f"[SYNC_CONNECT_PEER_ID] peer={peer_id[:10]}... peer_shared_id={peer_shared_id[:10]}...")
 
         # Send connects to all known peers from THREE sources:
         # 1. Synced peers (discovered via normal sync) - from peers_shared table
@@ -101,7 +94,8 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
         for row in connection_rows:
             all_peer_ids.add(row['peer_shared_id'])
 
-        log.info(f"sync_connect: peer {peer_id[:20]}... found {len(all_peer_ids)} total peers (peers_shared={len(peer_shared_rows)}, bootstrap={len(bootstrap_rows)}, connections={len(connection_rows)})")
+        all_peer_ids_list = [pid[:10] + '...' for pid in all_peer_ids]
+        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10]}... total_peers={len(all_peer_ids)} peers_shared={len(peer_shared_rows)} bootstrap={len(bootstrap_rows)} connections={len(connection_rows)} all_ids={all_peer_ids_list}")
 
         # Get invite_id if this peer used an invite to join
         invite_row = safedb.query_one(
@@ -112,8 +106,11 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
 
         # Send connect to each known peer
         for to_peer_shared_id in all_peer_ids:
+            log.warning(f"[SYNC_CONNECT_LOOP] peer={peer_id[:10]}... considering_peer={to_peer_shared_id[:10]}...")
+
             # Skip self
             if to_peer_shared_id == peer_shared_id:
+                log.warning(f"[SYNC_CONNECT_SKIP_SELF] peer={peer_id[:10]}... skipping_self={to_peer_shared_id[:10]}...")
                 continue
 
             try:
@@ -126,7 +123,7 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
                     db=db
                 )
             except Exception as e:
-                log.warning(f"sync_connect: failed to send to {to_peer_shared_id[:20]}...: {e}")
+                log.warning(f"[SYNC_CONNECT_EXCEPTION] peer={peer_id[:10]}... to_peer={to_peer_shared_id[:10]}... error={e}")
 
 
 def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str,
@@ -149,7 +146,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     response_transit_key_bytes = response_transit_key_dict.get('key') if response_transit_key_dict else None
 
     if not response_transit_key_bytes:
-        log.error(f"sync_connect: failed to create response_transit_key")
+        log.warning(f"[SYNC_CONNECT_NO_RESPONSE_KEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}...")
         return
 
     # Build connect event data
@@ -196,7 +193,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Wrap with recipient's transit prekey
     to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
     if not to_key:
-        log.warning(f"sync_connect: no transit_prekey for {to_peer_shared_id[:20]}..., cannot send")
+        log.warning(f"[SYNC_CONNECT_NO_PREKEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... CANNOT_SEND")
         return
 
     wrapped = crypto.wrap(canonical, to_key, db)
@@ -205,7 +202,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     import queues
     queues.incoming.add(wrapped, t_ms, db)
 
-    log.info(f"sync_connect: sent connect from {from_peer_shared_id[:20]}... to {to_peer_shared_id[:20]}...")
+    log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... invite_id={invite_id[:10] if invite_id else 'None'}...")
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
@@ -320,7 +317,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         (event_id, recorded_by)
     )
 
-    log.info(f"sync_connect.project: established connection with {peer_shared_id[:20]}...")
+    log.warning(f"[SYNC_CONNECT_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... invite_auth={invite_authenticated} STORING_IN_SYNC_CONNECTIONS")
 
 
 def purge_expired(t_ms: int, db: Any) -> None:
