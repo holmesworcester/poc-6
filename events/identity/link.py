@@ -342,42 +342,52 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     )
     log.info(f"link.join() created link_id={link_id[:20]}...")
 
-    # BOOTSTRAP FIX: Send Device 2's transit_prekey_shared to Device 1 immediately
-    # This allows Device 1 to unwrap Device 2's sync_connect messages before normal sync completes
-    log.warning(f"[BOOTSTRAP_FIX] Starting bootstrap prekey send")
+    # BOOTSTRAP: Send Device 2's transit_prekey_shared to Device 1
+    # Device 1 needs this to unwrap Device 2's sync_connect messages
+    # We create a recorded event for Device 1, wrap it, and queue it
+    log.warning(f"[BOOTSTRAP] Sending Device 2's transit_prekey_shared to Device 1")
     try:
-        from events.transit import transit_prekey as tp_module
-        # Get Device 1's peer_shared_id from the invite event
+        from events.transit import transit_prekey as tp_module, recorded as recorded_module
+        # Get Device 1's peer_shared_id AND peer_id from the invite event
         invite_event_data = crypto.parse_json(store.get(link_invite_id, create_unsafe_db(db)))
         inviter_peer_shared_id = invite_event_data.get('inviter_peer_shared_id')
-        log.warning(f"[BOOTSTRAP_FIX] inviter_peer_shared_id={inviter_peer_shared_id[:10] if inviter_peer_shared_id else 'NONE'}...")
+        inviter_peer_id = invite_event_data.get('created_by')  # This is Device 1's peer_id
 
-        if inviter_peer_shared_id:
-            # Get Device 1's transit_prekey (from invite or from transit_prekeys_shared table)
+        if inviter_peer_shared_id and inviter_peer_id:
+            # Get Device 1's transit_prekey (from the link URL / invite event)
             device1_prekey = tp_module.get_transit_prekey_for_peer(inviter_peer_shared_id, peer_id, db)
-            log.warning(f"[BOOTSTRAP_FIX] device1_prekey={'found' if device1_prekey else 'NOT_FOUND'}")
 
             if device1_prekey:
-                # Get Device 2's transit_prekey_shared blob
-                device2_prekey_shared_blob = store.get(transit_prekey_shared_id, create_unsafe_db(db))
+                # Create a recorded event wrapping Device 2's transit_prekey_shared
+                # This tells Device 1 "you (Device 1) are seeing Device 2's prekey"
+                recorded_id = recorded_module.create(
+                    ref_id=transit_prekey_shared_id,
+                    recorded_by=inviter_peer_id,  # Device 1 is the one "recording" this event
+                    t_ms=t_ms + 4,
+                    db=db,
+                    return_dupes=True
+                )
 
-                if device2_prekey_shared_blob:
+                # Get the recorded blob
+                recorded_blob = store.get(recorded_id, create_unsafe_db(db))
+
+                if recorded_blob:
                     # Wrap it with Device 1's prekey
-                    wrapped_prekey = crypto.wrap(device2_prekey_shared_blob, device1_prekey, db)
+                    wrapped_recorded = crypto.wrap(recorded_blob, device1_prekey, db)
 
-                    # Queue for delivery to Device 1
+                    # Queue for delivery to Device 1 (will be processed in next sync round)
                     import queues
-                    queues.incoming.add(wrapped_prekey, t_ms + 4, db)
+                    queues.incoming.add(wrapped_recorded, t_ms + 5, create_unsafe_db(db))
 
-                    log.warning(f"[BOOTSTRAP_FIX] ✓ Sent Device 2's transit_prekey_shared to Device 1")
+                    log.warning(f"[BOOTSTRAP] ✓ Queued Device 2's transit_prekey_shared (as recorded) for Device 1")
                 else:
-                    log.warning(f"link.join() could not get Device 2's transit_prekey_shared blob")
+                    log.warning(f"[BOOTSTRAP] Could not get recorded blob")
             else:
-                log.warning(f"link.join() could not get Device 1's transit_prekey")
+                log.warning(f"[BOOTSTRAP] Could not get Device 1's transit_prekey")
         else:
-            log.warning(f"link.join() no inviter_peer_shared_id in invite")
+            log.warning(f"[BOOTSTRAP] No inviter_peer_shared_id or inviter_peer_id in invite")
     except Exception as e:
-        log.warning(f"link.join() failed to send transit_prekey_shared to Device 1: {e}")
+        log.warning(f"[BOOTSTRAP] Failed to send transit_prekey_shared to Device 1: {e}")
 
     # Create separate invite_proof event (Phase 2: Unified Invite Primitive)
     # This proves possession of link_private_key separately from the link event
