@@ -502,13 +502,13 @@ For performant file retrieval, we recommend storing file slices sequentially, re
 
 All peers delete events upon `ttl` expiry. 
 
-To delete a message, peer create a `delete-message` event naming the event `id`. 
+To delete a message, peer create a `message_deletion` event naming the event `id`.
 
-`delete-message` events are typically only valid if signed by the same `user-id` that wrote the message. For messages in a `group` (but not in a `fixed-group`) admins can also delete all messages. 
+`message_deletion` events are typically only valid if signed by the same `user-id` that wrote the message. For messages in a `group` (but not in a `fixed-group`) admins can also delete all messages. 
 
-Two rules: 1. Delete all existing events or updates when you get a `delete-message`. 2. Delete all new events or updates for already-received `delete-message` events.
+Two rules: 1. Delete all existing events or updates when you get a `message_deletion`. 2. Delete all new events or updates for already-received `message_deletion` events.
 
-For perfectly reliable deletion, `delete-message` events should last forever. In practice, the `ttl` can be sufficiently greater than the event it deletes so that it always outlives its deleted events.
+For perfectly reliable deletion, `message_deletion` events should last forever. In practice, the `ttl` can be sufficiently greater than the event it deletes so that it always outlives its deleted events.
 
 File-related `slice` events may be unknown when the file root event is deleted. Unknown files are deleted via "cryptographic shredding" once the originating event has been deleted, and again once their `ttl` arrives.
 
@@ -649,7 +649,7 @@ Note that these events might make sense in an in-memory database.
 | **update**         | 0x02 | `event_id` 16 · `global_count` 4 · `update_code` 1 · `user_id` 16 · `body` 317 | Yes                    |
 | **slice**          | 0x03 | See dedicated table above (no common header or sig)                      | No                     |
 | **rekey**          | 0x04 | `original_event_id` 16 · `new_key_id` 16 · `new_ciphertext` ≤322 · pad | Yes                    |
-| **delete-message** | 0x05 | `message_id` 16 · pad (338)                                              | Yes                    |
+| **message_deletion** | 0x05 | `message_id` 16 · pad (338)                                              | Yes                    |
 | **delete-channel** | 0x06 | `channel_id` 16 · pad (338)                                              | Yes                    |
 | **sync**           | 0x07 | `window` 2 · `bloom_bits` 64 · pad (328)                 | No                     |
 | **sync-auth**      | 0x08 | `window` 2 · `bloom_bits` 64 · `limit` 2 · pad (326)    | No                     |
@@ -733,11 +733,11 @@ After creating the keys, the creator creates signed `add-prekey` update events f
 
 ## Appendix D — Auth-Related Events
 
-Here we list all events that are auth-related and can be prioritied with `sync-auth`: 
+Here we list all events that are auth-related and can be prioritied with `sync-auth`:
 
 - **block**
 - **unblock**
-- **delete-message**
+- **message_deletion**
 - **delete-channel**
 - **key**
 - **prekey**
@@ -924,11 +924,11 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
   Response: Updated message.  
   403 if not creator.
 
-- **DELETE /networks/{network_id}/messages/{message_id}**  
-  Delete (author/admin).  
-  Response: `{"success": true}`  
-  403 if not author/admin.  
-  (Generates `delete-message`.)
+- **DELETE /networks/{network_id}/messages/{message_id}**
+  Delete (author/admin).
+  Response: `{"success": true}`
+  403 if not author/admin.
+  (Generates `message_deletion`.)
 
 - **DELETE /networks/{network_id}/messages/{message_id}/reactions/{emoji}**  
   Remove reaction.  
