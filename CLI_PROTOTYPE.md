@@ -70,43 +70,46 @@ Note: Each tick represents one call to `tick.tick()`. With default 100ms per tic
 
 ### Slack-Like Interface
 The UI mimics Slack's layout with three sections shown sequentially:
-1. **Accounts** - List of all accounts (corresponds to peers internally)
-2. **Sidebar** - List of channels in the selected account
-3. **Main** - List of messages in the selected channel
+1. **Accounts** - List of all your accounts/devices (corresponds to peers internally)
+2. **Sidebar** - List of users in the selected account's network
+3. **Main** - List of messages with the selected user
 
 **What's hidden (under the hood):**
 - Groups - used internally for permissions but not shown in UI
+- Channels - used internally for message organization but abstracted away
 - Invites - only displayed at creation time as command output, not persisted in UI
 - Admin status - not explicitly shown (but affects what commands are allowed)
 
-The CLI maintains ephemeral in-memory state for which account and channel are currently selected.
+The CLI maintains ephemeral in-memory state for which account and user are currently selected.
 
 ### State Display Format
 Simple bulleted/nested lists, no boxes or special formatting:
 
 ```
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
-    Alice (Phone) - user_nF7kRm, network_uA2vWy
-    Bob (Desktop) - user_wP8qLx, network_uA2vWy
-    Charlie (Desktop) - user_zQ9rMy, network_xyz789
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+    alice (phone) - user_nF7kRm, peer_tD5mNk, network_uA2vWy
+    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+    charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
 
-SIDEBAR (Alice - Desktop):
-  * #general
-    #random
+SIDEBAR (alice - desktop):
+  * alice
+    bob
 
-MAIN (#general):
-  [22000ms] Bob: Hello from Bob!
-  [32000ms] Alice: Hello from Alice!
+MAIN (alice -> bob):
+  [32000ms] alice: Hello from Alice!
+  [22000ms] bob: Hello from Bob!
 ```
 
 The `*` indicates the currently selected item.
 
 Format notes:
-- Account names show user name + device name (e.g., "Alice (Desktop)")
-- Multiple accounts can have the same user name but different device names
+- **Accounts list**: Shows full context - `username (device) - user_id, peer_id, network_id`
+- **Sidebar**: Lists users in the network (can select to view messages)
+- **Main header**: Shows conversation participants (e.g., "alice -> bob")
+- **Messages**: Just show username (e.g., "alice:") - no device name
+- All lowercase for usernames and device names
 - IDs are truncated to first 6 characters for readability
-- Format: `<name> (<device>) - user_<id>, network_<id>` (NOT email-like)
 
 ## Interactive Mode
 
@@ -124,138 +127,140 @@ ACCOUNTS:
 ### Session Flow Example: Three Player Messaging
 
 ```
-> new-network --name Alice --device Desktop
-✓ Created network as Alice
-✓ Selected account: Alice (Desktop)
-✓ Selected channel: #general
+> new-network --name alice --device desktop
+✓ created network as alice
+✓ selected account: alice (desktop)
 
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
-SIDEBAR (Alice - Desktop):
-  * #general
+SIDEBAR (alice - desktop):
+  * alice
 
-MAIN (#general):
+MAIN (alice):
   (no messages)
 
 > create-invite
-✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
-⟳ Auto-syncing 100 ticks...
-✓ Synced (t=2000ms -> 12000ms)
+✓ created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+⟳ auto-syncing 100 ticks...
+✓ synced (t=2000ms -> 12000ms)
 
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
-SIDEBAR (Alice - Desktop):
-  * #general
+SIDEBAR (alice - desktop):
+  * alice
 
-MAIN (#general):
+MAIN (alice):
   (no messages)
 
-> new-account --name Bob --device Desktop --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
-✓ Created account: Bob (Desktop)
-✓ Joined network: uA2vWy
-✓ Selected account: Bob (Desktop)
-✓ Selected channel: #general
-⟳ Auto-syncing 100 ticks...
-✓ Synced (t=12000ms -> 22000ms)
+> new-account --name bob --device desktop --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
+✓ created account: bob (desktop)
+✓ joined network: uA2vWy
+✓ selected account: bob (desktop)
+⟳ auto-syncing 100 ticks...
+✓ synced (t=12000ms -> 22000ms)
 
 ACCOUNTS:
-    Alice (Desktop) - user_nF7kRm, network_uA2vWy
-  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
+    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
-SIDEBAR (Bob - Desktop):
-  * #general
+SIDEBAR (bob - desktop):
+  * alice
+    bob
 
-MAIN (#general):
+MAIN (bob):
+  (no messages)
+
+> select alice
+✓ selected user: alice
+
+SIDEBAR (bob - desktop):
+  * alice
+    bob
+
+MAIN (bob -> alice):
   (no messages)
 
 > send "Hello from Bob!"
-✓ Sent message
-⟳ Auto-syncing 100 ticks...
-✓ Synced (t=22000ms -> 32000ms)
+✓ sent message to alice
+⟳ auto-syncing 100 ticks...
+✓ synced (t=22000ms -> 32000ms)
 
 ACCOUNTS:
-    Alice (Desktop) - user_nF7kRm, network_uA2vWy
-  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
+    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
-SIDEBAR (Bob - Desktop):
-  * #general
+SIDEBAR (bob - desktop):
+  * alice
+    bob
 
-MAIN (#general):
-  [22000ms] Bob: Hello from Bob!
+MAIN (bob -> alice):
+  [22000ms] bob: Hello from Bob!
 
-> switch Alice
-✓ Selected account: Alice (Desktop)
+> switch alice
+✓ selected account: alice (desktop)
 
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
-    Bob (Desktop) - user_wP8qLx, network_uA2vWy
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
-SIDEBAR (Alice - Desktop):
-  * #general
+SIDEBAR (alice - desktop):
+  * alice
+    bob
 
-MAIN (#general):
-  [22000ms] Bob: Hello from Bob!
+MAIN (alice):
+  [22000ms] bob: Hello from Bob!
+
+> select bob
+✓ selected user: bob
+
+SIDEBAR (alice - desktop):
+  * alice
+  * bob
+
+MAIN (alice -> bob):
+  [22000ms] bob: Hello from Bob!
 
 > send "Hello from Alice!"
-✓ Sent message
-⟳ Auto-syncing 100 ticks...
-✓ Synced (t=32000ms -> 42000ms)
+✓ sent message to bob
+⟳ auto-syncing 100 ticks...
+✓ synced (t=32000ms -> 42000ms)
 
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
-    Bob (Desktop) - user_wP8qLx, network_uA2vWy
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
-SIDEBAR (Alice - Desktop):
-  * #general
+SIDEBAR (alice - desktop):
+  * alice
+  * bob
 
-MAIN (#general):
-  [32000ms] Alice: Hello from Alice!
-  [22000ms] Bob: Hello from Bob!
+MAIN (alice -> bob):
+  [32000ms] alice: Hello from Alice!
+  [22000ms] bob: Hello from Bob!
 
-> switch Bob
-✓ Selected account: Bob (Desktop)
+> switch bob
+✓ selected account: bob (desktop)
 
 ACCOUNTS:
-    Alice (Desktop) - user_nF7kRm, network_uA2vWy
-  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
+    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
-SIDEBAR (Bob - Desktop):
-  * #general
+SIDEBAR (bob - desktop):
+  * alice
+    bob
 
-MAIN (#general):
-  [32000ms] Alice: Hello from Alice!
-  [22000ms] Bob: Hello from Bob!
+MAIN (bob -> alice):
+  [32000ms] alice: Hello from Alice!
+  [22000ms] bob: Hello from Bob!
 
 > list-accounts
 ACCOUNTS:
-  * Bob (Desktop) - user_wP8qLx, network_uA2vWy
-    Alice (Desktop) - user_nF7kRm, network_uA2vWy
-
-> show-all
-=== ALL ACCOUNTS ===
-
-ACCOUNT: Alice (Desktop)
-  Network: uA2vWy
-  User ID: nF7kRm
-  Channels: #general
-
-  #general:
-    [32000ms] Alice: Hello from Alice!
-    [22000ms] Bob: Hello from Bob!
-
-ACCOUNT: Bob (Desktop)
-  Network: uA2vWy
-  User ID: wP8qLx
-  Channels: #general
-
-  #general:
-    [32000ms] Alice: Hello from Alice!
-    [22000ms] Bob: Hello from Bob!
+  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
 > quit
-Goodbye!
+goodbye!
 ```
 
 ## Non-Interactive Mode
@@ -421,11 +426,10 @@ Note: Device names distinguish multiple accounts for the same user (e.g., "Alice
 ### Invites
 - `create-invite` - Create network invite (requires admin) - shows invite link immediately
 
-### Channels & Messages
-- `create-channel --name <name>` - Create a new channel
-- `select-channel <channel_name>` - Select a different channel in current account
-- `send <message>` - Send message to currently selected channel
-- `list-messages` - List messages in current channel (explicit refresh)
+### Messages
+- `select <username>` - Select a user to view/send messages to
+- `send <message>` - Send message to currently selected user
+- `list-users` - List all users in the current network
 
 ### Multi-Device (Linking)
 - `create-link-invite` - Create a link invite for same user
@@ -440,8 +444,7 @@ Note: Linked devices share the same user_id but have different device names (e.g
 ### Sync & State
 - `sync --ticks <n>` - Run n sync ticks (calls `tick.tick()` n times)
 - `set-auto-tick <n>` - Set the number of auto-ticks after event commands (0 to disable)
-- `show` - Show current account's state (accounts + sidebar + main)
-- `show-all` - Show all accounts' states
+- `show` - Show current state (accounts + sidebar + main)
 - `time` - Show current simulation time
 
 ### System
@@ -454,44 +457,48 @@ Note: Linked devices share the same user_id but have different device names (e.g
 Shows all accounts in the session with selection indicator:
 ```
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_uA2vWy
-    Alice (Phone) - user_nF7kRm, network_uA2vWy
-    Bob (Desktop) - user_wP8qLx, network_uA2vWy
-    Charlie (Desktop) - user_zQ9rMy, network_xyz789
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+    alice (phone) - user_nF7kRm, peer_tD5mNk, network_uA2vWy
+    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+    charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
 ```
 
-Format: `[*] <user_name> (<device_name>) - user_<short_user_id>, network_<short_network_id>`
+Format: `[*] <username> (<device>) - user_<id>, peer_<id>, network_<id>`
 
 The `*` indicates the currently selected account.
 
 Notes:
-- Multiple accounts can share the same user name but have different device names
+- All lowercase for usernames and device names
+- Shows full context: user_id, peer_id, and network_id
+- Multiple accounts can share the same username but have different device names
 - Accounts with the same user_id are linked devices for the same user
 - IDs are truncated to first 6 characters
 
 ### SIDEBAR Section
-Shows channels available in the selected account:
+Shows users in the selected account's network:
 ```
-SIDEBAR (Alice):
-  * #general
-    #random
-    #dev-team
+SIDEBAR (alice - desktop):
+  * alice
+    bob
+    charlie
 ```
 
-Format: `[*] #<channel_name>`
+Format: `[*] <username>`
 
-The `*` indicates the currently selected channel.
+The `*` indicates the currently selected user for messaging.
 
 ### MAIN Section
-Shows messages in the selected channel:
+Shows messages with the selected user:
 ```
-MAIN (#general):
-  [5100ms] Bob: Hello from Bob!
-  [5000ms] Alice: Hello from Alice!
-  [4500ms] Alice: Welcome everyone!
+MAIN (alice -> bob):
+  [32000ms] alice: Hello from Alice!
+  [22000ms] bob: Hello from Bob!
+  [12000ms] alice: Welcome to the network!
 ```
 
-Format: `[<timestamp_ms>] <author_name>: <message_content>`
+Format:
+- Header: `(<from> -> <to>)` or just `(<user>)` if viewing own messages
+- Message: `[<timestamp_ms>] <username>: <message_content>`
 
 Messages are shown in reverse chronological order (newest first).
 
@@ -501,10 +508,10 @@ When sections are empty:
 ACCOUNTS:
   (no accounts)
 
-SIDEBAR (Alice):
-  (no channels)
+SIDEBAR (alice - desktop):
+  (no users)
 
-MAIN (#general):
+MAIN (alice -> bob):
   (no messages)
 ```
 
