@@ -745,15 +745,25 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
         return  # Invalid bloom-based sync request
 
     # Only respond to sync requests from peers we recognize (have their peer_shared valid)
-    # If not valid, discard - the requester will send another sync request in the next round
+    # or that have an active connection entry. This allows multi-device/link bootstrap
+    # where sync_connect established a connection before peer_shared has synced.
     safedb = create_safe_db(db, recorded_by=recorded_by)
     requester_known = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
         (requester_peer_shared_id, recorded_by)
     )
     if not requester_known:
-        log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}...")
-        return
+        # Fallback: allow if we have an active connection for this requester
+        unsafedb = create_unsafe_db(db)
+        conn_ok = unsafedb.query_one(
+            "SELECT 1 FROM sync_connections WHERE peer_shared_id = ? AND last_seen_ms + ttl_ms > ?",
+            (requester_peer_shared_id, recorded_by and recorded_at)
+        )
+        if not conn_ok:
+            log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}... no_active_connection")
+            return
+        else:
+            log.debug(f"[SYNC_PROJECT] ACCEPT via connection requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
 
     log.debug(f"[SYNC_PROJECT] result=ACCEPTED requester={requester_peer_shared_id[:20]}... recognized_by={recorded_by[:10]}... window={window_id}")
 

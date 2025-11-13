@@ -181,20 +181,11 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
                 (event_id, file_id, peer_id, 'file')
             )
 
-        # Mark all slices as shareable
-        # This allows them to be synced as normal events, not just via sync_file protocol
-        from events.transit.sync import compute_storage_window_id
-
-        # Batch insert window_ids - compute upfront then insert all at once
-        for event_id in event_ids:
-            event_id_bytes = crypto.b64decode(event_id)
-            window_id = compute_storage_window_id(event_id_bytes)
-            safedb.execute(
-                """INSERT OR IGNORE INTO shareable_events
-                   (event_id, can_share_peer_id, created_at, recorded_at, window_id)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (event_id, peer_id, None, t_ms, window_id)
-            )
+        # Note: File slices are NOT marked as shareable because:
+        # 1. Slices are synced via sync_file protocol (focused file sync), not normal bloom filter sync
+        # 2. Adding 116K+ slices to shareable_events would create excessive window_id computation
+        # 3. Normal sync should skip requesting 116K individual events and use sync_file instead
+        # 4. Access control is enforced at message_attachment level (group-encrypted)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)
