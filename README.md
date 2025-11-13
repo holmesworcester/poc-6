@@ -63,11 +63,11 @@ Build the CLI following the prototype:
 
 ### Slack-Like Interface
 The UI mimics Slack's three-section layout:
-1. **Accounts** - List of all accounts (peers) with selection indicator
-2. **Sidebar** - List of channels in selected account
-3. **Main** - List of messages in selected channel
+1. **Accounts** - List of all your accounts/devices with full context (user_id, peer_id, network_id)
+2. **Sidebar** - List of users in the selected account's network
+3. **Main** - Messages with the selected user
 
-Simple bulleted lists, no fancy formatting. Groups, invites, and admin status are hidden (under the hood).
+Simple bulleted lists, all lowercase, no fancy formatting. Groups, channels, invites, and admin status are hidden (under the hood).
 
 ### Function-Only API Access
 The CLI will act as an API client, using ONLY the event functions from `events/` modules. This means:
@@ -82,24 +82,25 @@ See [ARCHITECTURE_RULES.md](./ARCHITECTURE_RULES.md) for complete details.
 Commands work identically in both modes:
 ```bash
 # Interactive mode
-> new-network --name Alice
+> new-network --name alice --device desktop
 > send "Hello"
 
 # Non-interactive mode (same commands)
-./cli.py --new-network Alice --send "Hello"
+./cli.py --new-network alice --device desktop --send "Hello"
 ```
 
 ### State Visibility
 After each command, show the three-section state display:
 ```
 ACCOUNTS:
-  * Alice (Desktop) - user_nF7kRm, network_abc123
+  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_abc123
 
-SIDEBAR (Alice - Desktop):
-  * #general
+SIDEBAR (alice - desktop):
+  * alice
+    bob
 
-MAIN (#general):
-  [2000ms] Alice: Hello
+MAIN (alice -> bob):
+  [2000ms] alice: Hello
 ```
 
 This helps users understand:
