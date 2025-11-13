@@ -111,7 +111,8 @@ def test_three_player_messaging():
 
     # Sync messages
     print("\n=== Sync Round 2: Message exchange ===")
-    for round_num in range(9):  # A few rounds to ensure convergence
+    # Need extra rounds with new timing model where messages are delivered in next tick
+    for round_num in range(20):
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify message delivery
