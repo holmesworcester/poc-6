@@ -3,7 +3,7 @@ import sqlite3
 from db import Database, create_unsafe_db, create_safe_db
 import schema
 from events.identity import user, invite, peer
-from events.transit import sync_connect
+from events.network import sync_connect
 import logging
 
 # Enable logging
@@ -40,7 +40,7 @@ sync_connect.send_connect_to_all(t_ms=3000, db=db)
 
 # Process incoming blobs (includes sync_connect events)
 print("\n=== Calling sync.receive() to process sync_connect events ===")
-from events.transit import sync
+from events.network import sync
 sync.receive(batch_size=20, t_ms=3000, db=db)
 
 # Check sync_connections

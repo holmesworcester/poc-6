@@ -8,7 +8,7 @@ import sqlite3
 import logging
 from db import Database
 import schema
-from events.transit import sync
+from events.network import sync
 from events.identity import user
 from events.content import message
 
@@ -99,7 +99,7 @@ def test_sync_perf_10k():
 
         # Refresh connections periodically (every 20 steps)
         if sync_step % 20 == 1:
-            from events.transit import sync_connect
+            from events.network import sync_connect
             sync_connect.send_connect_to_all(t_ms=30000 + sync_step * 100, db=db)
             sync.receive(batch_size=100, t_ms=30000 + sync_step * 100 + 5, db=db)
 

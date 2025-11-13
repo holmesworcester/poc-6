@@ -107,7 +107,7 @@ def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db
 
     # Unblock events that were waiting for this prekey (e.g., group_key_shared events)
     import queues
-    from events.transit import recorded as recorded_module
+    from events.network import recorded as recorded_module
     unblocked_ids = queues.blocked.notify_event_valid(link_prekey_id, recorded_by, safedb)
     if unblocked_ids:
         log.info(f"link_invite_accepted.project() unblocked {len(unblocked_ids)} events waiting for link prekey")

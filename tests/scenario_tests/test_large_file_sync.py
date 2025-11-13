@@ -16,7 +16,7 @@ from db import Database
 import schema
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
-from events.transit import sync_file
+from events.network import sync_file
 import tick
 
 

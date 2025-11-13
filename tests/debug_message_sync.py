@@ -4,7 +4,7 @@ from db import Database
 import schema
 from events.identity import user, invite
 from events.content import message
-from events.transit import sync
+from events.network import sync
 
 # Setup
 conn = sqlite3.Connection(":memory:")
@@ -96,7 +96,7 @@ alice_sync_state = db.query_one(
     (alice['peer_id'], bob_peer_shared['peer_shared_id'])
 )
 if alice_sync_state:
-    from events.transit.sync import compute_window_count
+    from events.network.sync import compute_window_count
     total_windows = compute_window_count(alice_sync_state['w_param'])
     next_window = (alice_sync_state['last_window'] + 1) % total_windows
     print(f"Alice's sync state: last_window={alice_sync_state['last_window']}, w_param={alice_sync_state['w_param']}, next_window={next_window}")

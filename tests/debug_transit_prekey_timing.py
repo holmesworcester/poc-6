@@ -101,7 +101,7 @@ for row in prekeys_dev2:
 
 # Check if device 1 can see device 2's prekey
 print("\n=== Can device 1 see device 2's transit_prekey? ===")
-from events.transit import transit_prekey
+from events.network import transit_prekey
 device2_prekey = transit_prekey.get_transit_prekey_for_peer(
     alice_device2['peer_shared_id'],
     alice_device1['peer_id'],

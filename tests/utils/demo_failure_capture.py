@@ -13,7 +13,7 @@ this is a demonstration of the API, not an actual failure.
 import sqlite3
 from db import Database
 import schema
-from events.transit import transit_key
+from events.network import transit_key
 from events.group import group
 from events.identity import peer
 from events.content import channel, message

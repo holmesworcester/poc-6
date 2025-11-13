@@ -1,7 +1,7 @@
 """Debug sync functions that run to convergence for testing."""
 from typing import Any
 import logging
-from events.transit import sync
+from events.network import sync
 from db import create_safe_db
 
 log = logging.getLogger(__name__)

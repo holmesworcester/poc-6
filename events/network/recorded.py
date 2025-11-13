@@ -350,7 +350,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         # Always use created_at=None for simplicity and determinism
         # Sync protocol doesn't need created_at - it uses recorded_at for ordering
         # UI lazy loading will use separate projected_events table with created_at
-        from events.transit import sync
+        from events.network import sync
         log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None")
         sync.add_shareable_event(
             ref_id,
@@ -447,7 +447,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         peer.project(ref_id, recorded_by, db)
         projected_id = ref_id
     elif event_type == 'transit_key':
-        from events.transit import transit_key
+        from events.network import transit_key
         transit_key.project(ref_id, recorded_by, db)
         projected_id = ref_id
     elif event_type == 'group_key':
@@ -463,11 +463,11 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         projected_id = ref_id
         log.error(f"[CHANNEL_PROJECT_DISPATCHER] ✓ channel.project() completed for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
     elif event_type == 'sync':
-        from events.transit import sync
+        from events.network import sync
         sync.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
     elif event_type == 'sync_connect':
-        from events.transit import sync_connect
+        from events.network import sync_connect
         sync_connect.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
     elif event_type == 'invite':
@@ -480,11 +480,11 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.identity import user
         projected_id = user.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'transit_prekey':
-        from events.transit import transit_prekey
+        from events.network import transit_prekey
         transit_prekey.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
     elif event_type == 'transit_prekey_shared':
-        from events.transit import transit_prekey_shared
+        from events.network import transit_prekey_shared
         projected_id = transit_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'group_prekey':
         from events.group import group_prekey

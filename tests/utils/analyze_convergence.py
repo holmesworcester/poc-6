@@ -72,7 +72,7 @@ def replay_with_trace(db: Any, ordering: list[str], verbose: bool = False) -> di
         }
     """
     from tests.utils.convergence import _recreate_projection_tables, _dump_projection_state
-    from events.transit import recorded
+    from events.network import recorded
 
     # Reset tables
     _recreate_projection_tables(db)

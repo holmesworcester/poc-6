@@ -17,7 +17,7 @@ import json
 import crypto
 import store
 from events.identity import peer
-from events.transit import transit_key, transit_prekey
+from events.network import transit_key, transit_prekey
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)

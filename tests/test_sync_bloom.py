@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 from db import Database
 import schema
-from events.transit import sync
+from events.network import sync
 from events.identity import user, invite
 import crypto
 

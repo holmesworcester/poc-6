@@ -39,7 +39,7 @@ print(f"\nBob's peer_shared in Bob's shareable_events: {bool(bob_peer_shared_sha
 
 # Check LOCAL_ONLY_TYPES
 print("\n'peer_shared' in LOCAL_ONLY_TYPES?")
-from events.transit import recorded
+from events.network import recorded
 LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_joined', 'invite_accepted', 'sync_connect'}
 print(f"  'peer_shared' in LOCAL_ONLY: {'peer_shared' in LOCAL_ONLY_TYPES}")
 print(f"  'peer' in LOCAL_ONLY: {'peer' in LOCAL_ONLY_TYPES}")

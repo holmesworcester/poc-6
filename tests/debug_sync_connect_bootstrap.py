@@ -3,7 +3,7 @@ import sqlite3
 from db import Database, create_unsafe_db, create_safe_db
 import schema
 from events.identity import user, link_invite, link, peer as peer_module
-from events.transit import sync_connect
+from events.network import sync_connect
 import logging
 
 # Enable logging to see sync_connect activity
@@ -81,7 +81,7 @@ sync_connect.send_connect_to_all(t_ms=4000, db=db)
 
 # Check if phone received sync_connect
 print("\n=== Checking if phone received sync_connect ===")
-from events.transit import sync
+from events.network import sync
 sync.receive(batch_size=20, t_ms=4000, db=db)
 
 # Check sync_connections after

@@ -4,7 +4,7 @@ from db import Database, create_unsafe_db, create_safe_db
 import schema
 from events.identity import user, link_invite, link
 from events.group import group, group_member
-from events.transit import transit_prekey
+from events.network import transit_prekey
 import tick
 import crypto
 
