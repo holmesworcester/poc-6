@@ -13,6 +13,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite, peer
+from tests.utils import tick_helper
 import tick
 
 
@@ -71,13 +72,13 @@ def test_connection_establishment():
     assert conn_row['last_seen_ms'] == 3000, "Connection should have correct timestamp"
     print("✓ Connection has all required fields")
 
-    # Run another tick - connections should refresh (after 60s for sync_connect to run again)
+    # Run another tick - connections should refresh (sync_connect runs every 1s)
     print("\n=== Running second tick (refreshes connections) ===")
-    tick.tick(t_ms=63000, db=db)  # 60s later so sync_connect runs again
+    tick.tick(t_ms=4000, db=db)  # 1s later so sync_connect runs again
 
     # Check that connection timestamps were updated
     conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
-    assert conn_row['last_seen_ms'] == 63000, "Connection should have updated timestamp"
+    assert conn_row['last_seen_ms'] == 4000, "Connection should have updated timestamp"
     print("✓ Connection timestamp refreshed")
 
 
@@ -167,7 +168,7 @@ def test_sync_uses_connections():
     print("\n=== Running sync rounds ===")
     for i in range(5):
         print(f"Sync round {i+1}")
-        tick.tick(t_ms=3000 + i*200, db=db)
+        tick.tick(t_ms=3000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
 
     # Verify that sync completed successfully
     # (If connections weren't working, sync would fail or fall back to prekeys)

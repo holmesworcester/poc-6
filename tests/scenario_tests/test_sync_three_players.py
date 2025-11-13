@@ -11,6 +11,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite, peer
+from tests.utils import tick_helper
 import tick
 
 
@@ -66,10 +67,11 @@ def test_sync_three_players_convergence():
 
     # Run sync to convergence
     print("\n=== Running Sync ===")
-    max_rounds = 150  # Increased for job-based tick system and new network sim timing
+    start_t_ms = 4000
+    max_rounds = tick_helper.CONVERGENCE_ROUNDS  # ~10 seconds for complete convergence
     for round_num in range(max_rounds):
         # Run one tick cycle (send + receive)
-        tick.tick(t_ms=4000 + round_num * 100, db=db)
+        tick.tick(t_ms=start_t_ms + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
 
         # Check Bob's progress
         bob_shareable_now = set(row['event_id'] for row in db.query(
