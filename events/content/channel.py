@@ -31,7 +31,8 @@ def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            group_id: str | None = None, member_user_ids: list[str] | None = None,
-           key_id: str | None = None, is_main: bool = False) -> str:
+           key_id: str | None = None, is_main: bool = False,
+           disappearing_time_ms: int = 0) -> str:
     """Create a shareable, encrypted channel event.
 
     Only admins can create channels (except during initial network setup where group_id is explicitly provided).
@@ -56,11 +57,16 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         member_user_ids: If provided, create private channel for these members (creates new group)
         key_id: Optional explicit key_id (only used if group_id provided, otherwise derived)
         is_main: True if this is the main channel for a group
+        disappearing_time_ms: Messages expire after this duration in ms (0 = permanent, >0 = milliseconds)
 
     Returns:
         channel_id: The created channel event ID
     """
     safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Validate disappearing_time_ms
+    if disappearing_time_ms < 0:
+        raise ValueError("disappearing_time_ms must be non-negative")
 
     # Check authorization - only admins can create channels
     # Exception: if group_id is explicitly provided, skip admin check (used in initial network setup)
@@ -188,6 +194,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'group_id': group_id,
         'created_by': peer_shared_id,  # References shareable peer identity
         'created_at': t_ms,
+        'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
         'is_main': 1 if is_main else 0  # Store is_main flag
     }
 
@@ -293,14 +300,15 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
 
     safedb.execute(
         """INSERT OR REPLACE INTO channels
-           (channel_id, name, group_id, created_by, created_at, is_main, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (channel_id, name, group_id, created_by, created_at, disappearing_time_ms, is_main, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event_data['name'],
             event_data['group_id'],
             event_data['created_by'],
             event_data['created_at'],
+            event_data.get('disappearing_time_ms', 0),  # Default to 0 if not present (backward compatibility)
             event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
             recorded_by,
             recorded_at
@@ -324,7 +332,7 @@ def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query(
-        """SELECT channel_id, name, group_id, created_by, created_at
+        """SELECT channel_id, name, group_id, created_by, created_at, disappearing_time_ms
            FROM channels
            WHERE recorded_by = ?
            ORDER BY created_at DESC""",

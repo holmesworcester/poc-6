@@ -16,6 +16,10 @@ DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages.
 
+    Message TTL is determined by the channel's disappearing_time_ms setting:
+    - If disappearing_time_ms is 0: message is permanent (ttl_ms = 0)
+    - If disappearing_time_ms > 0: message expires at created_at + disappearing_time_ms
+
     SECURITY: This function trusts that peer_id is correct and owned by the caller.
     In production, the API authentication layer should validate that the authenticated session
     owns this peer_id before calling this function. This is safe for local-only apps where
@@ -35,9 +39,9 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Query channel to get group_id
+    # Query channel to get group_id and disappearing_time_ms
     channel_row = safedb.query_one(
-        "SELECT group_id FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT group_id, disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
         (channel_id, peer_id)
     )
     if not channel_row:
@@ -121,8 +125,12 @@ def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a single message event into the database.
 
-    Messages have TTL (time-to-live) set to created_at + DEFAULT_MESSAGE_TTL_MS (1 week).
-    In future: TTL can be customized per-channel via channel.disappearing_time field.
+    Message TTL is calculated from the channel's disappearing_time_ms setting:
+    - If disappearing_time_ms is 0: message is permanent (ttl_ms = 0)
+    - If disappearing_time_ms > 0: message expires at created_at + disappearing_time_ms
+
+    If channel settings change via channel_update, existing messages recalculate their
+    effective TTL on next projection (lazy recalculation for convergence).
     """
     import json
     log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
@@ -159,9 +167,20 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
-    # Calculate TTL for this message (absolute timestamp)
-    # For now: default 1 week. In future: get from channel's disappearing_time
-    ttl_ms = created_at + DEFAULT_MESSAGE_TTL_MS
+    # Calculate TTL based on channel's disappearing_time_ms setting
+    # Look up current channel settings to support dynamic TTL updates
+    channel_row = safedb.query_one(
+        "SELECT disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        (channel_id, recorded_by)
+    )
+
+    if channel_row and channel_row['disappearing_time_ms'] and channel_row['disappearing_time_ms'] > 0:
+        # Channel has disappearing messages enabled - use that TTL
+        ttl_ms = created_at + channel_row['disappearing_time_ms']
+    else:
+        # Channel is permanent (disappearing_time_ms = 0 or not found)
+        # Fall back to default for backward compatibility if channel not yet projected
+        ttl_ms = 0 if channel_row else (created_at + DEFAULT_MESSAGE_TTL_MS)
 
     # Extract key_id from blob for efficient purge lookups
     # Key ID is the first 16 bytes of the blob (the hint)

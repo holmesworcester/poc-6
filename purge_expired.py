@@ -96,12 +96,27 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
 
     # Check messages table
     messages_with_ttl = safedb.query(
-        """SELECT DISTINCT message_id FROM messages
+        """SELECT DISTINCT message_id, key_id FROM messages
            WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
         (recorded_by, cutoff_ms)
     )
-    expired_event_ids.extend([row['message_id'] for row in messages_with_ttl])
-    log.info(f"purge_expired.project() found {len(messages_with_ttl)} expired messages")
+    expired_message_ids = [row['message_id'] for row in messages_with_ttl]
+    expired_event_ids.extend(expired_message_ids)
+
+    # Mark encryption keys for purging (forward secrecy)
+    for row in messages_with_ttl:
+        if row['key_id']:
+            try:
+                safedb.execute(
+                    """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
+                       VALUES (?, ?, ?)""",
+                    (row['key_id'], recorded_at, recorded_by)
+                )
+                log.debug(f"purge_expired.project() marked key {row['key_id'][:20]}... for purging (expired message)")
+            except Exception as e:
+                log.warning(f"purge_expired.project() failed to mark key for purging: {e}")
+
+    log.info(f"purge_expired.project() found {len(messages_with_ttl)} expired messages, marked {len([r for r in messages_with_ttl if r['key_id']])} keys for purging")
 
     # Check message_attachments table
     attachments_with_ttl = safedb.query(

@@ -56,6 +56,7 @@ SUBJECTIVE_TABLES = {
     'pending_intros',              # Pending intro events for hole punching (peer-scoped)
     'removed_users',               # Removed users tracking (peer-scoped)
     'invite_accepteds',            # Invite acceptance metadata (peer-scoped)
+    'channel_updates',             # Channel updates (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
