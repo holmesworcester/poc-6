@@ -524,10 +524,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'address':
         from events.identity import address
         projected_id = address.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'file':
-        from events.content import file
-        file.project(ref_id, event_data, recorded_by, recorded_at, db)
-        projected_id = ref_id
     elif event_type == 'file_slice':
         from events.content import file_slice
         file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
