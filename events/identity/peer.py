@@ -38,7 +38,7 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     log.info(f"peer.create() generated peer_id={peer_id}")
 
     # Then create recorded wrapper where peer sees itself
-    from events.transit import recorded
+    from events.network import recorded
     recorded_id = recorded.create(peer_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 

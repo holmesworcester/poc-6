@@ -783,7 +783,7 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
 
         # Auto-trigger file sync with high priority (TTL = 0 means forever)
         try:
-            from events.transit import sync_file
+            from events.network import sync_file
             sync_file.request_file_sync(file_id, recorded_by, priority=10, ttl_ms=0, t_ms=0, db=db)
         except Exception as e:
             log.warning(f"message_attachment.get_file_data() failed to request sync: {e}")

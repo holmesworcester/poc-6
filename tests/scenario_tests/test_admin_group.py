@@ -19,7 +19,7 @@ from db import Database
 import schema
 from events.identity import user, invite, network, peer, peer_shared
 from events.group import group_member
-from events.transit import transit_prekey
+from events.network import transit_prekey
 import tick
 import store
 import crypto

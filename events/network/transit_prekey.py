@@ -94,7 +94,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     )
 
     # Create recorded wrapper where peer sees itself
-    from events.transit import recorded
+    from events.network import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 
@@ -144,7 +144,7 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     )
 
     # Create recorded wrapper where peer sees itself
-    from events.transit import recorded
+    from events.network import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 

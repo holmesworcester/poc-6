@@ -1,6 +1,6 @@
 """Sync implementation with bloom-based window protocol."""
 from typing import Any, Iterator
-from events.transit import recorded, transit_key, transit_prekey
+from events.network import recorded, transit_key, transit_prekey
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 import queues
@@ -280,7 +280,7 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
     if event_type == 'sync':
         project(event_id, recorded_by, t_ms, db, sync_data=event_data)
     elif event_type == 'sync_file':
-        from events.transit import sync_file
+        from events.network import sync_file
         sync_file.project(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
 
     # Mark ephemeral event as valid (for sync protocol tracking)
@@ -486,7 +486,7 @@ def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
         t_ms: Current timestamp
         db: Database connection
     """
-    from events.transit import sync_file
+    from events.network import sync_file
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 

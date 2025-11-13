@@ -3,7 +3,7 @@ from typing import Any
 import logging
 import crypto
 import store
-from events.transit import transit_key, transit_prekey
+from events.network import transit_key, transit_prekey
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
@@ -302,7 +302,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     if unblocked_ids:
         log.warning(f"[GROUP_KEY_SHARED_PROJECT] Unblocked {len(unblocked_ids)} events waiting for key {original_key_id[:20]}...")
         # Re-project the unblocked events
-        from events.transit import recorded
+        from events.network import recorded
         recorded.project_ids(unblocked_ids, db)
 
     return key_shared_id

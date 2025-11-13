@@ -1,6 +1,6 @@
 """Basic tests for bloom-based sync components."""
 import pytest
-from events.transit import sync
+from events.network import sync
 import crypto
 
 

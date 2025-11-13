@@ -66,8 +66,8 @@ def create(peer_id: str, peer_shared_id: str, link_invite_id: str,
     log.info(f"link.create() stored link_id={link_id[:20]}...")
 
     # Auto-create prekey for sync requests (same as user.create)
-    from events.transit import transit_prekey
-    from events.transit import transit_prekey_shared
+    from events.network import transit_prekey
+    from events.network import transit_prekey_shared
 
     prekey_id, prekey_private = transit_prekey.create(
         peer_id=peer_id,
@@ -256,7 +256,7 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         existing_peer_shared_blob_b64 = link_data[peer_shared_blob_key]
         existing_peer_shared_blob = base64.urlsafe_b64decode(existing_peer_shared_blob_b64 + '===')
 
-        from events.transit import recorded
+        from events.network import recorded
         unsafedb = create_unsafe_db(db)
         existing_peer_shared_id = store.blob(existing_peer_shared_blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 
@@ -278,7 +278,7 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         existing_user_blob_b64 = link_data['existing_user_blob']
         existing_user_blob = base64.urlsafe_b64decode(existing_user_blob_b64 + '===')
 
-        from events.transit import recorded
+        from events.network import recorded
         unsafedb = create_unsafe_db(db)
         existing_user_id = store.blob(existing_user_blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 
@@ -347,7 +347,7 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     # We create a recorded event for Device 1, wrap it, and queue it
     log.warning(f"[BOOTSTRAP] Sending Device 2's transit_prekey_shared to Device 1")
     try:
-        from events.transit import transit_prekey as tp_module, recorded as recorded_module
+        from events.network import transit_prekey as tp_module, recorded as recorded_module
         # Get Device 1's peer_shared_id AND peer_id from the invite event
         invite_event_data = crypto.parse_json(store.get(link_invite_id, create_unsafe_db(db)))
         inviter_peer_shared_id = invite_event_data.get('inviter_peer_shared_id')

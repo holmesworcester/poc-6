@@ -13,7 +13,7 @@ from db import Database, create_safe_db, create_unsafe_db
 import schema
 from events.identity import user, invite, peer
 from events.content import message, message_deletion
-from events.transit import transit_prekey, transit_key
+from events.network import transit_prekey, transit_key
 from events.group import group_prekey
 import tick
 import purge_expired

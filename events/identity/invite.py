@@ -5,7 +5,7 @@ import json
 import logging
 import crypto
 import store
-from events.transit import transit_key
+from events.network import transit_key
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
