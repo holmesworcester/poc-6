@@ -78,7 +78,7 @@ class SyncSendJob(Job):
     """Send sync requests to all known peers."""
 
     def __init__(self):
-        super().__init__('sync_send', every_ms=5_000)
+        super().__init__('sync_send', every_ms=100)  # 100ms for low-latency messaging
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync
@@ -90,7 +90,7 @@ class SyncReceiveJob(Job):
     """Receive and process incoming sync responses."""
 
     def __init__(self):
-        super().__init__('sync_receive', every_ms=5_000)
+        super().__init__('sync_receive', every_ms=100)  # 100ms for low-latency messaging
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync
@@ -190,7 +190,7 @@ class SyncConnectSendJob(Job):
     """Send connection announcements to establish/refresh connections."""
 
     def __init__(self):
-        super().__init__('sync_connect_send', every_ms=60_000)  # 1 minute
+        super().__init__('sync_connect_send', every_ms=1_000)  # 1 second for fast connection establishment
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync_connect
