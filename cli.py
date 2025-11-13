@@ -52,8 +52,6 @@ class CLISession:
         self.current_time_ms: int = 0
         self.auto_tick_count: int = 100  # Number of auto-ticks after event commands (default 100)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
-        self.last_invite_link: Optional[str] = None  # Internal - for --join-with-last-invite
-        self.last_link_url: Optional[str] = None     # Internal - for --with-last-link
 
     def initialize_database(self):
         """Initialize in-memory database with schema."""
@@ -108,6 +106,38 @@ class CLISession:
 # STATE DISPLAY FUNCTIONS (using event module query functions only)
 # ============================================================================
 
+def get_username_for_user_id(user_id: str, recorded_by: str, db: Any) -> str:
+    """Query backend for username by user_id. Returns '???' if not found."""
+    rows = db.execute_returning(
+        "SELECT name FROM users WHERE user_id = ? AND recorded_by = ?",
+        (user_id, recorded_by)
+    )
+    return rows[0]['name'] if rows else '???'
+
+
+def get_network_id_for_peer(peer_id: str, recorded_by: str, db: Any) -> Optional[str]:
+    """Query backend for network_id by peer_id. Returns None if not found."""
+    rows = db.execute_returning(
+        "SELECT network_id FROM users WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, recorded_by)
+    )
+    return rows[0]['network_id'] if rows else None
+
+
+def get_username_for_peer_shared_id(peer_shared_id: str, recorded_by: str, db: Any) -> str:
+    """Query backend for username by peer_shared_id. Returns '???' if not found."""
+    rows = db.execute_returning(
+        """
+        SELECT u.name
+        FROM peers_shared ps
+        JOIN users u ON ps.peer_id = u.peer_id AND ps.recorded_by = u.recorded_by
+        WHERE ps.peer_shared_id = ? AND ps.recorded_by = ?
+        """,
+        (peer_shared_id, recorded_by)
+    )
+    return rows[0]['name'] if rows else '???'
+
+
 def display_state(session: CLISession):
     """Display the complete state with all sections."""
     display_accounts(session)
@@ -131,7 +161,11 @@ def display_accounts(session: CLISession):
         selected = "*" if account.full_name == session.selected_account else " "
         short_user = account.user_id[:6] if account.user_id else "???"
         short_peer = account.peer_id[:6] if account.peer_id else "???"
-        short_net = account.network_id[:6] if account.network_id else "???"
+
+        # Query backend for network_id (may not be cached in account)
+        network_id = account.network_id or get_network_id_for_peer(account.peer_id, account.peer_id, session.db)
+        short_net = network_id[:6] if network_id else "???"
+
         print(f"  {i}. {selected} {account.full_name} - user_{short_user}, peer_{short_peer}, network_{short_net}")
 
 
@@ -167,13 +201,9 @@ def display_sidebar(session: CLISession):
         members = group_member.list_members(all_users_group_id, account.peer_id, session.db)
         if members:
             for i, member in enumerate(members, 1):
-                # Map user_id to username
+                # Query backend for username
                 user_id = member.get('user_id', '???')
-                username = '???'
-                for acc in session.accounts.values():
-                    if acc.user_id == user_id:
-                        username = acc.user_name
-                        break
+                username = get_username_for_user_id(user_id, account.peer_id, session.db)
                 print(f"    {i}. {username}")
         else:
             print("    (no users)")
@@ -229,13 +259,9 @@ def display_main(session: CLISession):
         return
 
     for msg in messages:
-        # Map author_id (peer_shared_id) to username
+        # Query backend for author username
         author_peer_shared_id = msg.get('author_id', '???')
-        author_name = '???'
-        for acc in session.accounts.values():
-            if acc.peer_shared_id == author_peer_shared_id:
-                author_name = acc.user_name
-                break
+        author_name = get_username_for_peer_shared_id(author_peer_shared_id, account.peer_id, session.db)
         timestamp = msg.get('created_at', 0)
         content = msg.get('content', '')
         print(f"  [{timestamp}ms] {author_name}: {content}")
@@ -488,6 +514,70 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
     display_state(session)
 
 
+def cmd_list_accounts(session: CLISession):
+    """List all accounts in the session."""
+    if not session.accounts:
+        print("no accounts")
+        return
+
+    account_list = list(session.accounts.values())
+    for i, account in enumerate(account_list, 1):
+        selected = "*" if account.full_name == session.selected_account else " "
+        print(f"  {i}. {selected} {account.full_name}")
+
+
+def cmd_list_channels(session: CLISession):
+    """List all channels for the selected account."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+
+    if not channels:
+        print("no channels")
+        return
+
+    for i, ch in enumerate(channels, 1):
+        selected = "*" if ch['channel_id'] == session.selected_channel_id else " "
+        print(f"  {i}. {selected} #{ch['name']}")
+
+
+def cmd_list_users(session: CLISession):
+    """List all users in the network for the selected account."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+    if not account.network_id:
+        # Try to get from backend
+        network_id = get_network_id_for_peer(account.peer_id, account.peer_id, session.db)
+        if not network_id:
+            print("error: not in a network")
+            return
+    else:
+        network_id = account.network_id
+
+    all_users_group_id = network.get_all_users_group_id(network_id, account.peer_id, session.db)
+    members = group_member.list_members(all_users_group_id, account.peer_id, session.db)
+
+    if not members:
+        print("no users")
+        return
+
+    for i, member in enumerate(members, 1):
+        user_id = member.get('user_id')
+        username = get_username_for_user_id(user_id, account.peer_id, session.db)
+        print(f"  {i}. {username}")
+
+
+def cmd_time(session: CLISession):
+    """Show current simulation time."""
+    print(f"{session.current_time_ms}ms")
+
+
 def cmd_quit(session: CLISession):
     """Quit the CLI."""
     print("goodbye!")
@@ -590,6 +680,18 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "show":
             display_state(session)
 
+        elif cmd == "list-accounts":
+            cmd_list_accounts(session)
+
+        elif cmd == "list-channels":
+            cmd_list_channels(session)
+
+        elif cmd == "list-users":
+            cmd_list_users(session)
+
+        elif cmd == "time":
+            cmd_time(session)
+
         elif cmd == "help":
             print("available commands:")
             print("  new-network --name <name> --device <device>")
@@ -601,6 +703,10 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  select-channel <n>")
             print("  create-channel <name>")
             print("  create-invite")
+            print("  list-accounts")
+            print("  list-channels")
+            print("  list-users")
+            print("  time")
             print("  show")
             print("  quit")
 
