@@ -64,10 +64,12 @@ Build the CLI following the prototype:
 ### Slack-Like Interface
 The UI mimics Slack's three-section layout:
 1. **Accounts** - List of all your accounts/devices with full context (user_id, peer_id, network_id)
-2. **Sidebar** - List of users in the selected account's network
-3. **Main** - Messages with the selected user
+2. **Sidebar** - List of users (informational) + list of channels (selectable)
+3. **Main** - Messages in the selected channel
 
-Simple bulleted lists, all lowercase, no fancy formatting. Groups, channels, invites, and admin status are hidden (under the hood).
+Simple bulleted lists, all lowercase, no fancy formatting. Groups, invites, and admin status are hidden (under the hood).
+
+**Note:** DMs not yet supported - messages go to channels. Users list is informational only.
 
 ### Function-Only API Access
 The CLI will act as an API client, using ONLY the event functions from `events/` modules. This means:
@@ -96,10 +98,14 @@ ACCOUNTS:
   * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_abc123
 
 SIDEBAR (alice - desktop):
-  * alice
+  users:
+    alice
     bob
 
-MAIN (alice -> bob):
+  channels:
+    * #general
+
+MAIN (#general):
   [2000ms] alice: Hello
 ```
 

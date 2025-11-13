@@ -71,16 +71,17 @@ Note: Each tick represents one call to `tick.tick()`. With default 100ms per tic
 ### Slack-Like Interface
 The UI mimics Slack's layout with three sections shown sequentially:
 1. **Accounts** - List of all your accounts/devices (corresponds to peers internally)
-2. **Sidebar** - List of users in the selected account's network
-3. **Main** - List of messages with the selected user
+2. **Sidebar** - List of users in the network (informational) + list of channels (selectable)
+3. **Main** - List of messages in the selected channel
 
 **What's hidden (under the hood):**
 - Groups - used internally for permissions but not shown in UI
-- Channels - used internally for message organization but abstracted away
 - Invites - only displayed at creation time as command output, not persisted in UI
 - Admin status - not explicitly shown (but affects what commands are allowed)
 
-The CLI maintains ephemeral in-memory state for which account and user are currently selected.
+The CLI maintains ephemeral in-memory state for which account and channel are currently selected.
+
+**Note:** DMs are not yet supported - messages go to channels. Users list in sidebar is informational only (shows who's in the network).
 
 ### State Display Format
 Simple bulleted/nested lists, no boxes or special formatting:
@@ -93,10 +94,15 @@ ACCOUNTS:
     charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
 
 SIDEBAR (alice - desktop):
-  * alice
+  users:
+    alice
     bob
 
-MAIN (alice -> bob):
+  channels:
+    * #general
+      #random
+
+MAIN (#general):
   [32000ms] alice: Hello from Alice!
   [22000ms] bob: Hello from Bob!
 ```
@@ -105,8 +111,9 @@ The `*` indicates the currently selected item.
 
 Format notes:
 - **Accounts list**: Shows full context - `username (device) - user_id, peer_id, network_id`
-- **Sidebar**: Lists users in the network (can select to view messages)
-- **Main header**: Shows conversation participants (e.g., "alice -> bob")
+- **Sidebar users**: Informational list of users in the network (not selectable, no DMs yet)
+- **Sidebar channels**: Selectable channels - where messages go
+- **Main header**: Shows selected channel (e.g., "#general")
 - **Messages**: Just show username (e.g., "alice:") - no device name
 - All lowercase for usernames and device names
 - IDs are truncated to first 6 characters for readability
@@ -130,14 +137,19 @@ ACCOUNTS:
 > new-network --name alice --device desktop
 ✓ created network as alice
 ✓ selected account: alice (desktop)
+✓ selected channel: #general
 
 ACCOUNTS:
   * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
 SIDEBAR (alice - desktop):
-  * alice
+  users:
+    alice
 
-MAIN (alice):
+  channels:
+    * #general
+
+MAIN (#general):
   (no messages)
 
 > create-invite
@@ -149,15 +161,20 @@ ACCOUNTS:
   * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
 SIDEBAR (alice - desktop):
-  * alice
+  users:
+    alice
 
-MAIN (alice):
+  channels:
+    * #general
+
+MAIN (#general):
   (no messages)
 
 > new-account --name bob --device desktop --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
 ✓ created account: bob (desktop)
 ✓ joined network: uA2vWy
 ✓ selected account: bob (desktop)
+✓ selected channel: #general
 ⟳ auto-syncing 100 ticks...
 ✓ synced (t=12000ms -> 22000ms)
 
@@ -166,24 +183,18 @@ ACCOUNTS:
   * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (bob - desktop):
-  * alice
+  users:
+    alice
     bob
 
-MAIN (bob):
-  (no messages)
+  channels:
+    * #general
 
-> select alice
-✓ selected user: alice
-
-SIDEBAR (bob - desktop):
-  * alice
-    bob
-
-MAIN (bob -> alice):
+MAIN (#general):
   (no messages)
 
 > send "Hello from Bob!"
-✓ sent message to alice
+✓ sent message
 ⟳ auto-syncing 100 ticks...
 ✓ synced (t=22000ms -> 32000ms)
 
@@ -192,10 +203,14 @@ ACCOUNTS:
   * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (bob - desktop):
-  * alice
+  users:
+    alice
     bob
 
-MAIN (bob -> alice):
+  channels:
+    * #general
+
+MAIN (#general):
   [22000ms] bob: Hello from Bob!
 
 > switch alice
@@ -206,24 +221,18 @@ ACCOUNTS:
     bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (alice - desktop):
-  * alice
+  users:
+    alice
     bob
 
-MAIN (alice):
-  [22000ms] bob: Hello from Bob!
+  channels:
+    * #general
 
-> select bob
-✓ selected user: bob
-
-SIDEBAR (alice - desktop):
-  * alice
-  * bob
-
-MAIN (alice -> bob):
+MAIN (#general):
   [22000ms] bob: Hello from Bob!
 
 > send "Hello from Alice!"
-✓ sent message to bob
+✓ sent message
 ⟳ auto-syncing 100 ticks...
 ✓ synced (t=32000ms -> 42000ms)
 
@@ -232,10 +241,14 @@ ACCOUNTS:
     bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (alice - desktop):
-  * alice
-  * bob
+  users:
+    alice
+    bob
 
-MAIN (alice -> bob):
+  channels:
+    * #general
+
+MAIN (#general):
   [32000ms] alice: Hello from Alice!
   [22000ms] bob: Hello from Bob!
 
@@ -247,10 +260,14 @@ ACCOUNTS:
   * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (bob - desktop):
-  * alice
+  users:
+    alice
     bob
 
-MAIN (bob -> alice):
+  channels:
+    * #general
+
+MAIN (#general):
   [32000ms] alice: Hello from Alice!
   [22000ms] bob: Hello from Bob!
 
@@ -426,9 +443,11 @@ Note: Device names distinguish multiple accounts for the same user (e.g., "Alice
 ### Invites
 - `create-invite` - Create network invite (requires admin) - shows invite link immediately
 
-### Messages
-- `select <username>` - Select a user to view/send messages to
-- `send <message>` - Send message to currently selected user
+### Channels & Messages
+- `create-channel --name <name>` - Create a new channel
+- `select-channel <channel_name>` - Select a different channel
+- `send <message>` - Send message to currently selected channel
+- `list-channels` - List all channels in the current network
 - `list-users` - List all users in the current network
 
 ### Multi-Device (Linking)
@@ -475,29 +494,36 @@ Notes:
 - IDs are truncated to first 6 characters
 
 ### SIDEBAR Section
-Shows users in the selected account's network:
+Shows users in the network (informational) and channels (selectable):
 ```
 SIDEBAR (alice - desktop):
-  * alice
+  users:
+    alice
     bob
     charlie
+
+  channels:
+    * #general
+      #random
 ```
 
-Format: `[*] <username>`
+Format:
+- users: `<username>` (informational, not selectable)
+- channels: `[*] #<channel_name>` (selectable)
 
-The `*` indicates the currently selected user for messaging.
+The `*` indicates the currently selected channel for messaging.
 
 ### MAIN Section
-Shows messages with the selected user:
+Shows messages in the selected channel:
 ```
-MAIN (alice -> bob):
+MAIN (#general):
   [32000ms] alice: Hello from Alice!
   [22000ms] bob: Hello from Bob!
   [12000ms] alice: Welcome to the network!
 ```
 
 Format:
-- Header: `(<from> -> <to>)` or just `(<user>)` if viewing own messages
+- Header: `(#<channel_name>)`
 - Message: `[<timestamp_ms>] <username>: <message_content>`
 
 Messages are shown in reverse chronological order (newest first).
@@ -509,9 +535,13 @@ ACCOUNTS:
   (no accounts)
 
 SIDEBAR (alice - desktop):
-  (no users)
+  users:
+    (no users)
 
-MAIN (alice -> bob):
+  channels:
+    (no channels)
+
+MAIN (#general):
   (no messages)
 ```
 
