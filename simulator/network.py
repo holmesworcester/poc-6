@@ -8,7 +8,7 @@ Provides:
 """
 from typing import Any, Optional, Tuple
 import logging
-from core.nat import NatEngine, NatConfig
+from simulator.nat import NatEngine, NatConfig
 
 log = logging.getLogger(__name__)
 

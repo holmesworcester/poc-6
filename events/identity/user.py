@@ -4,7 +4,7 @@ import base64
 import logging
 import crypto
 import store
-from events.transit import transit_key
+from events.network import transit_key
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
@@ -86,8 +86,8 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
 
     # Auto-create prekey for sync requests (inline, following poc-5 pattern)
     # Create local prekey (local-only, has private key)
-    from events.transit import transit_prekey
-    from events.transit import transit_prekey_shared
+    from events.network import transit_prekey
+    from events.network import transit_prekey_shared
     prekey_id, prekey_private = transit_prekey.create(
         peer_id=peer_id,
         t_ms=t_ms + 1,  # Slightly later timestamp
@@ -298,7 +298,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     # 1b. Phase 5: Create transit prekey early (needed for invite.create())
     # Normally created during user.create(), but we need it before invite
-    from events.transit import transit_prekey, transit_prekey_shared
+    from events.network import transit_prekey, transit_prekey_shared
     prekey_id, prekey_private = transit_prekey.create(
         peer_id=peer_id,
         t_ms=t_ms + 5,
@@ -497,7 +497,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64 + '===')
 
         # Store the blob and create recorded event
-        from events.transit import recorded
+        from events.network import recorded
         unsafedb = create_unsafe_db(db)
         inviter_peer_shared_id = store.blob(inviter_peer_shared_blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 

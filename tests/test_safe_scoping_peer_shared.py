@@ -3,7 +3,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, peer_shared
-from events.transit import recorded
+from events.network import recorded
 import store
 
 

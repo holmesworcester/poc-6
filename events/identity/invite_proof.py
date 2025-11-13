@@ -93,7 +93,7 @@ def create(invite_id: str, mode: str, joiner_peer_shared_id: str,
     invite_proof_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 
     # Create recorded event
-    from events.transit import recorded
+    from events.network import recorded
     recorded_id = recorded.create(invite_proof_id, peer_id, t_ms, db, return_dupes=True)
 
     # Project immediately (local event)

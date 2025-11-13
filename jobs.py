@@ -81,7 +81,7 @@ class SyncSendJob(Job):
         super().__init__('sync_send', every_ms=100)  # 100ms for low-latency messaging
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.transit import sync
+        from events.network import sync
         sync.send_request_to_all(t_ms=t_ms, db=db)
         return {}
 
@@ -93,7 +93,7 @@ class SyncReceiveJob(Job):
         super().__init__('sync_receive', every_ms=100)  # 100ms for low-latency messaging
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.transit import sync
+        from events.network import sync
         sync.receive(batch_size=20, t_ms=t_ms, db=db)
         return {}
 
@@ -133,7 +133,7 @@ class TransitPrekeyReplenishmentJob(Job):
             return False
 
         # Additional check: only run if prekeys actually low
-        from events.transit.transit_prekey import MIN_TRANSIT_PREKEYS
+        from events.network.transit_prekey import MIN_TRANSIT_PREKEYS
         unsafedb = create_unsafe_db(db)
 
         peers = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -148,7 +148,7 @@ class TransitPrekeyReplenishmentJob(Job):
         return False  # All peers have enough prekeys
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.transit import transit_prekey
+        from events.network import transit_prekey
         return transit_prekey.replenish_for_all_peers(t_ms, db)
 
 
@@ -193,7 +193,7 @@ class SyncConnectSendJob(Job):
         super().__init__('sync_connect_send', every_ms=1_000)  # 1 second for fast connection establishment
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.transit import sync_connect
+        from events.network import sync_connect
         sync_connect.send_connect_to_all(t_ms=t_ms, db=db)
         return {}
 
@@ -205,7 +205,7 @@ class SyncConnectPurgeJob(Job):
         super().__init__('sync_connect_purge', every_ms=60_000)  # 1 minute
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.transit import sync_connect
+        from events.network import sync_connect
         sync_connect.purge_expired(t_ms=t_ms, db=db)
         return {}
 

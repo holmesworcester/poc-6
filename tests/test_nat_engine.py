@@ -1,6 +1,6 @@
 """Test NAT engine directly - verify mapping creation and TTL logic."""
 import pytest
-from core.nat import NatConfig, NatEngine
+from simulator.nat import NatConfig, NatEngine
 
 
 def test_nat_engine_full_cone_mode():

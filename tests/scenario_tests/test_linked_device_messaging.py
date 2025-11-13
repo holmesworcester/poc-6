@@ -15,7 +15,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, link_invite, link
-from events.group import group
+from events.group import group, group_member
 from events.content import message
 import tick
 

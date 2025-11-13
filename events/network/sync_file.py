@@ -490,7 +490,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_fil
     log.info(f"sync_file.project() sending {len(slices_to_send)} slices to requester")
 
     # Get requester's transit prekey for wrapping response slices
-    from events.transit import transit_prekey
+    from events.network import transit_prekey
     try:
         requester_prekey_dict = transit_prekey.get_transit_prekey_for_peer(requester_peer_id, recorded_by, db)
         if not requester_prekey_dict:
