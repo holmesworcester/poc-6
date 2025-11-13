@@ -861,6 +861,8 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
     # Filter events using bloom: send only events that FAIL bloom check
     # (requester doesn't have them)
     events_to_send = []
+    peer_shared_seen = 0
+    peer_shared_will_send = 0
     for row in shareable_rows:
         event_id_str = row['event_id']
         event_id_bytes = crypto.b64decode(event_id_str)
@@ -875,7 +877,19 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         else:
             log.debug(f"[SYNC_RESPONSE] skipping event_id={event_id_str[:20]}... (in_bloom)")
 
+        # Try to detect peer_shared for instrumentation
+        try:
+            evt_blob_dbg = safedb.get_shareable_blob(event_id_str)
+            evt_json_dbg = crypto.parse_json(evt_blob_dbg)
+            if evt_json_dbg.get('type') == 'peer_shared':
+                peer_shared_seen += 1
+                if not in_bloom:
+                    peer_shared_will_send += 1
+        except Exception:
+            pass
+
     log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
+    log.warning(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
 
     if len(events_to_send) == 0 and len(shareable_rows) > 0:
         log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")

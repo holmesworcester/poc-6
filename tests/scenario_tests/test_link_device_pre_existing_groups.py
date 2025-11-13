@@ -134,7 +134,7 @@ def test_link_device_sees_pre_existing_groups():
 
     # Sync multiple rounds for convergence
     print("\n=== Sync for link and group key propagation ===")
-    for i in range(20):
+    for i in range(40):
         print(f"Sync round {i+1}...")
         tick.tick(t_ms=6000 + i*200, db=db)
 

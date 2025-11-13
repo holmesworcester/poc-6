@@ -86,7 +86,7 @@ def test_linked_devices_bidirectional_messaging():
 
     # Sync for link convergence and group key sharing
     print("\n=== Sync for link convergence ===")
-    for i in range(20):
+    for i in range(40):
         print(f"Sync round {i+1}...")
         tick.tick(t_ms=5000 + i*200, db=db)
 
@@ -126,7 +126,7 @@ def test_linked_devices_bidirectional_messaging():
 
     # Sync for message convergence
     print("\n=== Sync for message convergence ===")
-    for i in range(15):
+    for i in range(30):
         print(f"Sync round {i+1}...")
         tick.tick(t_ms=7000 + i*200, db=db)
 

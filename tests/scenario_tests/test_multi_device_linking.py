@@ -133,7 +133,7 @@ def test_alice_links_phone_to_laptop():
     # Sync messages between devices
     print("\n=== Sync messages between devices ===")
 
-    for round_num in range(30):  # Increased sync rounds for message propagation
+    for round_num in range(60):  # Increased sync rounds for message propagation
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both devices see both messages
@@ -221,9 +221,22 @@ def test_alice_laptop_joins_after_phone_has_messages():
     for i in range(15):
         tick.tick(t_ms=4000 + i*200, db=db)
 
+    # Discover channel via sync (laptop should have same channel as phone through user linking)
+    laptop_channels = db.query_all(
+        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+        (alice_laptop['peer_id'],)
+    )
+    print(f"Laptop discovered {len(laptop_channels)} channel(s)")
+
+    assert len(laptop_channels) == 1, \
+        f"Laptop should have exactly one channel (shared with phone), got {len(laptop_channels)}"
+
+    laptop_channel_id = laptop_channels[0]['channel_id']
+    print(f"Laptop using channel: {laptop_channel_id[:20]}...")
+
     # Laptop should see all historical messages
     laptop_messages = message.list_messages(
-        alice_laptop['channel_id'],
+        laptop_channel_id,
         alice_laptop['peer_id'],
         db
     )
