@@ -92,22 +92,26 @@ Commands work identically in both modes:
 ```
 
 ### State Visibility
-After each command, show the three-section state display:
+After each command, show the three-section state display with numbered lists:
 ```
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_abc123
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_abc123
+  2.   bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_abc123
 
 SIDEBAR (alice - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
+    1. * #general
+    2.   #random
 
 MAIN (#general):
   [2000ms] alice: Hello
 ```
+
+Lists are numbered to enable unambiguous selection (e.g., `switch 2`, `select-channel 1`).
 
 This helps users understand:
 - What changed as a result of the command
