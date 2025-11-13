@@ -60,10 +60,11 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
 
         log.warning(f"[SYNC_CONNECT_PEER_ID] peer={peer_id[:10]}... peer_shared_id={peer_shared_id[:10]}...")
 
-        # Send connects to all known peers from THREE sources:
+        # Send connects to all known peers from FOUR sources:
         # 1. Synced peers (discovered via normal sync) - from peers_shared table
         # 2. Bootstrap peers (from invite/link acceptance) - from invite_accepteds table
         # 3. Connected peers (received sync_connect from them) - from sync_connections table
+        # 4. Linked peers (devices linked to same user) - from linked_peers table
         # This unified query enables connections before sync completes (e.g., initial join, device linking)
 
         # Query synced peers
@@ -71,18 +72,28 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
             "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
             (peer_id,)
         )
+        peers_shared_ids = [row['peer_shared_id'] for row in peer_shared_rows]
+        log.warning(f"[SYNC_CONNECT_PEERS_SHARED] peer={peer_id[:10]}... peers_shared={len(peer_shared_rows)} ids={[pid[:10]+'...' if pid else 'NULL' for pid in peers_shared_ids]}")
 
         # Query bootstrap peers (inviter from invite/link acceptance)
         bootstrap_rows = safedb.query(
             "SELECT inviter_peer_shared_id as peer_shared_id FROM invite_accepteds WHERE recorded_by = ?",
             (peer_id,)
         )
+        bootstrap_peer_ids = [row['peer_shared_id'] for row in bootstrap_rows]
+        log.warning(f"[SYNC_CONNECT_BOOTSTRAP] peer={peer_id[:10]}... bootstrap_rows={len(bootstrap_rows)} ids={[pid[:10]+'...' if pid else 'NULL' for pid in bootstrap_peer_ids]}")
 
         # Query connected peers (peers who have sent us sync_connect)
         # Only include active connections (not expired)
         connection_rows = unsafedb.query(
             "SELECT peer_shared_id FROM sync_connections WHERE last_seen_ms + ttl_ms > ?",
             (t_ms,)
+        )
+
+        # Query linked peers (devices linked to same user via link events)
+        linked_rows = safedb.query(
+            "SELECT peer_id as peer_shared_id FROM linked_peers WHERE recorded_by = ?",
+            (peer_id,)
         )
 
         # Combine and deduplicate all peer IDs
@@ -93,9 +104,11 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
             all_peer_ids.add(row['peer_shared_id'])
         for row in connection_rows:
             all_peer_ids.add(row['peer_shared_id'])
+        for row in linked_rows:
+            all_peer_ids.add(row['peer_shared_id'])
 
         all_peer_ids_list = [pid[:10] + '...' for pid in all_peer_ids]
-        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10]}... total_peers={len(all_peer_ids)} peers_shared={len(peer_shared_rows)} bootstrap={len(bootstrap_rows)} connections={len(connection_rows)} all_ids={all_peer_ids_list}")
+        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10]}... total_peers={len(all_peer_ids)} peers_shared={len(peer_shared_rows)} bootstrap={len(bootstrap_rows)} connections={len(connection_rows)} linked={len(linked_rows)} all_ids={all_peer_ids_list}")
 
         # Get invite_id if this peer used an invite to join
         invite_row = safedb.query_one(

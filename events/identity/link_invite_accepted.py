@@ -74,7 +74,19 @@ def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db
         return
 
     link_invite_event = crypto.parse_json(link_invite_blob)
-    link_public_key = crypto.b64decode(link_invite_event['link_pubkey'])
+
+    # Handle both unified invite format (invite_pubkey) and legacy (link_pubkey)
+    is_unified_invite = (link_invite_event.get('type') == 'invite' and
+                         link_invite_event.get('mode') == 'link')
+
+    if is_unified_invite:
+        # Unified invite format: use invite_pubkey
+        link_public_key = crypto.b64decode(link_invite_event['invite_pubkey'])
+        log.info(f"link_invite_accepted.project() using unified invite format (invite_pubkey)")
+    else:
+        # Legacy link_invite format: use link_pubkey
+        link_public_key = crypto.b64decode(link_invite_event['link_pubkey'])
+        log.info(f"link_invite_accepted.project() using legacy link_invite format (link_pubkey)")
 
     # Store link proof keypair in group_prekeys table (for GKS decryption)
     safedb.execute(

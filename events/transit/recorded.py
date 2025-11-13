@@ -105,6 +105,10 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
     if event_type == 'sync' and field == 'peer_id':
         return True
 
+    # sync_connect events have peer_id referencing sender's local peer (always foreign)
+    if event_type == 'sync_connect' and field == 'peer_id':
+        return True
+
     return False
 
 
@@ -143,6 +147,15 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Deletion events only depend on the creator (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
         dep_fields = ['created_by']
+    elif event_type == 'peer_shared':
+        # peer_shared events are self-signed and have no dependencies
+        # peer_id is always a foreign local dep (creator's local peer)
+        dep_fields = []
+    elif event_type == 'sync_connect':
+        # sync_connect is ephemeral and can use EITHER invite_signature OR peer_signature for auth
+        # Don't enforce semantic deps - let projection attempt auth and drop if both fail
+        # peer_id is always foreign (sender's local peer)
+        dep_fields = []
 
     missing_deps = []
 
@@ -387,7 +400,14 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if not skip_dep_check:
         missing_deps = check_deps(event_data, recorded_by, db)
         if missing_deps:
-            # Event dependencies missing - block this event for this peer
+            # Ephemeral events (transit-layer) are recurring/retryable
+            # If deps are missing, drop them - sender will retry
+            EPHEMERAL_TYPES = {'sync_connect', 'sync_request', 'sync_response', 'purge_expired'}
+            if event_type in EPHEMERAL_TYPES:
+                log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
+                return [None, recorded_id]
+
+            # Historical events - block until dependencies resolved
             requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
             log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
 

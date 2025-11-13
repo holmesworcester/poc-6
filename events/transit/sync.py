@@ -547,13 +547,14 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
         (t_ms,)
     )
 
-    log.info(f"send_requests: from_peer_id={peer_id_str[:20]}... found={len(connection_rows)}_connections")
+    connection_ids = [row['peer_shared_id'][:10] + '...' for row in connection_rows]
+    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(connection_rows)} ids={connection_ids}")
 
     for row in connection_rows:
         peer_shared_id = row['peer_shared_id']
 
         # Send sync request to this connected peer
-        log.info(f"send_requests: {peer_id_str[:20]}... -> {peer_shared_id[:20]}... mode=sync")
+        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to={peer_shared_id[:10]}...")
         send_request(peer_shared_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()

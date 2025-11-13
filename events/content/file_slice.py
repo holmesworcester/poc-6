@@ -12,6 +12,9 @@ from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
+# Disable per-slice logging during batch operations
+_batch_mode = False
+
 
 def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
            poly_tag: bytes, peer_id: str, created_by: str, t_ms: int,
@@ -34,8 +37,9 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
     Returns:
         slice_event_id (BLAKE2b-128 of event)
     """
-    log.info(f"file_slice.create() file_id={file_id}, slice_number={slice_number}, "
-             f"ciphertext_size={len(ciphertext)}B")
+    if not _batch_mode:
+        log.info(f"file_slice.create() file_id={file_id}, slice_number={slice_number}, "
+                 f"ciphertext_size={len(ciphertext)}B")
 
     # Build event structure (NO signatures, NO wrapping)
     event_data = {
@@ -55,7 +59,8 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
     # Store as plain event (no wrapping at all)
     slice_event_id = store.event(canonical, peer_id, t_ms, db)
 
-    log.info(f"file_slice.create() created slice_event_id={slice_event_id[:20]}...")
+    if not _batch_mode:
+        log.info(f"file_slice.create() created slice_event_id={slice_event_id[:20]}...")
     return slice_event_id
 
 
@@ -106,3 +111,83 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
     )
 
     log.debug(f"file_slice.project() projected slice {file_id[:20]}.../{slice_number}")
+
+
+def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
+                        created_by: str, t_ms: int, db: Any) -> int:
+    """Efficiently create many file slices in batch mode.
+
+    Uses optimized batch storage without immediate projection for massive performance gains.
+
+    Args:
+        file_id: ID of the file these slices belong to
+        slices_data: List of (slice_number, nonce, ciphertext, poly_tag) tuples
+        peer_id: Local peer creating these events
+        created_by: Shareable peer_shared_id
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Number of slices created
+    """
+    global _batch_mode
+    import store
+    from db import create_safe_db
+
+    if not slices_data:
+        return 0
+
+    # Build all event blobs upfront
+    event_blobs = []
+    for slice_number, slice_nonce, ciphertext, poly_tag in slices_data:
+        event_data = {
+            'type': 'file_slice',
+            'file_id': file_id,
+            'slice_number': slice_number,
+            'nonce': crypto.b64encode(slice_nonce),
+            'ciphertext': crypto.b64encode(ciphertext),
+            'poly_tag': crypto.b64encode(poly_tag),
+            'created_by': created_by,
+            'created_at': t_ms
+        }
+        canonical = crypto.canonicalize_json(event_data)
+        event_blobs.append(canonical)
+
+    # Store all events in bulk AND project them directly (skipping recorded.project overhead)
+    old_store_batch = store._batch_mode
+    store._batch_mode = True
+
+    try:
+        event_ids = store.batch_store_events(event_blobs, peer_id, t_ms, db)
+
+        # Project all slices efficiently (bulk insert into file_slices table)
+        safedb = create_safe_db(db, recorded_by=peer_id)
+
+        # Bulk insert all slices at once for maximum efficiency
+        for event_id, (slice_number, slice_nonce, ciphertext, poly_tag) in zip(event_ids, slices_data):
+            # Insert into file_slices table
+            safedb.execute(
+                """INSERT OR IGNORE INTO file_slices
+                   (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (file_id, slice_number, slice_nonce, ciphertext, poly_tag, event_id, peer_id, t_ms)
+            )
+
+            # Record dependency
+            safedb.execute(
+                """INSERT OR IGNORE INTO event_dependencies
+                   (child_event_id, parent_event_id, recorded_by, dependency_type)
+                   VALUES (?, ?, ?, ?)""",
+                (event_id, file_id, peer_id, 'file')
+            )
+
+        # Note: File slices don't need to be marked as shareable because:
+        # 1. They're stored as plain events (not encrypted)
+        # 2. Access control happens at the message_attachment level
+        # 3. Syncing happens via sync_file protocol which handles slice distribution
+
+        log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
+        return len(event_ids)
+
+    finally:
+        store._batch_mode = old_store_batch

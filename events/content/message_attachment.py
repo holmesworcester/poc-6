@@ -49,8 +49,13 @@ def create(peer_id: str, message_id: str, file_data: bytes,
             'attachment_event_id': attachment_event_id
         }
     """
-    log.info(f"message_attachment.create() message_id={message_id[:20]}..., "
-             f"file_size={len(file_data)}B")
+    # Only log if not a large file (to avoid spam for batch operations)
+    if len(file_data) < 10 * 1024 * 1024:  # Log for files < 10 MB
+        log.info(f"message_attachment.create() message_id={message_id[:20]}..., "
+                 f"file_size={len(file_data)}B")
+    else:
+        log.debug(f"message_attachment.create() message_id={message_id[:20]}..., "
+                  f"file_size={len(file_data)}B")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
@@ -99,24 +104,22 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     full_ciphertext = b''.join(slice_ciphertexts)
     file_id = crypto.compute_file_id(full_ciphertext)
 
-    # Step 5: Create file_slice events (now that we have file_id)
-    slice_count = 0
-    for slice_number, slice_nonce, ciphertext, poly_tag in slices_to_create:
-        file_slice.create(
-            file_id=file_id,  # Now we have the correct file_id
-            slice_number=slice_number,
-            nonce=slice_nonce,
-            ciphertext=ciphertext,
-            poly_tag=poly_tag,
-            peer_id=peer_id,
-            created_by=peer_shared_id,
-            t_ms=t_ms,
-            db=db
-        )
-        slice_count += 1
+    # Step 5: Create file_slice events in batch (now that we have file_id)
+    slice_count = file_slice.batch_create_slices(
+        file_id=file_id,
+        slices_data=slices_to_create,
+        peer_id=peer_id,
+        created_by=peer_shared_id,
+        t_ms=t_ms,
+        db=db
+    )
 
-    log.info(f"message_attachment.create() created {slice_count} slices, "
-             f"file_id={file_id[:20]}...")
+    if len(file_data) < 10 * 1024 * 1024:  # Log for files < 10 MB
+        log.info(f"message_attachment.create() created {slice_count} slices, "
+                 f"file_id={file_id[:20]}...")
+    else:
+        log.debug(f"message_attachment.create() created {slice_count} slices, "
+                  f"file_id={file_id[:20]}...")
 
     # Step 6: Compute root_hash
     root_hash = crypto.compute_root_hash(slice_ciphertexts)

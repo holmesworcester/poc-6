@@ -315,17 +315,20 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     log.info(f"link.join() extracted link_prekey_id={link_prekey_id[:20]}..., user_id={user_id[:20]}...")
 
-    # Create link_invite_accepted event FIRST to capture link URL data for event-sourcing
-    from events.identity import link_invite_accepted
-    link_invite_accepted_id = link_invite_accepted.create(
-        link_invite_id=link_invite_id,
-        link_prekey_id=link_prekey_id,
-        link_private_key=link_private_key,
+    # Create invite_accepted event FIRST to capture invite link data for event-sourcing
+    # Use the SAME invite_accepted as user.join() - this ensures the same code path
+    # and the invite_private_key is stored in group_prekeys for unsealing group_key_shared
+    from events.identity import invite_accepted
+    invite_accepted_id = invite_accepted.create(
+        invite_id=link_invite_id,
+        invite_prekey_id=link_prekey_id,
+        invite_private_key=link_private_key,
         peer_id=peer_id,
         t_ms=t_ms + 1,
-        db=db
+        db=db,
+        first_peer=None  # Not a network creator, this is device linking
     )
-    log.info(f"link.join() created link_invite_accepted_id={link_invite_accepted_id[:20]}...")
+    log.info(f"link.join() created invite_accepted_id={invite_accepted_id[:20]}...")
 
     # Create link event with proof (also creates transit prekey)
     link_id, transit_prekey_shared_id, prekey_id = create(
@@ -338,6 +341,43 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db
     )
     log.info(f"link.join() created link_id={link_id[:20]}...")
+
+    # BOOTSTRAP FIX: Send Device 2's transit_prekey_shared to Device 1 immediately
+    # This allows Device 1 to unwrap Device 2's sync_connect messages before normal sync completes
+    log.warning(f"[BOOTSTRAP_FIX] Starting bootstrap prekey send")
+    try:
+        from events.transit import transit_prekey as tp_module
+        # Get Device 1's peer_shared_id from the invite event
+        invite_event_data = crypto.parse_json(store.get(link_invite_id, create_unsafe_db(db)))
+        inviter_peer_shared_id = invite_event_data.get('inviter_peer_shared_id')
+        log.warning(f"[BOOTSTRAP_FIX] inviter_peer_shared_id={inviter_peer_shared_id[:10] if inviter_peer_shared_id else 'NONE'}...")
+
+        if inviter_peer_shared_id:
+            # Get Device 1's transit_prekey (from invite or from transit_prekeys_shared table)
+            device1_prekey = tp_module.get_transit_prekey_for_peer(inviter_peer_shared_id, peer_id, db)
+            log.warning(f"[BOOTSTRAP_FIX] device1_prekey={'found' if device1_prekey else 'NOT_FOUND'}")
+
+            if device1_prekey:
+                # Get Device 2's transit_prekey_shared blob
+                device2_prekey_shared_blob = store.get(transit_prekey_shared_id, create_unsafe_db(db))
+
+                if device2_prekey_shared_blob:
+                    # Wrap it with Device 1's prekey
+                    wrapped_prekey = crypto.wrap(device2_prekey_shared_blob, device1_prekey, db)
+
+                    # Queue for delivery to Device 1
+                    import queues
+                    queues.incoming.add(wrapped_prekey, t_ms + 4, db)
+
+                    log.warning(f"[BOOTSTRAP_FIX] ✓ Sent Device 2's transit_prekey_shared to Device 1")
+                else:
+                    log.warning(f"link.join() could not get Device 2's transit_prekey_shared blob")
+            else:
+                log.warning(f"link.join() could not get Device 1's transit_prekey")
+        else:
+            log.warning(f"link.join() no inviter_peer_shared_id in invite")
+    except Exception as e:
+        log.warning(f"link.join() failed to send transit_prekey_shared to Device 1: {e}")
 
     # Create separate invite_proof event (Phase 2: Unified Invite Primitive)
     # This proves possession of link_private_key separately from the link event
@@ -361,7 +401,7 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         'user_id': user_id,
         'network_id': network_id,
         'link_invite_id': link_invite_id,
-        'link_invite_accepted_id': link_invite_accepted_id,
+        'invite_accepted_id': invite_accepted_id,  # Now using unified invite_accepted
         'link_id': link_id,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,
