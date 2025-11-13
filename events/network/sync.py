@@ -589,7 +589,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
            WHERE can_share_peer_id = ?
              AND window_id >= ?
              AND window_id < ?
-           ORDER BY created_at ASC""",
+           ORDER BY recorded_at ASC""",
         (from_peer_id, window_min, window_max)
     )
 
@@ -843,7 +843,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
            WHERE can_share_peer_id = ?
              AND window_id >= ?
              AND window_id < ?
-           ORDER BY created_at ASC""",
+           ORDER BY recorded_at ASC""",
         (from_peer_id, window_min, window_max)
     )
     log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_shareable_events from={from_peer_id[:10]}...")

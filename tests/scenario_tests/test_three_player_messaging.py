@@ -14,7 +14,7 @@ from db import Database
 import schema
 from events.identity import user, invite, peer
 from events.content import message
-import tick
+from tests.utils import tick_helper
 
 
 def test_three_player_messaging():
@@ -52,9 +52,8 @@ def test_three_player_messaging():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(15):
-        print(f"\n=== Sync Round {i+1} ===")
-        tick.tick(t_ms=4000 + i*200, db=db)
+    print("\n=== Initial Sync ===")
+    t_ms = tick_helper.initial_sync(db, start_t_ms=4000)
 
     # NOTE: We trust that sync worked correctly.
     # Observable behavior (message delivery) will verify this below.
@@ -127,10 +126,8 @@ def test_three_player_messaging():
     print(f"Charlie created message: {charlie_msg['id'][:20]}...")
 
     # Sync messages
-    print("\n=== Sync Round 2: Message exchange ===")
-    # Need extra rounds with new timing model where messages are delivered in next tick
-    for round_num in range(20):
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+    print("\n=== Message Sync ===")
+    t_ms = tick_helper.message_sync(db, start_t_ms=t_ms + 1000)  # Start 1 second after messages created
 
     # Verify message delivery
     print("\n=== Verifying message delivery ===")

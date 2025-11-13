@@ -333,8 +333,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Mark non-local-only events as shareable (centralized marking)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_joined', 'invite_accepted', 'sync_connect'}
+    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_joined', 'invite_accepted', 'sync_connect', 'purge_expired'}
     # Note: bootstrap_complete removed in Phase 3, network_created removed in Phase 5 (no longer created, but can still project for backward compat)
+    # Note: purge_expired is local-only because each peer independently purges their own expired events
 
     should_mark_shareable = False
     if event_type:
@@ -586,6 +587,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         log.warning(f"Unblocked {len(unblocked_ids)} events after {ref_id[:20]}... became valid for peer {recorded_by[:20]}...")
         # Re-project unblocked events recursively
         project_ids(unblocked_ids, db, _recursion_depth + 1)
+        # Clean up successfully projected events from blocked queue
+        _cleanup_successfully_projected_events(unblocked_ids, recorded_by, db)
     else:
         log.debug(f"No events to unblock after {ref_id[:20]}... for peer {recorded_by[:20]}...")
 
@@ -593,6 +596,71 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='success')
 
     return [projected_id, recorded_id]
+
+
+def _cleanup_successfully_projected_events(unblocked_ids: list[str], recorded_by: str, db: Any) -> int:
+    """Delete events from blocked_events_ephemeral after successful projection.
+
+    This function implements the cleanup logic that was previously only in test utilities.
+    Events with deps_remaining=0 should be removed from the blocked queue AFTER confirming
+    they successfully projected (i.e., their ref_id is in valid_events).
+
+    Args:
+        unblocked_ids: List of recorded_ids that were just unblocked and re-projected
+        recorded_by: The peer who projected them
+        db: Database connection
+
+    Returns:
+        Number of events cleaned up from blocked_events_ephemeral
+    """
+    if not unblocked_ids:
+        return 0
+
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    cleaned_count = 0
+
+    for recorded_id in unblocked_ids:
+        try:
+            # Get the ref_id from this recorded event
+            recorded_blob = store.get(recorded_id, db)
+            if not recorded_blob:
+                continue
+
+            recorded_data = crypto.parse_json(recorded_blob)
+            ref_id = recorded_data.get('ref_id')
+            if not ref_id:
+                continue
+
+            # Check if the event successfully projected (is in valid_events)
+            is_valid = safedb.query_one(
+                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (ref_id, recorded_by)
+            )
+
+            if is_valid:
+                # Safe to delete - the event was successfully projected
+                safedb.execute(
+                    "DELETE FROM blocked_events_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
+                    (recorded_id, recorded_by)
+                )
+                # Also clean up deps table entries
+                safedb.execute(
+                    "DELETE FROM blocked_event_deps_ephemeral WHERE recorded_id = ? AND recorded_by = ?",
+                    (recorded_id, recorded_by)
+                )
+                cleaned_count += 1
+            else:
+                # Event projection failed or hasn't completed - keep it blocked for retry
+                log.debug(f"_cleanup_successfully_projected_events: event {recorded_id[:20]}... not in valid_events, keeping blocked")
+        except Exception as e:
+            log.warning(f"_cleanup_successfully_projected_events: error processing {recorded_id[:20]}...: {e}")
+            continue
+
+    if cleaned_count > 0:
+        log.info(f"_cleanup_successfully_projected_events: cleaned up {cleaned_count}/{len(unblocked_ids)} events from blocked queue")
+
+    return cleaned_count
 
 
 def create(ref_id: str, recorded_by: str, t_ms: int, db: Any, return_dupes: bool) -> str:

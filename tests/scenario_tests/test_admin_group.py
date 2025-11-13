@@ -20,6 +20,7 @@ import schema
 from events.identity import user, invite, network, peer, peer_shared
 from events.group import group_member
 from events.network import transit_prekey
+from tests.utils import tick_helper
 import tick
 import store
 import crypto
@@ -59,9 +60,8 @@ def test_admin_group_workflow():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(10):
-        print(f"\n=== Sync Round {i+1} ===")
-        tick.tick(t_ms=4000 + i*200, db=db)
+    print("\n=== Initial Sync ===")
+    t_ms = tick_helper.initial_sync(db, start_t_ms=4000)
 
     # Get admin group ID from network
     admin_group_id = network.get_admin_group_id(alice['network_id'], alice['peer_id'], db)
@@ -169,7 +169,7 @@ def test_admin_group_workflow():
     # Sync to propagate admin group membership
     print("\n=== Sync to propagate admin membership ===")
     for round_num in range(10):  # More rounds to ensure convergence
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+        tick.tick(t_ms=6000 + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
 
     # Verify both peers see Bob as admin
     print("\n=== Verify both peers see Bob as admin after sync ===")
@@ -226,8 +226,8 @@ def test_admin_group_workflow():
 
     # Sync between all three peers (need more rounds for 3-way sync)
     print("\n=== Sync to integrate Charlie ===")
-    for round_num in range(80):  # Much more rounds for 3-peer convergence with new timing model
-        tick.tick(t_ms=9000 + round_num * 100, db=db)
+    # Use convergence_sync for complete event convergence (100 rounds = ~10 seconds)
+    tick_helper.convergence_sync(db, start_t_ms=9000)
 
     # Verify Charlie can see both Alice and Bob as admins
     print("\n=== Verify Charlie sees both Alice and Bob as admins ===")
@@ -320,7 +320,7 @@ def test_admin_group_workflow():
     # Sync the rogue invite to Alice (who should reject it)
     print("\n=== Syncing rogue invite to Alice ===")
     for round_num in range(10):
-        tick.tick(t_ms=12000 + round_num * 100, db=db)
+        tick.tick(t_ms=12000 + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
 
     # Verify Alice rejected the rogue invite (should not be in her invites table)
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])

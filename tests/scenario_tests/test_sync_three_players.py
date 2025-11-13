@@ -11,6 +11,7 @@ import sqlite3
 from db import Database
 import schema
 from events.identity import user, invite, peer
+from tests.utils import tick_helper
 import tick
 
 
@@ -66,10 +67,11 @@ def test_sync_three_players_convergence():
 
     # Run sync to convergence
     print("\n=== Running Sync ===")
-    max_rounds = 150  # Increased for job-based tick system and new network sim timing
+    start_t_ms = 4000
+    max_rounds = tick_helper.CONVERGENCE_ROUNDS  # ~10 seconds for complete convergence
     for round_num in range(max_rounds):
         # Run one tick cycle (send + receive)
-        tick.tick(t_ms=4000 + round_num * 100, db=db)
+        tick.tick(t_ms=start_t_ms + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
 
         # Check Bob's progress
         bob_shareable_now = set(row['event_id'] for row in db.query(
@@ -161,12 +163,48 @@ def test_sync_three_players_convergence():
     if missing_from_bob:
         print(f"\n⚠️  Bob is missing {len(missing_from_bob)} of Alice's shareable events:")
         for event_id in list(missing_from_bob)[:5]:  # Show first 5
-            print(f"  - {event_id[:20]}...")
+            # Get event type from store table
+            import json
+            store_row = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
+            event_type = 'unknown'
+            if store_row:
+                try:
+                    data = json.loads(store_row['blob'])
+                    event_type = data.get('type', 'unknown')
+                except:
+                    pass
+            print(f"  - {event_id[:20]}... (type: {event_type})")
+
+            # Check if Bob has it in blocked queue
+            blocked = db.query_one(
+                "SELECT waiting_for FROM blocked_events_ephemeral WHERE ref_id = ? AND recorded_by = ?",
+                (event_id, bob['peer_id'])
+            )
+            if blocked:
+                print(f"    → BLOCKED, waiting for: {blocked['waiting_for'][:50]}...")
 
     if missing_from_alice:
         print(f"\n⚠️  Alice is missing {len(missing_from_alice)} of Bob's shareable events:")
         for event_id in list(missing_from_alice)[:5]:  # Show first 5
-            print(f"  - {event_id[:20]}...")
+            # Get event type from store table
+            import json
+            store_row = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
+            event_type = 'unknown'
+            if store_row:
+                try:
+                    data = json.loads(store_row['blob'])
+                    event_type = data.get('type', 'unknown')
+                except:
+                    pass
+            print(f"  - {event_id[:20]}... (type: {event_type})")
+
+            # Check if Alice has it in blocked queue
+            blocked = db.query_one(
+                "SELECT waiting_for FROM blocked_events_ephemeral WHERE ref_id = ? AND recorded_by = ?",
+                (event_id, alice['peer_id'])
+            )
+            if blocked:
+                print(f"    → BLOCKED, waiting for: {blocked['waiting_for'][:50]}...")
 
     # Charlie isolation check
     # Charlie should only "have" events he's recorded (not just what's in global store)
