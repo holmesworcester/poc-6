@@ -24,33 +24,49 @@ Commands should work identically in interactive and non-interactive modes:
 - Same state display between commands
 
 ### Auto-Tick After Commands
-To simulate realistic message propagation, the CLI automatically runs sync rounds after commands that generate events:
-- **Default: 10 ticks** after commands like `send`, `create-invite`, `add-admin`, etc.
-- **Configurable**: `--auto-tick 20` to change default
-- **Disable**: `--no-auto-tick` for manual control
-- **Explicit sync**: `sync --rounds N` for additional manual ticks
+To simulate realistic message propagation, the CLI automatically runs sync ticks after commands that generate events:
+- **Default: 100 ticks** after commands like `send`, `create-invite`, `add-admin`, etc.
+- **Settable**: `set-auto-tick N` command to change the value during session
+- **Disable**: `set-auto-tick 0` for manual control
+- **Explicit sync**: `sync --ticks N` for additional manual ticks
 
-This makes the CLI more realistic without requiring constant manual syncing. The default of 10 ticks is a good starting point but may need tuning based on scenarios.
+This makes the CLI more realistic without requiring constant manual syncing. The default of 100 ticks should be enough for most scenarios to converge.
 
-Example with auto-tick (default 10):
+Example with auto-tick (default 100):
 ```
 > send "Hello"
 ✓ Sent message
-⟳ Auto-syncing 10 rounds...
-✓ Synced (t=2000ms -> 3000ms)
+⟳ Auto-syncing 100 ticks...
+✓ Synced (t=2000ms -> 12000ms)
 
 MAIN (#general):
   [2000ms] Alice: Hello
 ```
 
+Example changing auto-tick:
+```
+> set-auto-tick 20
+✓ Auto-tick set to 20 ticks
+
+> send "Hello"
+✓ Sent message
+⟳ Auto-syncing 20 ticks...
+✓ Synced (t=2000ms -> 4000ms)
+```
+
 Example with manual control:
 ```
-> send "Hello" --no-auto-tick
+> set-auto-tick 0
+✓ Auto-tick disabled
+
+> send "Hello"
 ✓ Sent message (not synced)
 
-> sync --rounds 20
-✓ Synced 20 rounds
+> sync --ticks 50
+✓ Synced 50 ticks
 ```
+
+Note: Each tick represents one call to `tick.tick()`. With default 100ms per tick, 100 ticks = 10 seconds of simulation time.
 
 ### Slack-Like Interface
 The UI mimics Slack's layout with three sections shown sequentially:
@@ -80,8 +96,8 @@ SIDEBAR (Alice - Desktop):
     #random
 
 MAIN (#general):
-  [5100ms] Bob: Hello from Bob!
-  [5000ms] Alice: Hello from Alice!
+  [22000ms] Bob: Hello from Bob!
+  [32000ms] Alice: Hello from Alice!
 ```
 
 The `*` indicates the currently selected item.
@@ -90,6 +106,7 @@ Format notes:
 - Account names show user name + device name (e.g., "Alice (Desktop)")
 - Multiple accounts can have the same user name but different device names
 - IDs are truncated to first 6 characters for readability
+- Format: `<name> (<device>) - user_<id>, network_<id>` (NOT email-like)
 
 ## Interactive Mode
 
@@ -123,8 +140,8 @@ MAIN (#general):
 
 > create-invite
 ✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
-⟳ Auto-syncing 10 rounds...
-✓ Synced (t=2000ms -> 3000ms)
+⟳ Auto-syncing 100 ticks...
+✓ Synced (t=2000ms -> 12000ms)
 
 ACCOUNTS:
   * Alice (Desktop) - user_nF7kRm, network_uA2vWy
@@ -140,8 +157,8 @@ MAIN (#general):
 ✓ Joined network: uA2vWy
 ✓ Selected account: Bob (Desktop)
 ✓ Selected channel: #general
-⟳ Auto-syncing 10 rounds...
-✓ Synced (t=3000ms -> 4000ms)
+⟳ Auto-syncing 100 ticks...
+✓ Synced (t=12000ms -> 22000ms)
 
 ACCOUNTS:
     Alice (Desktop) - user_nF7kRm, network_uA2vWy
@@ -155,8 +172,8 @@ MAIN (#general):
 
 > send "Hello from Bob!"
 ✓ Sent message
-⟳ Auto-syncing 10 rounds...
-✓ Synced (t=5100ms -> 6100ms)
+⟳ Auto-syncing 100 ticks...
+✓ Synced (t=22000ms -> 32000ms)
 
 ACCOUNTS:
     Alice (Desktop) - user_nF7kRm, network_uA2vWy
@@ -166,7 +183,7 @@ SIDEBAR (Bob - Desktop):
   * #general
 
 MAIN (#general):
-  [5100ms] Bob: Hello from Bob!
+  [22000ms] Bob: Hello from Bob!
 
 > switch Alice
 ✓ Selected account: Alice (Desktop)
@@ -179,12 +196,12 @@ SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
-  [5100ms] Bob: Hello from Bob!
+  [22000ms] Bob: Hello from Bob!
 
 > send "Hello from Alice!"
 ✓ Sent message
-⟳ Auto-syncing 10 rounds...
-✓ Synced (t=6200ms -> 7200ms)
+⟳ Auto-syncing 100 ticks...
+✓ Synced (t=32000ms -> 42000ms)
 
 ACCOUNTS:
   * Alice (Desktop) - user_nF7kRm, network_uA2vWy
@@ -194,8 +211,8 @@ SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
-  [6200ms] Alice: Hello from Alice!
-  [5100ms] Bob: Hello from Bob!
+  [32000ms] Alice: Hello from Alice!
+  [22000ms] Bob: Hello from Bob!
 
 > switch Bob
 ✓ Selected account: Bob (Desktop)
@@ -208,8 +225,8 @@ SIDEBAR (Bob - Desktop):
   * #general
 
 MAIN (#general):
-  [6200ms] Alice: Hello from Alice!
-  [5100ms] Bob: Hello from Bob!
+  [32000ms] Alice: Hello from Alice!
+  [22000ms] Bob: Hello from Bob!
 
 > list-accounts
 ACCOUNTS:
@@ -225,8 +242,8 @@ ACCOUNT: Alice (Desktop)
   Channels: #general
 
   #general:
-    [6200ms] Alice: Hello from Alice!
-    [5100ms] Bob: Hello from Bob!
+    [32000ms] Alice: Hello from Alice!
+    [22000ms] Bob: Hello from Bob!
 
 ACCOUNT: Bob (Desktop)
   Network: uA2vWy
@@ -234,8 +251,8 @@ ACCOUNT: Bob (Desktop)
   Channels: #general
 
   #general:
-    [6200ms] Alice: Hello from Alice!
-    [5100ms] Bob: Hello from Bob!
+    [32000ms] Alice: Hello from Alice!
+    [22000ms] Bob: Hello from Bob!
 
 > quit
 Goodbye!
@@ -266,7 +283,7 @@ $ ./cli.py \
 ✓ Selected channel: #general
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
+  * Alice - alice, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -278,7 +295,7 @@ MAIN (#general):
 ✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
+  * Alice - alice, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -293,8 +310,8 @@ MAIN (#general):
 ✓ Selected channel: #general
 
 ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
+    Alice - alice, network_uA2vWy
+  * Bob - bob, network_uA2vWy
 
 SIDEBAR (Bob):
   * #general
@@ -302,12 +319,12 @@ SIDEBAR (Bob):
 MAIN (#general):
   (no messages)
 
-[4] sync --rounds 15
-✓ Synced 15 rounds (t=4000ms -> 7000ms)
+[4] sync --ticks 15
+✓ Synced 15 ticks (t=4000ms -> 7000ms)
 
 ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
+    Alice - alice, network_uA2vWy
+  * Bob - bob, network_uA2vWy
 
 SIDEBAR (Bob):
   * #general
@@ -319,8 +336,8 @@ MAIN (#general):
 ✓ Sent message
 
 ACCOUNTS:
-    Alice - alice@network_uA2vWy
-  * Bob - bob@network_uA2vWy
+    Alice - alice, network_uA2vWy
+  * Bob - bob, network_uA2vWy
 
 SIDEBAR (Bob):
   * #general
@@ -332,8 +349,8 @@ MAIN (#general):
 ✓ Selected account: Alice
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
+  * Alice - alice, network_uA2vWy
+    Bob - bob, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -345,8 +362,8 @@ MAIN (#general):
 ✓ Sent message
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
+  * Alice - alice, network_uA2vWy
+    Bob - bob, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -354,12 +371,12 @@ SIDEBAR (Alice):
 MAIN (#general):
   [5000ms] Alice: Hello from Alice!
 
-[8] sync --rounds 20
-✓ Synced 20 rounds (t=7000ms -> 11000ms)
+[8] sync --ticks 20
+✓ Synced 20 ticks (t=7000ms -> 11000ms)
 
 ACCOUNTS:
-  * Alice - alice@network_uA2vWy
-    Bob - bob@network_uA2vWy
+  * Alice - alice, network_uA2vWy
+    Bob - bob, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -421,7 +438,8 @@ Note: Linked devices share the same user_id but have different device names (e.g
 - `list-admins` - List admin users
 
 ### Sync & State
-- `sync --rounds <n>` - Run n sync rounds (calls `tick.tick()` n times)
+- `sync --ticks <n>` - Run n sync ticks (calls `tick.tick()` n times)
+- `set-auto-tick <n>` - Set the number of auto-ticks after event commands (0 to disable)
 - `show` - Show current account's state (accounts + sidebar + main)
 - `show-all` - Show all accounts' states
 - `time` - Show current simulation time
@@ -636,6 +654,7 @@ class CLISession:
         self.selected_account = None  # Currently selected account name
         self.selected_channel = None  # Currently selected channel name
         self.current_time_ms = 0
+        self.auto_tick_count = 100  # Number of auto-ticks after event commands (default 100)
         self.last_invite_link = None  # Internal only - for --join-with-last-invite convenience
         self.last_link_url = None     # Internal only - for --with-last-link convenience
 
@@ -872,14 +891,14 @@ new-network --name Alice
 create-invite
 new-account --name Bob --join-with-last-invite
 new-network --name Charlie
-sync --rounds 15
+sync --ticks 15
 switch Bob
 send "Hello from Bob!"
 switch Alice
 send "Hello from Alice!"
 switch Charlie
 send "Hello from Charlie!"
-sync --rounds 20
+sync --ticks 20
 show-all
 
 # Assertions (checked automatically)

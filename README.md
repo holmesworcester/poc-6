@@ -93,9 +93,9 @@ Commands work identically in both modes:
 After each command, show the three-section state display:
 ```
 ACCOUNTS:
-  * Alice - alice@network_abc123
+  * Alice (Desktop) - user_nF7kRm, network_abc123
 
-SIDEBAR (Alice):
+SIDEBAR (Alice - Desktop):
   * #general
 
 MAIN (#general):
@@ -151,7 +151,7 @@ This should be implemented before or during CLI development.
 
 Before implementation, we should discuss:
 
-1. **Auto-tick configuration** - Is default 10 rounds good? Should it be 20?
+1. **Auto-tick configuration** - Default is now 100 ticks, settable via `set-auto-tick` command
 2. **Command syntax preferences** - Are the current command names intuitive?
 3. **Priority order** - Which commands should we implement first?
 4. **Testing approach** - Should CLI tests replace/augment scenario tests, or coexist?
