@@ -215,7 +215,6 @@ JOBS = [
     SyncConnectSendJob(),
     SyncReceiveJob(),
     SyncSendJob(),
-    SyncReceiveJob(),  # Run receive again after send
     SyncConnectPurgeJob(),
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),

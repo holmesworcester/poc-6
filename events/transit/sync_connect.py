@@ -37,6 +37,7 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
     unsafedb = create_unsafe_db(db)
     local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
 
+    log.info(f"sync_connect.send_connect_to_all: found {len(local_peer_rows)} local peers at t_ms={t_ms}")
     log.debug(f"sync_connect: sending from {len(local_peer_rows)} local peers")
 
     for peer_row in local_peer_rows:
@@ -66,25 +67,54 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
             log.debug(f"sync_connect: skipping peer {peer_id[:20]}... (no peer_shared_id)")
             continue
 
-        # Send connects to all known peers (from peers_shared table)
+        # Send connects to all known peers from THREE sources:
+        # 1. Synced peers (discovered via normal sync) - from peers_shared table
+        # 2. Bootstrap peers (from invite/link acceptance) - from invite_accepteds table
+        # 3. Connected peers (received sync_connect from them) - from sync_connections table
+        # This unified query enables connections before sync completes (e.g., initial join, device linking)
+
+        # Query synced peers
         peer_shared_rows = safedb.query(
             "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
             (peer_id,)
         )
 
-        for row in peer_shared_rows:
-            to_peer_shared_id = row['peer_shared_id']
+        # Query bootstrap peers (inviter from invite/link acceptance)
+        bootstrap_rows = safedb.query(
+            "SELECT inviter_peer_shared_id as peer_shared_id FROM invite_accepteds WHERE recorded_by = ?",
+            (peer_id,)
+        )
 
+        # Query connected peers (peers who have sent us sync_connect)
+        # Only include active connections (not expired)
+        connection_rows = unsafedb.query(
+            "SELECT peer_shared_id FROM sync_connections WHERE last_seen_ms + ttl_ms > ?",
+            (t_ms,)
+        )
+
+        # Combine and deduplicate all peer IDs
+        all_peer_ids = set()
+        for row in peer_shared_rows:
+            all_peer_ids.add(row['peer_shared_id'])
+        for row in bootstrap_rows:
+            all_peer_ids.add(row['peer_shared_id'])
+        for row in connection_rows:
+            all_peer_ids.add(row['peer_shared_id'])
+
+        log.info(f"sync_connect: peer {peer_id[:20]}... found {len(all_peer_ids)} total peers (peers_shared={len(peer_shared_rows)}, bootstrap={len(bootstrap_rows)}, connections={len(connection_rows)})")
+
+        # Get invite_id if this peer used an invite to join
+        invite_row = safedb.query_one(
+            "SELECT invite_id FROM invite_accepteds WHERE recorded_by = ? LIMIT 1",
+            (peer_id,)
+        )
+        invite_id = invite_row['invite_id'] if invite_row else None
+
+        # Send connect to each known peer
+        for to_peer_shared_id in all_peer_ids:
             # Skip self
             if to_peer_shared_id == peer_shared_id:
                 continue
-
-            # Get invite_id if this peer used an invite to join
-            invite_row = safedb.query_one(
-                "SELECT invite_id FROM invite_accepteds WHERE recorded_by = ? LIMIT 1",
-                (peer_id,)
-            )
-            invite_id = invite_row['invite_id'] if invite_row else None
 
             try:
                 send_connect(
@@ -203,12 +233,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
 
     event_data = crypto.parse_json(blob)
 
-    # Verify peer signature
-    try:
-        crypto.verify_signed_by_peer_shared(event_data, recorded_by, db)
-    except Exception as e:
-        log.warning(f"sync_connect.project: peer signature verification failed: {e}")
-        return
+    # Authentication strategy:
+    # 1. If invite_signature present: verify invite signature (proves link ownership)
+    # 2. Otherwise: verify peer signature (requires peer_shared to be valid)
+    # This allows linkers to connect before their peer_shared is synced to inviter
 
     # ENFORCEMENT: Reject connections from removed peers
     peer_shared_id = event_data.get('created_by')
@@ -218,14 +246,15 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
             (peer_shared_id,)
         )
         if removed_check:
-            log.info(f"sync_connect.project: rejecting connection from removed peer {peer_shared_id[:20]}...")
+            log.info(f"sync_connect.project(): rejecting connection from removed peer {peer_shared_id[:20]}...")
             return
 
-    # Verify invite signature if present
-    if event_data.get('invite_id') and event_data.get('invite_signature'):
-        invite_id = event_data['invite_id']
-        invite_signature_b64 = event_data['invite_signature']
+    invite_id = event_data.get('invite_id')
+    invite_signature_b64 = event_data.get('invite_signature')
+    invite_authenticated = False
 
+    # Try invite signature first (for linkers connecting to inviter)
+    if invite_id and invite_signature_b64:
         # Get invite public key
         invite_blob = store.get(invite_id, unsafedb)
         if invite_blob:
@@ -238,14 +267,24 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
                 sig_data = json.dumps(connect_without_sig, sort_keys=True).encode()
                 invite_signature = crypto.b64decode(invite_signature_b64)
 
-                if not crypto.verify(sig_data, invite_signature, invite_public_key):
+                if crypto.verify(sig_data, invite_signature, invite_public_key):
+                    log.info(f"sync_connect.project: ✓ invite signature verified for {invite_id[:20]}...")
+                    invite_authenticated = True
+                else:
                     log.warning(f"sync_connect.project: invite signature verification failed")
                     return
-
-                log.debug(f"sync_connect.project: invite signature verified for {invite_id[:20]}...")
             except Exception as e:
                 log.warning(f"sync_connect.project: invite signature check failed: {e}")
-                # Continue anyway - invite auth is opportunistic
+                return
+
+    # If no invite auth, fall back to peer signature verification
+    if not invite_authenticated:
+        try:
+            crypto.verify_signed_by_peer_shared(event_data, recorded_by, db)
+            log.debug(f"sync_connect.project: ✓ peer signature verified")
+        except Exception as e:
+            log.warning(f"sync_connect.project: peer signature verification failed: {e}")
+            return
 
     # Extract connection info (peer_shared_id already extracted above for removal check)
     response_transit_key_id = event_data.get('response_transit_key_id')
