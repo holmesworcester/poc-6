@@ -3,6 +3,14 @@ Scenario test: Disappearing messages - messages expire and are purged at the rig
 
 Tests realistic disappearing message scenarios using API-style commands and queries only.
 No direct database inspection - all verification via returned data and query functions.
+
+The disappearing messages feature:
+1. Channels have configurable TTLs (disappearing_time_ms)
+2. Messages expire at created_at + disappearing_time_ms
+3. Admins can update channel TTL via channel_update events
+4. New messages inherit current channel TTL (lazy calculation)
+5. Expired messages are automatically purged
+6. Multi-peer convergence: all peers see same expiration times
 """
 import sqlite3
 from db import Database
