@@ -92,93 +92,91 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
     # This is tricky because ttl_ms is in projection tables, not in store
     # Strategy: check projection tables for expired events, then delete from store
 
+    # Table-driven configuration for querying expired items
+    PURGEABLE_TABLES = [
+        {
+            'table': 'messages',
+            'id_col': 'message_id',
+            'db': 'safe',
+            'name': 'messages',
+            'has_key_id': True,  # Special handling for forward secrecy
+        },
+        {
+            'table': 'transit_prekeys',
+            'id_col': 'transit_prekey_id',
+            'db': 'unsafe',  # Device-wide, not subjective
+            'name': 'transit prekeys',
+        },
+        {
+            'table': 'group_prekeys',
+            'id_col': 'prekey_id',
+            'db': 'safe',
+            'name': 'group prekeys',
+        },
+        {
+            'table': 'transit_prekeys_shared',
+            'id_col': 'transit_prekey_shared_id',
+            'db': 'safe',
+            'name': 'transit_prekeys_shared',
+        },
+        {
+            'table': 'group_prekeys_shared',
+            'id_col': 'group_prekey_shared_id',
+            'db': 'safe',
+            'name': 'group_prekeys_shared',
+        },
+        {
+            'table': 'message_rekeys',
+            'id_col': 'rekey_id',
+            'db': 'safe',
+            'name': 'message_rekeys',
+        },
+    ]
+
     expired_event_ids = []
 
-    # Check messages table
-    messages_with_ttl = safedb.query(
-        """SELECT DISTINCT message_id, key_id FROM messages
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    expired_message_ids = [row['message_id'] for row in messages_with_ttl]
-    expired_event_ids.extend(expired_message_ids)
+    # Query expired items from each table
+    for config in PURGEABLE_TABLES:
+        table_db = safedb if config['db'] == 'safe' else unsafedb
+        table = config['table']
+        id_col = config['id_col']
+        name = config['name']
 
-    # Mark encryption keys for purging (forward secrecy)
-    for row in messages_with_ttl:
-        if row['key_id']:
-            try:
-                safedb.execute(
-                    """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
-                       VALUES (?, ?, ?)""",
-                    (row['key_id'], recorded_at, recorded_by)
-                )
-                log.debug(f"purge_expired.project() marked key {row['key_id'][:20]}... for purging (expired message)")
-            except Exception as e:
-                log.warning(f"purge_expired.project() failed to mark key for purging: {e}")
+        # Build query based on whether table is scoped by recorded_by
+        if config['db'] == 'safe':
+            # Special handling for messages to get key_id for forward secrecy
+            if config.get('has_key_id'):
+                query = f"""SELECT DISTINCT {id_col}, key_id FROM {table}
+                           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?"""
+                rows = table_db.query(query, (recorded_by, cutoff_ms))
 
-    log.info(f"purge_expired.project() found {len(messages_with_ttl)} expired messages, marked {len([r for r in messages_with_ttl if r['key_id']])} keys for purging")
+                # Mark encryption keys for purging (forward secrecy)
+                for row in rows:
+                    if row.get('key_id'):
+                        try:
+                            safedb.execute(
+                                """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
+                                   VALUES (?, ?, ?)""",
+                                (row['key_id'], recorded_at, recorded_by)
+                            )
+                            log.debug(f"purge_expired.project() marked key {row['key_id'][:20]}... for purging (expired message)")
+                        except Exception as e:
+                            log.warning(f"purge_expired.project() failed to mark key for purging: {e}")
 
-    # Check message_attachments table
-    attachments_with_ttl = safedb.query(
-        """SELECT DISTINCT message_id FROM message_attachments
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    # Note: message_attachment_id might not be trackable, so we mark by message_id
-    # In practice, deleting the message will cascade delete attachments
+                keys_marked = len([r for r in rows if r.get('key_id')])
+                log.info(f"purge_expired.project() found {len(rows)} expired {name}, marked {keys_marked} keys for purging")
+            else:
+                query = f"""SELECT {id_col} FROM {table}
+                           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?"""
+                rows = table_db.query(query, (recorded_by, cutoff_ms))
+                log.info(f"purge_expired.project() found {len(rows)} expired {name}")
+        else:
+            # Unsafe tables are not scoped by recorded_by
+            query = f"SELECT {id_col} FROM {table} WHERE ttl_ms > 0 AND ttl_ms <= ?"
+            rows = table_db.query(query, (cutoff_ms,))
+            log.info(f"purge_expired.project() found {len(rows)} expired {name}")
 
-    # Check file_slices table (no separate files table, just slices)
-    slices_with_ttl = safedb.query(
-        """SELECT DISTINCT file_id FROM file_slices
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    # Slices are cleaned up by their file, no need to track separately
-
-    # Check transit prekeys (device-wide, not subjective)
-    transit_prekeys_with_ttl = unsafedb.query(
-        """SELECT transit_prekey_id FROM transit_prekeys
-           WHERE ttl_ms > 0 AND ttl_ms <= ?""",
-        (cutoff_ms,)
-    )
-    expired_event_ids.extend([row['transit_prekey_id'] for row in transit_prekeys_with_ttl])
-    log.info(f"purge_expired.project() found {len(transit_prekeys_with_ttl)} expired transit prekeys")
-
-    # Check group prekeys (subjective)
-    group_prekeys_with_ttl = safedb.query(
-        """SELECT prekey_id FROM group_prekeys
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    expired_event_ids.extend([row['prekey_id'] for row in group_prekeys_with_ttl])
-    log.info(f"purge_expired.project() found {len(group_prekeys_with_ttl)} expired group prekeys")
-
-    # Check transit_prekeys_shared (subjective)
-    transit_shared_with_ttl = safedb.query(
-        """SELECT transit_prekey_shared_id FROM transit_prekeys_shared
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    expired_event_ids.extend([row['transit_prekey_shared_id'] for row in transit_shared_with_ttl])
-    log.info(f"purge_expired.project() found {len(transit_shared_with_ttl)} expired transit_prekeys_shared")
-
-    # Check group_prekeys_shared (subjective)
-    group_shared_with_ttl = safedb.query(
-        """SELECT group_prekey_shared_id FROM group_prekeys_shared
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    expired_event_ids.extend([row['group_prekey_shared_id'] for row in group_shared_with_ttl])
-    log.info(f"purge_expired.project() found {len(group_shared_with_ttl)} expired group_prekeys_shared")
-
-    # Check message_rekeys
-    rekeys_with_ttl = safedb.query(
-        """SELECT rekey_id FROM message_rekeys
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-    expired_event_ids.extend([row['rekey_id'] for row in rekeys_with_ttl])
-    log.info(f"purge_expired.project() found {len(rekeys_with_ttl)} expired message_rekeys")
+        expired_event_ids.extend([row[id_col] for row in rows])
 
     # Deduplicate
     expired_event_ids = list(set(expired_event_ids))
@@ -194,61 +192,27 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
 
     log.info(f"purge_expired.project() deleted {len(expired_event_ids)} expired events from store")
 
-    # Also delete from projection tables
-    # Messages
-    safedb.execute(
-        """DELETE FROM messages
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
+    # Also delete from projection tables (table-driven)
+    # Add message_attachments and file_slices to the list for deletion
+    PROJECTION_TABLES_TO_CLEAN = PURGEABLE_TABLES + [
+        {'table': 'message_attachments', 'db': 'safe', 'name': 'message_attachments'},
+        {'table': 'file_slices', 'db': 'safe', 'name': 'file_slices'},
+    ]
 
-    # Message attachments
-    safedb.execute(
-        """DELETE FROM message_attachments
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
+    for config in PROJECTION_TABLES_TO_CLEAN:
+        table_db = safedb if config['db'] == 'safe' else unsafedb
+        table = config['table']
 
-    # File slices (no separate files table)
-    safedb.execute(
-        """DELETE FROM file_slices
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-
-    # Transit prekeys (device-wide, not scoped by recorded_by)
-    unsafedb.execute(
-        "DELETE FROM transit_prekeys WHERE ttl_ms > 0 AND ttl_ms <= ?",
-        (cutoff_ms,)
-    )
-
-    # Group prekeys
-    safedb.execute(
-        """DELETE FROM group_prekeys
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-
-    # Transit prekeys shared
-    safedb.execute(
-        """DELETE FROM transit_prekeys_shared
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-
-    # Group prekeys shared
-    safedb.execute(
-        """DELETE FROM group_prekeys_shared
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
-
-    # Message rekeys
-    safedb.execute(
-        """DELETE FROM message_rekeys
-           WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?""",
-        (recorded_by, cutoff_ms)
-    )
+        if config['db'] == 'safe':
+            table_db.execute(
+                f"DELETE FROM {table} WHERE recorded_by = ? AND ttl_ms > 0 AND ttl_ms <= ?",
+                (recorded_by, cutoff_ms)
+            )
+        else:
+            table_db.execute(
+                f"DELETE FROM {table} WHERE ttl_ms > 0 AND ttl_ms <= ?",
+                (cutoff_ms,)
+            )
 
     # Mark the purge_expired event itself as valid (it has no TTL)
     safedb.execute(

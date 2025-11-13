@@ -475,6 +475,89 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 # ===== Wrap/Unwrap Functions =====
 
 
+def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
+                   key_lookup_fn, block_on_missing: bool,
+                   namespace_name: str) -> tuple[bytes | None, list[str]]:
+    """Internal helper for unwrapping blobs. Consolidates duplicate code.
+
+    Args:
+        wrapped_blob: Encrypted blob to unwrap
+        recorded_by: Peer ID attempting to unwrap (for access control)
+        db: Database connection
+        key_lookup_fn: Function to look up key by ID (namespace-specific)
+        block_on_missing: If True, return [key_id] on missing key; if False, return []
+        namespace_name: Name for logging (e.g., "transit", "event", "both")
+
+    Returns tuple of (plaintext, missing_key_ids).
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    log.debug(f"crypto._unwrap_common({namespace_name}) called with blob size={len(wrapped_blob)}B, recorded_by={recorded_by[:20]}...")
+
+    # Check if blob is plaintext JSON (starts with '{' or '[')
+    if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
+        try:
+            # Verify it's valid JSON
+            json.loads(wrapped_blob.decode('utf-8'))
+            log.debug(f"crypto._unwrap_common({namespace_name}) blob is plaintext JSON, returning as-is")
+            return (wrapped_blob, [])
+        except Exception:
+            # Not valid JSON, continue with decrypt attempt
+            pass
+
+    # Extract id from blob
+    try:
+        id_bytes = extract_id(wrapped_blob)
+        key_id_b64 = b64encode(id_bytes)
+        log.debug(f"crypto._unwrap_common({namespace_name}) extracted key_id={key_id_b64}")
+    except Exception as e:
+        log.error(f"crypto._unwrap_common({namespace_name}) failed to extract id from blob: {e}")
+        return (None, [])
+
+    # Get the key using the namespace-specific lookup function
+    key_data = key_lookup_fn(id_bytes, recorded_by, db)
+    if not key_data:
+        key_id_b64 = b64encode(id_bytes)
+        if block_on_missing:
+            log.warning(f"crypto._unwrap_common({namespace_name}) key not found for id={key_id_b64} (will block until key arrives)")
+            return (None, [key_id_b64])
+        else:
+            log.warning(f"crypto._unwrap_common({namespace_name}) key not found for id={key_id_b64} (dropping for DoS protection)")
+            return (None, [])
+
+    # Extract the encrypted portion (after the id)
+    id_length = len(id_bytes)
+    encrypted_data = wrapped_blob[id_length:]
+
+    # Determine if symmetric or asymmetric based on key_data type
+    key_type = key_data.get('type') if isinstance(key_data, dict) else None
+    log.debug(f"crypto._unwrap_common({namespace_name}) key_type={key_type}, encrypted_data_size={len(encrypted_data)}B")
+
+    # Decrypt/unseal
+    try:
+        if key_type == 'symmetric':
+            # Symmetric decryption: extract nonce + ciphertext
+            nonce = encrypted_data[:NONCE_SIZE]
+            ciphertext = encrypted_data[NONCE_SIZE:]
+            plaintext = decrypt(ciphertext, key_data['key'], nonce)
+            log.debug(f"crypto._unwrap_common({namespace_name}) symmetric decrypt SUCCESS, plaintext_size={len(plaintext)}B")
+        elif key_type == 'asymmetric':
+            # Asymmetric unsealing
+            private_key = key_data['private_key']
+            plaintext = unseal(encrypted_data, private_key)
+            log.debug(f"crypto._unwrap_common({namespace_name}) asymmetric unseal SUCCESS, plaintext_size={len(plaintext)}B")
+        else:
+            log.error(f"crypto._unwrap_common({namespace_name}) unknown key type: {key_type}")
+            return (None, [])
+    except Exception as e:
+        log.error(f"crypto._unwrap_common({namespace_name}) decryption FAILED for id={b64encode(id_bytes)}: {e}")
+        return (None, [])
+
+    # Return decrypted bytes (caller handles JSON parsing if needed)
+    return (plaintext, [])
+
+
 def unwrap_transit(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
     """Unwrap transit-layer blob (network transport). Never blocks on missing keys.
 
@@ -492,68 +575,9 @@ def unwrap_transit(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[byte
     - If key missing: (None, []) - never blocks for DoS protection
     - If other error: (None, [])
     """
-    import logging
-    log = logging.getLogger(__name__)
-
-    log.debug(f"crypto.unwrap_transit() called with blob size={len(wrapped_blob)}B, recorded_by={recorded_by[:20]}...")
-
-    # Check if blob is plaintext JSON (starts with '{' or '[')
-    if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
-        try:
-            # Verify it's valid JSON
-            json.loads(wrapped_blob.decode('utf-8'))
-            log.debug(f"crypto.unwrap_transit() blob is plaintext JSON, returning as-is")
-            return (wrapped_blob, [])
-        except Exception:
-            # Not valid JSON, continue with decrypt attempt
-            pass
-
-    # Extract id from blob
-    try:
-        id_bytes = extract_id(wrapped_blob)
-        key_id_b64 = b64encode(id_bytes)
-        log.debug(f"crypto.unwrap_transit() extracted key_id={key_id_b64}")
-    except Exception as e:
-        log.error(f"crypto.unwrap_transit() failed to extract id from blob: {e}")
-        return (None, [])
-
-    # Get the key using the id (transit namespace only)
-    key_data = get_transit_key_by_id(id_bytes, recorded_by, db)
-    if not key_data:
-        key_id_b64 = b64encode(id_bytes)
-        log.warning(f"crypto.unwrap_transit() key not found for id={key_id_b64} (dropping for DoS protection)")
-        return (None, [])  # Never block on transit layer
-
-    # Extract the encrypted portion (after the id)
-    id_length = len(id_bytes)
-    encrypted_data = wrapped_blob[id_length:]
-
-    # Determine if symmetric or asymmetric based on key_data type
-    key_type = key_data.get('type') if isinstance(key_data, dict) else None
-    log.debug(f"crypto.unwrap_transit() key_type={key_type}, encrypted_data_size={len(encrypted_data)}B")
-
-    # Decrypt/unseal
-    try:
-        if key_type == 'symmetric':
-            # Symmetric decryption: extract nonce + ciphertext
-            nonce = encrypted_data[:NONCE_SIZE]
-            ciphertext = encrypted_data[NONCE_SIZE:]
-            plaintext = decrypt(ciphertext, key_data['key'], nonce)
-            log.debug(f"crypto.unwrap_transit() symmetric decrypt SUCCESS, plaintext_size={len(plaintext)}B")
-        elif key_type == 'asymmetric':
-            # Asymmetric unsealing
-            private_key = key_data['private_key']
-            plaintext = unseal(encrypted_data, private_key)
-            log.debug(f"crypto.unwrap_transit() asymmetric unseal SUCCESS, plaintext_size={len(plaintext)}B")
-        else:
-            log.error(f"crypto.unwrap_transit() unknown key type: {key_type}")
-            return (None, [])
-    except Exception as e:
-        log.error(f"crypto.unwrap_transit() decryption FAILED for id={b64encode(id_bytes)}: {e}")
-        return (None, [])
-
-    # Return decrypted bytes (caller handles JSON parsing if needed)
-    return (plaintext, [])
+    return _unwrap_common(wrapped_blob, recorded_by, db,
+                         get_transit_key_by_id, block_on_missing=False,
+                         namespace_name="transit")
 
 
 def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
@@ -573,68 +597,9 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes 
     - If key missing: (None, [key_id]) - blocks for convergence guarantee
     - If other error: (None, [])
     """
-    import logging
-    log = logging.getLogger(__name__)
-
-    log.debug(f"crypto.unwrap_event() called with blob size={len(wrapped_blob)}B, recorded_by={recorded_by[:20]}...")
-
-    # Check if blob is plaintext JSON (starts with '{' or '[')
-    if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
-        try:
-            # Verify it's valid JSON
-            json.loads(wrapped_blob.decode('utf-8'))
-            log.debug(f"crypto.unwrap_event() blob is plaintext JSON, returning as-is")
-            return (wrapped_blob, [])
-        except Exception:
-            # Not valid JSON, continue with decrypt attempt
-            pass
-
-    # Extract id from blob
-    try:
-        id_bytes = extract_id(wrapped_blob)
-        key_id_b64 = b64encode(id_bytes)
-        log.debug(f"crypto.unwrap_event() extracted key_id={key_id_b64}")
-    except Exception as e:
-        log.error(f"crypto.unwrap_event() failed to extract id from blob: {e}")
-        return (None, [])
-
-    # Get the key using the id (event namespace only)
-    key_data = get_event_key_by_id(id_bytes, recorded_by, db)
-    if not key_data:
-        key_id_b64 = b64encode(id_bytes)
-        log.warning(f"crypto.unwrap_event() key not found for id={key_id_b64} (should block until key arrives)")
-        return (None, [key_id_b64])  # Always block on event layer
-
-    # Extract the encrypted portion (after the id)
-    id_length = len(id_bytes)
-    encrypted_data = wrapped_blob[id_length:]
-
-    # Determine if symmetric or asymmetric based on key_data type
-    key_type = key_data.get('type') if isinstance(key_data, dict) else None
-    log.debug(f"crypto.unwrap_event() key_type={key_type}, encrypted_data_size={len(encrypted_data)}B")
-
-    # Decrypt/unseal
-    try:
-        if key_type == 'symmetric':
-            # Symmetric decryption: extract nonce + ciphertext
-            nonce = encrypted_data[:NONCE_SIZE]
-            ciphertext = encrypted_data[NONCE_SIZE:]
-            plaintext = decrypt(ciphertext, key_data['key'], nonce)
-            log.debug(f"crypto.unwrap_event() symmetric decrypt SUCCESS, plaintext_size={len(plaintext)}B")
-        elif key_type == 'asymmetric':
-            # Asymmetric unsealing
-            private_key = key_data['private_key']
-            plaintext = unseal(encrypted_data, private_key)
-            log.debug(f"crypto.unwrap_event() asymmetric unseal SUCCESS, plaintext_size={len(plaintext)}B")
-        else:
-            log.error(f"crypto.unwrap_event() unknown key type: {key_type}")
-            return (None, [])
-    except Exception as e:
-        log.error(f"crypto.unwrap_event() decryption FAILED for id={b64encode(id_bytes)}: {e}")
-        return (None, [])
-
-    # Return decrypted bytes (caller handles JSON parsing if needed)
-    return (plaintext, [])
+    return _unwrap_common(wrapped_blob, recorded_by, db,
+                         get_event_key_by_id, block_on_missing=True,
+                         namespace_name="event")
 
 
 def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
@@ -655,68 +620,9 @@ def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None
 
     Blob remains in store for future retry/recovery.
     """
-    import logging
-    log = logging.getLogger(__name__)
-
-    log.debug(f"crypto.unwrap() called with blob size={len(wrapped_blob)}B, recorded_by={recorded_by[:20]}...")
-
-    # Check if blob is plaintext JSON (starts with '{' or '[')
-    if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
-        try:
-            # Verify it's valid JSON
-            json.loads(wrapped_blob.decode('utf-8'))
-            log.debug(f"crypto.unwrap() blob is plaintext JSON, returning as-is")
-            return (wrapped_blob, [])
-        except Exception:
-            # Not valid JSON, continue with decrypt attempt
-            pass
-
-    # Extract id from blob
-    try:
-        id_bytes = extract_id(wrapped_blob)
-        key_id_b64 = b64encode(id_bytes)
-        log.debug(f"crypto.unwrap() extracted key_id={key_id_b64}")
-    except Exception as e:
-        log.error(f"crypto.unwrap() failed to extract id from blob: {e}")
-        return (None, [])
-
-    # Get the key using the id (filtered by recorded_by for access control)
-    key_data = get_key_by_id(id_bytes, recorded_by, db)
-    if not key_data:
-        key_id_b64 = b64encode(id_bytes)
-        log.warning(f"crypto.unwrap() key not found for id={key_id_b64} (will block until key arrives)")
-        return (None, [key_id_b64])
-
-    # Extract the encrypted portion (after the id)
-    id_length = len(id_bytes)
-    encrypted_data = wrapped_blob[id_length:]
-
-    # Determine if symmetric or asymmetric based on key_data type
-    key_type = key_data.get('type') if isinstance(key_data, dict) else None
-    log.debug(f"crypto.unwrap() key_type={key_type}, encrypted_data_size={len(encrypted_data)}B")
-
-    # Decrypt/unseal
-    try:
-        if key_type == 'symmetric':
-            # Symmetric decryption: extract nonce + ciphertext
-            nonce = encrypted_data[:NONCE_SIZE]
-            ciphertext = encrypted_data[NONCE_SIZE:]
-            plaintext = decrypt(ciphertext, key_data['key'], nonce)
-            log.debug(f"crypto.unwrap() symmetric decrypt SUCCESS, plaintext_size={len(plaintext)}B")
-        elif key_type == 'asymmetric':
-            # Asymmetric unsealing
-            private_key = key_data['private_key']
-            plaintext = unseal(encrypted_data, private_key)
-            log.debug(f"crypto.unwrap() asymmetric unseal SUCCESS, plaintext_size={len(plaintext)}B")
-        else:
-            log.error(f"crypto.unwrap() unknown key type: {key_type}")
-            return (None, [])
-    except Exception as e:
-        log.error(f"crypto.unwrap() decryption FAILED for id={b64encode(id_bytes)}: {e}")
-        return (None, [])
-
-    # Return decrypted bytes (caller handles JSON parsing if needed)
-    return (plaintext, [])
+    return _unwrap_common(wrapped_blob, recorded_by, db,
+                         get_key_by_id, block_on_missing=True,
+                         namespace_name="both")
 
 
 def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
