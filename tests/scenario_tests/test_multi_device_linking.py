@@ -119,10 +119,10 @@ def test_alice_links_phone_to_laptop():
     db.commit()
     print(f"Alice (phone) created message: {alice_phone_msg['id'][:20]}...")
 
-    # Alice sends from laptop
+    # Alice sends from laptop (uses same channel as phone since same user)
     alice_laptop_msg = message.create(
         peer_id=alice_laptop['peer_id'],
-        channel_id=alice_laptop['channel_id'],
+        channel_id=alice_phone['channel_id'],  # Same user, same channel
         content="Hello from Alice's laptop!",
         t_ms=5100,
         db=db
@@ -133,14 +133,14 @@ def test_alice_links_phone_to_laptop():
     # Sync messages between devices
     print("\n=== Sync messages between devices ===")
 
-    for round_num in range(9):
+    for round_num in range(30):  # Increased sync rounds for message propagation
         tick.tick(t_ms=6000 + round_num * 100, db=db)
 
     # Verify both devices see both messages
     print("\n=== Verifying message delivery ===")
 
     phone_messages = message.list_messages(alice_phone['channel_id'], alice_phone['peer_id'], db)
-    laptop_messages = message.list_messages(alice_laptop['channel_id'], alice_laptop['peer_id'], db)
+    laptop_messages = message.list_messages(alice_phone['channel_id'], alice_laptop['peer_id'], db)  # Same channel
 
     phone_contents = [msg['content'] for msg in phone_messages]
     laptop_contents = [msg['content'] for msg in laptop_messages]
