@@ -84,23 +84,23 @@ The CLI maintains ephemeral in-memory state for which account and channel are cu
 **Note:** DMs are not yet supported - messages go to channels. Users list in sidebar is informational only (shows who's in the network).
 
 ### State Display Format
-Simple bulleted/nested lists, no boxes or special formatting:
+Simple numbered lists, no boxes or special formatting:
 
 ```
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-    alice (phone) - user_nF7kRm, peer_tD5mNk, network_uA2vWy
-    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
-    charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2.   alice (phone) - user_nF7kRm, peer_tD5mNk, network_uA2vWy
+  3.   bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  4.   charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
 
 SIDEBAR (alice - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
-      #random
+    1. * #general
+    2.   #random
 
 MAIN (#general):
   [32000ms] alice: Hello from Alice!
@@ -110,9 +110,10 @@ MAIN (#general):
 The `*` indicates the currently selected item.
 
 Format notes:
+- **All lists are numbered** - items selected by number, not name (avoids ambiguity with duplicates)
 - **Accounts list**: Shows full context - `username (device) - user_id, peer_id, network_id`
-- **Sidebar users**: Informational list of users in the network (not selectable, no DMs yet)
-- **Sidebar channels**: Selectable channels - where messages go
+- **Sidebar users**: Informational list of users in the network (numbered but not selectable, no DMs yet)
+- **Sidebar channels**: Selectable channels by number - where messages go
 - **Main header**: Shows selected channel (e.g., "#general")
 - **Messages**: Just show username (e.g., "alice:") - no device name
 - All lowercase for usernames and device names
@@ -136,18 +137,18 @@ ACCOUNTS:
 ```
 > new-network --name alice --device desktop
 ✓ created network as alice
-✓ selected account: alice (desktop)
-✓ selected channel: #general
+✓ selected account #1: alice (desktop)
+✓ selected channel #1: #general
 
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
 SIDEBAR (alice - desktop):
   users:
-    alice
+    1. alice
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   (no messages)
@@ -158,14 +159,14 @@ MAIN (#general):
 ✓ synced (t=2000ms -> 12000ms)
 
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
 SIDEBAR (alice - desktop):
   users:
-    alice
+    1. alice
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   (no messages)
@@ -173,22 +174,22 @@ MAIN (#general):
 > new-account --name bob --device desktop --invite poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
 ✓ created account: bob (desktop)
 ✓ joined network: uA2vWy
-✓ selected account: bob (desktop)
+✓ selected account #2: bob (desktop)
 ✓ selected channel: #general
 ⟳ auto-syncing 100 ticks...
 ✓ synced (t=12000ms -> 22000ms)
 
 ACCOUNTS:
-    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  1.   alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2. * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (bob - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   (no messages)
@@ -199,34 +200,34 @@ MAIN (#general):
 ✓ synced (t=22000ms -> 32000ms)
 
 ACCOUNTS:
-    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  1.   alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2. * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (bob - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   [22000ms] bob: Hello from Bob!
 
-> switch alice
-✓ selected account: alice (desktop)
+> switch 1
+✓ selected account #1: alice (desktop)
 
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2.   bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (alice - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   [22000ms] bob: Hello from Bob!
@@ -237,35 +238,35 @@ MAIN (#general):
 ✓ synced (t=32000ms -> 42000ms)
 
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2.   bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (alice - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   [32000ms] alice: Hello from Alice!
   [22000ms] bob: Hello from Bob!
 
-> switch bob
-✓ selected account: bob (desktop)
+> switch 2
+✓ selected account #2: bob (desktop)
 
 ACCOUNTS:
-    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  1.   alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2. * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
 
 SIDEBAR (bob - desktop):
   users:
-    alice
-    bob
+    1. alice
+    2. bob
 
   channels:
-    * #general
+    1. * #general
 
 MAIN (#general):
   [32000ms] alice: Hello from Alice!
@@ -273,8 +274,8 @@ MAIN (#general):
 
 > list-accounts
 ACCOUNTS:
-  * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
-    alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  1. * bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  2.   alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
 
 > quit
 goodbye!
@@ -305,7 +306,7 @@ $ ./cli.py \
 ✓ Selected channel: #general
 
 ACCOUNTS:
-  * Alice - alice, network_uA2vWy
+  1. * Alice - alice, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -317,7 +318,7 @@ MAIN (#general):
 ✓ Created invite: poc6://invite/eyJpbnZpdGVfaWQiOiJ2Ujlz...
 
 ACCOUNTS:
-  * Alice - alice, network_uA2vWy
+  1. * Alice - alice, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -332,8 +333,8 @@ MAIN (#general):
 ✓ Selected channel: #general
 
 ACCOUNTS:
-    Alice - alice, network_uA2vWy
-  * Bob - bob, network_uA2vWy
+  1.   Alice - alice, network_uA2vWy
+  2. * Bob - bob, network_uA2vWy
 
 SIDEBAR (Bob):
   * #general
@@ -345,8 +346,8 @@ MAIN (#general):
 ✓ Synced 15 ticks (t=4000ms -> 7000ms)
 
 ACCOUNTS:
-    Alice - alice, network_uA2vWy
-  * Bob - bob, network_uA2vWy
+  1.   Alice - alice, network_uA2vWy
+  2. * Bob - bob, network_uA2vWy
 
 SIDEBAR (Bob):
   * #general
@@ -358,8 +359,8 @@ MAIN (#general):
 ✓ Sent message
 
 ACCOUNTS:
-    Alice - alice, network_uA2vWy
-  * Bob - bob, network_uA2vWy
+  1.   Alice - alice, network_uA2vWy
+  2. * Bob - bob, network_uA2vWy
 
 SIDEBAR (Bob):
   * #general
@@ -371,8 +372,8 @@ MAIN (#general):
 ✓ Selected account: Alice
 
 ACCOUNTS:
-  * Alice - alice, network_uA2vWy
-    Bob - bob, network_uA2vWy
+  1. * Alice - alice, network_uA2vWy
+  2.   Bob - bob, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -384,8 +385,8 @@ MAIN (#general):
 ✓ Sent message
 
 ACCOUNTS:
-  * Alice - alice, network_uA2vWy
-    Bob - bob, network_uA2vWy
+  1. * Alice - alice, network_uA2vWy
+  2.   Bob - bob, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -397,8 +398,8 @@ MAIN (#general):
 ✓ Synced 20 ticks (t=7000ms -> 11000ms)
 
 ACCOUNTS:
-  * Alice - alice, network_uA2vWy
-    Bob - bob, network_uA2vWy
+  1. * Alice - alice, network_uA2vWy
+  2.   Bob - bob, network_uA2vWy
 
 SIDEBAR (Alice):
   * #general
@@ -435,17 +436,17 @@ ACCOUNT: Bob
 ### Network & Account Management
 - `new-network --name <name> --device <device_name>` - Create a new network and first account
 - `new-account --name <name> --device <device_name> --invite <invite_link>` - Create account and join network
-- `switch <account_name>` - Switch to a different account (use full name with device, e.g., "Alice (Desktop)")
+- `switch <n>` - Switch to account #n (e.g., `switch 2` for account #2)
 - `list-accounts` - List all accounts in session with details
 
-Note: Device names distinguish multiple accounts for the same user (e.g., "Alice (Desktop)" vs "Alice (Phone)")
+Note: Device names distinguish multiple accounts for the same user (e.g., "alice (desktop)" vs "alice (phone)")
 
 ### Invites
 - `create-invite` - Create network invite (requires admin) - shows invite link immediately
 
 ### Channels & Messages
 - `create-channel --name <name>` - Create a new channel
-- `select-channel <channel_name>` - Select a different channel
+- `select-channel <n>` - Select channel #n (e.g., `select-channel 2` for channel #2)
 - `send <message>` - Send message to currently selected channel
 - `list-channels` - List all channels in the current network
 - `list-users` - List all users in the current network
@@ -476,10 +477,10 @@ Note: Linked devices share the same user_id but have different device names (e.g
 Shows all accounts in the session with selection indicator:
 ```
 ACCOUNTS:
-  * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
-    alice (phone) - user_nF7kRm, peer_tD5mNk, network_uA2vWy
-    bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
-    charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
+  1. * alice (desktop) - user_nF7kRm, peer_gBQNZX, network_uA2vWy
+  2.   alice (phone) - user_nF7kRm, peer_tD5mNk, network_uA2vWy
+  3.   bob (desktop) - user_wP8qLx, peer_hJ6tPm, network_uA2vWy
+  4.   charlie (desktop) - user_zQ9rMy, peer_kL8vRp, network_xyz789
 ```
 
 Format: `[*] <username> (<device>) - user_<id>, peer_<id>, network_<id>`
@@ -498,13 +499,13 @@ Shows users in the network (informational) and channels (selectable):
 ```
 SIDEBAR (alice - desktop):
   users:
-    alice
-    bob
-    charlie
+    1. alice
+    2. bob
+    3. charlie
 
   channels:
-    * #general
-      #random
+    1. * #general
+    2.   #random
 ```
 
 Format:
