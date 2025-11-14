@@ -59,12 +59,24 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
+    # Look up user_id for this peer_shared_id (the user event that represents this peer's membership)
+    # Note: users.peer_id column contains peer_shared_id (shareable device ID), not local peer_id
+    user_row = safedb.query_one(
+        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, peer_id)  # peer_shared_id goes into users.peer_id (misleading column name)
+    )
+    if not user_row or not user_row['user_id']:
+        raise ValueError(f"User not found for peer_shared_id {peer_shared_id}. User must join network before creating messages.")
+
+    user_id = user_row['user_id']
+
     # Build standardized event structure
     event_data = {
         'type': 'message',
         'channel_id': channel_id,
         'group_id': group_id,
-        'created_by': peer_shared_id,  # References shareable peer identity
+        'created_by': peer_shared_id,  # Device that created the event (consistent across all events)
+        'author_id': user_id,  # Person who authored the message content
         'content': content,
         'created_at': t_ms
     }
@@ -86,7 +98,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
     log.info(f"message.create() created message_id={event_id}")
 
     # Get latest messages
-    latest = list_messages(channel_id, peer_id, db)
+    latest = list(channel_id, peer_id, db)
 
     # Note: No commit here - caller owns the transaction (future API layer or tests)
 
@@ -96,7 +108,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
     }
 
 
-def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer, including attachments and author names.
 
     Returns message dicts with 'attachments' field containing list of attached files
@@ -107,8 +119,7 @@ def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, 
     messages = safedb.query(
         """SELECT m.*, u.name as author_name
            FROM messages m
-           JOIN peers_shared ps ON m.author_id = ps.peer_shared_id AND m.recorded_by = ps.recorded_by
-           JOIN users u ON ps.peer_id = u.peer_id AND ps.recorded_by = u.recorded_by
+           JOIN users u ON m.author_id = u.user_id AND m.recorded_by = u.recorded_by
            WHERE m.channel_id = ? AND m.recorded_by = ?
            ORDER BY m.created_at DESC LIMIT 50""",
         (channel_id, recorded_by)
@@ -158,20 +169,30 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     event_data = crypto.parse_json(unwrapped)
     log.info(f"message.project() projected message content='{event_data.get('content', '')[:50]}...', id={event_id}")
 
-    # Verify signature - get public key from created_by peer_shared
-    from events.identity import peer_shared
-    created_by = event_data.get('created_by')
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
-    if not crypto.verify_event(event_data, public_key):
-        return None  # Reject unsigned or invalid signature
-
     # Extract fields from event
     message_id = event_id
     channel_id = event_data.get('channel_id')
     group_id = event_data.get('group_id')
-    author_id = event_data.get('created_by')
+    author_id = event_data.get('author_id')  # user_id (person who authored)
+    created_by_peer_shared_id = event_data.get('created_by')  # peer_shared_id (device that created event)
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
+
+    # Verify author exists before projecting (dependency: message requires user)
+    user_row = safedb.query_one(
+        "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (author_id, recorded_by)
+    )
+    if not user_row:
+        # User not projected yet - block until they are
+        log.warning(f"message.project() author {author_id[:20]}... not found - blocking")
+        return None
+
+    # Verify signature using created_by peer_shared_id's public key
+    from events.identity import peer_shared
+    public_key = peer_shared.get_public_key(created_by_peer_shared_id, recorded_by, db)
+    if not crypto.verify_event(event_data, public_key):
+        return None  # Reject unsigned or invalid signature
 
     # Calculate TTL based on channel's disappearing_time_ms setting
     # Look up current channel settings to support dynamic TTL updates
@@ -224,9 +245,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(
         """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
+           (message_id, channel_id, group_id, author_id, created_by, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (message_id, channel_id, group_id, author_id, created_by_peer_shared_id, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
     )
 
     # Record dependency: message depends on channel (for cascading deletion)

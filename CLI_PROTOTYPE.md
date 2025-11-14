@@ -792,7 +792,7 @@ def display_main(session):
         return
 
     # Use event function to get messages
-    messages = message.list_messages(channel_id, account.peer_id, session.db)
+    messages = message.list(channel_id, account.peer_id, session.db)
 
     if not messages:
         print("  (no messages)")

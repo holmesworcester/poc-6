@@ -50,7 +50,7 @@ def test_alice_sends_to_herself():
     assert 'latest' in result1
     assert len(result1['latest']) == 1
     assert result1['latest'][0]['content'] == 'Hello'
-    assert result1['latest'][0]['author_id'] == alice['peer_shared_id']
+    assert result1['latest'][0]['author_id'] == alice['user_id']  # Now author_id is user_id, not peer_shared_id
 
     # Send second message
     result2 = message.create(
@@ -91,14 +91,14 @@ def test_alice_sends_to_herself():
     assert result3['latest'][0]['content'] == 'Random thoughts'
 
     # Query messages from general channel
-    general_messages = message.list_messages(alice['channel_id'], alice['peer_id'], db)
+    general_messages = message.list(alice['channel_id'], alice['peer_id'], db)
     assert len(general_messages) == 2
     assert general_messages[0]['content'] == 'World'
     assert general_messages[1]['content'] == 'Hello'
     assert all(m['channel_id'] == alice['channel_id'] for m in general_messages)
 
     # Query messages from random channel
-    random_messages = message.list_messages(random_channel_id, alice['peer_id'], db)
+    random_messages = message.list(random_channel_id, alice['peer_id'], db)
     assert len(random_messages) == 1
     assert random_messages[0]['content'] == 'Random thoughts'
     assert random_messages[0]['channel_id'] == random_channel_id

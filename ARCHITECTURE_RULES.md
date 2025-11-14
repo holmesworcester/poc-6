@@ -9,7 +9,7 @@ The CLI implementation must:
 1. **Use ONLY event functions from `events/` modules**
    - ✅ CORRECT: `user.new_network(name='Alice', t_ms=1000, db=db)`
    - ✅ CORRECT: `message.create(peer_id=..., channel_id=..., content='Hello', t_ms=2000, db=db)`
-   - ✅ CORRECT: `message.list_messages(channel_id, peer_id, db)`
+   - ✅ CORRECT: `message.list(channel_id, peer_id, db)`
    - ❌ WRONG: `db.query("SELECT * FROM messages WHERE ...")`
    - ❌ WRONG: Direct access to any projection tables
 
@@ -75,7 +75,7 @@ channel.list_channels(peer_id, db) -> list[dict]
 
 ### From `events.content.message`
 ```python
-message.list_messages(channel_id, peer_id, db) -> list[dict]
+message.list(channel_id, peer_id, db) -> list[dict]
 ```
 
 ### From `events.group.group`
@@ -158,7 +158,7 @@ Before committing any CLI code, verify:
 - [ ] All database operations are either:
   - Setup: `schema.create_all()`, `db.commit()`
   - Event functions: `user.new_network()`, `message.create()`, etc.
-  - Query functions: `message.list_messages()`, `group.list_all_groups()`, etc.
+  - Query functions: `message.list()`, `group.list_all_groups()`, etc.
 
 ## Function Discovery Guide
 

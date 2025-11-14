@@ -61,7 +61,7 @@ def test_alice_creates_disappearing_channel_and_sends_messages():
 
     # Verify message appears in list before expiry
     print("\n=== Before expiry (t=7000): message should be visible ===")
-    messages_before = message.list_messages(ephemeral_channel_id, alice['peer_id'], db)
+    messages_before = message.list(ephemeral_channel_id, alice['peer_id'], db)
     assert len(messages_before) == 1, "Should have 1 message"
     assert messages_before[0]['content'] == "This will disappear in 5 seconds"
     assert messages_before[0]['message_id'] == message_id
@@ -82,7 +82,7 @@ def test_alice_creates_disappearing_channel_and_sends_messages():
 
     # After purge, message should be gone
     print("\n=== After expiry: message should be gone ===")
-    messages_after = message.list_messages(ephemeral_channel_id, alice['peer_id'], db)
+    messages_after = message.list(ephemeral_channel_id, alice['peer_id'], db)
     assert len(messages_after) == 0, "Message should be expired and deleted"
     print("✓ Message deleted after expiry")
 
@@ -152,8 +152,8 @@ def test_alice_and_bob_see_messages_disappear_together():
     db.commit()
 
     # Both see the message
-    alice_messages = message.list_messages(channel_id, alice['peer_id'], db)
-    bob_messages = message.list_messages(channel_id, bob['peer_id'], db)
+    alice_messages = message.list(channel_id, alice['peer_id'], db)
+    bob_messages = message.list(channel_id, bob['peer_id'], db)
     assert len(alice_messages) == 1
     assert len(bob_messages) == 1
     assert alice_messages[0]['content'] == "Secret message"
@@ -167,8 +167,8 @@ def test_alice_and_bob_see_messages_disappear_together():
     db.commit()
 
     # Both should see empty message lists
-    alice_messages_after = message.list_messages(channel_id, alice['peer_id'], db)
-    bob_messages_after = message.list_messages(channel_id, bob['peer_id'], db)
+    alice_messages_after = message.list(channel_id, alice['peer_id'], db)
+    bob_messages_after = message.list(channel_id, bob['peer_id'], db)
     assert len(alice_messages_after) == 0, "Alice should see no messages after expiry"
     assert len(bob_messages_after) == 0, "Bob should see no messages after expiry"
     print("✓ Message disappeared for both Alice and Bob")
@@ -236,7 +236,7 @@ def test_channel_ttl_update_affects_new_messages():
     db.commit()
 
     # Both messages should be visible before selective expiry
-    all_messages = message.list_messages(channel_id, alice['peer_id'], db)
+    all_messages = message.list(channel_id, alice['peer_id'], db)
     assert len(all_messages) == 2, "Should have 2 messages"
     print("✓ Both messages visible")
 
@@ -247,7 +247,7 @@ def test_channel_ttl_update_affects_new_messages():
     db.commit()
 
     # Only message 1 should remain
-    remaining_messages = message.list_messages(channel_id, alice['peer_id'], db)
+    remaining_messages = message.list(channel_id, alice['peer_id'], db)
     assert len(remaining_messages) == 1, "Only message 1 should remain"
     assert remaining_messages[0]['content'] == "Message 1"
     print("✓ Message 2 expired, message 1 still exists")

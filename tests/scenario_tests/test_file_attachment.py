@@ -100,7 +100,7 @@ def test_two_party_file_attachment_and_sync():
     print(f"✓ Alice retrieved file successfully, matches original")
 
     # Verify attachment appears in message query
-    alice_messages = message.list_messages(alice['channel_id'], alice['peer_id'], db)
+    alice_messages = message.list(alice['channel_id'], alice['peer_id'], db)
     assert len(alice_messages) == 1
     assert len(alice_messages[0]['attachments']) == 1
     attachment = alice_messages[0]['attachments'][0]
@@ -169,7 +169,7 @@ def test_two_party_file_attachment_and_sync():
     print("\n=== Verify Bob received file ===")
 
     # Bob should see the message with attachment
-    bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
     print(f"Bob sees {len(bob_messages)} messages")
     assert len(bob_messages) == 1, f"Expected 1 message for Bob, got {len(bob_messages)}"
 

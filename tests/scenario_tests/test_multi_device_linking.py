@@ -159,8 +159,8 @@ def test_alice_links_phone_to_laptop():
         "Phone and laptop should share the same channel"
     print(f"✅ Both devices share channel: {phone_channel_id[:20]}...")
 
-    phone_messages = message.list_messages(phone_channel_id, alice_phone['peer_id'], db)
-    laptop_messages = message.list_messages(laptop_channel_id, alice_laptop['peer_id'], db)
+    phone_messages = message.list(phone_channel_id, alice_phone['peer_id'], db)
+    laptop_messages = message.list(laptop_channel_id, alice_laptop['peer_id'], db)
 
     phone_contents = [msg['content'] for msg in phone_messages]
     laptop_contents = [msg['content'] for msg in laptop_messages]
@@ -255,7 +255,7 @@ def test_alice_laptop_joins_after_phone_has_messages():
     print(f"Laptop using channel: {laptop_channel_id[:20]}...")
 
     # Laptop should see all historical messages
-    laptop_messages = message.list_messages(
+    laptop_messages = message.list(
         laptop_channel_id,
         alice_laptop['peer_id'],
         db
@@ -399,9 +399,9 @@ def test_three_devices_all_linked():
     print(f"✅ All devices share channel: {phone_channel_id[:20]}...")
 
     # All devices should see all three messages
-    phone_msgs = message.list_messages(phone_channel_id, alice_phone['peer_id'], db)
-    laptop_msgs = message.list_messages(laptop_channel_id, alice_laptop['peer_id'], db)
-    tablet_msgs = message.list_messages(tablet_channel_id, alice_tablet['peer_id'], db)
+    phone_msgs = message.list(phone_channel_id, alice_phone['peer_id'], db)
+    laptop_msgs = message.list(laptop_channel_id, alice_laptop['peer_id'], db)
+    tablet_msgs = message.list(tablet_channel_id, alice_tablet['peer_id'], db)
 
     print(f"Phone sees: {[m['content'] for m in phone_msgs]}")
     print(f"Laptop sees: {[m['content'] for m in laptop_msgs]}")

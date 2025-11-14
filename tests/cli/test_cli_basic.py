@@ -25,14 +25,13 @@ def run_cli(commands: str) -> subprocess.CompletedProcess:
 
 
 def extract_main_section(output: str) -> str:
-    """Extract the MAIN section content from CLI output.
+    """Extract the LAST MAIN section content from CLI output.
 
-    Returns the content between "MAIN (#...)" and the next section or end of output.
-    This ensures we're checking if messages appear in the actual display, not in
-    command echoes or other parts of the output.
+    Returns the content between the last "MAIN (#...)" and the next section or end of output.
+    This ensures we're checking the final state after all commands have been executed.
     """
-    match = re.search(r'MAIN \([^)]*\):\n(.*?)(?=\n>|\nACCOUNTS:|\nINVITES:|\Z)', output, re.DOTALL)
-    return match.group(1) if match else ""
+    matches = list(re.finditer(r'MAIN \([^)]*\):\n(.*?)(?=\n>|\nACCOUNTS:|\nINVITES:|\Z)', output, re.DOTALL))
+    return matches[-1].group(1) if matches else ""
 
 
 def test_single_user_messaging():

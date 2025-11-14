@@ -43,10 +43,10 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     admins_group_id = network_row['admins_group_id']
 
     # Get user_id for this peer_shared_id
-    # Note: users.peer_id stores the public peer_shared_id, not local peer_id
+    # Note: users.peer_id column stores peer_shared_id (shareable device ID), not local peer_id
     user_row = safedb.query_one(
         "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_shared_id, recorded_by)
+        (peer_shared_id, recorded_by)  # peer_shared_id goes into users.peer_id (misleading column name)
     )
     if not user_row:
         return False
@@ -170,12 +170,13 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
         # Get inviter's user_id for the invite event
+        # Note: users.peer_id column stores peer_shared_id (shareable device ID), not local peer_id
         inviter_user_row = safedb.query_one(
             "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-            (peer_shared_id, peer_id)
+            (peer_shared_id, peer_id)  # peer_shared_id goes into users.peer_id (misleading column name)
         )
         if not inviter_user_row:
-            raise ValueError(f"User record not found for peer {peer_id}. Cannot create invite.")
+            raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
         inviter_user_id = inviter_user_row['user_id']
     else:
         # Network creator self-invite - will become admin on join

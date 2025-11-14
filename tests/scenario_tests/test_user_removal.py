@@ -548,7 +548,7 @@ def test_removed_peer_cannot_sync_messages():
         tick.tick(t_ms=7000 + i*100, db=db)
 
     # Verify Bob received Alice's message (using public API)
-    bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
     bob_contents = [msg['content'] for msg in bob_messages]
     print(f"Bob sees {len(bob_messages)} messages: {bob_contents}")
 
@@ -593,7 +593,7 @@ def test_removed_peer_cannot_sync_messages():
     # Verify observable behavior: Bob did NOT receive Alice's post-removal message
     print("\n=== Verifying message delivery (observable behavior) ===")
 
-    bob_messages_after = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages_after = message.list(bob['channel_id'], bob['peer_id'], db)
     bob_contents_after = [msg['content'] for msg in bob_messages_after]
     print(f"Bob sees {len(bob_messages_after)} messages: {bob_contents_after}")
 
@@ -609,7 +609,7 @@ def test_removed_peer_cannot_sync_messages():
 #
 # ✓ test_removed_peer_cannot_sync_messages (REALISTIC SCENARIO TEST)
 #   - Follows three-player messaging pattern
-#   - Only uses public APIs (message.create, message.list_messages, tick.tick)
+#   - Only uses public APIs (message.create, message.list, tick.tick)
 #   - Verifies observable behavior (message delivery blocked after removal)
 #   - Proves: Removed peer cannot sync messages with network
 #   - This is the primary test showing removal enforcement works from user perspective

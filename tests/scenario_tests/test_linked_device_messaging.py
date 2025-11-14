@@ -133,7 +133,7 @@ def test_linked_devices_bidirectional_messaging():
     # Verify device 1 sees both messages
     print("\n=== Verifying device 1 sees both messages ===")
 
-    device1_messages = message.list_messages(
+    device1_messages = message.list(
         alice_device1['channel_id'],
         alice_device1['peer_id'],
         db
@@ -152,7 +152,7 @@ def test_linked_devices_bidirectional_messaging():
     # Verify device 2 sees both messages
     print("\n=== Verifying device 2 sees both messages ===")
 
-    device2_messages = message.list_messages(
+    device2_messages = message.list(
         alice_device2['channel_id'],
         alice_device2['peer_id'],
         db

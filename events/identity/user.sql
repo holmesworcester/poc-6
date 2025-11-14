@@ -1,8 +1,8 @@
 -- Schema for user events (network membership)
 -- Each peer has their own view of users they've seen
 CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT NOT NULL,
-    peer_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,              -- Event hash of user event (person identity)
+    peer_id TEXT NOT NULL,              -- MISLEADING NAME: Actually stores peer_shared_id (shareable device ID)
     name TEXT NOT NULL,
     network_id TEXT,
     created_at INTEGER NOT NULL,

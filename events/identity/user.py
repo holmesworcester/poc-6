@@ -25,8 +25,8 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     2. Network creator (Alice): Requires group_id, channel_id. No invite.
 
     Args:
-        peer_id: Local peer ID (for signing)
-        peer_shared_id: Public peer ID (for created_by and peer_id in event)
+        peer_id: Local peer ID (device-local identifier, for signing)
+        peer_shared_id: Shareable peer ID (cross-device identifier, used in created_by and event's 'peer_id' field)
         name: Display name for the user
         t_ms: Timestamp
         db: Database connection
@@ -41,9 +41,9 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     # Create base user event
     event_data = {
         'type': 'user',
-        'peer_id': peer_shared_id,  # References the public peer identity
+        'peer_id': peer_shared_id,  # MISLEADING NAME: field called 'peer_id' but contains peer_shared_id (shareable device ID)
         'name': name,
-        'created_by': peer_shared_id,
+        'created_by': peer_shared_id,  # Device that created this event (consistent across all events)
         'created_at': t_ms
     }
 
@@ -171,14 +171,14 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # Insert into users table
     safedb = create_safe_db(db, recorded_by=recorded_by)
     network_id = event_data.get('network_id')  # NEW - may be from invite or event_data
-    log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}..., peer_id={event_data['peer_id'][:20]}...")
+    log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}..., peer_shared_id={event_data['peer_id'][:20]}...")
     safedb.execute(
         """INSERT OR IGNORE INTO users
            (user_id, peer_id, name, network_id, created_at, invite_pubkey, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
-            event_data['peer_id'],
+            event_data['peer_id'],  # Event field 'peer_id' contains peer_shared_id - stored in users.peer_id column
             event_data['name'],
             network_id,  # NEW
             event_data['created_at'],
@@ -213,20 +213,23 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
                     if network_row and network_row['admins_group_id']:
                         admins_group_id = network_row['admins_group_id']
 
-                        # Create a group_member EVENT so it syncs to other peers
-                        from events.group import group_member
-                        try:
-                            member_event_id = group_member.create(
-                                group_id=admins_group_id,
-                                user_id=user_id,
-                                peer_id=recorded_by,  # Added by self (local peer_id)
-                                peer_shared_id=event_data['peer_id'],  # Creator's public peer_shared_id
-                                t_ms=recorded_at,
-                                db=db
+                        # Grant admin by directly inserting into group_members (bootstrap, no event)
+                        # Can't use group_member.create() because it checks authorization (chicken-and-egg)
+                        safedb.execute(
+                            """INSERT OR IGNORE INTO group_members
+                               (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                user_id,  # Use user_id as member_id for bootstrap membership
+                                admins_group_id,
+                                user_id,
+                                event_data['created_by'],  # Self-added (peer_shared_id)
+                                event_data['created_at'],
+                                recorded_by,
+                                recorded_at
                             )
-                            log.warning(f"[FIRST_PEER_GRANTED] user.project() granted first_peer admin via event: {member_event_id[:20]}...")
-                        except Exception as e:
-                            log.warning(f"[FIRST_PEER_GRANT_ERROR] Failed to create admin member event: {e}")
+                        )
+                        log.warning(f"[FIRST_PEER_GRANTED] user.project() granted first_peer admin directly: {user_id[:20]}...")
 
     # Add to group_members
     # For invite joiners, this is handled by invite_proof.project()

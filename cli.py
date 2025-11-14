@@ -30,7 +30,7 @@ Same constraints as scenario tests - acts like an API client.
 #    - If the CLI displays a list, the backend list function should
 #      return ALL data needed to display that list
 #    - NO additional queries per item (N+1 problem)
-#    - Example: message.list_messages() should include author_name,
+#    - Example: message.list() should include author_name,
 #      not just author_id
 #
 # 4. 📊 WHEN TO ADD BACKEND FUNCTIONS
@@ -264,13 +264,13 @@ def display_main(session: CLISession):
     print(f"MAIN (#{channel_name}):")
 
     # Get messages
-    messages = message.list_messages(session.selected_channel_id, account.peer_id, session.db)
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
     if not messages:
         print("  (no messages)")
         return
 
     for msg in messages:
-        # Author name is already in the data from list_messages()
+        # Author name is already in the data from message.list()
         author_name = msg.get('author_name', '???')
         timestamp = msg.get('created_at', 0)
         content = msg.get('content', '')
