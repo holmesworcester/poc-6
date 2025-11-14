@@ -215,12 +215,15 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
                         # Grant admin by directly inserting into group_members (bootstrap, no event)
                         # Can't use group_member.create() because it checks authorization (chicken-and-egg)
+                        # Generate unique member_id (synthetic event ID for bootstrap membership)
+                        member_id_data = f"{admins_group_id}:{user_id}:{recorded_by}".encode('utf-8')
+                        member_id = crypto.b64encode(crypto.hash(member_id_data))
                         safedb.execute(
                             """INSERT OR IGNORE INTO group_members
                                (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
                                VALUES (?, ?, ?, ?, ?, ?, ?)""",
                             (
-                                user_id,  # Use user_id as member_id for bootstrap membership
+                                member_id,  # Unique synthetic member_id for bootstrap membership
                                 admins_group_id,
                                 user_id,
                                 event_data['created_by'],  # Self-added (peer_shared_id)
@@ -236,12 +239,15 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # For network creators (no invite_id), we add directly here
     if not invite_id:
         # Network creator - add to group directly
+        # Generate unique member_id (synthetic event ID for bootstrap membership)
+        member_id_data = f"{group_id}:{user_id}:{recorded_by}".encode('utf-8')
+        member_id = crypto.b64encode(crypto.hash(member_id_data))
         safedb.execute(
             """INSERT OR IGNORE INTO group_members
                (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
-                user_id,  # Use user_id as member_id for bootstrap membership
+                member_id,  # Unique synthetic member_id for bootstrap membership
                 group_id,  # From event_data for network creator
                 user_id,
                 event_data['created_by'],  # Self-added
