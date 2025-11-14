@@ -6,6 +6,7 @@ Written using TDD - tests written first, then code fixed to pass.
 """
 import subprocess
 import os
+import re
 
 
 CLI_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'cli.py')
@@ -13,13 +14,25 @@ CLI_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'cli.py')
 
 def run_cli(commands: str) -> subprocess.CompletedProcess:
     """Run CLI with given commands and return result."""
+    python_exe = "/home/hwilson/poc-6/venv/bin/python"
     return subprocess.run(
-        [CLI_PATH],
+        [python_exe, CLI_PATH],
         input=commands.strip(),
         capture_output=True,
         text=True,
         cwd=os.path.dirname(CLI_PATH)
     )
+
+
+def extract_main_section(output: str) -> str:
+    """Extract the MAIN section content from CLI output.
+
+    Returns the content between "MAIN (#...)" and the next section or end of output.
+    This ensures we're checking if messages appear in the actual display, not in
+    command echoes or other parts of the output.
+    """
+    match = re.search(r'MAIN \([^)]*\):\n(.*?)(?=\n>|\nACCOUNTS:|\nINVITES:|\Z)', output, re.DOTALL)
+    return match.group(1) if match else ""
 
 
 def test_single_user_messaging():
@@ -37,8 +50,10 @@ show
     # Should show account
     assert "alice (desktop)" in result.stdout
 
-    # Should show message
-    assert "hello world" in result.stdout
+    # Should show message in MAIN section (not just in command echo)
+    main_section = extract_main_section(result.stdout)
+    assert "hello world" in main_section, \
+        f"Message 'hello world' not found in MAIN section. MAIN content: {repr(main_section)}"
 
     # Should have success indicator
     assert "✓" in result.stdout
@@ -62,9 +77,12 @@ show
 
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
 
-    # After sync, alice should see both messages
-    assert "hello from alice" in result.stdout
-    assert "hi from bob" in result.stdout
+    # After sync, alice should see both messages in MAIN section (not just in command echoes)
+    main_section = extract_main_section(result.stdout)
+    assert "hello from alice" in main_section, \
+        f"Message 'hello from alice' not found in MAIN section. MAIN content: {repr(main_section)}"
+    assert "hi from bob" in main_section, \
+        f"Message 'hi from bob' not found in MAIN section. MAIN content: {repr(main_section)}"
 
 
 def test_usernames_display_correctly():
@@ -146,8 +164,10 @@ show
     # Should show the new channel
     assert "random" in result.stdout
 
-    # Should show the message in that channel
-    assert "test message" in result.stdout
+    # Should show the message in MAIN section (not just in command echo)
+    main_section = extract_main_section(result.stdout)
+    assert "test message" in main_section, \
+        f"Message 'test message' not found in MAIN section. MAIN content: {repr(main_section)}"
 
 
 def test_auto_tick_behavior():
@@ -168,9 +188,12 @@ show
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
 
     # Auto-tick should sync messages (default 100 ticks)
-    # After switching back to alice and showing, both messages should appear
-    assert "from alice" in result.stdout
-    assert "from bob" in result.stdout
+    # After switching back to alice and showing, both messages should appear in MAIN section
+    main_section = extract_main_section(result.stdout)
+    assert "from alice" in main_section, \
+        f"Message 'from alice' not found in MAIN section. MAIN content: {repr(main_section)}"
+    assert "from bob" in main_section, \
+        f"Message 'from bob' not found in MAIN section. MAIN content: {repr(main_section)}"
 
     # Should see auto-tick indicator
     assert "auto-syncing" in result.stdout or "⟳" in result.stdout
