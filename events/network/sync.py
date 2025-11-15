@@ -553,8 +553,13 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     for row in connection_rows:
         peer_shared_id = row['peer_shared_id']
 
+        # Skip connections to ourselves (can happen in shared-database tests)
+        if peer_shared_id == from_peer_shared_id:
+            log.warning(f"[SYNC_SEND] skipping self-connection: from={from_peer_shared_id[:10]}... to={peer_shared_id[:10]}...")
+            continue
+
         # Send sync request to this connected peer
-        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to={peer_shared_id[:10]}...")
+        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... (peer_shared={from_peer_shared_id[:10]}...) to={peer_shared_id[:10]}...")
         send_request(peer_shared_id, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
