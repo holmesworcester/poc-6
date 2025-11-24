@@ -101,10 +101,15 @@ def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, 
 
     Returns message dicts with 'attachments' field containing list of attached files:
     [{'file_id', 'filename', 'mime_type', 'blob_bytes'}, ...]
+    Also includes 'author_name' field with the human-readable name of the message author.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
-        "SELECT * FROM messages WHERE channel_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 50",
+        """SELECT m.*, u.name as author_name
+           FROM messages m
+           JOIN users u ON m.author_id = u.peer_id AND m.recorded_by = u.recorded_by
+           WHERE m.channel_id = ? AND m.recorded_by = ?
+           ORDER BY m.created_at DESC LIMIT 50""",
         (channel_id, recorded_by)
     )
 
