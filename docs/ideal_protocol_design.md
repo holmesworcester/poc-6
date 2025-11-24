@@ -58,6 +58,17 @@ In this case we follow a *Block and Unblock* pattern whenever an event depends o
 
 This is a [topological sorting](https://en.wikipedia.org/wiki/Topological_sorting) problem for which there are efficient algorithms, such as Khan's algorithm. We can use queue's of incoming and unblocked events, as well as SQLite's atomicity guarantees, to ensure that no blocked event is left behind.
 
+## Targets (Local Post‑Projection Actions)
+
+Targets are local, deterministic side effects triggered after projection of the target event. They do not add DAG edges.
+
+- Purpose: bootstrapping the network event, removal, local cleanup, rekeying.
+- Semantics: run‑if‑present (execute immediately if the trigger is already projected) and run‑on‑arrival (execute when the trigger projects later).
+- Bulk targets: optional local registrations that apply handlers to future events referencing a given id (e.g., a channel) until deactivated.
+- Guarantees: handlers must be idempotent and replay‑safe; do not mint new shared events.
+
+(see also: [Removal](#removal) for using targets to enforce removal or schedule rekey/cleanup after removals.)
+
 ## Wire Protocol 
 
 Events are small enough to travel between peers as UDP packets. All messages on the wire are encrypted events (see: [Encoding Events](#Encoding-Events) and [Event-Layer Encryption](#Event-Layer-Encryption)).
@@ -75,6 +86,9 @@ This event is specific to the application, the device, and the network. If Alice
 ## Event Signing
 
 All events except `peer` and `peer_shared` include a `created_by` field that references the `peer_shared_id`, and all events include a `signed_by` field that includes the signature over all other fields canonicalized, by the `peer` private key. This signature must validate for an event to be valid. 
+
+Note: `created_by` is deprecated. Where prior drafts used `created_by = peer_shared_id`, prefer `signed_by = peer_shared_id` and resolve the signer’s public key by signer type (`network_id` | `user_id` | `peer_shared_id` | `invite_id`).
+
 
 TODO: how does `recorded_by` work again? What events can't include `created_by`?
 
@@ -96,60 +110,46 @@ To create a network, Alice creates a `network` event with `created_by` equal to 
 
 She then creates an `admin` event with network equal to `network_id` and its `created_by` equal to her `peer_shared_id` also.  
 
-Note that all of these are blocked until [Joining](#joining) concludes and blesses Alice's `peer_shared_id` as the `first_peer`. That is, Alice must invite herself to the network and join to complete network creation.
+Note that network and admin events remain blocked until Joining admits the first user via an invite; Alice must invite herself and join to complete network creation. Accepting an invitation link forces the `network_id` named in the invite to be valid; this validity cascades to the other events.
 
 ## Invitation
 
-To invite users to the network, including herself, Alice creates  `group_prekey` event (see: [Forward Secrecy](#forward-secrecy)) and an `add_users` event referencing her `admin` and `user` events and the `group_prekey_id`.
+To invite users or link peers, we use a single `invite` event type with a `mode` field.
 
-She then creates a new public/private keypair, an `invite` event and a corresponding Signal-style "invite link" that can be shared in an out-of-band message or QR code: e.g. `https://app.com/join#[invite_data]`
+Note: `invite.mode` is one of `user` | `peer` and determines authorization and dependencies.
 
-`invite` contains:
-- add_users=`add_users_id`
-- the invite public key
-- Alice's `admin_id`
+### invite (mode=user)
+- Fields (depends on): `network_id`, `invite_pubkey`, `created_at`, `admin_grant?` (ongoing; references `admin_id`), `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
+- Signed_by: `network_id` (bootstrap) | `peer_shared_id` of an admin user (ongoing).
+- Authorization: Ongoing `invite(mode=user)` requires an `admin_grant` such that `admin_grant.user_id == signer_user_id` and `admin_grant.network_id == network_id`.
 
-To be valid, `invite` events' `created_by` must match created by an `admin` identified in the `network` event. (TODO: ensure `admin` events are by peer and not by user!)
+### invite (mode=peer)
+- Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
+- Signed_by: `user_id` (first) | linked `peer_shared_id` of that user (ongoing).
 
-The `invite_data` is base64 encoded and includes:
-- `first_peer` (the `peer_shared_id` of the first peer in the network)
-- `invite_id` - the event id of the `invite` event 
-- `invite_private_key` - the invite private key
-- the `group_prekey_id` and its corresponding private key (see: [Forward Secrecy](#forward-secrecy))
-- the `public_ip` and `port` of the most available peer in the network (initially, Alice's own)
-- the public key of a `transit_prekey_shared` event and the `transit_prekey_shared_id` for use as a key hint.
-- the `group_prekey` private key and the `group_prekey_id`
-
-Notes: 
-
-1. Referencing an `add_users_id` or an `add_devices_id` lets us re-use the invitation mechanism for multi-device linking (see: [Linking Peers on Multiple Devices](#linking-peers-on-multiple-devices)).
-1. Making the first user Alice join herself using an invite link eliminates (mostly) the special case of the first user. (For this simplifation to work, `admin` events must be per-peer and not per-user, or alternatively the `first_peer` must be special-cased as an admin.) 
-
+Invite links include the `invite_id` and private material needed by the joiner; group encryption prekeys (`group_prekey_shared` ids with corresponding private `group_prekey`) can be referenced here as needed (see: [Event-layer Encryption](#event-layer-encryption)).
 ## Joining (Graph)
 
-Alice then joins herself. She creates a local-only `invite_accepted` event containing all invite data, for playback and testing purposes. 
+Joining uses a uniform invite → prove-invite model with signatures over entire events:
 
-(Implementation note: for testing and reliability, all invite data should be stored in its own table, not mingled with other addresses, prekeys, etc.)
+### Create User (no peer yet)
+- `invite(mode=user)` [signed_by: network/admin] → `user` [signed_by: invite_id]
+- Verification: load `invites_user[invite_id]`, verify the `user` signature over its canonical body with `invite_pubkey` from the invite; insert `users(user_id=invite_id, user_pubkey=invite_pubkey)`.
 
-Then she creates an `invite_proof` event consisting of a canonicalized string of `invite_id`, her own own `peer_shared_id`, and `first_peer` by the `invite_private_key` (both are the same in Alice's case).
+### Link Peer (first and later identical)
+- `invite(mode=peer)` [signed_by: user | peer linked to that user] → `peer_shared` [signed_by: invite_id]
+- Verification: load `invites_peer[invite_id]`, verify the `peer_shared` signature over its canonical body with `invite_pubkey` from the invite; insert `peers_shared` and `linked_peers(user_id, peer_shared_id)`.
 
-She then creates a `user` event that names the `invite_proof_id`, where the`created_by` is her `peer_shared_id`. The `event-id` of this `user` event is her `user-id`. 
-
-When Alice invites Bob, Bob does the same, using the IP address, port, and `transit_prekey` information to seal and send `connection` events to Alice until he receives a `sync` request back (see: [Sync](#sync) and [Connection](#connection)). 
-
-If messages on the network are encrypted (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates `group_key_shared` events, sealed to the `group_prekey` of each non-expired `add_users` event, for every `group_key` used for the initial "all members" group that all users join by default. All new `group_key`s are sealed  to this prekey too, until the `add_users` event expires.  
-
-Note that `invite_proof` depends on `invite` and its dependents, which Bob does not have until he syncs them, so Bob's device will not appear (to Bob) to have joined until this data syncs. 
-
+In both flows, signatures bind the entire event body (excluding the signature field). This prevents re-use of a valid signature to produce a different event or id; byte-for-byte replays are harmless due to content addressing and idempotent inserts.
 ## Joining (Event-Layer Encryption)
 
-To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `prekey_shared` event, includes its `id` in the `invite` event, and includes its private key in `invite_data`.
+To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey_shared` event, includes its `id` in the `invite` event (`invite_prekey_id`), and includes the corresponding private `group_prekey` in `invite_data`.
 
-She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are wrapped to all invite event prekeys just as they would to individual group member prekeys.
+She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are also wrapped to all outstanding invite‑referenced `group_prekey_shared` keys just as they are to each member’s current `group_prekey_shared`.
 
 ## Address Publishing
 
-To make her peer reachable on the network, Alice creates an `address` event that includes her `peer-id`, a network transport (e.g. UDP), her network address, and a port. 
+To make her peer reachable on the network, Alice creates an `address` event that includes her `peer_shared_id`, a network transport (e.g. UDP), her network address, and a port. 
 
 Every peer on the network periodically creates `address` events with their own latest address information. Other peers use the latest `address` events for each peer.
 
@@ -177,31 +177,32 @@ In future iterations we will make it so that only admins can add new members to 
 
 # Linking Peers on Multiple Devices
 
-Users often work on multiple devices, e.g. a phone and a laptop and must link them to the same user. Linking works similar to [invitation](#invitation) and uses the same `invite` event type.
+Users often work on multiple devices (e.g., phone and laptop) and must link them to the same user. Linking uses the same `invite` event type as new-user invitation, with `mode=peer`.
 
-To add new linked devices Bob creates new `group_prekey` and `group_prekey_shared` events (see: [Forward Secrecy](#forward-secrecy)) and an `add_devices` event referencing his `user` event and the `group_prekey_id`. 
+Invite (mode=peer)
+- Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
+- Signed_by: a linked `peer_shared_id` of that `user_id` (ongoing device linking).
 
-He creates `group_key_shared` events for each group key he possesses, sealed to this new `group_prekey_shared`, and all peers do that see Bob's `add_devices` will create a `group_key_shared` event in any case where they would send `group_key_shared` events to Bob's devices (creating a new group, removing a user).
+Prekeys for immediate E2E (optional)
+- The inviter may publish a `group_prekey_shared` and include its id in `invite_prekey_id`.
+- The inviter (and other peers) can wrap existing group keys to this `group_prekey_shared` (via new `group_key_shared` events), so the new device can read previously‑encrypted messages on first sync.
 
-Bob then creates a new public/private keypair, an `invite` event and a corresponding Signal-style "invite link" that can be shared in an out-of-band message or QR code: e.g. `https://app.com/join#[invite_data]`
+Invite link
+- The inviter generates a one‑time invite keypair and sends an invite link containing `invite_id`, `invite_private_key`, and the private `group_prekey` material corresponding to `invite_prekey_id`.
 
-The `invite_link` events and `invite_data` are the same, as is the joining process for the new peer. The difference: because the `invite` event refers to an `add_devices` event, each `invite_proof` will add a device to an existing user, rather than add a new user.
-
-Bob's new device uses the `group_prekey` private key to unseal `group_prekey_shared` events and use them to decrypt messages to all of the groups Bob belongs to. 
+Joining flow (device link)
+- Identical to Link Peer in [Joining (Graph)](#joining-graph): the new device publishes `peer_shared` signed_by = `invite_id` (signature over its canonical body). Projectors verify with `invite.invite_pubkey` and insert `peers_shared` and `linked_peers(user_id, peer_shared_id)`.
 
 ## Validation
 
-`add_devices` events are valid if signed by the same `peer-id` as the `user-id` or by a previously-linked `peer-id`. 
-
-Any linked peer can add `update` events to that `user-id` to e.g. update a username or avatar (see: [Updating Events](#updating-events)).
-
-We [block](#blocking-and-unblocking) `link-invite`, `link`, and `user-id` update events that fail validation due to missing `link` permission.
-
+- `invite(mode=peer)` must reference `network_id`, `peer_shared_id` and `user_id`; it is authorized when signed_by `peer_shared_id` and `peer_shared_id` is a peer of `user_id`.
+- `peer_shared` is signed_by = `invite_id`; projectors load the invite and verify the signature with `invite_pubkey`. On success, they link `(user_id, peer_shared_id)`.
+- Any linked peer can subsequently publish updates for that `user_id` (e.g., profile updates) subject to normal validation.
 # Encryption
 
 We can now discuss how messages are encrypted between peers.
 
-## Prekey Publishing
+## Group Prekey Publishing
 
 For each group and channel (see: [Channels](#channels)) peers periodically replenish `group_prekey` and `group_prekey_shared` events. The former includes the full keypair for our ephemeral public key which is never shared, and the latter includes an ephemeral public key, the `group-id`, and (if applicable) `channel-id`.
 
@@ -209,9 +210,9 @@ For each group and channel (see: [Channels](#channels)) peers periodically reple
 
 ## Event-Layer Encryption
 
-Whenever Alice creates a group, she creates a `group_key` that is local-only and never shared. Then:
+Whenever Alice creates a group, she creates a `group_key` that is local‑only and never shared. Then:
 
-For each known `peer_id_shared` belonging to each known `user_id` in a group, Alice chooses an prekey (with a not-expiring-too-soon `ttl`) and creates a `group_key_shared` event sealing the secret key to the chosen prekey. 
+For each known `peer_shared_id` belonging to each known `user_id` in a group, Alice selects a recipient `group_prekey_shared` that is not expiring too soon and creates a `group_key_shared` event sealing the secret key to that `group_prekey_shared`.
 
 Whenever someone adds a member to the group, they seal the existing group key to the member.
 
@@ -222,8 +223,8 @@ inner := {
     peer_pk                 // sender’s Ed25519 (for sig verification)
     count, created_ms, ttl_ms // common bookkeeping
     tagId                     // which ACL this key is for
-    prekey_id                 // ID of the recipient's published prekey used (for lookup/deletion)
-    sealedKey = crypto_box_seal(G, prekey_pk_recipient)  // Seal to recipient's prekey public (not static pk)
+    group_prekey_shared_id    // ID of the recipient's published group prekey (for lookup/deletion)
+    sealedKey = crypto_box_seal(G, group_prekey_shared_pub_recipient)  // Seal to recipient's group_prekey_shared public key (not static pk)
     
     sig64   = crypto_sign_detached(inner[..payload], sk_sender)
 }
@@ -252,13 +253,13 @@ Peers in a group do not know when a `group_key_shared` event includes another pe
 
 [Transit-Layer Encryption](#transit-layer-encryption) provides strong forward secrecy against an attacker that can surveil the network and later compromise a device. We also must protect deleted or expired messages from being recovered by an attacker who can compromise a *server* and later compromise a device. 
 
-When events are deleted or expire, we mark their associated keys and prekeys (the prekeys their keys were encapsulated to) as "must purge".
+When events are deleted or expire, we mark their associated keys and prekeys (the `group_prekey_shared` or `transit_prekey_shared` their keys were encapsulated to) as "must purge".
 
-Periodically, we create `rekey` events for all *not deleted* events associated with "must-purge" keys and prekeys, encrypted deterministically to the "clean" (not being purged) key whose `ttl` is minimally greater than the event `ttl`. 
+Periodically, we create `rekey` events for all *not deleted* events associated with "must‑purge" keys and prekeys, encrypted deterministically to the "clean" (not being purged) key whose `ttl` is minimally greater than the event `ttl`. 
 
 Periodically, we also purge the events that have corresponding, validated `rekey` events.
 
-Periodically, we also purge "must-purge" keys and prekeys that have no deleted events. 
+Periodically, we also purge "must‑purge" keys and prekeys that have no deleted events. 
 
 Doing things this way mean we don't have to worry about atomicity: each of these steps only occurs after the previous one is complete, and if it is interrupted, a subsequent step will catch it.
 
@@ -273,7 +274,7 @@ Any `rekey` event whose contents are identical to the original event is valid, a
 
 Peers that cannot decrypt the original event will not be able to validate `rekey` events; eventually they will expire from the buffer.
 
-Rekeying is more performant if `key` events are not re-used across channels, and if `prekey` events are not re-used by `key` events.
+Rekeying is more performant if `key` events are not re‑used across channels, and if `group_prekey_shared` events are not re‑used by `key` events.
 
 #### Out-of-scope: Forward Secrecy for Not-Yet-Purged Events
 
@@ -283,7 +284,7 @@ Unlike Signal or MLS, we do not pursue Forward Secrecy for not-yet-purged events
 
 All users must be able to remove peers on lost or stolen devices. Admins must be able to remove both peers and users.
 
-When encrypting a new event, a peer MUST choose a key whose recipient set excludes every user-id and `peer-id` present in any accepted `remove-user` or `remove-peer` event. If no such key exists, it MUST create a fresh key event for all remaining members and use that.
+When encrypting a new event, a peer MUST choose a key whose recipient set excludes every `user_id` and `peer_shared_id` present in any accepted `remove-user` or `remove-peer` event. If no such key exists, it MUST create a fresh key event for all remaining members and use that.
 
 To ensure a convergent historical record, events from removed users are still valid. However, peers check their set of `remove-peer` and `remove-user` events and reject any [Transit-layer Encryption](#transit-layer-encryption) connection, request, or response from removed peers. 
 
@@ -293,7 +294,7 @@ If an [optional server](#optional-servers) uses another form of transit-layer en
 
 ### Removing Peers
 
-Any peer can issue a `remove-peer` event naming another `peer-id`. Peers can remove themselves and their linked peers. Admins can remove any peer.
+Any peer can issue a `remove-peer` event naming another `peer_shared_id`. Peers can remove themselves and their linked peers. Admins can remove any peer.
 
 We [blocking and unblocking](#blocking-and-unblocking) `remove-peer` events that are invalid for lack of permission.
 
@@ -311,17 +312,27 @@ We choose to wait until Post Quantum support exists in libsodium, but the design
 
 To share data between peers, peers must first connect to each other. A "connection" is the successful receipt of a valid `connect` event by Bob from Alice.
 
-`connect` events are [`recipient_peer_shared_id`, `ciphertext`] where `ciphertext` is the following, sealed to a soon-to-expire `prekey` for the recipient:
+`connect` events are [`recipient_peer_shared_id`, `ciphertext`] where `ciphertext` is the following, sealed to the recipient’s `transit_prekey_shared.pubkey` identified by `transit_prekey_id` (a soon-to-expire transit prekey):
 
 * `transit_key` - a secret used for all subsequent symmetric encryption
-* `ttl` - the time in ms the connection expires.
+* `created_at_ms` - sender’s monotonic timestamp for this connection.
+* `ttl_ms` - the time in ms the connection expires. Recipients MUST enforce a configured maximum connection duration (`max_connection_ttl_ms`); do not blindly trust sender-provided values. Either clamp the effective expiry to `min(created_at_ms + ttl_ms, created_at_ms + max_connection_ttl_ms)` or reject connections exceeding the cap.
 * `created_by` - the sender's `peer_shared_id`
 * `invite_id` - the `invite` the user joined with
-* `invite_proof` - `invite_id` and `created_by` signed by the `invite` private key (this is only required for validation if `peer_shared_id` is unknown to the recipient, but we always include it anyway for simplicity, and because there's always some chance Bob does not yet know Alice has joined.)
+* `transit_prekey_id` - id of the recipient’s `transit_prekey_shared` that this connection targets (binds the message to the advertised address/key from the invite link). Use `transit_prekey`/`transit_prekey_shared` naming consistently with `group_prekey`/`group_prekey_shared`.
+* `sig_invite` - signature by the `invite_private_key` over the canonical connection body (excluding signature fields); proves possession of the invite.
+* `sig_peer` - signature by the sender’s peer private key (corresponding to `peer_shared.pubkey`) over the same canonical connection body (excluding signature fields); proves possession of the peer key.
+
+Verification (dual‑proof): accept the `connect` if either signature validates against currently known state:
+- If the recipient has the `invite` but not the sender’s `peer_shared`, `sig_invite` authenticates the sender.
+- If the recipient has the sender’s `peer_shared` but not (or no longer trusts) the `invite` (expired/removed), `sig_peer` authenticates the sender.
+- If both states are present, either (or both) may validate. For CPU efficiency, attempt `sig_peer` verification first (typical during steady state), then fall back to `sig_invite` if `peer_shared` is unknown.
+
+Canonicalization: both signatures cover the canonical connection body with signature fields omitted. Include time fields (`created_at_ms`, `ttl_ms`) and identifiers (`invite_id`, `created_by`, `transit_prekey_id`, and optionally `network_id`) so tampering breaks signatures. This avoids circularity with the event id and provides natural replay protection in combination with `connection_id`.
 
 Upon validation, Bob stores this data in a `connections` table along with the `origin_ip` and `origin_port` of the message. (We don't include ip and port in the message because many peers will not know their public ip and port.)
 
-The `connection_id` serves as a nonce. Replayed connection events will be naturally filtered out as duplicates and not update address information.
+The `connection_id` serves as a nonce. Replayed connection events are naturally filtered as duplicates and do not update address information. Enforce expiry at acceptance time: accept only if `now <= created_at_ms + ttl_ms + skew_ms`.
 
 These `connection` events are stored but they are not shared, as they would be undecryptable by any other peer.
 
@@ -335,7 +346,7 @@ Connections give us:
 - A periodically-replenished set of peers to pursue syncing with
 - A set of peers to maintain holepunches with (see: [Hole Punching](#hole-punching)) 
 - Transit secrets private to each pair that we can use for syncing
-- Forward secrecy for transit, because the prekeys the transit secrets were encrypted to will be purged soon
+- Forward secrecy for transit, because the transit prekeys (`transit_prekey_shared`) the transit secrets were encrypted to will be purged soon
 - Resistance to replay attacks (nonce)
 
 # Sync 
@@ -540,7 +551,7 @@ Communities can add multiple sync servers for increased uptime, backup, censorsh
 
 Communities can add an optional push notification server to deliver push notifications via Apple, Google, and others. The push server can run as the same peer as the [Sync Server](#sync-server), or a separate one.
 
-After the Server joins the community, admins can create a `push-server` event naming its `user-id`. Other peers send events to the push server, encrypted as DMs. The event types are `push-register` to register a push token (contains an Apple/Google-provided token) and `push-mute`/`push-unmute` (containing a `group-id`) to mute/unmute notifications. These are encrypted to the service's `prekey`s. 
+After the Server joins the community, admins can create a `push-server` event naming its `user-id`. Other peers send events to the push server, encrypted as DMs. The event types are `push-register` to register a push token (contains an Apple/Google-provided token) and `push-mute`/`push-unmute` (containing a `group-id`) to mute/unmute notifications. These are encrypted using the service peer’s published `group_prekey_shared` keys. 
 
 The Server bases its state for each peer on events with the highest count, and sends notifications to each registered peer token for all unmuted groups.
 
@@ -598,6 +609,10 @@ The CPU cost of decryption on the fly is dominated by the data retrieval cost (t
 # Appendix 
 
 ## Appendix A — Types and Layouts
+
+Terminology notes for shared vs local-only identities and keys:
+- `peer` vs `peer_shared`: `peer` is a LOCAL-ONLY event that holds private key material and never syncs; `peer_shared` is the shared public identity. All shared event fields that reference a peer use `peer_shared_id`.
+- Prekeys: `group_prekey` (local secret) vs `group_prekey_shared` (shared public). Transit uses `transit_prekey` (local) and `transit_prekey_shared` (shared). Shared events reference the `..._shared` ids.
 
 ##### Local-only Events
 
@@ -661,15 +676,15 @@ Note that these events might make sense in an in-memory database.
 | **user**           | 0x0E | `invite_proof` 32 · `network_id` 16 · pad (346)                          | No                     |
 | **link-invite**    | 0x0F | `invite_pk` 32 · `max_join` 2 · `expiry_ms` 8 · `user_id` 16 · `network_id` 16 · pad (320) | No                     |
 | **link**           | 0x10 | `invite_proof` 32 · `user_id` 16 · `network_id` 16 · pad (330)           | No                     |
-| **remove-peer**  | 0x11 | `peer_id` 32 · pad (362)                                             | No                     |
+| **remove-peer**  | 0x11 | `peer_shared_id` 32 · pad (362)                                      | No                     |
 | **remove-user**    | 0x12 | `user_id` 16 · pad (378)                                               | No                     |
 | **block**          | 0x13 | `blocked_user_id` 16 · `global_count` 4 · pad (334)                    | Yes (self-only)        |
 | **group**          | 0x14 | `user_id` 16 · `group_name` 32 · pad (306)                              | Yes                    |
 | **update-group-name** | 0x15| `group_id` 16 · `new_name` 32 · pad (306)                              | Yes                    |
 | **fixed-group**    | 0x16 | `num_members` 1 · `user_ids` (16 each, ≤20, sorted) · pad (≤353)       | Yes                    |
 | **grant**          | 0x17 | `group_id` 16 · `user_id` 16 · pad (322)                               | Yes                    |
-| **key**            | 0x18 | `type_inner` 1 · `peer_pk` 32 · `count` 4 · `created_ms` 8 · `ttl_ms` 8 · `tagId` 16 · `prekey_id` 16 · `sealed_key` 80 · pad (229) | No                     |
-| **prekey**         | 0x19 | `group_id` 16 · `channel_id` 16 · `prekey_pub` 32 · `eol_ms` 8 · pad (322)               | No                     |
+| **key**            | 0x18 | `type_inner` 1 · `peer_pk` 32 · `count` 4 · `created_ms` 8 · `ttl_ms` 8 · `tagId` 16 · `group_prekey_shared_id` 16 · `sealed_key` 80 · pad (229) | No                     |
+| **prekey** (group_prekey_shared) | 0x19 | `group_id` 16 · `channel_id` 16 · `prekey_pub` 32 · `eol_ms` 8 · pad (322)               | No                     |
 | **push-server**    | 0x1A | `user_id` 16 · `security_settings` 4 · `pad`  (338)	                                              | Yes                    |
 | **push-register**  | 0x1B | `token` 128 · `ttl_ms` 8 · pad (218)                                   | Yes                    |
 | **push-mute**      | 0x1C | `channel_id` 16 · pad (338)                             | Yes                    |
@@ -700,36 +715,11 @@ This table applies to the **update** plaintext payload block: `event_id` 16 | `g
 | **remove-reaction**         | 0x04 | `emoji_utf32` 4 · `user_group_id` 16 · pad (301)                                          |
 | **update-username**         | 0x05 | `utf-8 new name` ≤321 B (targets a `user` event’s `id`)                                   |
 | **update-profile-image**    | 0x06 | `file_id` 16 · `file_bytes` 8 · `nonce_prefix` 4 · `enc_key` 32 · `root_hash` 32 · pad (229)                                                                  |
-| **add-prekey**              | 0x07 | `prekey_pub` 32 · `eol_ms` 8 · pad (281)                                                  |
+| **add-prekey** (publish group_prekey_shared)             | 0x07 | `prekey_pub` 32 · `eol_ms` 8 · pad (281)                                                  |
 | *reserved*                  | ≥0x08| zero-filled until defined                                                                 
 
 Events **update-username** and **update-profile-image** name the `user` event-id for the user they are updating.
 
-#### Joining proof and prekeys
-
-prekeys for a given invite secret (`invite` event) are created as follows:
-
-```
-pw = random 32-byte invite secret  // e.g., crypto_randombytes(pw, 32)
-
-NUM_prekeyS = 100
-
-master_key = crypto_generichash(32, pw ∥ "quiet-invite-prekeys")
-
-for i from 0 to NUM_prekeyS-1:
-    ctx = "prekey-" + i as little-endian uint32  // 11 bytes total
-    
-    priv_bytes = crypto_generichash(64, master_key ∥ ctx)
-    priv_i = crypto_core_ed25519_scalar_reduce(priv_bytes)
-    
-    pub_i = crypto_scalarmult_ed25519_base_noclamp(priv_i)
-    
-    sodium_memzero(priv_i, 32);      /* wipe loop scalar */
-}
-sodium_memzero(master_key, 32);      /* wipe master key */
-```
-
-After creating the keys, the creator creates signed `add-prekey` update events for each and discards the private keys. Invitees re-derive them on join. 
 
 ## Appendix D — Auth-Related Events
 
@@ -740,7 +730,8 @@ Here we list all events that are auth-related and can be prioritied with `sync-a
 - **message_deletion**
 - **delete-channel**
 - **key**
-- **prekey**
+- **group_prekey_shared**
+- **transit_prekey_shared**
 - **remove-user**
 - **remove-peer**
 - **group**
@@ -795,7 +786,7 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
 #### Users
 - **GET /networks/{network_id}/users**  
   List users. Query: `?group_id=hex&cursor=hex&limit=50`.  
-  Response: `{"items": [{"user_id": "hex", "username": "string", "peer_ids": ["hex"], "created_at_ms": int}], "next_cursor": "hex", "has_more": bool}`
+  Response: `{"items": [{"user_id": "hex", "username": "string", "peer_shared_ids": ["hex"], "created_at_ms": int}], "next_cursor": "hex", "has_more": bool}`
 
 - **GET /networks/{network_id}/users/{user_id}**  
   Get user.  
@@ -817,10 +808,10 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
 
 - **POST /networks/{network_id}/peers/link**  
   Claim link invite (on new peer). Request: `{"encoded_data": "base64"}`.  
-  Response: 201 Created, `{"peer_id": "hex"}`  
+  Response: 201 Created, `{"peer_shared_id": "hex"}`  
   (Generates `link` event.)
 
-- **DELETE /networks/{network_id}/users/{user_id}/peers/{peer_id}**  
+- **DELETE /networks/{network_id}/users/{user_id}/peers/{peer_shared_id}**  
   Remove peer.  
   Response: `{"success": true}`  
   403 if not self/admin.  
@@ -968,9 +959,9 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
   Simulate. Request: `{"initial_events": [], "new_events": []}`.  
   Response: `{"result_state": [], "emitted": []}`
 
-- **POST /debug/networks/{network_id}/prekeys**  
+- **POST /debug/networks/{network_id}/group-prekeys**  
   Create. Request: `{"count": int}`.  
-  Response: 201 Created, `{"prekey_ids": ["hex"]}`
+  Response: 201 Created, `{"group_prekey_shared_ids": ["hex"]}`
 
 - **POST /debug/networks/{network_id}/rekey**  
   Rekey/purge. Request: `{"event_ids": ["hex"]}`.  
@@ -1210,7 +1201,7 @@ To minimize "drift" between frontend and backend state, we tear down and re-poll
 
 The API provides a `tick` endpoint that takes a`time_ms` parameter and triggers all event processing, creation, and deletion. 
 
-For events that are constructed or processed periodically, such as `sync`, `prekey`, and `rekey`, we use [Local-only Events](#local-only-events-1) to track the last time these events were executed and determine whether they should be executed again in this `tick`. For any events that are more efficient to process in large batches (like `file`s) we can use the same approach: track the last time they were performed and do a big batch.
+For events that are constructed or processed periodically, such as `sync`, `group_prekey_shared`, `transit_prekey_shared` (prekey publish), and `rekey`, we use [Local-only Events](#local-only-events-1) to track the last time these events were executed and determine whether they should be executed again in this `tick`. For any events that are more efficient to process in large batches (like `file`s) we can use the same approach: track the last time they were performed and do a big batch.
 
 In production use, `tick` can be triggered as often as is practical, with the current time. We can also limit the number of events processed in a typical `tick`. 
 
@@ -1218,7 +1209,7 @@ In [Deterministic Testing and Simulation](#deterministic-testing--simulation), `
 
 ### Local-only Events
 
-It is convenient for testing if local-only data such as `peer-id` private keys to be stored as events too.
+It is convenient for testing if local-only data such as `peer` (local-only) private keys are stored as events too.
 
 Data for local-only use is stored in events prefixed with `LOCAL-ONLY-`. `LOCAL-ONLY-` events MUST never be shared, and `LOCAL-ONLY-` events from external sources MUST never be validated.
 
@@ -1228,9 +1219,9 @@ These events are not synced so they can be deleted conventionally. Secure delete
 
 When joining or creating a network, clients first create a `LOCAL-ONLY-peer` event containing her keypair. This event is specific to the application, the device, and the network. If a client joins 5 networks in 2 different applications on her phone, it will have 10 `LOCAL-ONLY-peer` events.
 
-#### prekeys
+#### Group prekeys
 
-When creating a `prekey` event, clients create a `LOCAL-ONLY-prekey-secret` event containing the keypair. prekeys for purged messages are purged for [forward secrecy](#forward-secrecy). 
+When creating a `group_prekey_shared` event, clients create a `LOCAL-ONLY-group_prekey` event containing the keypair. Group prekeys for purged messages are purged for [forward secrecy](#forward-secrecy). 
 
 #### Network Creation
 
@@ -1242,7 +1233,7 @@ The sync process requires some minimal state, such as recently seen peers and th
 
 ##### Last-sent
 
-Recent events can store this with `LOCAL-ONLY-latest-sync` events that including the entire last-sent sync event for a given sync type and `peer-id`. We delete each when a new one for the `peer-id` is created.
+Recent events can store this with `LOCAL-ONLY-latest-sync` events that include the entire last-sent sync event for a given sync type and local `peer` id. We delete each when a new one for that local `peer` id is created.
 
 ##### Last-received
 
@@ -1342,7 +1333,7 @@ This uses the same `tick` feature of the API triggered periodically in productio
 
 Note that because our client can be multiple peers on multiple networks, each `pre-tick` and `post-tick` state can include many peers running on the same client, perhaps participating in the same network (as different users or devices) or on multiple networks. 
 
-It is for this reason that `api-calls[]` is an array: since API calls specify the peer and network, it can include one API call for each peer. (TODO: this implies a change in the API structure where the lowest level must be `peer-id`, not `network`)
+It is for this reason that `api-calls[]` is an array: since API calls specify the peer and network, it can include one API call for each peer. (TODO: this implies a change in the API structure where the lowest level must be the local `peer` id, not `network`)
 
 Finally, in packets in `incoming[]` can have an `arrives_at_ms` field, so that we can model packets that have not arrived yet by skipping over them. (Incoming cannot be processed until the `t_ms` reaches `arrives_at_ms`. If they are processed later, this is adequate for most simulation purposes, and we can adjust the `t_ms` granularity to match real-world clients.)
 
