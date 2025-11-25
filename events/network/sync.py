@@ -254,17 +254,17 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_key")
         return recorded_by_peers
 
-    # Try transit prekeys (asymmetric)
+    # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
     try:
         cursor = db._conn.execute(
-            "SELECT DISTINCT recorded_by FROM transit_prekeys_shared WHERE transit_prekey_id = ?",
+            "SELECT DISTINCT owner_peer_id FROM transit_prekeys WHERE transit_prekey_id = ?",
             (hint_b64,)
         )
         recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
             log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_prekey")
     except Exception as e:
-        log.warning(f"route_blob_to_peers: Failed to query transit_prekeys_shared: {e}")
+        log.warning(f"route_blob_to_peers: Failed to query transit_prekeys: {e}")
         recorded_by_peers = []
 
     return recorded_by_peers
