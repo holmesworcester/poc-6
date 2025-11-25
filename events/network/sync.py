@@ -23,10 +23,11 @@ EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file'}
 # Window parameters
 DEFAULT_W = 12  # Default window parameter: 2^12 = 4096 windows
 STORAGE_W = 20  # Storage window parameter: 2^20 = 1M windows (future-proof)
-EVENTS_PER_WINDOW_TARGET = 450  # Target events per window for optimal FPR
+EVENTS_PER_WINDOW_TARGET = 100  # Target events per window for ~9% FPR (was 450, causing 94% FPR)
 
 # False Positive Rate target (informational)
-TARGET_FPR = 0.025  # ~2.5% wasted bandwidth from false positives
+# With 100 events/window in 512-bit bloom (k=5): ~62% bits set → ~9% FPR
+TARGET_FPR = 0.09  # ~9% wasted bandwidth from false positives
 
 
 # ============================================================================
@@ -188,8 +189,15 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
 
     # Compute optimal w_param for this event count
     optimal_w = compute_w_for_event_count(total_events)
+    old_w = state['w_param']
     state['w_param'] = max(state['w_param'], optimal_w)
     state['total_events_seen'] = total_events
+
+    # Log w_param changes for analysis
+    if state['w_param'] != old_w:
+        windows = compute_window_count(state['w_param'])
+        events_per_window = total_events / windows if windows > 0 else total_events
+        log.info(f"[SYNC_DYNAMICS] w_param: {old_w} → {state['w_param']}, total_events={total_events}, windows={windows}, events/window={events_per_window:.1f}")
 
     update_sync_state(
         from_peer_id,
@@ -897,7 +905,12 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
             pass
 
     log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
-    log.warning(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
+
+    # Calculate and log FPR for analysis
+    fpr = bits_set / BLOOM_SIZE_BITS
+    in_bloom_count = len(shareable_rows) - len(events_to_send)
+    empirical_fpr = in_bloom_count / len(shareable_rows) if len(shareable_rows) > 0 else 0
+    log.info(f"[SYNC_DYNAMICS] window={window_id} range={window_min}-{window_max} candidates={len(shareable_rows)} sent={len(events_to_send)} bits_set={bits_set}/512 fpr_theoretical={fpr:.2%} fpr_empirical={empirical_fpr:.2%}")
 
     if len(events_to_send) == 0 and len(shareable_rows) > 0:
         log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")
