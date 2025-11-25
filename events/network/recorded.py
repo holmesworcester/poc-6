@@ -84,15 +84,15 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
         True if this is a foreign local dep (should skip check), False otherwise
     """
     event_type = event_data.get('type')
-    created_by = event_data.get('created_by')
+    signed_by = event_data.get('signed_by')
 
-    # Schema: key events have created_by referencing creator's local peer (not peer_shared_id)
+    # Schema: key events have signed_by referencing creator's local peer (not peer_shared_id)
     # peer_shared events have peer_id referencing creator's local peer
     LOCAL_CREATOR_TYPES = {'transit_key', 'group_key', 'transit_prekey', 'group_prekey'}
 
-    if event_type in LOCAL_CREATOR_TYPES and field == 'created_by':
-        # Local events have created_by=peer_id (local). Skip if we're not the creator (foreign local)
-        return recorded_by != created_by
+    if event_type in LOCAL_CREATOR_TYPES and field == 'signed_by':
+        # Local events have signed_by=peer_id (local). Skip if we're not the creator (foreign local)
+        return recorded_by != signed_by
 
     if event_type == 'peer_shared' and field == 'peer_id':
         # peer_shared events have peer_id referencing creator's local peer
@@ -125,25 +125,25 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # and not shared between peers. Events encrypted with a key are sent as plaintext
     # during sync responses, so the recording peer should not be required to possess
     # the creator's key event.
-    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id', 'message_id', 'user_id']
+    dep_fields = ['group_id', 'channel_id', 'signed_by', 'peer_id', 'peer_shared_id', 'invite_id', 'message_id', 'user_id']
 
     # User events reference invite_id (which contains group/channel metadata)
     # They create stub group/channel rows from the invite during projection
     event_type = event_data.get('type')
     if event_type == 'user':
-        dep_fields = ['created_by', 'peer_id', 'invite_id']  # Depend on invite, not group/channel
+        dep_fields = ['signed_by', 'peer_id', 'invite_id']  # Depend on invite, not group/channel
     elif event_type == 'network':
         # Network events depend on both groups and the creator user
-        dep_fields = ['created_by', 'all_users_group_id', 'admins_group_id', 'creator_user_id']
+        dep_fields = ['signed_by', 'all_users_group_id', 'admins_group_id', 'creator_user_id']
     elif event_type == 'invite':
-        # Invite events need creator to exist for signature verification
+        # Invite events need signer to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet
-        dep_fields = ['created_by']
+        dep_fields = ['signed_by']
     # Phase 5: invite_proof removed - proof IS the signature on user/peer_shared events
     elif event_type == 'message_deletion':
-        # Deletion events only depend on the creator (for signature verification)
+        # Deletion events only depend on the signer (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
-        dep_fields = ['created_by']
+        dep_fields = ['signed_by']
     elif event_type == 'peer_shared':
         # peer_shared events are self-signed and have no dependencies
         # peer_id is always a foreign local dep (creator's local peer)
@@ -369,15 +369,15 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if event_type == 'user' and 'signed_by' in event_data:
         # Self-created user with invite proof: creator doesn't have invite in valid_events
         # (invite comes from out-of-band link, not network sync)
-        # Note: created_by is peer_shared_id but recorded_by is peer_id, so we need to check
-        # if they're linked via peer_self table
-        created_by = event_data.get('created_by')
-        # Check if created_by is THIS peer's peer_shared_id
+        # Note: signed_by is invite_id for Phase 2 user events, check peer_id from event
+        # User events have peer_id field which is the peer_shared_id
+        user_peer_shared_id = event_data.get('peer_id')
+        # Check if this user's peer_id is THIS peer's peer_shared_id
         peer_self_row = safedb.query_one(
             "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
             (recorded_by, recorded_by)
         )
-        if peer_self_row and peer_self_row['peer_shared_id'] == created_by:
+        if peer_self_row and peer_self_row['peer_shared_id'] == user_peer_shared_id:
             skip_dep_check = True
             log.info(f"[USER_SKIP_DEPS] Skipping dep check for self-created user event")
 
@@ -388,10 +388,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if event_type == 'invite_accepted':
         # invite_accepted events are root-of-trust for joiners - they capture out-of-band
         # trusted data from the invite link. Only self-created ones are valid.
-        # However, we still need to check created_by dependency (peer event must exist first
+        # However, we still need to check signed_by dependency (peer event must exist first
         # for foreign key constraints in transit_prekeys table)
-        created_by = event_data.get('created_by')
         # Do NOT skip dep check - we need peer event to be projected first
+        pass  # signed_by is peer_id for invite_accepted
 
     if not skip_dep_check:
         missing_deps = check_deps(event_data, recorded_by, db)

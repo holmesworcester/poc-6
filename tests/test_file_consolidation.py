@@ -11,7 +11,7 @@ import sqlite3
 import time
 from db import Database
 import schema
-from events.identity import user, invite
+from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from events.network import sync_file
 import tick
@@ -108,7 +108,8 @@ def test_auto_consolidation_on_download_complete():
     )
 
     # Bob joins
-    bob = user.join(invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
     # Initial sync

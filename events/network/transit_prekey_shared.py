@@ -39,7 +39,7 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any
         'transit_prekey_id': prekey_id,
         'peer_id': peer_shared_id,  # Public identity (peer_shared_id)
         'public_key': prekey_public_b64,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 

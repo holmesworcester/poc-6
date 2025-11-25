@@ -260,7 +260,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'inviter_transit_prekey_id': inviter_prekey_id,
         'address': inviter_ip,  # For bootstrap connections (stored in invite_accepteds)
         'port': inviter_port,   # For bootstrap connections (stored in invite_accepteds)
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -440,9 +440,10 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     # Phase 4: Determine verification mode based on signed_by
     signed_by = event_data.get('signed_by')
     mode = event_data.get('mode', 'user')
-    # Extract created_by early (used in INSERT regardless of verification path)
-    # For Phase 4 bootstrap invites, this is first_peer; for others it's inviter's peer_shared_id
-    created_by = event_data.get('created_by') or event_data.get('first_peer', '')
+    # Extract signer early for INSERT
+    # For Phase 4 bootstrap invites with signed_by=network_id, use inviter_peer_shared_id or first_peer
+    # For ongoing invites, signed_by IS the inviter's peer_shared_id
+    inviter_id = event_data.get('inviter_peer_shared_id') or event_data.get('signed_by') or event_data.get('first_peer', '')
 
     log.info(f"invite.project() validating invite mode={mode} signed_by={signed_by[:20] if signed_by else 'None'}...")
 
@@ -515,24 +516,25 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             log.info(f"invite.project() verified ongoing invite with signer pubkey")
 
     else:
-        # Legacy flow: no signed_by, use created_by
-        # TODO(Phase 9): Remove this legacy created_by flow and require signed_by on all invites
-        if not created_by:
+        # Legacy flow: no signed_by, use inviter_id as signer
+        # Phase 9: This path handles legacy events that used created_by instead of signed_by
+        legacy_signer = event_data.get('created_by') or inviter_id
+        if not legacy_signer:
             log.warning(f"invite.project() missing both signed_by and created_by")
             return None
 
         from events.identity import peer_shared
         try:
-            creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+            creator_public_key = peer_shared.get_public_key(legacy_signer, recorded_by, db)
         except ValueError:
-            log.warning(f"invite.project() creator not found: {created_by[:20]}...")
+            log.warning(f"invite.project() signer not found: {legacy_signer[:20]}...")
             return None
 
         if not crypto.verify_event(event_data, creator_public_key):
             log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
             return None
 
-        log.info(f"invite.project() verified legacy invite with created_by pubkey")
+        log.info(f"invite.project() verified legacy invite with signer pubkey")
 
         # Legacy admin validation
         invite_network_id = event_data.get('network_id')
@@ -565,7 +567,7 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             invite_id,
             event_data['invite_pubkey'],
             event_data['group_id'],
-            created_by,  # Use created_by (inviter's peer_shared_id)
+            inviter_id,  # Use inviter_id (inviter's peer_shared_id)
             mode,
             user_id,
             event_data['created_at'],

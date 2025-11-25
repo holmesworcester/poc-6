@@ -17,7 +17,7 @@ _batch_mode = False
 
 
 def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
-           poly_tag: bytes, peer_id: str, created_by: str, t_ms: int,
+           poly_tag: bytes, peer_id: str, signed_by: str, t_ms: int,
            db: Any) -> str:
     """Create a file_slice event (encrypted chunk of file).
 
@@ -30,7 +30,7 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
         ciphertext: Encrypted bytes (max 450 bytes)
         poly_tag: 16-byte AEAD authentication tag
         peer_id: Local peer creating this event
-        created_by: Shareable peer_shared_id (for sync tracking)
+        signed_by: Shareable peer_shared_id (for sync tracking)
         t_ms: Timestamp
         db: Database connection
 
@@ -49,7 +49,7 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
         'nonce': crypto.b64encode(nonce),
         'ciphertext': crypto.b64encode(ciphertext),
         'poly_tag': crypto.b64encode(poly_tag),
-        'created_by': created_by,  # Shareable peer identity
+        'signed_by': signed_by,  # Shareable peer identity
         'created_at': t_ms
     }
 
@@ -114,7 +114,7 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
 
 
 def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
-                        created_by: str, t_ms: int, db: Any) -> int:
+                        signed_by: str, t_ms: int, db: Any) -> int:
     """Efficiently create many file slices in batch mode.
 
     Uses optimized batch storage without immediate projection for massive performance gains.
@@ -123,7 +123,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         file_id: ID of the file these slices belong to
         slices_data: List of (slice_number, nonce, ciphertext, poly_tag) tuples
         peer_id: Local peer creating these events
-        created_by: Shareable peer_shared_id
+        signed_by: Shareable peer_shared_id
         t_ms: Timestamp
         db: Database connection
 
@@ -147,7 +147,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
             'nonce': crypto.b64encode(slice_nonce),
             'ciphertext': crypto.b64encode(ciphertext),
             'poly_tag': crypto.b64encode(poly_tag),
-            'created_by': created_by,
+            'signed_by': signed_by,
             'created_at': t_ms
         }
         canonical = crypto.canonicalize_json(event_data)

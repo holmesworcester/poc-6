@@ -69,7 +69,7 @@ def create(peer_id: str, message_id: str, file_data: bytes,
 
     group_id = message_row['group_id']
 
-    # Get peer_shared_id for created_by field
+    # Get peer_shared_id for signed_by field
     peer_self_row = safedb.query_one(
         "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (peer_id, peer_id)
@@ -109,7 +109,7 @@ def create(peer_id: str, message_id: str, file_data: bytes,
         file_id=file_id,
         slices_data=slices_to_create,
         peer_id=peer_id,
-        created_by=peer_shared_id,
+        signed_by=peer_shared_id,
         t_ms=t_ms,
         db=db
     )
@@ -137,7 +137,7 @@ def create(peer_id: str, message_id: str, file_data: bytes,
         'enc_key': crypto.b64encode(enc_key),
         'root_hash': crypto.b64encode(root_hash),
         'total_slices': slice_count,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -529,7 +529,7 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
     file_id = event_data.get('file_id')
     filename = event_data.get('filename')
     mime_type = event_data.get('mime_type')
-    created_by = event_data.get('created_by')
+    signed_by = event_data.get('signed_by')
 
     # File descriptor fields (now in this event)
     blob_bytes = event_data.get('blob_bytes')
@@ -538,7 +538,7 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
     root_hash_b64 = event_data.get('root_hash')
     total_slices = event_data.get('total_slices')
 
-    if not all([message_id, file_id, created_by, blob_bytes is not None,
+    if not all([message_id, file_id, signed_by, blob_bytes is not None,
                 nonce_prefix_b64, enc_key_b64, root_hash_b64, total_slices is not None]):
         log.warning(f"message_attachment.project() missing required fields: {list(event_data.keys())}")
         return
@@ -556,8 +556,8 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
         log.error(f"message_attachment.project() BUG: message not found (should be blocked by deps): {message_id[:20]}...")
         return
 
-    if message_row['author_id'] != created_by:
-        log.warning(f"message_attachment.project() VALIDATION FAILED: attachment created_by={created_by[:20]}... "
+    if message_row['author_id'] != signed_by:
+        log.warning(f"message_attachment.project() VALIDATION FAILED: attachment signed_by={signed_by[:20]}... "
                    f"does not match message author_id={message_row['author_id'][:20]}...")
         return
 

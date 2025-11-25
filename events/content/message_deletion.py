@@ -166,7 +166,7 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
     event_data = {
         'type': 'message_deletion',
         'message_id': message_id,
-        'created_by': deleter_peer_shared_id,
+        'signed_by': deleter_peer_shared_id,
         'created_at': t_ms
     }
 
@@ -230,7 +230,7 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     # Parse event
     event_data = crypto.parse_json(plaintext)
     message_id = event_data['message_id']
-    deleted_by = event_data['created_by']
+    deleted_by = event_data['signed_by']
     created_at = event_data['created_at']
 
     log.info(f"message_deletion.project() deleting message_id={message_id[:20]}... deleted_by={deleted_by[:20]}...")

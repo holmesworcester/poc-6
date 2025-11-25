@@ -38,7 +38,7 @@ def create(peer_id: str, cutoff_ms: int, t_ms: int, db: Any) -> str:
     event_data = {
         'type': 'purge_expired',
         'cutoff_ms': cutoff_ms,
-        'created_by': peer_id,
+        'signed_by': peer_id,
         'created_at': t_ms
     }
 

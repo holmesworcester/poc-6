@@ -39,7 +39,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
     event_data = {
         'type': 'group',
         'name': name,
-        'created_by': peer_shared_id,  # References shareable peer identity
+        'signed_by': peer_shared_id,  # References shareable peer identity
         'created_at': t_ms,
         'key_id': key_id,  # Store key_id in event for later retrieval
         'is_main': 1 if is_main else 0  # Store is_main flag
@@ -85,10 +85,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Parse JSON
     event_data = crypto.parse_json(unwrapped)
 
-    # Verify signature - get public key from created_by peer_shared
+    # Verify signature - get public key from signed_by peer_shared
     from events.identity import peer_shared
-    created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    signed_by = event_data['signed_by']
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"group.project() signature verification FAILED for group_id={event_id}")
         return None  # Reject unsigned or invalid signature
@@ -96,12 +96,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into groups table (use REPLACE to overwrite stubs from user.project())
     safedb.execute(
         """INSERT OR REPLACE INTO groups
-           (group_id, name, created_by, created_at, key_id, is_main, recorded_by, recorded_at)
+           (group_id, name, signed_by, created_at, key_id, is_main, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event_data['name'],
-            event_data['created_by'],
+            event_data['signed_by'],
             event_data['created_at'],
             event_data['key_id'],
             event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
@@ -145,6 +145,6 @@ def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all groups for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query(
-        "SELECT group_id, name, created_by, created_at FROM groups WHERE recorded_by = ? ORDER BY created_at DESC",
+        "SELECT group_id, name, signed_by, created_at FROM groups WHERE recorded_by = ? ORDER BY created_at DESC",
         (recorded_by,)
     )

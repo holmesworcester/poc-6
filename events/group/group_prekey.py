@@ -71,7 +71,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
         'type': 'group_prekey',
         'public_key': crypto.b64encode(prekey_public),
         'private_key': crypto.b64encode(prekey_private),
-        'created_by': peer_id,  # Local peer who created this prekey
+        'signed_by': peer_id,  # Local peer who created this prekey
         'created_at': t_ms
     }
 
@@ -98,7 +98,7 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
-    owner_peer_id = event_data['created_by']
+    owner_peer_id = event_data['signed_by']
     created_at = event_data['created_at']
 
     # Calculate TTL: absolute time when this prekey expires

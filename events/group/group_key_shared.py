@@ -48,7 +48,7 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
         'type': 'group_key_shared',
         'key_id': key_id,  # Reference to the key being shared
         'symmetric_key': symmetric_key_b64,  # The actual key material
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -121,7 +121,7 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
         'type': 'group_key_shared',
         'key_id': key_id,
         'symmetric_key': symmetric_key_b64,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -192,7 +192,7 @@ def create_for_link_invite(key_id: str, peer_id: str, peer_shared_id: str,
         'type': 'group_key_shared',
         'key_id': key_id,
         'symmetric_key': symmetric_key_b64,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -242,10 +242,10 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     # 2. Invite case: recipient_peer_id is invite prekey ID, but we have invite private key
     # The ability to decrypt is the authorization, not the recipient_peer_id field
 
-    # Verify signature - get public key from created_by peer_shared
+    # Verify signature - get public key from signed_by peer_shared
     from events.identity import peer_shared
-    created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    signed_by = event_data['signed_by']
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"key_shared.project() signature verification failed for key_shared_id={key_shared_id}")
         return None
@@ -272,12 +272,12 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     # Insert into group_keys_shared table to track this event
     safedb.execute(
         """INSERT OR IGNORE INTO group_keys_shared
-           (key_shared_id, original_key_id, created_by, created_at, recorded_by, recorded_at)
+           (key_shared_id, original_key_id, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (
             key_shared_id,
             original_key_id,
-            event_data['created_by'],
+            event_data['signed_by'],
             event_data['created_at'],
             recorded_by,
             recorded_at

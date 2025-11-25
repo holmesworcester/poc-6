@@ -192,7 +192,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'type': 'channel',
         'name': name,
         'group_id': group_id,
-        'created_by': peer_shared_id,  # References shareable peer identity
+        'signed_by': peer_shared_id,  # References shareable peer identity
         'created_at': t_ms,
         'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
         'is_main': 1 if is_main else 0  # Store is_main flag
@@ -275,14 +275,14 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     # Check: Verify all required fields exist
     assert event_data.get('name'), f"[CHANNEL_ASSERT] channel must have name"
     assert event_data.get('group_id'), f"[CHANNEL_ASSERT] channel must have group_id"
-    assert event_data.get('created_by'), f"[CHANNEL_ASSERT] channel must have created_by"
+    assert event_data.get('signed_by'), f"[CHANNEL_ASSERT] channel must have signed_by"
     assert isinstance(event_data.get('created_at'), int), f"[CHANNEL_ASSERT] channel must have created_at as int, got {type(event_data.get('created_at'))}"
     log.warning(f"[CHANNEL_ASSERT] ✓ All required fields present for channel {event_id[:20]}...")
 
-    # Verify signature - get public key from created_by peer_shared
+    # Verify signature - get public key from signed_by peer_shared
     from events.identity import peer_shared
-    created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    signed_by = event_data['signed_by']
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"channel.project() signature verification FAILED for channel_id={event_id}")
         return  # Reject unsigned or invalid signature
@@ -300,13 +300,13 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
 
     safedb.execute(
         """INSERT OR REPLACE INTO channels
-           (channel_id, name, group_id, created_by, created_at, disappearing_time_ms, is_main, recorded_by, recorded_at)
+           (channel_id, name, group_id, signed_by, created_at, disappearing_time_ms, is_main, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event_data['name'],
             event_data['group_id'],
-            event_data['created_by'],
+            event_data['signed_by'],
             event_data['created_at'],
             event_data.get('disappearing_time_ms', 0),  # Default to 0 if not present (backward compatibility)
             event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
@@ -332,7 +332,7 @@ def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query(
-        """SELECT channel_id, name, group_id, created_by, created_at, disappearing_time_ms
+        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
            FROM channels
            WHERE recorded_by = ?
            ORDER BY created_at DESC""",
