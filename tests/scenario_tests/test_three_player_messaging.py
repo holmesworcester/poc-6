@@ -15,6 +15,7 @@ import schema
 from events.identity import user, invite, peer
 from events.content import message
 import tick
+from tests.utils import tick_helper
 
 
 def test_three_player_messaging():
@@ -52,9 +53,11 @@ def test_three_player_messaging():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(15):
-        print(f"\n=== Sync Round {i+1} ===")
-        tick.tick(t_ms=4000 + i*200, db=db)
+    print("\n=== Initial sync ===")
+    final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
+        db=db, start_t_ms=4000, max_rounds=50, check_interval=5, verbose=True
+    )
+    print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
 
     # NOTE: We trust that sync worked correctly.
     # Observable behavior (message delivery) will verify this below.
@@ -128,9 +131,10 @@ def test_three_player_messaging():
 
     # Sync messages
     print("\n=== Sync Round 2: Message exchange ===")
-    # Need extra rounds with new timing model where messages are delivered in next tick
-    for round_num in range(20):
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+    final_t_ms2, rounds_used2, converged2, status2 = tick_helper.sync_until_converged(
+        db=db, start_t_ms=6000, max_rounds=50, check_interval=5, verbose=True
+    )
+    print(f"Message sync completed in {rounds_used2} rounds (converged={converged2})")
 
     # Verify message delivery
     print("\n=== Verifying message delivery ===")

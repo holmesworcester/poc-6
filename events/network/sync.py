@@ -931,3 +931,149 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         queues.incoming.add(wrapped_blob, t_ms, db)
         after_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
         log.debug(f"[SYNC_RESPONSE] added blob to incoming queue: before={before_count}, after={after_count}, hint={actual_hint_in_blob}")
+
+
+# =============================================================================
+# Convergence Detection Functions
+# =============================================================================
+
+def get_active_peer_pairs(db: Any) -> list[tuple[str, str]]:
+    """Get all peer pairs that should be syncing.
+
+    Returns list of (local_peer_id, remote_peer_shared_id) tuples for all
+    peers that are actively syncing with each other.
+
+    Returns:
+        List of (from_peer_id, to_peer_shared_id) tuples
+    """
+    unsafedb = create_unsafe_db(db)
+
+    pairs = []
+
+    # Get all local peers
+    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    for local_row in local_peers:
+        local_peer_id = local_row['peer_id']
+
+        # Get all peers this local peer knows about (from peers_shared table)
+        safedb = create_safe_db(db, recorded_by=local_peer_id)
+        known_peers = safedb.query(
+            "SELECT DISTINCT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
+            (local_peer_id,)
+        )
+
+        for remote_row in known_peers:
+            remote_peer_shared_id = remote_row['peer_shared_id']
+            # Don't include self-pairs
+            if remote_peer_shared_id != local_peer_id:
+                pairs.append((local_peer_id, remote_peer_shared_id))
+
+    return pairs
+
+
+def check_peer_pair_convergence(from_peer_id: str, to_peer_id: str, db: Any) -> tuple[bool, int]:
+    """Check if to_peer has all shareable events from from_peer.
+
+    Works by comparing:
+    - What from_peer can share (shareable_events table)
+    - What to_peer has recorded (store table with recorded_by=to_peer)
+
+    Args:
+        from_peer_id: Peer who has shareable events
+        to_peer_id: Peer who should have received them
+        db: Database connection
+
+    Returns:
+        (converged, missing_count) where converged=True if to_peer has all events
+    """
+    import json
+
+    # 1. Get all shareable events from from_peer
+    safedb_from = create_safe_db(db, recorded_by=from_peer_id)
+    from_peer_shareable = safedb_from.query(
+        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
+        (from_peer_id,)
+    )
+    shareable_set = {row['event_id'] for row in from_peer_shareable}
+
+    if not shareable_set:
+        # No shareable events yet, consider converged
+        return (True, 0)
+
+    # 2. Get what to_peer has recorded (their recorded events)
+    to_peer_recorded = set()
+    unsafedb = create_unsafe_db(db)
+    all_store_rows = unsafedb.query("SELECT id, blob FROM store")
+
+    for row in all_store_rows:
+        try:
+            data = json.loads(row['blob'])
+            if data.get('type') == 'recorded' and data.get('recorded_by') == to_peer_id:
+                ref_id = data.get('ref_id')
+                if ref_id:
+                    to_peer_recorded.add(ref_id)
+        except:
+            continue
+
+    # 3. Check intersection - what to_peer has from from_peer
+    received_from_peer = shareable_set & to_peer_recorded
+
+    # 4. Converged if to_peer has ALL shareable events from from_peer
+    missing_count = len(shareable_set - received_from_peer)
+    converged = (missing_count == 0)
+
+    return (converged, missing_count)
+
+
+def check_all_convergence(db: Any) -> dict:
+    """Check convergence for all active peer pairs (bidirectional).
+
+    Returns dictionary with:
+    - 'converged': bool (True if all pairs converged)
+    - 'peer_pairs': list of dicts with convergence status per pair
+    - 'queue_size': number of events in incoming_blobs
+    - 'blocked_count': number of blocked events
+
+    Returns:
+        Convergence status dictionary
+    """
+    pairs = get_active_peer_pairs(db)
+
+    results = []
+    all_converged = True
+
+    for from_peer, to_peer in pairs:
+        converged, missing = check_peer_pair_convergence(from_peer, to_peer, db)
+        results.append({
+            'from_peer': from_peer[:10] + '...',
+            'to_peer': to_peer[:10] + '...',
+            'converged': converged,
+            'missing_count': missing
+        })
+        if not converged:
+            all_converged = False
+
+    # Check sync queues
+    unsafedb = create_unsafe_db(db)
+    queue = unsafedb.query_one("SELECT COUNT(*) as count FROM incoming_blobs")
+
+    # Count blocked events across all local peers (blocked_events_ephemeral is subjective)
+    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+    total_blocked = 0
+    for peer_row in local_peers:
+        peer_id = peer_row['peer_id']
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        peer_blocked = safedb.query_one(
+            "SELECT COUNT(*) as count FROM blocked_events_ephemeral WHERE recorded_by = ?",
+            (peer_id,)
+        )
+        if peer_blocked:
+            total_blocked += peer_blocked['count']
+
+    return {
+        'converged': all_converged,
+        'peer_pairs': results,
+        'queue_size': queue['count'] if queue else 0,
+        'blocked_count': total_blocked
+    }
