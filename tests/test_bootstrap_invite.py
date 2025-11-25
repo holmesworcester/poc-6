@@ -93,6 +93,7 @@ def test_bootstrap_user_invite_signed_by_network():
     db.commit()
 
     # Create bootstrap user invite
+    # Note: Admin privileges are now granted via admin event in new_network(), not via first_peer
     invite_id, invite_private_key, invite_public_key = invite.create_bootstrap_user_invite(
         network_id=network_id,
         network_private_key=network_private_key,
@@ -100,7 +101,7 @@ def test_bootstrap_user_invite_signed_by_network():
         channel_id=channel_id,
         key_id=all_users_key_id,
         peer_id=peer_id,
-        first_peer=peer_shared_id,  # Bootstrap peer becomes admin
+        peer_shared_id=peer_shared_id,
         t_ms=1500,
         db=db
     )
@@ -120,13 +121,13 @@ def test_bootstrap_user_invite_signed_by_network():
     assert invite_event['group_id'] == all_users_group_id, "Should have correct group_id"
     assert invite_event['channel_id'] == channel_id, "Should have correct channel_id"
     assert invite_event['key_id'] == all_users_key_id, "Should have correct key_id"
-    assert invite_event.get('first_peer') == peer_shared_id, "Should have first_peer for admin grant"
+    assert invite_event['inviter_peer_shared_id'] == peer_shared_id, "Should have inviter_peer_shared_id"
 
     print("\nInvite event fields:")
     print(f"  type: {invite_event['type']}")
     print(f"  mode: {invite_event['mode']}")
     print(f"  signed_by: {invite_event['signed_by'][:20]}...")
-    print(f"  first_peer: {invite_event.get('first_peer', 'None')[:20] if invite_event.get('first_peer') else 'None'}...")
+    print(f"  inviter_peer_shared_id: {invite_event.get('inviter_peer_shared_id', 'None')[:20]}...")
 
     # Verify signature using network_pubkey
     network_pubkey_bytes = crypto.b64decode(network_event['network_pubkey'])

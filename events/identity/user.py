@@ -385,8 +385,8 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     )
     log.info(f"new_network() bootstrap inserted network into networks table")
 
-    # 6. Phase 6: Create bootstrap user invite signed by network_id
-    # This replaces the legacy first_peer mechanism
+    # 6. Create bootstrap user invite signed by network_id
+    # Admin privileges are granted via admin event after join (not via invite)
     invite_id, invite_private_key, invite_pubkey = invite.create_bootstrap_user_invite(
         network_id=network_id,
         network_private_key=network_private_key,
@@ -394,7 +394,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         channel_id=channel_id,
         key_id=all_users_key_id,
         peer_id=peer_id,
-        first_peer=peer_shared_id,  # Grants admin on join
+        peer_shared_id=peer_shared_id,
         t_ms=t_ms + 50,
         db=db
     )
@@ -416,7 +416,6 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': peer_shared_id,
         'inviter_peer_shared_blob': base64.urlsafe_b64encode(peer_shared_blob).decode().rstrip('='),
-        'first_peer': peer_shared_id,  # For admin grant on join
         'ip': '127.0.0.1',
         'port': 6100,
     }
@@ -450,20 +449,6 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         admin_grant=None  # Bootstrap: no prior admin to reference
     )
     log.info(f"new_network() granted admin via admin event: {admin_id[:20]}...")
-
-    # LEGACY: Also add to admins group for backward compatibility during migration
-    # TODO: Remove this once is_admin() no longer checks group membership
-    from events.group import group_member
-    admin_member_id = group_member.create(
-        group_id=admins_group_id,
-        user_id=join_result['user_id'],
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 115,
-        db=db,
-        skip_admin_check=True  # Bootstrap: first user grants themselves admin
-    )
-    log.info(f"new_network() (legacy) added creator to admins group: {admin_member_id[:20]}...")
 
     db.commit()
 
@@ -570,8 +555,9 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
 
     # Now project invite (after peer_shared, so creator's public key is available for validation)
+    # Skip admin check for out-of-band invites - the joiner trusts the invite link they received
     from events.identity import invite
-    invite.project(invite_id, peer_id, t_ms, db)
+    invite.project(invite_id, peer_id, t_ms, db, skip_admin_check=True)
     log.info(f"join() projected invite: {invite_id[:20]}...")
 
     # Extract secrets from invite link (all b64 encoded)
@@ -586,9 +572,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
     channel_id = invite_event_data['channel_id']
     key_id = invite_event_data['key_id']
 
-    # Phase 5: Extract first_peer from invite link (for network creator self-bootstrapping)
-    first_peer = invite_data.get('first_peer')
-
     # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
     # This restores the invite private key via projection BEFORE user.create() is called
     # This allows reprojection to work without the original invite link
@@ -599,8 +582,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         invite_private_key=invite_private_key,
         peer_id=peer_id,
         t_ms=t_ms + 1,  # Before user creation
-        db=db,
-        first_peer=first_peer  # Phase 5: Pass first_peer for admin grant
+        db=db
     )
 
     # 2. Create user membership (auto-creates transit_prekey + transit_prekey_shared)

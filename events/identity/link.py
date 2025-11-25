@@ -325,8 +325,7 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         invite_private_key=link_private_key,
         peer_id=peer_id,
         t_ms=t_ms + 1,
-        db=db,
-        first_peer=None  # Not a network creator, this is device linking
+        db=db
     )
     log.info(f"link.join() created invite_accepted_id={invite_accepted_id[:20]}...")
 

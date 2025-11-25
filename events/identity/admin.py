@@ -187,6 +187,24 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     log.warning(f"[ADMIN_PROJECT_SUCCESS] Admin grant inserted: admin_id={admin_id[:20]}..., "
                 f"user_id={user_id[:20]}...")
 
+    # Notify events waiting for this user's admin status
+    # user_id is the user event ID, but waiters block on peer_shared_id
+    # Look up the peer_shared_id for this user
+    user_row = safedb.query_one(
+        "SELECT peer_id FROM users WHERE user_id = ? AND recorded_by = ?",
+        (user_id, recorded_by)
+    )
+    if user_row:
+        peer_shared_id = user_row['peer_id']  # users.peer_id stores peer_shared_id
+        import queues
+        dep_key = f"admin_status_{peer_shared_id}"
+        unblocked = queues.blocked.notify_event_valid(dep_key, recorded_by, safedb)
+        if unblocked:
+            log.info(f"[ADMIN_PROJECT] Unblocked {len(unblocked)} events waiting for admin status of {peer_shared_id[:20]}...")
+            # Re-project unblocked events
+            from events.network import recorded as recorded_module
+            recorded_module.project_ids(unblocked, db)
+
     return admin_id
 
 

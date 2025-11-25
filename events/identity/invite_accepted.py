@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 
 def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
-           peer_id: str, t_ms: int, db: Any, first_peer: str | None = None) -> str:
+           peer_id: str, t_ms: int, db: Any) -> str:
     """Create local invite_accepted event (not shareable).
 
     This event captures the invite acceptance action and stores ALL
@@ -23,12 +23,11 @@ def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
         peer_id: Bob's peer_id (local)
         t_ms: Timestamp
         db: Database connection
-        first_peer: Optional peer_shared_id of network creator (for self-bootstrapping)
 
     Returns:
         invite_accepted_id: Event ID
     """
-    log.info(f"invite_accepted.create() for invite={invite_id}, peer={peer_id}, first_peer={first_peer[:20] if first_peer else 'None'}...")
+    log.info(f"invite_accepted.create() for invite={invite_id}, peer={peer_id}")
 
     event_data = {
         'type': 'invite_accepted',
@@ -38,10 +37,6 @@ def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
         'signed_by': peer_id,
         'created_at': t_ms
     }
-
-    # Phase 5: Store first_peer for self-bootstrapping
-    if first_peer:
-        event_data['first_peer'] = first_peer
 
     blob = json.dumps(event_data).encode()
 
@@ -83,7 +78,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         return
 
     invite_event = crypto.parse_json(invite_blob)
-    log.warning(f"[DEBUG_INVITE_EVENT] keys={list(invite_event.keys())}, first_peer={invite_event.get('first_peer', 'MISSING')[:20] if invite_event.get('first_peer') else 'MISSING'}")
+    log.info(f"[INVITE_ACCEPTED_PROJECT] invite event keys={list(invite_event.keys())}")
     invite_public_key = crypto.b64decode(invite_event['invite_pubkey'])
 
     # Store invite proof keypair in group_prekeys table (for GKS decryption)
@@ -161,17 +156,13 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         recorded_by
     ))
 
-    # Phase 7: Simplified - no __BOOTSTRAP_FIRST_PEER__ blocking anymore
     # Bootstrap invites use signed_by=network_id which doesn't need artificial blocking
-    # Admin privileges for first_peer are granted by user.project() when it detects first_peer match
+    # Admin privileges are granted via admin event created in new_network()
 
     # Unblock events waiting for the invite
     unblocked_by_invite = queues.blocked.notify_event_valid(invite_id, recorded_by, safedb)
     if unblocked_by_invite:
         log.info(f"invite_accepted.project() unblocked {len(unblocked_by_invite)} events waiting for invite")
         recorded_module.project_ids(unblocked_by_invite, db)
-
-    # Phase 5: Admin privileges for first_peer are now granted by user.project()
-    # (Moved there because user.project() runs after user is inserted, avoiding race condition)
 
     log.info(f"invite_accepted.project() completed for {recorded_by}")
