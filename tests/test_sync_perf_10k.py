@@ -9,7 +9,7 @@ import logging
 from db import Database
 import schema
 from events.network import sync
-from events.identity import user
+from events.identity import user, peer
 from events.content import message
 
 # Enable logging
