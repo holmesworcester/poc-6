@@ -436,18 +436,34 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     log.info(f"new_network() joined via self-invite: user_id={join_result['user_id'][:20]}...")
 
     # 8. Grant admin privileges to network creator
-    # This is explicit here rather than hidden as a side-effect in user.project()
+    # Per spec: Use admin event (first-class event type) instead of group membership
+    # Bootstrap admin is signed by network_id (no admin_grant chain needed for first admin)
+    from events.identity import admin
+    admin_id = admin.create(
+        user_id=join_result['user_id'],
+        network_id=network_id,
+        signed_by=network_id,  # Bootstrap: signed by network key
+        signer_private_key=network_private_key,
+        t_ms=t_ms + 110,
+        peer_id=peer_id,
+        db=db,
+        admin_grant=None  # Bootstrap: no prior admin to reference
+    )
+    log.info(f"new_network() granted admin via admin event: {admin_id[:20]}...")
+
+    # LEGACY: Also add to admins group for backward compatibility during migration
+    # TODO: Remove this once is_admin() no longer checks group membership
     from events.group import group_member
     admin_member_id = group_member.create(
         group_id=admins_group_id,
         user_id=join_result['user_id'],
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 110,
+        t_ms=t_ms + 115,
         db=db,
         skip_admin_check=True  # Bootstrap: first user grants themselves admin
     )
-    log.info(f"new_network() granted admin to creator: {admin_member_id[:20]}...")
+    log.info(f"new_network() (legacy) added creator to admins group: {admin_member_id[:20]}...")
 
     db.commit()
 
@@ -459,6 +475,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'admins_group_id': admins_group_id,
         'channel_id': channel_id,
         'invite_id': invite_id,
+        'admin_id': admin_id,  # Per spec: admin event ID for authorization chain
         # Backward compatibility - group_id and key_id reference all_users group
         'group_id': all_users_group_id,
         'key_id': all_users_key_id,

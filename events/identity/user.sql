@@ -13,18 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
     PRIMARY KEY (user_id, recorded_by)
 );
 
-CREATE TABLE IF NOT EXISTS group_members (
-    group_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    added_by TEXT NOT NULL,
-    added_at INTEGER NOT NULL,
-    recorded_by TEXT NOT NULL,
-    recorded_at INTEGER NOT NULL,
-    PRIMARY KEY (group_id, user_id, recorded_by)
-);
+-- NOTE: group_members table is defined in events/group/group_member.sql
+-- The duplicate definition here was removed to avoid schema conflicts
 
 CREATE INDEX IF NOT EXISTS idx_users_peer
 ON users(peer_id, recorded_by);
-
-CREATE INDEX IF NOT EXISTS idx_group_members_group
-ON group_members(group_id, recorded_by);

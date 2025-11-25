@@ -150,13 +150,14 @@ When accepting a user invite, the joiner handles two distinct keypairs:
    - `invite_private_key`: received in invite link
    - `invite_pubkey`: stored in `invite(mode=user)` event
    - Used to sign the `user` event (`signed_by=invite_id`)
-   - Discard `invite_private_key` immediately after creating `user` event
+   - Do not persist `invite_private_key` after creating `user` event
 
 2. **User keypair** (freshly generated):
    - `user_private_key, user_pubkey = generate_keypair()` — fresh, NOT derived from invite
    - `user_pubkey` stored IN the `user` event body
    - `user_private_key` used to sign first `invite(mode=peer)` (`signed_by=user_id`)
-   - Discard `user_private_key` after first `peer_shared` is created
+   - Do not persist `user_private_key` after first `peer_shared` is created
+   - Implementation note: `user.create()` returns `user_private_key` to caller for signing first peer invite; caller should not store it
 
 This separation ensures:
 - Invite key proves "I have the invite link" (one-time use)
@@ -166,8 +167,8 @@ This separation ensures:
 ### Key Lifecycle (Network Bootstrap)
 
 When creating a network:
-- `network_private_key`: discard after creating `admin` (bootstrap) event
-- `user_private_key`: discard after creating first `peer_shared`
+- `network_private_key`: do not persist after creating `admin` (bootstrap) event; it may be held in memory briefly for signing bootstrap events
+- `user_private_key`: do not persist after creating first `peer_shared`; returned to caller for immediate use only
 - Only `peer_private_key` (local-only) persists for ongoing operations
 
 ## Joining (Event-Layer Encryption)
