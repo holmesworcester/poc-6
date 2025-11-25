@@ -230,7 +230,7 @@ def is_user_admin(user_id: str, network_id: str, recorded_by: str, db: Any) -> b
     return admin_row is not None
 
 
-def get_admin_grant_for_user(user_id: str, network_id: str, recorded_by: str, db: Any) -> str | None:
+def my_grant(user_id: str, network_id: str, recorded_by: str, db: Any) -> str | None:
     """Get the admin_id that granted admin to a user.
 
     Used for creating admin_grant chain when granting admin to others.

@@ -152,7 +152,7 @@ def test_admin_group_workflow():
     # Alice adds Bob as admin
     print("\n=== Alice adds Bob as admin ===")
     # Get Alice's admin_grant (the admin event that made her admin)
-    alice_admin_grant = admin.get_admin_grant_for_user(
+    alice_admin_grant = admin.my_grant(
         alice['user_id'],
         alice['network_id'],
         alice['peer_id'],

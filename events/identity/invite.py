@@ -161,7 +161,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
     from events.identity import admin as admin_module
-    admin_grant_id = admin_module.get_admin_grant_for_user(inviter_user_id, network_id, peer_id, db)
+    admin_grant_id = admin_module.my_grant(inviter_user_id, network_id, peer_id, db)
     if admin_grant_id:
         log.info(f"invite.create() including admin_grant={admin_grant_id[:20]}... for ongoing invite")
     else:
