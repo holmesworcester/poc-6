@@ -1,5 +1,11 @@
 """User event type (shareable, encrypted) - represents network membership."""
 from typing import Any
+
+# Registry metadata
+EVENT_TYPE = 'user'
+SHAREABLE = True  # User events sync across the network
+EPHEMERAL = False
+PROJECTION_TABLE = ('users', 'user_id')
 import base64
 import logging
 import crypto
