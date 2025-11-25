@@ -840,18 +840,21 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
 
     log.debug(f"[SYNC_RESPONSE] from={from_peer_id[:10]}... to={to_peer_id[:10]}... window={window_id} range={window_min}-{window_max}")
 
-    # Query events the responder can share in this window
-    # The bloom filter handles deduplication, so we don't need to exclude requester's events
+    # Query random candidates to share (LIMIT to avoid O(n) scans for large event counts)
+    # Random sampling ensures we eventually cover all events across multiple rounds.
+    # Bloom filter prevents re-sending events receiver already has.
+    MAX_CANDIDATES = 2000  # Bound the scan per response
     safedb = create_safe_db(db, recorded_by=from_peer_id)
     shareable_rows = safedb.query(
         """SELECT event_id FROM shareable_events
            WHERE can_share_peer_id = ?
              AND window_id >= ?
              AND window_id < ?
-           ORDER BY created_at ASC""",
-        (from_peer_id, window_min, window_max)
+           ORDER BY RANDOM()
+           LIMIT ?""",
+        (from_peer_id, window_min, window_max, MAX_CANDIDATES)
     )
-    log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_shareable_events from={from_peer_id[:10]}...")
+    log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_candidate_events from={from_peer_id[:10]}...")
     for row in shareable_rows:
         log.debug(f"[SYNC_RESPONSE]   candidate event={row['event_id'][:20]}...")
 
