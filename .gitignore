@@ -31,3 +31,12 @@ Thumbs.db
 
 # Test failures (saved for debugging, not committed)
 tests/failures/
+
+# Debug test outputs
+tests/debug/*.db
+tests/debug/*.log
+tests/debug/output/
+
+# Common test artifacts
+*.db-journal
+.pytest_cache/
