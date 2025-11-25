@@ -153,6 +153,12 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Don't enforce semantic deps - let projection attempt auth and drop if both fail
         # peer_id is always foreign (sender's local peer)
         dep_fields = []
+    elif event_type == 'admin':
+        # Admin events depend on network for signature verification
+        # For bootstrap: signed_by == network_id, verify with network_pubkey
+        # For ongoing: signed_by is peer_shared_id + admin_grant chain
+        # NOTE: We only check network_id here; ongoing admin_grant chain is verified in admin.project()
+        dep_fields = ['network_id']
 
     missing_deps = []
 
@@ -178,6 +184,29 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # Phase 7: Bootstrap invites use signed_by=network_id and don't need special blocking
     # The invite.project() verifies the network signature directly from the stored network blob
     # No legacy __BOOTSTRAP_FIRST_PEER__ blocking needed anymore
+
+    # For non-bootstrap invites, check if the creator is an admin
+    # If not, add a virtual dependency that will be satisfied when admin.project() runs
+    if event_type == 'invite':
+        signed_by = event_data.get('signed_by')
+        network_id = event_data.get('network_id')
+        log.warning(f"[CHECK_DEPS_INVITE] signed_by={signed_by[:20] if signed_by else 'None'}... network_id={network_id[:20] if network_id else 'None'}...")
+        # Only check admin status for non-bootstrap invites
+        if signed_by != network_id:
+            created_by = event_data.get('created_by')
+            log.warning(f"[CHECK_DEPS_INVITE] Non-bootstrap invite, created_by={created_by[:20] if created_by else 'None'}...")
+            if created_by:
+                from events.identity import invite as invite_module
+                is_admin_result = invite_module.is_admin(created_by, recorded_by, db)
+                log.warning(f"[CHECK_DEPS_INVITE] is_admin({created_by[:20]}...) = {is_admin_result}")
+                if not is_admin_result:
+                    # Creator is not yet an admin from our perspective
+                    # Block on a virtual dependency that admin.project() will notify
+                    admin_dep = f"admin_status_{created_by}"
+                    log.warning(f"[CHECK_DEPS_INVITE] Adding admin_status dep: {admin_dep}")
+                    missing_deps.append(admin_dep)
+        else:
+            log.warning(f"[CHECK_DEPS_INVITE] Bootstrap invite (signed_by == network_id), skipping admin check")
 
     if missing_deps:
         log.debug(f"recorded.check_deps() total missing deps: {missing_deps}")
@@ -515,6 +544,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'bootstrap_complete':
         from events.identity import bootstrap_complete
         projected_id = bootstrap_complete.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'admin':
+        from events.identity import admin
+        projected_id = admin.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'address':
         from events.identity import address
         projected_id = address.project(ref_id, recorded_by, recorded_at, db)
