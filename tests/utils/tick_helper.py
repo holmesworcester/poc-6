@@ -92,17 +92,17 @@ def sync_until_converged(
     start_t_ms: int,
     max_rounds: int = 200,
     check_interval: int = 5,
-    verbose: bool = False
+    verbose: bool = False,
+    stability_threshold: int = 3
 ) -> tuple[int, int, bool, dict]:
-    """Run ticks until all peer pairs converge or max_rounds reached.
+    """Run ticks until all peer pairs converge, stabilize, or max_rounds reached.
 
     Checks convergence every check_interval rounds by comparing
     database state (what each peer actually has recorded).
 
-    Convergence means:
-    - All peer pairs have exchanged all shareable events
-    - Incoming queue is empty
-    - No blocked events remain
+    Exits early when:
+    - Full convergence: All peer pairs synced + queue empty
+    - Stability: Missing counts unchanged for stability_threshold consecutive checks
 
     Args:
         db: Database connection
@@ -110,17 +110,23 @@ def sync_until_converged(
         max_rounds: Maximum sync rounds (default 200)
         check_interval: Check convergence every N rounds (default 5)
         verbose: Print convergence status (default False)
+        stability_threshold: Exit if missing counts stable for N checks (default 3)
 
     Returns:
         (final_t_ms, rounds_used, converged, status_dict)
 
     Status dict contains:
-        - 'converged': bool
+        - 'converged': bool (True only if fully converged)
+        - 'stable': bool (True if counts stabilized)
         - 'peer_pairs': list of convergence status per pair
         - 'queue_size': incoming_blobs count
         - 'blocked_count': blocked_events count
     """
     from events.network import sync as sync_module
+
+    prev_missing_total = None
+    prev_queue_size = None
+    stable_count = 0
 
     for round_num in range(max_rounds):
         t_ms = start_t_ms + (round_num * TICK_INTERVAL_MS)
@@ -130,27 +136,54 @@ def sync_until_converged(
         if (round_num + 1) % check_interval == 0:
             status = sync_module.check_all_convergence(db)
 
+            # Calculate total missing across all pairs
+            missing_total = sum(p['missing_count'] for p in status['peer_pairs'])
+
             if verbose:
                 print(f"Round {round_num + 1}: "
                       f"converged={status['converged']}, "
                       f"queue={status['queue_size']}, "
-                      f"blocked={status['blocked_count']}")
+                      f"blocked={status['blocked_count']}, "
+                      f"missing_total={missing_total}")
                 for pair in status['peer_pairs']:
                     if not pair['converged']:
                         print(f"  {pair['from_peer']} → {pair['to_peer']}: "
                               f"missing {pair['missing_count']} events")
 
-            # Converged if all pairs converged AND queues empty
+            # Check for full convergence
             if status['converged'] and status['queue_size'] == 0:
                 final_t_ms = start_t_ms + ((round_num + 1) * TICK_INTERVAL_MS)
+                status['stable'] = True
                 if verbose:
-                    print(f"✓ Converged in {round_num + 1} rounds!")
+                    print(f"✓ Fully converged in {round_num + 1} rounds!")
                 return (final_t_ms, round_num + 1, True, status)
 
-    # Did not converge within max_rounds
+            # Check for stability (counts not changing)
+            # Also track queue stability - some blobs may be stuck (missing keys)
+            if prev_missing_total is not None and prev_queue_size is not None:
+                queue_stable = (status['queue_size'] == prev_queue_size)
+                counts_stable = (missing_total == prev_missing_total)
+
+                if counts_stable and queue_stable:
+                    stable_count += 1
+                    if stable_count >= stability_threshold:
+                        final_t_ms = start_t_ms + ((round_num + 1) * TICK_INTERVAL_MS)
+                        status['stable'] = True
+                        if verbose:
+                            stuck_blobs = f", {status['queue_size']} stuck" if status['queue_size'] > 0 else ""
+                            print(f"✓ Stabilized in {round_num + 1} rounds ({missing_total} missing{stuck_blobs})")
+                        return (final_t_ms, round_num + 1, False, status)
+                else:
+                    stable_count = 0
+
+            prev_missing_total = missing_total
+            prev_queue_size = status['queue_size']
+
+    # Did not converge or stabilize within max_rounds
     final_t_ms = start_t_ms + (max_rounds * TICK_INTERVAL_MS)
     final_status = sync_module.check_all_convergence(db)
+    final_status['stable'] = False
     if verbose:
-        print(f"✗ Did not converge within {max_rounds} rounds")
+        print(f"✗ Did not converge/stabilize within {max_rounds} rounds")
         print(f"   Final status: {final_status}")
     return (final_t_ms, max_rounds, False, final_status)

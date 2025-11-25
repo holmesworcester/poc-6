@@ -972,7 +972,17 @@ def get_active_peer_pairs(db: Any) -> list[tuple[str, str]]:
     return pairs
 
 
-def check_peer_pair_convergence(from_peer_id: str, to_peer_id: str, db: Any) -> tuple[bool, int]:
+# Event types to exclude from convergence checks by default
+# These are generated during sync and would prevent convergence from ever being reached
+DEFAULT_EXCLUDE_TYPES = {'transit_prekey_shared', 'group_keys_shared'}
+
+
+def check_peer_pair_convergence(
+    from_peer_id: str,
+    to_peer_id: str,
+    db: Any,
+    exclude_types: set[str] | None = None
+) -> tuple[bool, int]:
     """Check if to_peer has all shareable events from from_peer.
 
     Works by comparing:
@@ -983,19 +993,42 @@ def check_peer_pair_convergence(from_peer_id: str, to_peer_id: str, db: Any) -> 
         from_peer_id: Peer who has shareable events
         to_peer_id: Peer who should have received them
         db: Database connection
+        exclude_types: Event types to exclude from convergence check.
+                      Defaults to DEFAULT_EXCLUDE_TYPES (transit_prekey_shared, group_keys_shared)
 
     Returns:
         (converged, missing_count) where converged=True if to_peer has all events
     """
     import json
 
-    # 1. Get all shareable events from from_peer
+    if exclude_types is None:
+        exclude_types = DEFAULT_EXCLUDE_TYPES
+
+    # 1. Get all shareable events from from_peer, filtering by type
     safedb_from = create_safe_db(db, recorded_by=from_peer_id)
     from_peer_shareable = safedb_from.query(
         "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
         (from_peer_id,)
     )
-    shareable_set = {row['event_id'] for row in from_peer_shareable}
+
+    # Filter out excluded types
+    shareable_set = set()
+    unsafedb = create_unsafe_db(db)
+    for row in from_peer_shareable:
+        event_id = row['event_id']
+        # Look up event type
+        blob_row = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
+        if blob_row:
+            try:
+                data = json.loads(blob_row['blob'])
+                event_type = data.get('type', 'unknown')
+                if event_type not in exclude_types:
+                    shareable_set.add(event_id)
+            except:
+                # Can't parse, include it
+                shareable_set.add(event_id)
+        else:
+            shareable_set.add(event_id)
 
     if not shareable_set:
         # No shareable events yet, consider converged
@@ -1003,7 +1036,6 @@ def check_peer_pair_convergence(from_peer_id: str, to_peer_id: str, db: Any) -> 
 
     # 2. Get what to_peer has recorded (their recorded events)
     to_peer_recorded = set()
-    unsafedb = create_unsafe_db(db)
     all_store_rows = unsafedb.query("SELECT id, blob FROM store")
 
     for row in all_store_rows:
