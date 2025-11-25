@@ -92,45 +92,29 @@ def test_sync_perf_10k():
     # Now sync: track how many ticks it takes for Bob to get all messages
     log.info("\nStarting sync performance test...")
     tick_count = 0
-    max_ticks = 500  # Safety limit
+    max_ticks = 100  # Safety limit (typically completes in ~20 ticks)
 
     while tick_count < max_ticks:
         tick_count += 1
-
-        # Run tick (handles all sync jobs with configured batch_size)
         tick.tick(t_ms=30000 + tick_count * 100, db=db)
 
-        # Check Bob's message count periodically
+        # Check completion every 10 ticks
         if tick_count % 10 == 0:
-            bob_messages = db.query(
+            bob_msg_count = db.query_one(
                 "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
                 (bob_peer_id,)
-            )
-            bob_msg_count = bob_messages[0]['count']
+            )['count']
 
             log.info(f"  Tick {tick_count}: Bob has {bob_msg_count}/{num_messages} messages")
-
-            # Check if sync is complete
             if bob_msg_count >= num_messages:
-                log.info(f"\n✓ Sync complete after {tick_count} ticks!")
                 break
 
-            # Check if sync has stalled
-            if tick_count > 10 and bob_msg_count < num_messages:
-                queue_count = db.query_one(
-                    "SELECT COUNT(*) as count FROM incoming_blobs"
-                )
-                if queue_count and queue_count['count'] == 0:
-                    log.warning(f"Sync stalled at tick {tick_count}: Bob has {bob_msg_count}/{num_messages} messages, queue empty")
-                    break
-
-    # Final check
-    bob_messages = db.query(
+    # Final count
+    bob_msg_count = db.query_one(
         "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
         (bob_peer_id,)
-    )
-    bob_msg_count = bob_messages[0]['count']
-    sync_step = tick_count  # For backwards compatibility with assertions
+    )['count']
+    sync_step = tick_count
 
     db.commit()
 
