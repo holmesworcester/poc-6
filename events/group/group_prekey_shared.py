@@ -46,7 +46,7 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
         'peer_id': peer_shared_id,
         'group_id': group_id,
         'public_key': prekey_public_b64,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms,
         'key_id': key_id
     }
@@ -83,10 +83,10 @@ def project(group_prekey_shared_id: str, recorded_by: str, recorded_at: int, db:
     # Parse JSON (signed plaintext, no decryption needed)
     event_data = crypto.parse_json(blob)
 
-    # Verify signature - get public key from created_by peer_shared
+    # Verify signature - get public key from signed_by peer_shared
     from events.identity import peer_shared
-    created_by = event_data['created_by']
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    signed_by = event_data['signed_by']
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"group_prekey_shared.project() signature verification failed for group_prekey_shared_id={group_prekey_shared_id}")
         return None

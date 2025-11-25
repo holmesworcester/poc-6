@@ -303,7 +303,7 @@ def test_admin_group_workflow():
         'inviter_transit_prekey_public_key': crypto.b64encode(charlie_prekey_row['public_key']),
         'inviter_transit_prekey_shared_id': charlie['peer_shared_id'],  # Simplified
         'inviter_transit_prekey_id': charlie_prekey_row['transit_prekey_id'],
-        'created_by': charlie['peer_shared_id'],
+        'signed_by': charlie['peer_shared_id'],
         'created_at': 11000
     }
 

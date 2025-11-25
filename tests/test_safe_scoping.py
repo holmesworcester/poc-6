@@ -51,16 +51,16 @@ def test_peer_view_isolation():
     alice_db = create_safe_db(db, recorded_by=alice_id)
     bob_db = create_safe_db(db, recorded_by=bob_id)
 
-    # Alice inserts a message
+    # Alice inserts a message (10 columns: message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
     alice_db.execute(
-        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ('msg1', 'chan1', 'grp1', alice_id, 'Alice secret', 1000, 0, alice_id, 1001)
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ('msg1', 'chan1', 'grp1', alice_id, 'Alice secret', 1000, 0, None, alice_id, 1001)
     )
 
     # Bob inserts a message with same message_id (different peer view)
     bob_db.execute(
-        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ('msg1', 'chan1', 'grp1', bob_id, 'Bob secret', 2000, 0, bob_id, 2001)
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ('msg1', 'chan1', 'grp1', bob_id, 'Bob secret', 2000, 0, None, bob_id, 2001)
     )
 
     db.commit()
@@ -152,12 +152,12 @@ def test_safedb_catches_wrong_recorded_by_in_results():
 
     # Insert data for both peers using raw db
     db.execute(
-        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ('msg1', 'chan1', 'grp1', alice_id, 'Alice msg', 1000, 0, alice_id, 1001)
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ('msg1', 'chan1', 'grp1', alice_id, 'Alice msg', 1000, 0, None, alice_id, 1001)
     )
     db.execute(
-        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ('msg2', 'chan1', 'grp1', bob_id, 'Bob msg', 2000, 0, bob_id, 2001)
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ('msg2', 'chan1', 'grp1', bob_id, 'Bob msg', 2000, 0, None, bob_id, 2001)
     )
     db.commit()
 
@@ -183,14 +183,14 @@ def test_safedb_insert_validation():
     # Should reject INSERT without recorded_by value
     with pytest.raises(ScopingViolation, match="must include recorded_by"):
         alice_db.execute(
-            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ('msg1', 'chan1', 'grp1', 'author', 'content', 1000, 0, 'bob', 1001)  # Wrong peer!
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ('msg1', 'chan1', 'grp1', 'author', 'content', 1000, 0, None, 'bob', 1001)  # Wrong peer!
         )
 
     # Should accept INSERT with correct recorded_by
     alice_db.execute(
-        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ('msg1', 'chan1', 'grp1', 'author', 'content', 1000, 0, 'alice', 1001)
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ('msg1', 'chan1', 'grp1', 'author', 'content', 1000, 0, None, 'alice', 1001)
     )
     db.commit()
 

@@ -51,7 +51,7 @@ def create(peer_id: str, peer_shared_id: str, link_invite_id: str,
         'link_signature': link_signature_b64,  # Proof of ownership
         'user_id': user_id,  # User being linked to
         'peer_id': peer_shared_id,  # New device's peer
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -101,15 +101,15 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # Parse JSON (plaintext, no unwrap needed)
     event_data = crypto.parse_json(blob)
 
-    created_by = event_data['created_by']
+    signed_by = event_data['signed_by']
 
-    log.info(f"link.project() link_id={link_id[:20]}..., created_by={created_by[:20]}...")
+    log.info(f"link.project() link_id={link_id[:20]}..., signed_by={signed_by[:20]}...")
 
-    # Verify creator (created_by) exists
+    # Verify signer (signed_by) exists
     from events.identity import peer_shared
-    creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    creator_public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not creator_public_key:
-        log.warning(f"link.project() creator not found: {created_by[:20]}...")
+        log.warning(f"link.project() signer not found: {signed_by[:20]}...")
         return None
 
     # Verify link event signature
@@ -139,7 +139,7 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
     # Verify link proof signature: sign(peer_id + ":" + user_id) with link_pubkey
     user_id = event_data['user_id']
-    proof_message = f"{created_by}:{user_id}".encode('utf-8')
+    proof_message = f"{signed_by}:{user_id}".encode('utf-8')
     link_pubkey = crypto.b64decode(event_data['link_pubkey'])
     link_signature = crypto.b64decode(event_data['link_signature'])
 
@@ -157,7 +157,7 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         (
             link_id,
             user_id,
-            created_by,  # New device's peer_shared_id
+            signed_by,  # New device's peer_shared_id
             event_data['created_at'],
             recorded_by
         )
@@ -175,7 +175,7 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
-            created_by,  # New device's peer_shared_id
+            signed_by,  # New device's peer_shared_id
             '',  # Name will be same as original user (empty here, can query original)
             network_id,
             event_data['created_at'],

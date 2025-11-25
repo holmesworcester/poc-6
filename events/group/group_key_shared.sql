@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS group_keys_shared (
     key_shared_id TEXT NOT NULL,
     original_key_id TEXT NOT NULL,  -- The key_id being shared
-    created_by TEXT NOT NULL,        -- peer_shared_id of creator
+    signed_by TEXT NOT NULL,         -- peer_shared_id of signer
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,       -- Who decrypted and projected this event
     recorded_at INTEGER NOT NULL,

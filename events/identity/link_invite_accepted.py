@@ -34,7 +34,7 @@ def create(link_invite_id: str, link_prekey_id: str, link_private_key: bytes,
         'link_invite_id': link_invite_id,
         'link_prekey_id': link_prekey_id,
         'link_private_key': crypto.b64encode(link_private_key),
-        'created_by': peer_id,
+        'signed_by': peer_id,
         'created_at': t_ms
     }
 

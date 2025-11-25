@@ -32,7 +32,7 @@ def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db:
     event_data = {
         'type': 'address',
         'peer_id': peer_shared_id,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'ip': ip,
         'port': port,
         'created_at': t_ms

@@ -64,7 +64,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
         'type': 'message',
         'channel_id': channel_id,
         'group_id': group_id,
-        'created_by': peer_shared_id,  # References shareable peer identity
+        'signed_by': peer_shared_id,  # References shareable peer identity
         'content': content,
         'created_at': t_ms
     }
@@ -152,10 +152,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     event_data = crypto.parse_json(unwrapped)
     log.info(f"message.project() projected message content='{event_data.get('content', '')[:50]}...', id={event_id}")
 
-    # Verify signature - get public key from created_by peer_shared
+    # Verify signature - get public key from signed_by peer_shared
     from events.identity import peer_shared
-    created_by = event_data.get('created_by')
-    public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    signed_by = event_data.get('signed_by')
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         return None  # Reject unsigned or invalid signature
 
@@ -163,7 +163,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     message_id = event_id
     channel_id = event_data.get('channel_id')
     group_id = event_data.get('group_id')
-    author_id = event_data.get('created_by')
+    author_id = event_data.get('signed_by')
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 

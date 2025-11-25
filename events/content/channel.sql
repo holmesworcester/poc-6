@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS channels (
     channel_id TEXT NOT NULL,
     name TEXT NOT NULL,
     group_id TEXT NOT NULL,
-    created_by TEXT NOT NULL,
+    signed_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     disappearing_time_ms INTEGER NOT NULL DEFAULT 0,  -- 0 = permanent, >0 = milliseconds until expiration
     is_main INTEGER DEFAULT 0,  -- 1 if this is the peer's main channel
