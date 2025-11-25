@@ -139,10 +139,7 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Invite events need creator to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet
         dep_fields = ['created_by']
-    elif event_type == 'invite_proof':
-        # Invite proof only depends on invite and created_by
-        # user_id/link_user_id are string IDs, not event IDs, so they're not dependencies
-        dep_fields = ['created_by', 'invite_id']
+    # Phase 5: invite_proof removed - proof IS the signature on user/peer_shared events
     elif event_type == 'message_deletion':
         # Deletion events only depend on the creator (for signature verification)
         # Message doesn't need to exist - deletion can arrive before the message
@@ -178,19 +175,9 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             log.warning(f"recorded.check_deps() missing dep: {field}={dep_id[:20]}... for peer={recorded_by[:20]}...")
             missing_deps.append(dep_id)
 
-    # Phase 5 BOOTSTRAP: Check for first_peer field (self-invite bootstrap)
-    # If this is an invite with first_peer, artificially block it until invite_accepted resolves the bootstrap
-    # Only block if no invite_accepted event has been created yet for this peer
-    if event_type == 'invite' and event_data.get('first_peer'):
-        # Check if invite_accepteds table has any entries (populated by invite_accepted.project())
-        invite_accepted_exists = safedb.query_one(
-            "SELECT 1 FROM invite_accepteds WHERE recorded_by = ? LIMIT 1",
-            (recorded_by,)
-        )
-        log.warning(f"[BOOTSTRAP_CHECK_DEPS] invite with first_peer, invite_accepted_exists={invite_accepted_exists is not None}, peer={recorded_by[:20]}...")
-        if not invite_accepted_exists:
-            missing_deps.append('__BOOTSTRAP_FIRST_PEER__')
-            log.warning(f"[BOOTSTRAP_BLOCK] blocking invite with first_peer for peer {recorded_by[:20]}...")
+    # Phase 7: Bootstrap invites use signed_by=network_id and don't need special blocking
+    # The invite.project() verifies the network signature directly from the stored network blob
+    # No legacy __BOOTSTRAP_FIRST_PEER__ blocking needed anymore
 
     if missing_deps:
         log.debug(f"recorded.check_deps() total missing deps: {missing_deps}")
@@ -379,12 +366,21 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     event_type = event_data.get('type')
     skip_dep_check = False
 
-    if event_type == 'user' and 'invite_pubkey' in event_data:
+    # Phase 2: User events now have signed_by=invite_id and user_pubkey (not invite_pubkey)
+    if event_type == 'user' and 'signed_by' in event_data:
         # Self-created user with invite proof: creator doesn't have invite in valid_events
         # (invite comes from out-of-band link, not network sync)
+        # Note: created_by is peer_shared_id but recorded_by is peer_id, so we need to check
+        # if they're linked via peer_self table
         created_by = event_data.get('created_by')
-        if recorded_by == created_by:
+        # Check if created_by is THIS peer's peer_shared_id
+        peer_self_row = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+            (recorded_by, recorded_by)
+        )
+        if peer_self_row and peer_self_row['peer_shared_id'] == created_by:
             skip_dep_check = True
+            log.info(f"[USER_SKIP_DEPS] Skipping dep check for self-created user event")
 
     # NOTE: Invite validation moved to invite.project() for better modularity
     # Invites from URLs (with invite_accepted) skip validation in projector
@@ -474,9 +470,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'invite':
         from events.identity import invite
         projected_id = invite.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'invite_proof':
-        from events.identity import invite_proof
-        projected_id = invite_proof.project(ref_id, recorded_by, recorded_at, db)
+    # Phase 5: invite_proof removed - proof IS the signature on user/peer_shared events
     elif event_type == 'user':
         from events.identity import user
         projected_id = user.project(ref_id, recorded_by, recorded_at, db)

@@ -10,25 +10,33 @@ log = logging.getLogger(__name__)
 
 
 def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
-           peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
+           peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     """Create a network event binding all_users and admins groups.
 
     The network_id is the event_id (hash of the network event).
     During projection, creator_user_id is automatically added to admin group.
 
+    Phase 4: Network now has its own keypair (network_pubkey in event).
+    The network_private_key is returned for signing bootstrap invites.
+
     Args:
         all_users_group_id: Main group for all users
         admins_group_id: Admin-only group
-        creator_user_id: User to add to admin group during projection
+        creator_user_id: User to add to admin group during projection (empty string for bootstrap)
         peer_id: Local peer ID (for signing)
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
 
     Returns:
-        network_id: The stored network event ID (hash of event)
+        tuple: (network_id, network_private_key)
+            - network_id: The stored network event ID (hash of event)
+            - network_private_key: Private key for signing bootstrap invites
     """
     log.info(f"network.create() creating network with all_users={all_users_group_id}, admins={admins_group_id}, creator={creator_user_id}")
+
+    # Phase 4: Generate network's own keypair
+    network_private_key, network_public_key = crypto.generate_keypair()
 
     # Create event data
     event_data = {
@@ -36,6 +44,7 @@ def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
         'all_users_group_id': all_users_group_id,
         'admins_group_id': admins_group_id,
         'creator_user_id': creator_user_id,
+        'network_pubkey': crypto.b64encode(network_public_key),  # Phase 4
         'created_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -51,7 +60,7 @@ def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
     network_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"network.create() created network_id={network_id}")
-    return network_id
+    return network_id, network_private_key
 
 
 def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -130,16 +139,20 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
             # Don't block here - let recorded.project() handle blocking with recorded_id
             return None
 
+    # Phase 4: Get network_pubkey (may not exist in legacy events)
+    network_pubkey = event_data.get('network_pubkey', '')
+
     # Insert into networks table
     safedb.execute(
         """INSERT OR IGNORE INTO networks
-           (network_id, all_users_group_id, admins_group_id, creator_user_id, created_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, created_by, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             network_id,
             all_users_group_id,
             admins_group_id,
             creator_user_id,
+            network_pubkey,
             created_by,
             event_data['created_at'],
             recorded_by,
@@ -227,6 +240,39 @@ def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
         raise ValueError(f"Network {network_id} not found")
 
     return network['all_users_group_id']
+
+
+def get_public_key(network_id: str, recorded_by: str, db: Any) -> bytes:
+    """Get network public key for signature verification.
+
+    Phase 4: Used to verify signed_by=network_id on bootstrap invites.
+
+    Args:
+        network_id: Network ID
+        recorded_by: Peer ID querying
+        db: Database connection
+
+    Returns:
+        Network public key as bytes
+
+    Raises:
+        ValueError: If network not found or no network_pubkey
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    network = safedb.query_one(
+        "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+
+    if not network:
+        raise ValueError(f"Network {network_id} not found")
+
+    network_pubkey = network['network_pubkey']
+    if not network_pubkey:
+        raise ValueError(f"Network {network_id} has no network_pubkey (legacy event)")
+
+    return crypto.b64decode(network_pubkey)
 
 
 def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
