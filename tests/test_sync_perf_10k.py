@@ -71,7 +71,8 @@ def test_sync_perf_10k():
             channel_id=alice_channel_id,
             content=f'Message {i}',
             t_ms=10000 + i,
-            db=db
+            db=db,
+            return_latest=False  # Skip fetching messages for bulk creation performance
         )
 
         if (i + 1) % 1000 == 0:
