@@ -17,7 +17,7 @@ import schema
 from events.identity import user, link_invite, link
 from events.group import group, group_member
 from events.content import message
-import tick
+from tests.utils import tick_helper
 
 
 def test_linked_devices_bidirectional_messaging():
@@ -58,8 +58,7 @@ def test_linked_devices_bidirectional_messaging():
     db.commit()
 
     # Sync for group creation
-    for i in range(5):
-        tick.tick(t_ms=2000 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=2000, max_rounds=200, check_interval=1)
 
     # Alice creates link invite and links second device
     print("\n=== Link second device ===")
@@ -86,9 +85,7 @@ def test_linked_devices_bidirectional_messaging():
 
     # Sync for link convergence and group key sharing
     print("\n=== Sync for link convergence ===")
-    for i in range(40):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=5000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
 
     # Verify device 2 has the group key
     has_key = db.query_one(
@@ -126,9 +123,7 @@ def test_linked_devices_bidirectional_messaging():
 
     # Sync for message convergence
     print("\n=== Sync for message convergence ===")
-    for i in range(30):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=7000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
 
     # Verify device 1 sees both messages
     print("\n=== Verifying device 1 sees both messages ===")

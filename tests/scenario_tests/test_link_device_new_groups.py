@@ -17,7 +17,7 @@ from db import Database
 import schema
 from events.identity import user, link_invite, link
 from events.group import group, group_member
-import tick
+from tests.utils import tick_helper
 
 
 def test_link_device_sees_new_groups_after_invite():
@@ -57,8 +57,7 @@ def test_link_device_sees_new_groups_after_invite():
 
     # Sync for group creation
     print("\n=== Sync for Group A creation ===")
-    for i in range(5):
-        tick.tick(t_ms=2500 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=2500, max_rounds=200, check_interval=1)
 
     # Alice creates link invite
     print("\n=== Alice creates link invite ===")
@@ -94,8 +93,7 @@ def test_link_device_sees_new_groups_after_invite():
 
     # Sync for Group B creation
     print("\n=== Sync for Group B creation ===")
-    for i in range(5):
-        tick.tick(t_ms=4000 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
 
     # Alice links second device
     print("\n=== Alice links second device ===")
@@ -116,9 +114,7 @@ def test_link_device_sees_new_groups_after_invite():
 
     # Sync multiple rounds for convergence (more rounds needed for key sharing)
     print("\n=== Sync for link and group key propagation ===")
-    for i in range(40):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=6000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
 
     # Verify device 2 is member of BOTH groups
     print("\n=== Verifying device 2 group memberships ===")

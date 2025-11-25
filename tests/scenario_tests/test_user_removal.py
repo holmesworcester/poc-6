@@ -15,7 +15,7 @@ from db import Database, create_safe_db, create_unsafe_db
 import schema
 from events.identity import user, invite, peer, peer_shared
 from events.identity import user_removed, peer_removed
-import tick
+from tests.utils import tick_helper
 from events.content import message
 import store
 from tests.utils import assert_convergence, assert_reprojection, assert_idempotency
@@ -56,9 +56,7 @@ def test_user_removal_blocks_sync_but_preserves_history():
 
     # Initial sync to converge (need multiple rounds for GKS to propagate)
     print("\n=== Initial sync to converge ===")
-    for i in range(15):
-        print(f"Sync round {i+1}")
-        tick.tick(t_ms=3000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Verify Bob is in Alice's view
     print("\n=== Verify Bob joined successfully ===")
@@ -295,8 +293,7 @@ def test_receive_path_removal_check():
     db.commit()
 
     print("\n=== Initial sync to converge ===")
-    for i in range(9):
-        tick.tick(t_ms=3000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Alice removes Bob
     print("\n=== Alice removes Bob ===")
@@ -367,9 +364,7 @@ def test_user_removal_rotates_group_keys():
 
     # Initial sync to converge
     print("\n=== Initial sync to converge ===")
-    for i in range(15):
-        print(f"Sync round {i+1}")
-        tick.tick(t_ms=3000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Get original key
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -443,9 +438,7 @@ def test_peer_removal_last_device_rotates_keys():
 
     # Initial sync to converge
     print("\n=== Initial sync to converge ===")
-    for i in range(15):
-        print(f"Sync round {i+1}")
-        tick.tick(t_ms=3000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Get original key
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -527,8 +520,7 @@ def test_removed_peer_cannot_sync_messages():
 
     # Initial sync to converge (like three-player test: multiple rounds for GKS)
     print("\n=== Initial sync to establish network ===")
-    for i in range(15):
-        tick.tick(t_ms=3000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Alice sends a message before Bob is removed
     print("\n=== Alice sends message (before Bob removed) ===")
@@ -544,8 +536,7 @@ def test_removed_peer_cannot_sync_messages():
 
     # Sync the message
     print("\n=== Sync Alice's pre-removal message ===")
-    for i in range(10):
-        tick.tick(t_ms=7000 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
 
     # Verify Bob received Alice's message (using public API)
     bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
@@ -570,8 +561,7 @@ def test_removed_peer_cannot_sync_messages():
 
     # Sync the removal event
     print("\n=== Sync removal event ===")
-    for i in range(15):
-        tick.tick(t_ms=10000 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=10000, max_rounds=200, check_interval=1)
 
     # Alice sends a message AFTER removing Bob
     print("\n=== Alice sends message (after Bob removed) ===")
@@ -586,9 +576,8 @@ def test_removed_peer_cannot_sync_messages():
     db.commit()
 
     # Extensive sync attempts to ensure any queued messages would be delivered
-    print("\n=== Extensive sync attempts (20 rounds) ===")
-    for i in range(20):
-        tick.tick(t_ms=13000 + i*100, db=db)
+    print("\n=== Extensive sync attempts ===")
+    tick_helper.sync_until_converged(db=db, start_t_ms=13000, max_rounds=200, check_interval=1)
 
     # Verify observable behavior: Bob did NOT receive Alice's post-removal message
     print("\n=== Verifying message delivery (observable behavior) ===")

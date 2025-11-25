@@ -30,6 +30,7 @@ from events.network import transit_prekey
 import tick
 import store
 import crypto
+from tests.utils import tick_helper
 
 
 def test_admin_group_workflow():
@@ -66,9 +67,11 @@ def test_admin_group_workflow():
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(10):
-        print(f"\n=== Sync Round {i+1} ===")
-        tick.tick(t_ms=4000 + i*200, db=db)
+    print("\n=== Initial sync ===")
+    final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
+        db=db, start_t_ms=4000, max_rounds=50, check_interval=5, verbose=True
+    )
+    print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
 
     # Get admin group ID from network (still used for reference)
     admin_group_id = network.get_admin_group_id(alice['network_id'], alice['peer_id'], db)
@@ -196,8 +199,10 @@ def test_admin_group_workflow():
 
     # Sync to propagate admin event
     print("\n=== Sync to propagate admin event ===")
-    for round_num in range(10):  # More rounds to ensure convergence
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+    final_t_ms2, rounds_used2, converged2, status2 = tick_helper.sync_until_converged(
+        db=db, start_t_ms=6000, max_rounds=50, check_interval=5, verbose=True
+    )
+    print(f"Admin event sync completed in {rounds_used2} rounds (converged={converged2})")
 
     # Verify both peers see Bob as admin
     print("\n=== Verify both peers see Bob as admin after sync ===")
