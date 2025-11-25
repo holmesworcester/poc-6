@@ -125,7 +125,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # and not shared between peers. Events encrypted with a key are sent as plaintext
     # during sync responses, so the recording peer should not be required to possess
     # the creator's key event.
-    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id', 'message_id', 'user_id']
+    # Note: 'author_id' is the user_id of the message author (distinct from created_by which is peer_shared_id)
+    dep_fields = ['group_id', 'channel_id', 'created_by', 'peer_id', 'peer_shared_id', 'invite_id', 'message_id', 'user_id', 'author_id']
 
     # User events reference invite_id (which contains group/channel metadata)
     # They create stub group/channel rows from the invite during projection

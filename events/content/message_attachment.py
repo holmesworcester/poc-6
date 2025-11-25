@@ -547,8 +547,9 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
 
     # Validate: attachment creator must match message creator
     # NOTE: message_id is a dependency, so the message should already be projected
+    # Compare peer_shared_id (created_by) - the device that created both events must match
     message_row = safedb.query_one(
-        "SELECT author_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT created_by FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
         (message_id, recorded_by)
     )
 
@@ -556,9 +557,9 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
         log.error(f"message_attachment.project() BUG: message not found (should be blocked by deps): {message_id[:20]}...")
         return
 
-    if message_row['author_id'] != created_by:
+    if message_row['created_by'] != created_by:
         log.warning(f"message_attachment.project() VALIDATION FAILED: attachment created_by={created_by[:20]}... "
-                   f"does not match message author_id={message_row['author_id'][:20]}...")
+                   f"does not match message created_by={message_row['created_by'][:20]}...")
         return
 
     # Decode file descriptor fields

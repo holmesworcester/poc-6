@@ -178,15 +178,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
-    # Verify author exists before projecting (dependency: message requires user)
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (author_id, recorded_by)
-    )
-    if not user_row:
-        # User not projected yet - block until they are
-        log.warning(f"message.project() author {author_id[:20]}... not found - blocking")
-        return None
+    # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
+    # before projection begins, so we don't need to check here.
 
     # Verify signature using created_by peer_shared_id's public key
     from events.identity import peer_shared
