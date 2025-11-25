@@ -15,13 +15,10 @@ log = logging.getLogger(__name__)
 def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     """Check if a peer is an admin (centralized admin validation).
 
-    A peer is an admin if either:
-    1. Their user_id is in the admins group (normal admin path), OR
-    2. They are the first_peer (network creator via self-invite) - fallback safety check
+    A peer is an admin if their user_id has an admin_grant event in the admins table.
 
-    Phase 6/7: Network creators are automatically added to the admins group during
-    user.project() when first_peer match is detected. The fallback first_peer check
-    is kept for robustness and backward compatibility with legacy data.
+    Phase 7: Uses the first-class admins table (from admin events) instead of
+    checking admins_group membership. Admin grants are event-sourced.
 
     Args:
         peer_shared_id: Public peer ID to check
@@ -33,46 +30,54 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get network's admin group ID
+    # Get user_id for this peer_shared_id
+    # Phase 3: Look up via linked_peers first (for invite-signed peer_shared),
+    # then fall back to users.peer_id (for legacy/bootstrap peer_shared)
+    user_id = None
+
+    # Try linked_peers first (for peers linked via invite(mode=peer))
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    if linked_row:
+        user_id = linked_row['user_id']
+    else:
+        # Fall back to users.peer_id (legacy path for initial peer_shared before linking)
+        user_row = safedb.query_one(
+            "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+            (peer_shared_id, recorded_by)
+        )
+        if user_row:
+            user_id = user_row['user_id']
+
+    if not user_id:
+        return False
+
+    # Check if user has an admin_grant in the admins table (first-class admin events)
+    admin_row = safedb.query_one(
+        "SELECT 1 FROM admins WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+
+    if admin_row:
+        return True
+
+    # Legacy fallback: Check admins group membership (for backward compatibility)
     network_row = safedb.query_one(
         "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (recorded_by,)
     )
-    if not network_row or not network_row['admins_group_id']:
-        return False
+    if network_row and network_row['admins_group_id']:
+        admins_group_id = network_row['admins_group_id']
+        is_admin_member = safedb.query_one(
+            "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
+            (admins_group_id, user_id, recorded_by)
+        )
+        if is_admin_member:
+            return True
 
-    admins_group_id = network_row['admins_group_id']
-
-    # Get user_id for this peer_shared_id
-    # Note: users.peer_id column stores peer_shared_id (shareable device ID), not local peer_id
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_shared_id, recorded_by)  # peer_shared_id goes into users.peer_id (misleading column name)
-    )
-    if not user_row:
-        return False
-
-    user_id = user_row['user_id']
-
-    # Check if user is in admin group
-    is_admin_member = safedb.query_one(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, user_id, recorded_by)
-    )
-
-    if is_admin_member:
-        return True
-
-    # Also check if this peer is first_peer (network creator)
-    first_peer_check = safedb.query_one("""
-        SELECT 1 FROM invite_accepteds ia
-        JOIN store s ON ia.invite_id = s.id
-        WHERE ia.recorded_by = ?
-        AND json_extract(s.blob, '$.first_peer') = ?
-        LIMIT 1
-    """, (recorded_by, peer_shared_id))
-
-    return first_peer_check is not None
+    return False
 
 
 def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: Any) -> bool:
@@ -171,14 +176,27 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
         # Get inviter's user_id for the invite event
-        # Note: users.peer_id column stores peer_shared_id (shareable device ID), not local peer_id
-        inviter_user_row = safedb.query_one(
-            "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-            (peer_shared_id, peer_id)  # peer_shared_id goes into users.peer_id (misleading column name)
+        # Phase 3: Check linked_peers first (for invite-signed peer_shared), then fall back to users.peer_id
+        inviter_user_id = None
+
+        # Try linked_peers first (for peers linked via invite(mode=peer))
+        linked_row = safedb.query_one(
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+            (peer_shared_id, peer_id)
         )
-        if not inviter_user_row:
+        if linked_row:
+            inviter_user_id = linked_row['user_id']
+        else:
+            # Fall back to users.peer_id (legacy path for initial peer_shared before linking)
+            inviter_user_row = safedb.query_one(
+                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+                (peer_shared_id, peer_id)
+            )
+            if inviter_user_row:
+                inviter_user_id = inviter_user_row['user_id']
+
+        if not inviter_user_id:
             raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
-        inviter_user_id = inviter_user_row['user_id']
     else:
         # Network creator self-invite - will become admin on join
         log.info(f"invite.create() skipping admin check for first_peer self-invite")
@@ -204,13 +222,43 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     channel_id = channel_row['channel_id']
 
-    # Generate Ed25519 keypair for invite proof + GKS decryption
-    invite_private_key, invite_public_key = crypto.generate_keypair()
-    invite_pubkey_b64 = crypto.b64encode(invite_public_key)
+    # Create a group_prekey (generates keypair) then share it via group_prekey_shared
+    # This ensures invite_prekey_id is an actual event ID, so dependencies work naturally
+    from events.group import group_prekey, group_prekey_shared
 
-    # Generate deterministic prekey ID from public key hash
-    # This serves as the crypto hint for group_key_shared decryption
-    invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key)[:16])
+    # Create local prekey with keypair
+    local_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms + 1, db)
+
+    # Get the public key from the created prekey for the invite event
+    prekey_blob = store.get(local_prekey_id, unsafedb)
+    prekey_data = crypto.parse_json(prekey_blob)
+    invite_pubkey_b64 = prekey_data['public_key']
+
+    # Create shareable prekey event - its event ID becomes invite_prekey_id
+    # Context depends on mode:
+    # - mode='user': group context (all_users_group)
+    # - mode='link': user context (user_id being linked to)
+    if mode == 'link':
+        # Device linking: context is the user being linked to
+        invite_prekey_id = group_prekey_shared.create(
+            prekey_id=local_prekey_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 2,
+            db=db,
+            user_id=user_id  # User context for device linking
+        )
+    else:
+        # User invite: context is the all_users group
+        invite_prekey_id = group_prekey_shared.create(
+            prekey_id=local_prekey_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 2,
+            db=db,
+            group_id=all_users_group_id,
+            key_id=key_id
+        )
 
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table
@@ -226,9 +274,11 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
     # Get prekey_shared_id from transit_prekeys_shared table
+    # Phase 3: Query by recorded_by only (not peer_id) since peer_id may be old peer_shared
+    # after Phase 3 isomorphic linking creates new peer_shared_id
     inviter_prekey_shared_row = safedb.query_one(
-        "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
-        (peer_shared_id, peer_id)
+        "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        (peer_id,)
     )
 
     if not inviter_prekey_shared_row:
@@ -560,7 +610,8 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
     # Insert into invites table
     mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility
-    user_id = event_data.get('user_id')  # None for mode='user', set for mode='link'
+    user_id = event_data.get('user_id')  # None for mode='user', set for mode='link' and mode='peer'
+    group_id = event_data.get('group_id')  # None for mode='peer' (peer invites don't have group context)
 
     safedb.execute(
         """INSERT OR IGNORE INTO invites
@@ -569,7 +620,7 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         (
             invite_id,
             event_data['invite_pubkey'],
-            event_data['group_id'],
+            group_id,  # May be None for mode='peer'
             inviter_id,  # Use inviter_id (inviter's peer_shared_id)
             mode,
             user_id,

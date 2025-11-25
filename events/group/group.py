@@ -11,7 +11,9 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_main: bool = False) -> tuple[str, str]:
+def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
+           is_main: bool = False, network_id: str | None = None,
+           network_role: str | None = None) -> tuple[str, str]:
     """Create a shareable, encrypted group event.
 
     Groups own their encryption keys. The key is created internally and its id stored
@@ -26,6 +28,8 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
 
     Args:
         is_main: True if this is the peer's main group for inviting (default: False)
+        network_id: Network ID this group belongs to (for network bootstrap)
+        network_role: Role of this group in the network ('all_users' or 'admins')
 
     Returns:
         (group_id, key_id): The group event ID and its encryption key ID
@@ -33,7 +37,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
     # Create the group's encryption key
     key_id = group_key.create(peer_id=peer_id, t_ms=t_ms, db=db)
 
-    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}")
+    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}, network_role={network_role}")
 
     # Create event dict
     event_data = {
@@ -44,6 +48,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
         'key_id': key_id,  # Store key_id in event for later retrieval
         'is_main': 1 if is_main else 0  # Store is_main flag
     }
+
+    # Add network relationship if specified
+    if network_id:
+        event_data['network_id'] = network_id
+    if network_role:
+        event_data['network_role'] = network_role
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -109,6 +119,25 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             recorded_at
         )
     )
+
+    # Update networks table if this group has a network_role
+    network_id = event_data.get('network_id')
+    network_role = event_data.get('network_role')
+    if network_id and network_role:
+        if network_role == 'all_users':
+            safedb.execute(
+                """UPDATE networks SET all_users_group_id = ?
+                   WHERE network_id = ? AND recorded_by = ?""",
+                (event_id, network_id, recorded_by)
+            )
+            log.info(f"group.project() updated networks.all_users_group_id={event_id[:20]}...")
+        elif network_role == 'admins':
+            safedb.execute(
+                """UPDATE networks SET admins_group_id = ?
+                   WHERE network_id = ? AND recorded_by = ?""",
+                (event_id, network_id, recorded_by)
+            )
+            log.info(f"group.project() updated networks.admins_group_id={event_id[:20]}...")
 
     return event_id
 

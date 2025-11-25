@@ -184,6 +184,16 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         )
     )
 
+    # For bootstrap admin (signed_by == network_id), set creator_user_id on network
+    # This makes the first admin the "creator" of the network
+    if is_bootstrap:
+        safedb.execute(
+            """UPDATE networks SET creator_user_id = ?
+               WHERE network_id = ? AND recorded_by = ? AND (creator_user_id IS NULL OR creator_user_id = '')""",
+            (user_id, network_id, recorded_by)
+        )
+        log.info(f"[ADMIN_PROJECT] Set networks.creator_user_id={user_id[:20]}...")
+
     log.warning(f"[ADMIN_PROJECT_SUCCESS] Admin grant inserted: admin_id={admin_id[:20]}..., "
                 f"user_id={user_id[:20]}...")
 

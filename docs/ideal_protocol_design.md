@@ -58,6 +58,17 @@ In this case we follow a *Block and Unblock* pattern whenever an event depends o
 
 This is a [topological sorting](https://en.wikipedia.org/wiki/Topological_sorting) problem for which there are efficient algorithms, such as Khan's algorithm. We can use queue's of incoming and unblocked events, as well as SQLite's atomicity guarantees, to ensure that no blocked event is left behind.
 
+### Implicit Dependencies Rule
+
+**All event IDs referenced in a shared event are implicit dependencies.** If event B contains a field like `peer_shared_id=X`, `group_id=Y`, or `key_id=Z`, then B cannot project until X, Y, and Z have projected. This rule ensures:
+
+1. Signature verification works (signer's public key is available)
+2. Authorization checks work (referenced entities exist in projection tables)
+3. Decryption works (key_id references are event IDs, so the key is available)
+4. The DAG is consistent (no dangling references)
+
+This works for both sync (deps arrive from network) and bootstrap (deps are created locally and project in cascade once a root event is marked valid).
+
 ## Targets (Local Post‑Projection Actions)
 
 Targets are local, deterministic side effects triggered after projection of the target event. They do not add DAG edges.
@@ -172,9 +183,24 @@ When creating a network:
 
 ## Joining (Event-Layer Encryption)
 
-To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey_shared` event, includes its `id` in the `invite` event (`invite_prekey_id`), and includes the corresponding private `group_prekey` in `invite_data`.
+To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey` (local, contains keypair) and then a `group_prekey_shared` event (shareable, contains public key). The `group_prekey_shared` event's `id` becomes the `invite_prekey_id` in the invite event.
 
-She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are also wrapped to all outstanding invite‑referenced `group_prekey_shared` keys just as they are to each member’s current `group_prekey_shared`.
+**Design principle**: All key IDs must be real event IDs. The `invite_prekey_id` is a `group_prekey_shared_id`, not a synthetic hash. This ensures dependencies work naturally through the event graph - events can block/unblock on the prekey event existing and being valid.
+
+### Prekey Context by Invite Mode
+
+The `group_prekey_shared` event includes context that depends on the invite mode. Exactly one context type must be provided:
+
+| Mode | Context | Description |
+|------|---------|-------------|
+| `user` (network join) | `group_id` + `key_id` | Group context (all_users group) |
+| `link`/`peer` (device linking) | `user_id` | User context - the user being linked to |
+
+Note: Bootstrap (first user) doesn't need an `invite_prekey_id` at all since there are no existing encrypted events to decrypt.
+
+Alice includes the corresponding private `group_prekey` material in `invite_data` so Bob can decrypt `group_key_shared` events sealed to this prekey.
+
+She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are also wrapped to all outstanding invite‑referenced `group_prekey_shared` keys just as they are to each member's current `group_prekey_shared`.
 
 ## Address Publishing
 

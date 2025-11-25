@@ -93,14 +93,27 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
         # First, ensure the creator is added to the private channel group
         # Get creator's user_id
-        creator_user_row = safedb.query_one(
-            "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        # Phase 3: Check linked_peers first (for invite-signed peer_shared), then fall back to users.peer_id
+        creator_user_id = None
+
+        # Try linked_peers first (for peers linked via invite(mode=peer))
+        linked_row = safedb.query_one(
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
             (peer_shared_id, peer_id)
         )
-        if not creator_user_row:
-            raise ValueError(f"Creator user not found for peer_shared_id {peer_shared_id}")
+        if linked_row:
+            creator_user_id = linked_row['user_id']
+        else:
+            # Fall back to users.peer_id (legacy path for initial peer_shared before linking)
+            creator_user_row = safedb.query_one(
+                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+                (peer_shared_id, peer_id)
+            )
+            if creator_user_row:
+                creator_user_id = creator_user_row['user_id']
 
-        creator_user_id = creator_user_row['user_id']
+        if not creator_user_id:
+            raise ValueError(f"Creator user not found for peer_shared_id {peer_shared_id}")
 
         # Track which users we've already added
         added_user_ids = set()

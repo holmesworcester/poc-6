@@ -134,8 +134,15 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     if event_type == 'user':
         dep_fields = ['signed_by', 'peer_id', 'invite_id']  # Depend on invite, not group/channel
     elif event_type == 'network':
-        # Network events depend on both groups and the creator user
-        dep_fields = ['signed_by', 'all_users_group_id', 'admins_group_id', 'creator_user_id']
+        # Network events are now self-signed (signed_by='SELF') with no external dependencies
+        # They are the root of trust - groups and admin grants come after
+        dep_fields = []
+    elif event_type == 'admin':
+        # Admin events have different deps for bootstrap vs ongoing:
+        # - Bootstrap (signed_by == network_id): depends on network_id, user_id
+        # - Ongoing (signed_by == peer_shared_id): depends on signed_by, admin_grant, user_id
+        # We include all fields - check_deps skips fields that equal network_id (bootstrap case)
+        dep_fields = ['network_id', 'user_id', 'signed_by', 'admin_grant']
     elif event_type == 'invite':
         # Invite events need signer to exist for signature verification
         # Network/group/channel are metadata and don't need to exist yet
@@ -160,6 +167,11 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     for field in dep_fields:
         dep_id = event_data.get(field)
         if not dep_id:
+            continue
+
+        # Skip special placeholder values (used during bootstrap)
+        if dep_id in ('SELF', 'PENDING'):
+            log.debug(f"recorded.check_deps() skipping special value: {field}={dep_id}")
             continue
 
         # Skip foreign local deps (creator's local state we'll never have)
@@ -510,6 +522,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'network':
         from events.identity import network
         projected_id = network.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'admin':
+        from events.identity import admin
+        projected_id = admin.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'network_created':
         # Phase 5: network_created removed - kept for backward compat (old events can still project)
         from events.identity import network_created

@@ -1,57 +1,46 @@
-"""Network event type - binds all_users and admins groups, adds creator to admin group."""
+"""Network event type - self-signed root of trust for a network."""
 from typing import Any
 import logging
 import crypto
 import store
-from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
 
-def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
-           peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
-    """Create a network event binding all_users and admins groups.
+def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
+    """Create a self-signed network event (root of trust).
 
-    The network_id is the event_id (hash of the network event).
-    During projection, creator_user_id is automatically added to admin group.
-
-    Phase 4: Network now has its own keypair (network_pubkey in event).
-    The network_private_key is returned for signing bootstrap invites.
+    The network event is the first shared event in bootstrap. It's self-signed
+    using its own keypair (like a root CA certificate). Groups, channels, and
+    other content are created AFTER the user has a peer_shared identity.
 
     Args:
-        all_users_group_id: Main group for all users
-        admins_group_id: Admin-only group
-        creator_user_id: User to add to admin group during projection (empty string for bootstrap)
-        peer_id: Local peer ID (for signing)
-        peer_shared_id: Public peer ID (for created_by)
+        peer_id: Local peer ID (for recording, not signing)
         t_ms: Timestamp
         db: Database connection
 
     Returns:
         tuple: (network_id, network_private_key)
             - network_id: The stored network event ID (hash of event)
-            - network_private_key: Private key for signing bootstrap invites
+            - network_private_key: Private key for signing bootstrap invites and admin_grant
     """
-    log.info(f"network.create() creating network with all_users={all_users_group_id}, admins={admins_group_id}, creator={creator_user_id}")
+    log.info(f"network.create() creating self-signed network at t_ms={t_ms}")
 
-    # Phase 4: Generate network's own keypair
+    # Generate network's own keypair (network is self-signed)
     network_private_key, network_public_key = crypto.generate_keypair()
 
-    # Create event data
+    # Create event data - minimal, just the network identity
+    # Groups are created LATER after peer_shared exists
     event_data = {
         'type': 'network',
-        'all_users_group_id': all_users_group_id,
-        'admins_group_id': admins_group_id,
-        'creator_user_id': creator_user_id,
-        'network_pubkey': crypto.b64encode(network_public_key),  # Phase 4
-        'signed_by': peer_shared_id,
+        'network_pubkey': crypto.b64encode(network_public_key),
+        'signed_by': 'SELF',  # Special marker for self-signed network event
         'created_at': t_ms
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
+    # Self-sign with network's own private key
+    signed_event = crypto.sign_event(event_data, network_private_key)
 
     # Store as signed plaintext (no encryption)
     blob = crypto.canonicalize_json(signed_event)
@@ -59,12 +48,15 @@ def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
     # Store event and return network_id (which is the event_id)
     network_id = store.event(blob, peer_id, t_ms, db)
 
-    log.info(f"network.create() created network_id={network_id}")
+    log.info(f"network.create() created self-signed network_id={network_id}")
     return network_id, network_private_key
 
 
 def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project network event into networks table and add creator to admin group.
+    """Project self-signed network event into networks table.
+
+    The network event is self-signed (root of trust). Admin grants are handled
+    by separate admin_grant events, and groups are created after the network.
 
     Args:
         network_id: The network event ID
@@ -73,7 +65,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
         db: Database connection
 
     Returns:
-        network_id if successful, None if blocking
+        network_id if successful, None if verification fails
     """
     log.debug(f"network.project() projecting network_id={network_id}, recorded_by={recorded_by}")
 
@@ -89,70 +81,37 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     # Parse JSON (plaintext, no unwrap needed)
     event_data = crypto.parse_json(blob)
 
-    # Verify signature
-    from events.identity import peer_shared
-    signed_by = event_data['signed_by']
-    try:
-        public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
-    except ValueError:
-        log.debug(f"network.project() blocking on peer_shared {signed_by}")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
+    # Verify self-signature using network_pubkey from event body
+    signed_by = event_data.get('signed_by')
+    network_pubkey_b64 = event_data.get('network_pubkey')
+
+    if signed_by != 'SELF':
+        log.warning(f"network.project() expected signed_by='SELF', got {signed_by}")
         return None
 
-    if not crypto.verify_event(event_data, public_key):
-        log.warning(f"network.project() signature verification FAILED for network_id={network_id}")
+    if not network_pubkey_b64:
+        log.warning(f"network.project() missing network_pubkey in event")
         return None
 
-    all_users_group_id = event_data['all_users_group_id']
-    admins_group_id = event_data['admins_group_id']
-    creator_user_id = event_data['creator_user_id']
-
-    # Check if groups exist
-    all_users_group = safedb.query_one(
-        "SELECT 1 FROM groups WHERE group_id = ? AND recorded_by = ?",
-        (all_users_group_id, recorded_by)
-    )
-    if not all_users_group:
-        log.info(f"network.project() blocking on missing all_users group {all_users_group_id}")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
+    network_pubkey = crypto.b64decode(network_pubkey_b64)
+    if not crypto.verify_event(event_data, network_pubkey):
+        log.warning(f"network.project() self-signature verification FAILED for network_id={network_id}")
         return None
 
-    admins_group = safedb.query_one(
-        "SELECT 1 FROM groups WHERE group_id = ? AND recorded_by = ?",
-        (admins_group_id, recorded_by)
-    )
-    if not admins_group:
-        log.info(f"network.project() blocking on missing admins group {admins_group_id}")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
-        return None
+    log.info(f"network.project() verified self-signed network event")
 
-    # Phase 5: If creator_user_id is empty (bootstrap case), skip creator check
-    # The first_peer will be added to admin group by invite_accepted.project()
-    if creator_user_id:
-        # Check if creator user exists
-        creator_user = safedb.query_one(
-            "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ?",
-            (creator_user_id, recorded_by)
-        )
-        if not creator_user:
-            log.info(f"network.project() blocking on missing creator user {creator_user_id}")
-            # Don't block here - let recorded.project() handle blocking with recorded_id
-            return None
-
-    # Phase 4: Get network_pubkey (may not exist in legacy events)
-    network_pubkey = event_data.get('network_pubkey', '')
-
-    # Insert into networks table
+    # Insert into networks table (minimal - no groups, no creator)
+    # Groups and admin grants are separate events created after network
     safedb.execute(
         """INSERT OR IGNORE INTO networks
            (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             network_id,
-            all_users_group_id,
-            admins_group_id,
-            creator_user_id,
-            network_pubkey,
+            '',  # all_users_group_id - set later by group event
+            '',  # admins_group_id - set later by group event
+            '',  # creator_user_id - set later by admin_grant event
+            network_pubkey_b64,
             signed_by,
             event_data['created_at'],
             recorded_by,
@@ -160,30 +119,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
         )
     )
 
-    log.info(f"network.project() inserted into networks table")
-
-    # Add creator to admin group via group_members
-    # Phase 5: Skip if creator_user_id is empty (bootstrap case)
-    if creator_user_id:
-        # (Don't create a separate group_member event - just insert directly during projection)
-        safedb.execute(
-            """INSERT OR IGNORE INTO group_members
-               (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                f"{network_id}:admin_member",  # Synthetic ID for creator->admin membership
-                admins_group_id,
-                creator_user_id,
-                signed_by,  # Added by network creator
-                event_data['created_at'],
-                recorded_by,
-                recorded_at
-            )
-        )
-
-        log.info(f"network.project() added creator {creator_user_id} to admin group {admins_group_id}")
-    else:
-        log.info(f"network.project() skipping admin grant (empty creator_user_id, bootstrap case)")
+    log.info(f"network.project() inserted self-signed network into networks table")
 
     return network_id
 

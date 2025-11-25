@@ -9,13 +9,14 @@ from db import create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(t_ms: int, db: Any) -> tuple[str, str]:
-    """Create a peer (local-only keypair) and its shareable peer_shared event.
+def create(t_ms: int, db: Any) -> str:
+    """Create a peer (local-only keypair).
 
-    Returns (peer_id, peer_shared_id): peer_id is local (for signing), peer_shared_id is public (for created_by).
+    Returns peer_id: the local peer ID for signing operations.
+
+    Note: peer_shared is NOT created here. It is created during network join
+    (via invite) so that every peer_shared is invite-signed and linked to a user_id.
     """
-    from events.identity import peer_shared
-
     log.info(f"peer.create() creating new peer at t_ms={t_ms}")
 
     unsafedb = create_unsafe_db(db)
@@ -42,11 +43,7 @@ def create(t_ms: int, db: Any) -> tuple[str, str]:
     recorded_id = recorded.create(peer_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 
-    # Create shareable peer_shared event
-    peer_shared_id = peer_shared.create(peer_id, t_ms, db)
-    log.info(f"peer.create() created peer_shared_id={peer_shared_id}")
-
-    return (peer_id, peer_shared_id)
+    return peer_id
 
 
 def project(peer_id: str, recorded_by: str, db: Any) -> None:
