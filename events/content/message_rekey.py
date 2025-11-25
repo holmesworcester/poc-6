@@ -79,7 +79,7 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
         'original_message_id': original_message_id,
         'new_key_id': new_key_id,
         'new_ciphertext': crypto.b64encode(new_ciphertext + deterministic_nonce),  # Store nonce with ciphertext
-        'created_by': peer_id,
+        'signed_by': peer_id,
         'created_at': t_ms
     }
 

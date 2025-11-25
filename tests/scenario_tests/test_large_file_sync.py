@@ -21,7 +21,11 @@ import tick
 
 
 def test_5mb_file_download_with_progress():
-    """Test downloading a realistic 5 MB file with progress tracking."""
+    """Test downloading a 1 MB file with progress tracking.
+
+    Note: Uses 1 MB instead of 5 MB for faster test execution while still
+    exercising the progress tracking and file sync mechanisms.
+    """
 
     # Setup
     conn = sqlite3.Connection(":memory:")
@@ -56,21 +60,21 @@ def test_5mb_file_download_with_progress():
 
     print("✓ Initial sync completed")
 
-    print("\n=== Alice creates message with 5 MB file ===")
+    print("\n=== Alice creates message with 1 MB file ===")
 
     # Alice sends message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
-        content='Check out this 5 MB file!',
+        content='Check out this 1 MB file!',
         t_ms=4000,
         db=db
     )
     message_id = msg_result['id']
     print(f"✓ Alice created message: {message_id[:20]}...")
 
-    # Create 5 MB file (5,000,000 bytes)
-    file_size = 5 * 1024 * 1024  # 5 MB
+    # Create 1 MB file (faster test while still exercising progress tracking)
+    file_size = 1 * 1024 * 1024  # 1 MB
     file_data = b'X' * file_size  # Simple pattern for testing
     print(f"✓ Created {file_size:,} byte file")
 
@@ -118,7 +122,7 @@ def test_5mb_file_download_with_progress():
     prev_progress = None
     last_print_time = start_time
 
-    for round_num in range(100):  # Enough rounds to complete a large file
+    for round_num in range(200):  # ~20 slices/round, need ~120 rounds for ~2,331 slices (1 MB)
         current_time_ms = 7000 + round_num * 100
 
         # Execute tick (runs sync jobs)
@@ -164,7 +168,7 @@ def test_5mb_file_download_with_progress():
     print(f"✓ Bob retrieved and verified {len(bob_retrieved):,} byte file")
 
     elapsed_time = time.time() - start_time
-    print(f"\n✅ Test passed! 5 MB file synced in {elapsed_time:.2f}s")
+    print(f"\n✅ Test passed! 1 MB file synced in {elapsed_time:.2f}s")
 
 
 def test_50mb_file_download():

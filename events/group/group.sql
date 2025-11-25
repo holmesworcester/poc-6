@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS groups (
     group_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    created_by TEXT NOT NULL,
+    signed_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     key_id TEXT NOT NULL,
     is_main INTEGER DEFAULT 0,  -- 1 if this is the peer's main group for inviting

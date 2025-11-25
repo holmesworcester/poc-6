@@ -84,17 +84,17 @@ def project(link_invite_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
     # Otherwise handle legacy link_invite format
 
-    created_by = event_data['created_by']
+    signed_by = event_data.get('signed_by') or event_data.get('created_by')  # Support legacy events
 
     # Phase 4: No more bootstrap special case
     # All link_invites are validated the same way (creator's peer_shared is projected first from URL)
     log.info(f"link_invite.project() validating link_invite...")
 
-    # Verify creator exists
+    # Verify signer exists
     from events.identity import peer_shared
-    creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+    creator_public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not creator_public_key:
-        log.warning(f"link_invite.project() creator not found: {created_by[:20]}...")
+        log.warning(f"link_invite.project() signer not found: {signed_by[:20]}...")
         return None
 
     # Verify signature

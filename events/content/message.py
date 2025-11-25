@@ -75,8 +75,8 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
         'type': 'message',
         'channel_id': channel_id,
         'group_id': group_id,
-        'created_by': peer_shared_id,  # Device that created the event (consistent across all events)
-        'author_id': user_id,  # Person who authored the message content
+        'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
+        'author_id': user_id,  # User who authored the message content (for display)
         'content': content,
         'created_at': t_ms
     }
@@ -169,23 +169,23 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     event_data = crypto.parse_json(unwrapped)
     log.info(f"message.project() projected message content='{event_data.get('content', '')[:50]}...', id={event_id}")
 
+    # Verify signature - get public key from signed_by peer_shared
+    from events.identity import peer_shared
+    signed_by = event_data.get('signed_by')
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+    if not crypto.verify_event(event_data, public_key):
+        return None  # Reject unsigned or invalid signature
+
     # Extract fields from event
     message_id = event_id
     channel_id = event_data.get('channel_id')
     group_id = event_data.get('group_id')
-    author_id = event_data.get('author_id')  # user_id (person who authored)
-    created_by_peer_shared_id = event_data.get('created_by')  # peer_shared_id (device that created event)
+    author_id = event_data.get('author_id')  # user_id (person who authored the content)
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
 
     # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
     # before projection begins, so we don't need to check here.
-
-    # Verify signature using created_by peer_shared_id's public key
-    from events.identity import peer_shared
-    public_key = peer_shared.get_public_key(created_by_peer_shared_id, recorded_by, db)
-    if not crypto.verify_event(event_data, public_key):
-        return None  # Reject unsigned or invalid signature
 
     # Calculate TTL based on channel's disappearing_time_ms setting
     # Look up current channel settings to support dynamic TTL updates
@@ -238,9 +238,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(
         """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, created_by, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
+           (message_id, channel_id, group_id, author_id, signed_by, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, created_by_peer_shared_id, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
+        (message_id, channel_id, group_id, author_id, signed_by, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
     )
 
     # Record dependency: message depends on channel (for cascading deletion)

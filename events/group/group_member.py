@@ -58,7 +58,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
 
     # Validate group exists
     group = safedb.query_one(
-        "SELECT created_by, key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
+        "SELECT signed_by, key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
         (group_id, peer_id)
     )
     if not group:
@@ -75,7 +75,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         'group_id': group_id,
         'user_id': user_id,
         'added_by': peer_shared_id,
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -154,7 +154,7 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
     # Check if group exists
     group = safedb.query_one(
-        "SELECT created_by FROM groups WHERE group_id = ? AND recorded_by = ?",
+        "SELECT signed_by FROM groups WHERE group_id = ? AND recorded_by = ?",
         (event_data['group_id'], recorded_by)
     )
 

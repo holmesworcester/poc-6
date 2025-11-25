@@ -62,7 +62,7 @@ def test_bootstrap_user_invite_signed_by_network():
     # Bootstrap insert network into table (simulating new_network() behavior)
     db.execute(
         """INSERT OR IGNORE INTO networks
-           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, created_by, created_at, recorded_by, recorded_at)
+           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (network_id, all_users_group_id, admins_group_id, '', network_event['network_pubkey'],
          peer_shared_id, 1400, peer_id, 1400)
@@ -71,13 +71,13 @@ def test_bootstrap_user_invite_signed_by_network():
     # Bootstrap insert groups into table
     db.execute(
         """INSERT OR IGNORE INTO groups
-           (group_id, name, created_by, created_at, recorded_by, recorded_at)
+           (group_id, name, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (all_users_group_id, 'all_users', peer_shared_id, 1100, peer_id, 1100)
     )
     db.execute(
         """INSERT OR IGNORE INTO groups
-           (group_id, name, created_by, created_at, recorded_by, recorded_at)
+           (group_id, name, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (admins_group_id, 'admins', peer_shared_id, 1200, peer_id, 1200)
     )
@@ -85,7 +85,7 @@ def test_bootstrap_user_invite_signed_by_network():
     # Bootstrap insert channel into table
     db.execute(
         """INSERT OR IGNORE INTO channels
-           (channel_id, group_id, name, is_main, created_by, created_at, recorded_by, recorded_at)
+           (channel_id, group_id, name, is_main, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (channel_id, all_users_group_id, 'main', 1, peer_shared_id, 1300, peer_id, 1300)
     )

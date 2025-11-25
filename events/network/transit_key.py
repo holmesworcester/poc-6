@@ -27,7 +27,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     event_data = {
         'type': 'transit_key',
         'key': crypto.b64encode(key),
-        'created_by': peer_id,
+        'signed_by': peer_id,
         'created_at': t_ms
     }
     blob = json.dumps(event_data, separators=(',', ':'), sort_keys=True).encode()
@@ -63,7 +63,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     event_data = {
         'type': 'transit_key',
         'key': crypto.b64encode(key_material),
-        'created_by': peer_id,  # Local peer who created this key
+        'signed_by': peer_id,  # Local peer who created this key
         'created_at': t_ms
     }
 
@@ -89,14 +89,14 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
 
     # Insert into transit_keys table (device-wide)
     unsafedb = create_unsafe_db(db)
-    log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... owner={event_data['created_by'][:10]}... into_transit_keys_table")
+    log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... owner={event_data['signed_by'][:10]}... into_transit_keys_table")
     unsafedb.execute(
         """INSERT OR IGNORE INTO transit_keys (key_id, key, owner_peer_id, created_at)
            VALUES (?, ?, ?, ?)""",
         (
             key_id,
             crypto.b64decode(event_data['key']),
-            event_data['created_by'],
+            event_data['signed_by'],
             event_data['created_at']
         )
     )

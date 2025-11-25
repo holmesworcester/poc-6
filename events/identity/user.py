@@ -75,7 +75,7 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
         'user_pubkey': crypto.b64encode(user_pubkey),  # User's OWN public key (for signing first peer invite)
         'peer_id': peer_shared_id,  # References the public peer identity
         'name': name,
-        'created_by': peer_shared_id,
+        # Note: signed_by is invite_id (above), not peer_shared_id
         'created_at': t_ms
     }
 
@@ -225,7 +225,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         group_id = invite_data.get('group_id')
         if group_id:
             # Get inviter_peer_shared_id for added_by field
-            inviter_peer_shared_id = invite_data.get('inviter_peer_shared_id', event_data['created_by'])
+            inviter_peer_shared_id = invite_data.get('inviter_peer_shared_id', event_data.get('signed_by', ''))
             safedb.execute(
                 """INSERT OR IGNORE INTO group_members
                    (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
@@ -369,7 +369,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     safedb.execute(
         """INSERT OR IGNORE INTO networks
-           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, created_by, created_at, recorded_by, recorded_at)
+           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             network_id,
@@ -377,7 +377,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
             admins_group_id,
             '',  # Placeholder
             network_pubkey,  # Phase 4
-            peer_shared_id,
+            peer_shared_id,  # signed_by
             t_ms + 40,
             peer_id,
             t_ms + 40

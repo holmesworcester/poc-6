@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS messages (
     channel_id TEXT NOT NULL,
     group_id TEXT NOT NULL,
     author_id TEXT NOT NULL,       -- user_id (person who authored the message)
-    created_by TEXT NOT NULL,      -- peer_shared_id (device that created the message event)
+    signed_by TEXT NOT NULL,       -- peer_shared_id (device that signed the message event)
     content TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never

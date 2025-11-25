@@ -4,7 +4,7 @@ import pytest
 from db import Database
 import schema
 from events.network import sync
-from events.identity import user, invite
+from events.identity import user, invite, peer
 import crypto
 
 

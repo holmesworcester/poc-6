@@ -639,7 +639,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     request_data = {
         'type': 'sync',
         'peer_id': from_peer_id,
-        'created_by': from_peer_shared_id,  # Include so recipient knows which events to send
+        'signed_by': from_peer_shared_id,  # Include so recipient knows which events to send
         'address': '127.0.0.1:8000',
         'window_id': window_id,  # Which window we're requesting (for salt derivation and state tracking)
         'window_min': window_min,  # Concrete storage window range start
@@ -731,7 +731,7 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 
     # Extract requester info
     requester_peer_id = sync_data.get('peer_id')
-    requester_peer_shared_id = sync_data.get('created_by')
+    requester_peer_shared_id = sync_data.get('signed_by')
     response_transit_key_id = sync_data.get('response_transit_key_id')
     response_transit_key_b64 = sync_data.get('response_transit_key')
     window_id = sync_data.get('window_id')

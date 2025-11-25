@@ -166,7 +166,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     connect_data = {
         'type': 'sync_connect',
         'peer_id': from_peer_id,
-        'created_by': from_peer_shared_id,
+        'signed_by': from_peer_shared_id,
         'address': '127.0.0.1',  # TODO: get from network layer
         'port': 8000,  # TODO: get from network layer
         'response_transit_key_id': response_transit_key_id,
@@ -249,7 +249,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     # This allows linkers to connect before their peer_shared is synced to inviter
 
     # ENFORCEMENT: Reject connections from removed peers
-    peer_shared_id = event_data.get('created_by')
+    peer_shared_id = event_data.get('signed_by')
     if peer_shared_id:
         removed_check = unsafedb.query_one(
             "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",

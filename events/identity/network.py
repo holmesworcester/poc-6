@@ -45,7 +45,7 @@ def create(all_users_group_id: str, admins_group_id: str, creator_user_id: str,
         'admins_group_id': admins_group_id,
         'creator_user_id': creator_user_id,
         'network_pubkey': crypto.b64encode(network_public_key),  # Phase 4
-        'created_by': peer_shared_id,
+        'signed_by': peer_shared_id,
         'created_at': t_ms
     }
 
@@ -91,11 +91,11 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
 
     # Verify signature
     from events.identity import peer_shared
-    created_by = event_data['created_by']
+    signed_by = event_data['signed_by']
     try:
-        public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+        public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     except ValueError:
-        log.debug(f"network.project() blocking on peer_shared {created_by}")
+        log.debug(f"network.project() blocking on peer_shared {signed_by}")
         # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
@@ -145,7 +145,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     # Insert into networks table
     safedb.execute(
         """INSERT OR IGNORE INTO networks
-           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, created_by, created_at, recorded_by, recorded_at)
+           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             network_id,
@@ -153,7 +153,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
             admins_group_id,
             creator_user_id,
             network_pubkey,
-            created_by,
+            signed_by,
             event_data['created_at'],
             recorded_by,
             recorded_at
@@ -174,7 +174,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
                 f"{network_id}:admin_member",  # Synthetic ID for creator->admin membership
                 admins_group_id,
                 creator_user_id,
-                created_by,  # Added by network creator
+                signed_by,  # Added by network creator
                 event_data['created_at'],
                 recorded_by,
                 recorded_at

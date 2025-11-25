@@ -20,7 +20,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     event_data = {
         'type': 'group_key',
         'key': crypto.b64encode(key),
-        'created_by': peer_id,  # Local peer who created this key
+        'signed_by': peer_id,  # Local peer who created this key
         'created_at': t_ms
     }
 
@@ -50,7 +50,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     event_data = {
         'type': 'group_key',
         'key': crypto.b64encode(key_material),
-        'created_by': peer_id,  # Local peer who created this key
+        'signed_by': peer_id,  # Local peer who created this key
         'created_at': t_ms
     }
 

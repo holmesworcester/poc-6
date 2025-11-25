@@ -585,6 +585,12 @@ def _dump_projection_state(db: Any) -> dict[str, list[dict]]:
             persisted_event_ids = set(row['id'] for row in db.query("SELECT id FROM store"))
             row_dicts = [r for r in row_dicts if r.get('event_id') in persisted_event_ids]
 
+        # Exclude cache columns that are populated lazily, not from events
+        # consolidated_blob is a cache for fast file reads - populated on download complete
+        if table == 'message_attachments':
+            for row_dict in row_dicts:
+                row_dict.pop('consolidated_blob', None)
+
         # Sort by all columns as tuple for deterministic ordering
         row_dicts.sort(key=lambda r: tuple(str(v) for v in r.values()))
         state[table] = row_dicts
