@@ -32,7 +32,8 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
     return invite.is_admin(added_by, recorded_by, db)
 
 
-def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
+def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
+           skip_admin_check: bool = False) -> str:
     """Create a group_member event to add a user to a group.
 
     Only admins can add new members to groups.
@@ -45,6 +46,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
+        skip_admin_check: If True, skip admin authorization check (ONLY for bootstrap first_peer grant)
 
     Returns:
         member_id: The stored group_member event ID
@@ -63,7 +65,8 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         raise ValueError(f"Group {group_id} not found")
 
     # Check authorization using shared validate() function
-    if not validate(group_id, peer_shared_id, peer_id, db):
+    # skip_admin_check is ONLY for bootstrap first_peer admin grant (chicken-egg problem)
+    if not skip_admin_check and not validate(group_id, peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id} (only admins can add members)")
 
     # Create event data

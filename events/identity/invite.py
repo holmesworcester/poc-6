@@ -17,10 +17,11 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
     A peer is an admin if either:
     1. Their user_id is in the admins group (normal admin path), OR
-    2. They are the first_peer (network creator via self-invite)
+    2. They are the first_peer (network creator via self-invite) - fallback safety check
 
-    This centralizes the admin check logic to avoid sprinkling first_peer
-    checks throughout the codebase.
+    Phase 6/7: Network creators are automatically added to the admins group during
+    user.project() when first_peer match is detected. The fallback first_peer check
+    is kept for robustness and backward compatibility with legacy data.
 
     Args:
         peer_shared_id: Public peer ID to check
@@ -417,7 +418,13 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
 
 def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project minimal invite event into invites table."""
+    """Project invite event into invites table.
+
+    Phase 4: Supports polymorphic signed_by:
+    - signed_by=network_id (bootstrap): verify with network pubkey
+    - signed_by=peer_shared_id (ongoing): verify with peer_shared pubkey
+    - Legacy (no signed_by): verify with created_by peer_shared pubkey
+    """
     # Create db wrappers first (consistent with other projectors)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
@@ -430,50 +437,119 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     # Parse JSON (plaintext, no unwrap needed)
     event_data = crypto.parse_json(blob)
 
-    created_by = event_data['created_by']
+    # Phase 4: Determine verification mode based on signed_by
+    signed_by = event_data.get('signed_by')
+    mode = event_data.get('mode', 'user')
+    # Extract created_by early (used in INSERT regardless of verification path)
+    # For Phase 4 bootstrap invites, this is first_peer; for others it's inviter's peer_shared_id
+    created_by = event_data.get('created_by') or event_data.get('first_peer', '')
 
-    # Phase 4: No more bootstrap special case
-    # All invites are validated the same way (creator's peer_shared is projected first from URL)
-    log.info(f"invite.project() validating invite...")
+    log.info(f"invite.project() validating invite mode={mode} signed_by={signed_by[:20] if signed_by else 'None'}...")
 
-    # 1. Verify creator (created_by) exists
-    from events.identity import peer_shared
-    creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
-    if not creator_public_key:
-        log.warning(f"invite.project() creator not found: {created_by[:20]}...")
-        return None
+    if signed_by:
+        # New Phase 4 flow: polymorphic signed_by
+        network_id = event_data.get('network_id')
 
-    # 2. Verify signature
-    if not crypto.verify_event(event_data, creator_public_key):
-        log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
-        return None
+        if signed_by == network_id:
+            # Bootstrap invite: signed by network key
+            # Get network pubkey from networks table or store blob
+            network_pubkey = None
 
-    # 3. Verify network_id matches peer's network (if peer already has a network)
-    invite_network_id = event_data.get('network_id')
-    if invite_network_id:
-        peer_network = safedb.query_one(
-            "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
-            (invite_network_id, recorded_by)
-        )
-        # Only validate network match if peer already has this network
-        # (new joiners won't have the network yet)
-        if peer_network:
-            # 4. Verify inviter is an admin using shared validate() function
-            inviter_user_id = event_data.get('inviter_user_id')
-            # Phase 5: Allow None inviter_user_id for first_peer self-invites
-            # The creator will become admin on join via invite_accepted first_peer logic
-            if inviter_user_id and peer_network['admins_group_id']:
-                admins_group_id = peer_network['admins_group_id']
-                if not validate(inviter_user_id, admins_group_id, recorded_by, db):
-                    log.warning(f"invite.project() authorization FAILED: inviter {inviter_user_id[:20]}... is not an admin")
-                    return None
-            elif inviter_user_id is None:
-                # Phase 5: Assume first_peer self-invite (creator hasn't joined yet)
-                log.info(f"invite.project() skipping admin validation for first_peer self-invite (inviter_user_id=None)")
+            network_row = safedb.query_one(
+                "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+                (network_id, recorded_by)
+            )
+            if network_row and network_row.get('network_pubkey'):
+                network_pubkey = crypto.b64decode(network_row['network_pubkey'])
             else:
-                # If inviter_user_id is missing but not None (old invite format), reject for safety
-                log.warning(f"invite.project() missing inviter_user_id in invite event - rejecting for security")
+                # Try store blob (bootstrap case)
+                network_blob = store.get(network_id, unsafedb)
+                if network_blob:
+                    network_data = crypto.parse_json(network_blob)
+                    network_pubkey_b64 = network_data.get('network_pubkey')
+                    if network_pubkey_b64:
+                        network_pubkey = crypto.b64decode(network_pubkey_b64)
+                        log.info(f"invite.project() got network_pubkey from store blob")
+
+            if not network_pubkey:
+                log.warning(f"invite.project() network_id={network_id[:20]}... not available yet")
                 return None
+
+            if not crypto.verify_event(event_data, network_pubkey):
+                log.warning(f"invite.project() signature verification FAILED using network_pubkey")
+                return None
+
+            log.info(f"invite.project() verified bootstrap invite with network_pubkey")
+
+        else:
+            # Ongoing invite: signed by peer_shared or user
+            # Try peer_shared first, then user
+            signer_pubkey = None
+
+            # Try peer_shared
+            from events.identity import peer_shared
+            try:
+                signer_pubkey = peer_shared.get_public_key(signed_by, recorded_by, db)
+                log.info(f"invite.project() using peer_shared pubkey for signer {signed_by[:20]}...")
+            except ValueError:
+                pass
+
+            # Try user (for mode=peer signed_by=user_id)
+            if not signer_pubkey:
+                user_row = safedb.query_one(
+                    "SELECT user_pubkey FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+                    (signed_by, recorded_by)
+                )
+                if user_row and user_row.get('user_pubkey'):
+                    signer_pubkey = crypto.b64decode(user_row['user_pubkey'])
+                    log.info(f"invite.project() using user_pubkey for signer {signed_by[:20]}...")
+
+            if not signer_pubkey:
+                log.warning(f"invite.project() signer {signed_by[:20]}... not available yet")
+                return None
+
+            if not crypto.verify_event(event_data, signer_pubkey):
+                log.warning(f"invite.project() signature verification FAILED for signed_by={signed_by[:20]}...")
+                return None
+
+            log.info(f"invite.project() verified ongoing invite with signer pubkey")
+
+    else:
+        # Legacy flow: no signed_by, use created_by
+        # TODO(Phase 9): Remove this legacy created_by flow and require signed_by on all invites
+        if not created_by:
+            log.warning(f"invite.project() missing both signed_by and created_by")
+            return None
+
+        from events.identity import peer_shared
+        try:
+            creator_public_key = peer_shared.get_public_key(created_by, recorded_by, db)
+        except ValueError:
+            log.warning(f"invite.project() creator not found: {created_by[:20]}...")
+            return None
+
+        if not crypto.verify_event(event_data, creator_public_key):
+            log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
+            return None
+
+        log.info(f"invite.project() verified legacy invite with created_by pubkey")
+
+        # Legacy admin validation
+        invite_network_id = event_data.get('network_id')
+        if invite_network_id:
+            peer_network = safedb.query_one(
+                "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+                (invite_network_id, recorded_by)
+            )
+            if peer_network:
+                inviter_user_id = event_data.get('inviter_user_id')
+                if inviter_user_id and peer_network['admins_group_id']:
+                    admins_group_id = peer_network['admins_group_id']
+                    if not validate(inviter_user_id, admins_group_id, recorded_by, db):
+                        log.warning(f"invite.project() authorization FAILED: inviter {inviter_user_id[:20]}... is not an admin")
+                        return None
+                elif inviter_user_id is None:
+                    log.info(f"invite.project() skipping admin validation for first_peer self-invite")
 
     log.info(f"invite.project() validation passed")
 
@@ -520,3 +596,115 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     )
 
     return invite_id
+
+
+def create_peer_invite(
+    user_id: str,
+    signer_id: str,
+    signer_private_key: bytes,
+    peer_id: str,
+    t_ms: int,
+    db: Any
+) -> tuple[str, bytes, bytes]:
+    """Create an invite(mode=peer) for linking a peer to a user.
+
+    Phase 3: Uniform peer linking - first peer and later peers use same flow.
+
+    For first peer: signer_id=user_id, signer_private_key=user_private_key
+    For later peers: signer_id=peer_shared_id, signer_private_key=peer_private_key
+
+    Args:
+        user_id: The user this peer will be linked to
+        signer_id: Who signs this invite (user_id for first peer, peer_shared_id for later)
+        signer_private_key: Private key of the signer
+        peer_id: Local peer ID (for recording)
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        (invite_id, invite_private_key, invite_pubkey): The invite ID and keys for peer_shared signing
+    """
+    # Generate keypair for this peer invite
+    invite_private_key, invite_pubkey = crypto.generate_keypair()
+
+    # Create peer invite event
+    event_data = {
+        'type': 'invite',
+        'mode': 'peer',
+        'user_id': user_id,  # Which user this peer will link to
+        'invite_pubkey': crypto.b64encode(invite_pubkey),
+        'signed_by': signer_id,  # user_id for first peer, peer_shared_id for later
+        'created_at': t_ms
+    }
+
+    # Sign with signer's private key
+    signed_event = crypto.sign_event(event_data, signer_private_key)
+
+    # Store the invite event
+    blob = crypto.canonicalize_json(signed_event)
+    invite_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"create_peer_invite() created invite(mode=peer) {invite_id[:20]}... signed_by={signer_id[:20]}...")
+
+    return invite_id, invite_private_key, invite_pubkey
+
+
+def create_bootstrap_user_invite(
+    network_id: str,
+    network_private_key: bytes,
+    group_id: str,
+    channel_id: str,
+    key_id: str,
+    peer_id: str,
+    first_peer: str,
+    t_ms: int,
+    db: Any
+) -> tuple[str, bytes, bytes]:
+    """Create an invite(mode=user) for bootstrap - signed by network key.
+
+    Phase 4: Bootstrap user invite is signed by network_id (not peer_shared_id).
+    This is used when creating the first user in a new network.
+
+    Args:
+        network_id: The network this invite is for
+        network_private_key: Network's private key for signing
+        group_id: All-users group ID
+        channel_id: Default channel ID
+        key_id: Group key ID
+        peer_id: Local peer ID (for recording)
+        first_peer: peer_shared_id of the bootstrap peer (grants admin on join)
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        (invite_id, invite_private_key, invite_pubkey): The invite ID and keys for user signing
+    """
+    # Generate keypair for this user invite
+    invite_private_key, invite_pubkey = crypto.generate_keypair()
+
+    # Create bootstrap user invite event
+    # Note: For bootstrap, the first_peer IS the inviter (self-invite)
+    event_data = {
+        'type': 'invite',
+        'mode': 'user',
+        'network_id': network_id,
+        'group_id': group_id,
+        'channel_id': channel_id,
+        'key_id': key_id,
+        'invite_pubkey': crypto.b64encode(invite_pubkey),
+        'signed_by': network_id,  # Bootstrap: signed by network key
+        'first_peer': first_peer,  # Grants admin on join
+        'inviter_peer_shared_id': first_peer,  # For bootstrap, inviter is self
+        'created_at': t_ms
+    }
+
+    # Sign with network's private key
+    signed_event = crypto.sign_event(event_data, network_private_key)
+
+    # Store the invite event
+    blob = crypto.canonicalize_json(signed_event)
+    invite_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"create_bootstrap_user_invite() created invite(mode=user) {invite_id[:20]}... signed_by=network_id")
+
+    return invite_id, invite_private_key, invite_pubkey

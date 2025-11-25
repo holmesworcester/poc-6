@@ -10,15 +10,31 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(peer_id: str, t_ms: int, db: Any) -> str:
-    """Create a shareable peer_shared event from a local peer."""
-    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}")
+def create(peer_id: str, t_ms: int, db: Any,
+           invite_id: str | None = None,
+           invite_private_key: bytes | None = None) -> str:
+    """Create a shareable peer_shared event from a local peer.
 
-    # Get keys from local peer
+    Phase 3: Two modes:
+    1. Legacy (no invite): Self-signed with peer's own key (backward compat)
+    2. Invite-based: Signed with invite_private_key (signed_by=invite_id)
+
+    Args:
+        peer_id: Local peer ID
+        t_ms: Timestamp
+        db: Database connection
+        invite_id: Optional peer invite ID (for Phase 3 uniform peer linking)
+        invite_private_key: Optional invite private key for signing
+
+    Returns:
+        peer_shared_id: The ID of the created peer_shared event
+    """
+    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}, invite_id={invite_id[:20] if invite_id else 'None'}...")
+
+    # Get peer's public key (always needed)
     public_key = peer.get_public_key(peer_id, peer_id, db)
-    private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Create event dict (plaintext, will be signed)
+    # Create event dict
     event_data = {
         'type': 'peer_shared',
         'public_key': crypto.b64encode(public_key),
@@ -26,8 +42,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
         'created_at': t_ms
     }
 
-    # Sign the event with peer's private key
-    signed_event = crypto.sign_event(event_data, private_key)
+    # Phase 3: Determine signing mode
+    if invite_id and invite_private_key:
+        # Invite-based signing (uniform peer linking)
+        event_data['invite_id'] = invite_id
+        event_data['signed_by'] = invite_id
+        signed_event = crypto.sign_event(event_data, invite_private_key)
+        log.info(f"peer_shared.create() signed with invite key (signed_by={invite_id[:20]}...)")
+    else:
+        # Legacy self-signed mode (backward compat)
+        private_key = peer.get_private_key(peer_id, peer_id, db)
+        signed_event = crypto.sign_event(event_data, private_key)
+        log.info(f"peer_shared.create() self-signed (legacy mode)")
 
     # Canonicalize to get deterministic blob
     blob = crypto.canonicalize_json(signed_event)
@@ -40,7 +66,12 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 
 
 def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project peer_shared event into peers_shared and shareable_events tables."""
+    """Project peer_shared event into peers_shared and linked_peers tables.
+
+    Phase 3: Two verification modes:
+    1. Legacy (no invite_id): Self-signed, verify with public_key from event
+    2. Invite-based (signed_by=invite_id): Verify with invite_pubkey, link to user
+    """
     log.warning(f"[PEER_SHARED_PROJECT] peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
@@ -55,16 +86,57 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     # Parse JSON (signed plaintext)
     event_data = crypto.parse_json(blob)
 
-    # Verify signature using public key from event itself
+    # Get public key from event (always needed for peers_shared table)
     public_key_b64 = event_data.get('public_key')
     if not public_key_b64:
         log.warning(f"peer_shared.project() missing public_key in event data")
         return None
 
-    public_key = crypto.b64decode(public_key_b64)
-    if not crypto.verify_event(event_data, public_key):
-        log.warning(f"peer_shared.project() signature verification failed for peer_shared_id={peer_shared_id}")
-        return None
+    # Phase 3: Determine verification mode
+    invite_id = event_data.get('invite_id')
+    signed_by = event_data.get('signed_by')
+    user_id = None  # Will be set if invite-based linking
+
+    if invite_id and signed_by == invite_id:
+        # Invite-based verification (Phase 3 uniform peer linking)
+        # Get invite_pubkey from invites table or store blob
+        invite_pubkey_bytes = None
+
+        invite_row = safedb.query_one(
+            "SELECT invite_pubkey, user_id FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
+            (invite_id, recorded_by)
+        )
+
+        if invite_row:
+            invite_pubkey_bytes = crypto.b64decode(invite_row['invite_pubkey'])
+            user_id = invite_row['user_id']
+        else:
+            # Try store blob (bootstrap case)
+            invite_blob = store.get(invite_id, unsafedb)
+            if invite_blob:
+                invite_data = crypto.parse_json(invite_blob)
+                invite_pubkey_b64 = invite_data.get('invite_pubkey')
+                if invite_pubkey_b64:
+                    invite_pubkey_bytes = crypto.b64decode(invite_pubkey_b64)
+                    user_id = invite_data.get('user_id')
+                    log.info(f"peer_shared.project() got invite_pubkey from store blob (bootstrap case)")
+
+        if not invite_pubkey_bytes:
+            log.warning(f"peer_shared.project() invite_id={invite_id[:20]}... not available yet")
+            return None
+
+        if not crypto.verify_event(event_data, invite_pubkey_bytes):
+            log.warning(f"peer_shared.project() signature verification failed using invite_pubkey")
+            return None
+
+        log.info(f"peer_shared.project() verified with invite_pubkey, user_id={user_id[:20] if user_id else 'None'}...")
+    else:
+        # Legacy self-signed verification
+        public_key = crypto.b64decode(public_key_b64)
+        if not crypto.verify_event(event_data, public_key):
+            log.warning(f"peer_shared.project() signature verification failed for peer_shared_id={peer_shared_id}")
+            return None
+        log.info(f"peer_shared.project() verified self-signed (legacy mode)")
 
     # Insert into peers_shared table
     safedb.execute(
@@ -81,6 +153,22 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         )
     )
     log.info(f"peer_shared.project() inserted into peers_shared: peer_shared_id={peer_shared_id}, owner_peer_id={event_data['peer_id']}, recorded_by={recorded_by}")
+
+    # Phase 3: Insert into linked_peers if invite-based (links peer to user)
+    if user_id:
+        safedb.execute(
+            """INSERT OR IGNORE INTO linked_peers
+               (link_id, user_id, peer_id, linked_at, recorded_by)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                peer_shared_id,  # Use peer_shared_id as link_id
+                user_id,
+                peer_shared_id,  # peer_id in linked_peers is peer_shared_id
+                recorded_at,
+                recorded_by
+            )
+        )
+        log.info(f"peer_shared.project() linked peer to user: peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}...")
 
     # Insert into peer_self table (subjective mapping) if this is our own peer
     owner_peer_id = event_data['peer_id']

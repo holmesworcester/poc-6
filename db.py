@@ -26,7 +26,7 @@ SUBJECTIVE_TABLES = {
     'addresses',
     'group_keys',                  # NEW: subjective group encryption keys
     'group_keys_shared',           # Group keys shared (subjective)
-    'invite_proofs',               # Invite proof validation (subjective)
+    # Phase 5: invite_proofs removed - proof IS the signature on user/peer_shared events
     'group_prekeys',               # NEW: subjective group prekeys
     'group_prekeys_shared',        # Group prekeys shared (subjective)
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)

@@ -158,47 +158,11 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         recorded_by
     ))
 
-    # Phase 5 BOOTSTRAP: Check if this is the first_peer BEFORE unblocking invite dependents
-    # We need to unblock __BOOTSTRAP_FIRST_PEER__ first, otherwise dependent events will still be blocked
-    first_peer = invite_event.get('first_peer')
-    is_first_peer = False
+    # Phase 7: Simplified - no __BOOTSTRAP_FIRST_PEER__ blocking anymore
+    # Bootstrap invites use signed_by=network_id which doesn't need artificial blocking
+    # Admin privileges for first_peer are granted by user.project() when it detects first_peer match
 
-    if first_peer:
-        # Get this peer's peer_shared_id to compare with first_peer
-        peer_self_row = safedb.query_one(
-            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-            (recorded_by, recorded_by)
-        )
-        my_peer_shared_id = peer_self_row['peer_shared_id'] if peer_self_row else None
-        is_first_peer = (my_peer_shared_id == first_peer)
-        log.warning(f"invite_accepted.project() BOOTSTRAP CHECK: first_peer={first_peer[:20] if first_peer else 'None'}..., my_peer_shared_id={my_peer_shared_id[:20] if my_peer_shared_id else 'None'}..., match={is_first_peer}")
-
-    if is_first_peer:
-        log.info(f"invite_accepted.project() first_peer detected: recorded_by={recorded_by[:20]}... == first_peer={first_peer[:20]}...")
-
-        # Check if we've already done the bootstrap unblock (idempotency)
-        # Look for any events with deps_remaining > 0 waiting for __BOOTSTRAP_FIRST_PEER__
-        pending_bootstrap = safedb.query_one("""
-            SELECT 1 FROM blocked_event_deps_ephemeral bed
-            JOIN blocked_events_ephemeral be ON bed.recorded_id = be.recorded_id
-                AND bed.recorded_by = be.recorded_by
-            WHERE bed.dep_id = ? AND bed.recorded_by = ? AND be.deps_remaining > 0
-            LIMIT 1
-        """, ('__BOOTSTRAP_FIRST_PEER__', recorded_by))
-
-        if pending_bootstrap:
-            log.warning(f"[BOOTSTRAP_CASCADE] Found pending bootstrap events, triggering unblock")
-            # Unblock the bootstrap marker FIRST before processing invite dependents
-            unblocked_by_bootstrap = queues.blocked.notify_event_valid('__BOOTSTRAP_FIRST_PEER__', recorded_by, safedb)
-            log.warning(f"[BOOTSTRAP_CASCADE] Unblocked bootstrap marker, found {len(unblocked_by_bootstrap)} events: {[eid[:20] for eid in unblocked_by_bootstrap]}")
-            if unblocked_by_bootstrap:
-                # Re-project the invite (which was artificially blocked)
-                recorded_module.project_ids(unblocked_by_bootstrap, db)
-                log.warning(f"[BOOTSTRAP_CASCADE] Re-projected bootstrap-blocked events")
-        else:
-            log.warning(f"[BOOTSTRAP_CASCADE] No pending bootstrap events (already unblocked)")
-
-    # NOW unblock events waiting for the invite (they should no longer be blocked on __BOOTSTRAP_FIRST_PEER__)
+    # Unblock events waiting for the invite
     unblocked_by_invite = queues.blocked.notify_event_valid(invite_id, recorded_by, safedb)
     if unblocked_by_invite:
         log.info(f"invite_accepted.project() unblocked {len(unblocked_by_invite)} events waiting for invite")
