@@ -65,6 +65,14 @@ def create(peer_id: str, peer_shared_id: str, link_invite_id: str,
 
     log.info(f"link.create() stored link_id={link_id[:20]}...")
 
+    # Update peer_self with our user_id - this is the canonical source for "what user am I?"
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        "UPDATE peer_self SET user_id = ? WHERE peer_id = ? AND recorded_by = ?",
+        (user_id, peer_id, peer_id)
+    )
+    log.info(f"link.create() set user_id in peer_self")
+
     # Auto-create prekey for sync requests (same as user.create)
     from events.network import transit_prekey
     from events.network import transit_prekey_shared
@@ -90,12 +98,14 @@ def create(peer_id: str, peer_shared_id: str, link_invite_id: str,
 
 def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project link event into linked_peers and users tables."""
+    print(f"[DEBUG] link.project() called: link_id={link_id[:20]}..., recorded_by={recorded_by[:20]}...")
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
 
     # Get blob from store
     blob = store.get(link_id, unsafedb)
     if not blob:
+        print(f"[DEBUG] link.project() blob not found for {link_id[:20]}...")
         return None
 
     # Parse JSON (plaintext, no unwrap needed)
@@ -127,7 +137,9 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     link_invite_event_data = crypto.parse_json(link_invite_blob)
 
     # Verify link_pubkey matches link_invite_pubkey
-    if event_data['link_pubkey'] != link_invite_event_data['link_pubkey']:
+    # Support both unified format (invite_pubkey) and legacy (link_pubkey)
+    invite_pubkey = link_invite_event_data.get('invite_pubkey') or link_invite_event_data.get('link_pubkey')
+    if event_data['link_pubkey'] != invite_pubkey:
         log.warning(f"link.project() link_pubkey mismatch - invalid link")
         return None
 
@@ -147,9 +159,9 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         log.warning(f"link.project() proof signature verification FAILED")
         return None
 
-    log.info(f"link.project() validation passed - link is valid")
+    log.warning(f"link.project() validation passed - link is valid")
 
-    # Insert into linked_peers table
+    # Insert into linked_peers table (NOT users - linked devices look up user_id via linked_peers)
     safedb.execute(
         """INSERT OR IGNORE INTO linked_peers
            (link_id, user_id, peer_id, linked_at, recorded_by)
@@ -160,27 +172,6 @@ def project(link_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
             signed_by,  # New device's peer_shared_id
             event_data['created_at'],
             recorded_by
-        )
-    )
-
-    # Also insert into users table so new peer has all groups/channels
-    # Get the network_id from link_invite
-    network_id = link_invite_event_data.get('network_id')
-
-    # Insert into users table with same user_id (different peer_id)
-    # This gives the new device access to all groups
-    safedb.execute(
-        """INSERT OR IGNORE INTO users
-           (user_id, peer_id, name, network_id, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            user_id,
-            signed_by,  # New device's peer_shared_id
-            '',  # Name will be same as original user (empty here, can query original)
-            network_id,
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
         )
     )
 
@@ -232,6 +223,26 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     # 1. Create new peer (local + shared)
     peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
     log.info(f"link.join() created new peer: {peer_id[:20]}...")
+
+    # Phase: Project network event FIRST if present in link URL
+    # The network blob is the root of the dependency cascade:
+    # network_id -> bootstrap_invite -> user
+    # Without network being valid, user events can't project (they depend on invite, which depends on network)
+    if 'network_blob' in link_data:
+        network_blob_b64 = link_data['network_blob']
+        network_blob = base64.urlsafe_b64decode(network_blob_b64 + '===')
+
+        from events.network import recorded
+        unsafedb = create_unsafe_db(db)
+        network_id_from_blob = store.blob(network_blob, t_ms, return_dupes=True, unsafedb=unsafedb)
+
+        # Create recorded event for this peer
+        recorded_id_network = recorded.create(network_id_from_blob, peer_id, t_ms, db, return_dupes=True)
+
+        # Project it immediately - this marks network_id as valid
+        recorded.project_ids([recorded_id_network], db)
+
+        log.info(f"link.join() projected network event: {network_id_from_blob[:20]}...")
 
     # Extract and store invite/link_invite event blob
     # Support both unified invite format (invite_blob) and legacy (link_invite_blob)
@@ -341,6 +352,14 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db
     )
     log.info(f"link.join() created link_id={link_id[:20]}...")
+
+    # Project the link event immediately for the laptop's own view
+    # This creates the user record in the users table that message.create() needs
+    # to look up author_id when creating messages
+    from events.network import recorded
+    link_recorded_id = recorded.create(link_id, peer_id, t_ms + 3, db, return_dupes=True)
+    recorded.project_ids([link_recorded_id], db)
+    log.info(f"link.join() projected link event for own view: {link_id[:20]}...")
 
     # Phase 5: invite_proof removed - proof IS the signature on peer_shared event (signed_by=invite_id)
 

@@ -143,15 +143,6 @@ def test_two_party_file_attachment_and_sync():
 
     print("\n=== Sync file to Bob ===")
 
-    # Debug: Check how many file slice events are shareable for Alice
-    alice_file_events = db.query_all(
-        "SELECT event_id, event_type FROM shareable_events WHERE can_share_peer_id = ? AND event_type LIKE '%file%'",
-        (alice['peer_id'],)
-    )
-    print(f"Debug: Alice has {len(alice_file_events)} file-related shareable events")
-    for evt in alice_file_events[:10]:  # Show first 10
-        print(f"  - {evt['event_type']}: {evt['event_id'][:20]}...")
-
     # Sync file events to Bob (need multiple rounds for message + file + slices + attachment)
     # More rounds needed because: round 1 sends events, round 2 may trigger key shares, plus window rotation
     # Use extra rounds for file sync (30 rounds = ~3 seconds)

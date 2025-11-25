@@ -93,6 +93,17 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     # Store event with recorded wrapper and projection
     user_id = store.event(blob, peer_id, t_ms, db)
 
+    # TEMPORARY: Set peer_self.user_id here for first device (network creator).
+    # Per ideal_protocol_design.md "Link Peer (first and later identical)", the first device
+    # should go through the same peer linking flow as subsequent devices. Once new_network()
+    # is refactored to call link.create() after user.create(), this can be removed.
+    # Until then, we need this for the first device to be able to create messages.
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        "UPDATE peer_self SET user_id = ? WHERE peer_id = ? AND recorded_by = ?",
+        (user_id, peer_id, peer_id)
+    )
+
     # Auto-create prekey for sync requests (inline, following poc-5 pattern)
     # Create local prekey (local-only, has private key)
     from events.network import transit_prekey

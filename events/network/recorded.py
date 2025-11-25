@@ -475,6 +475,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'user':
         from events.identity import user
         projected_id = user.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'link':
+        from events.identity import link
+        projected_id = link.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'transit_prekey':
         from events.network import transit_prekey
         transit_prekey.project(ref_id, recorded_by, recorded_at, db)

@@ -49,26 +49,19 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
 
     group_id = channel_row['group_id']
 
-    # Query peer_self to get peer_shared_id (subjective table)
+    # Look up our identity from peer_self (set when we created/linked our account)
+    # This is the canonical source for "what user am I?" - single lookup, no fallback chain
     peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (peer_id, peer_id)
     )
     if not peer_self_row or not peer_self_row['peer_shared_id']:
-        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set in peer_self table")
+        raise ValueError(f"Peer {peer_id} not found in peer_self table")
+    if not peer_self_row['user_id']:
+        raise ValueError(f"User identity not set for peer {peer_id}. Must create or link account first.")
 
     peer_shared_id = peer_self_row['peer_shared_id']
-
-    # Look up user_id for this peer_shared_id (the user event that represents this peer's membership)
-    # Note: users.peer_id column contains peer_shared_id (shareable device ID), not local peer_id
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_shared_id, peer_id)  # peer_shared_id goes into users.peer_id (misleading column name)
-    )
-    if not user_row or not user_row['user_id']:
-        raise ValueError(f"User not found for peer_shared_id {peer_shared_id}. User must join network before creating messages.")
-
-    user_id = user_row['user_id']
+    user_id = peer_self_row['user_id']
 
     # Build standardized event structure
     event_data = {
@@ -119,7 +112,7 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     messages = safedb.query(
         """SELECT m.*, u.name as author_name
            FROM messages m
-           JOIN users u ON m.author_id = u.user_id AND m.recorded_by = u.recorded_by
+           LEFT JOIN users u ON m.author_id = u.user_id AND m.recorded_by = u.recorded_by
            WHERE m.channel_id = ? AND m.recorded_by = ?
            ORDER BY m.created_at DESC LIMIT 50""",
         (channel_id, recorded_by)

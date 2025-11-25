@@ -396,13 +396,15 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         invite_link_data['first_peer'] = first_peer
         log.info(f"invite.create() added first_peer={first_peer[:20]}... for self-bootstrapping")
 
-    # For mode='link', also include the existing user blob (for device linking)
-    if mode == 'link' and user_id:
-        existing_user_blob = store.get(user_id, unsafedb)
-        if existing_user_blob:
-            existing_user_blob_b64 = base64.urlsafe_b64encode(existing_user_blob).decode().rstrip('=')
-            invite_link_data['existing_user_blob'] = existing_user_blob_b64
-            log.info(f"invite.create() added existing_user_blob for mode='link'")
+    # For mode='link', also include the network blob (for device linking)
+    # The network blob is required for the dependency cascade:
+    # network_id -> bootstrap_invite -> user
+    if mode == 'link':
+        network_blob = store.get(network_id, unsafedb)
+        if network_blob:
+            network_blob_b64 = base64.urlsafe_b64encode(network_blob).decode().rstrip('=')
+            invite_link_data['network_blob'] = network_blob_b64
+            log.info(f"invite.create() added network_blob for mode='link'")
 
     # Encode invite link as base64-urlsafe JSON
     import base64
