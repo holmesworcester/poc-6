@@ -15,7 +15,7 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
     """Validate that added_by has authorization to add members to the group.
 
     Authorization rule:
-    - added_by must be a member of the network's admins group OR the first_peer (network creator)
+    - added_by must have an admin event in the admins table
 
     Uses centralized is_admin() function from events.identity.invite.
 
@@ -46,7 +46,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
-        skip_admin_check: If True, skip admin authorization check (ONLY for bootstrap first_peer grant)
+        skip_admin_check: If True, skip admin authorization check (for internal use only)
 
     Returns:
         member_id: The stored group_member event ID
@@ -65,7 +65,6 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         raise ValueError(f"Group {group_id} not found")
 
     # Check authorization using shared validate() function
-    # skip_admin_check is ONLY for bootstrap first_peer admin grant (chicken-egg problem)
     if not skip_admin_check and not validate(group_id, peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id} (only admins can add members)")
 
@@ -175,25 +174,8 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         return None
 
     # Check authorization using shared validate() function
-    # Exception: Skip auth check if this is first_peer self-granting admin during bootstrap
-    # We detect this by checking if added_by matches first_peer in ANY invite in the store
-    is_first_peer_grant = False
-    unsafedb = create_unsafe_db(db)
-
-    # Check if added_by is first_peer by looking at all invite events
-    # This works even before first_peer has synced their invite_accepted
-    invites_blobs = unsafedb.query("SELECT id, blob FROM store")
-    for row in invites_blobs:
-        try:
-            event_data_check = crypto.parse_json(row['blob'])
-            if event_data_check.get('type') == 'invite' and event_data_check.get('first_peer') == added_by:
-                is_first_peer_grant = True
-                log.info(f"group_member.project() detected first_peer grant: added_by={added_by[:20]}... matches first_peer in invite")
-                break
-        except:
-            pass  # Skip non-JSON blobs
-
-    if not is_first_peer_grant and not validate(event_data['group_id'], added_by, recorded_by, db):
+    # Authorization is based on admin event chain (via is_admin())
+    if not validate(event_data['group_id'], added_by, recorded_by, db):
         log.warning(f"group_member.project() authorization FAILED: {added_by} cannot add members to group {event_data['group_id']} (only admins can add members)")
         return None
 

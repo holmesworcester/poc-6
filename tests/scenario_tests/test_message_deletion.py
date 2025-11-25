@@ -20,7 +20,7 @@ from events.identity import user, invite, peer
 from events.content import message
 from events.content import message_deletion
 from events.group import group_member
-import tick
+from tests.utils import tick_helper
 
 
 def test_message_deletion_self():
@@ -131,8 +131,7 @@ def test_message_deletion_admin():
 
     # Sync to converge
     print("\n=== Sync to converge ===")
-    for round_num in range(3):
-        tick.tick(t_ms=3000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Make Bob an admin
     print("\n=== Alice makes Bob an admin ===")
@@ -148,8 +147,7 @@ def test_message_deletion_admin():
     db.commit()
 
     # Sync admin status
-    for round_num in range(3):
-        tick.tick(t_ms=5000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
@@ -165,8 +163,7 @@ def test_message_deletion_admin():
     db.commit()
 
     # Sync message to Bob
-    for round_num in range(3):
-        tick.tick(t_ms=7000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
 
     # Verify Bob sees the message
     from db import create_safe_db
@@ -198,8 +195,7 @@ def test_message_deletion_admin():
     print("✓ Message deleted from Bob's database")
 
     # Sync deletion to Alice
-    for round_num in range(3):
-        tick.tick(t_ms=9000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=9000, max_rounds=200, check_interval=1)
 
     # Verify Alice also sees deletion
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -236,8 +232,7 @@ def test_message_deletion_unauthorized():
     db.commit()
 
     # Sync
-    for round_num in range(3):
-        tick.tick(t_ms=3000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Make Bob admin
     group_member.create(
@@ -251,8 +246,7 @@ def test_message_deletion_unauthorized():
     db.commit()
 
     # Sync Bob's admin status
-    for round_num in range(3):
-        tick.tick(t_ms=5000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
 
     # Charlie joins (will NOT be admin)
     charlie_invite_id, charlie_invite_link, _ = invite.create(
@@ -266,8 +260,7 @@ def test_message_deletion_unauthorized():
     db.commit()
 
     # Sync
-    for round_num in range(3):
-        tick.tick(t_ms=8000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1)
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
@@ -282,8 +275,7 @@ def test_message_deletion_unauthorized():
     db.commit()
 
     # Sync message
-    for round_num in range(3):
-        tick.tick(t_ms=10000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=10000, max_rounds=200, check_interval=1)
 
     # Charlie (non-admin) tries to delete Alice's message
     print("\n=== Charlie (non-admin) tries to delete Alice's message ===")
@@ -324,8 +316,7 @@ def test_message_deletion_ordering():
     db.commit()
 
     # Sync
-    for round_num in range(3):
-        tick.tick(t_ms=3000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Alice sends message
     print("\n=== Alice sends message ===")
@@ -351,8 +342,7 @@ def test_message_deletion_ordering():
 
     # Now sync both message and deletion to Bob
     print("\n=== Sync to Bob (message and deletion together) ===")
-    for round_num in range(3):
-        tick.tick(t_ms=5000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
 
     # Verify Bob never sees the message (deletion blocks it)
     from db import create_safe_db

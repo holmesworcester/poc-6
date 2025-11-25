@@ -254,17 +254,17 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_key")
         return recorded_by_peers
 
-    # Try transit prekeys (asymmetric)
+    # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
     try:
         cursor = db._conn.execute(
-            "SELECT DISTINCT recorded_by FROM transit_prekeys_shared WHERE transit_prekey_id = ?",
+            "SELECT DISTINCT owner_peer_id FROM transit_prekeys WHERE transit_prekey_id = ?",
             (hint_b64,)
         )
         recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
             log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_prekey")
     except Exception as e:
-        log.warning(f"route_blob_to_peers: Failed to query transit_prekeys_shared: {e}")
+        log.warning(f"route_blob_to_peers: Failed to query transit_prekeys: {e}")
         recorded_by_peers = []
 
     return recorded_by_peers
@@ -931,3 +931,105 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         queues.incoming.add(wrapped_blob, t_ms, db)
         after_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
         log.debug(f"[SYNC_RESPONSE] added blob to incoming queue: before={before_count}, after={after_count}, hint={actual_hint_in_blob}")
+
+
+# =============================================================================
+# Convergence Detection Functions (Snapshot-based)
+# =============================================================================
+
+def take_sync_snapshot(db: Any) -> dict:
+    """Take a snapshot of current sync state for convergence detection.
+
+    Captures the current valid event counts for each local peer.
+    Used to detect when sync has stabilized (no new events being validated).
+
+    Returns:
+        Snapshot dict with:
+        - 'local_peers': list of peer_ids
+        - 'valid_counts': {peer_id: count of valid events}
+        - 'queue_size': incoming_blobs count
+        - 'blocked_counts': {peer_id: count of blocked events}
+    """
+    unsafedb = create_unsafe_db(db)
+
+    # Get all local peers
+    local_peers = [row['peer_id'] for row in unsafedb.query("SELECT peer_id FROM local_peers")]
+
+    # Count valid events per peer (valid_events is subjective)
+    valid_counts = {}
+    for peer_id in local_peers:
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        count = safedb.query_one(
+            "SELECT COUNT(*) as count FROM valid_events WHERE recorded_by = ?",
+            (peer_id,)
+        )
+        valid_counts[peer_id] = count['count'] if count else 0
+
+    # Count blocked events per peer
+    blocked_counts = {}
+    for peer_id in local_peers:
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        count = safedb.query_one(
+            "SELECT COUNT(*) as count FROM blocked_events_ephemeral WHERE recorded_by = ?",
+            (peer_id,)
+        )
+        blocked_counts[peer_id] = count['count'] if count else 0
+
+    # Queue size
+    queue = unsafedb.query_one("SELECT COUNT(*) as count FROM incoming_blobs")
+
+    return {
+        'local_peers': local_peers,
+        'valid_counts': valid_counts,
+        'queue_size': queue['count'] if queue else 0,
+        'blocked_counts': blocked_counts
+    }
+
+
+def check_sync_progress(db: Any, prev_snapshot: dict) -> dict:
+    """Check if sync has made progress since previous snapshot.
+
+    Compares current state to previous snapshot to detect sync activity.
+    Progress is determined by queue changes only (not valid_events count)
+    because valid_events grows from both sync AND local event creation.
+
+    Args:
+        db: Database connection
+        prev_snapshot: Previous snapshot from take_sync_snapshot()
+
+    Returns:
+        Status dict with:
+        - 'progressed': bool (True if queue changed since last check)
+        - 'valid_deltas': {peer_id: new events validated since snapshot}
+        - 'queue_size': current incoming_blobs count
+        - 'blocked_count': total blocked events
+        - 'total_valid': total valid events across all peers
+    """
+    current = take_sync_snapshot(db)
+
+    # Calculate deltas (for informational purposes)
+    valid_deltas = {}
+    total_valid = 0
+    for peer_id in current['local_peers']:
+        prev_count = prev_snapshot['valid_counts'].get(peer_id, 0)
+        curr_count = current['valid_counts'].get(peer_id, 0)
+        valid_deltas[peer_id] = curr_count - prev_count
+        total_valid += curr_count
+
+    # Only track queue changes for progress detection
+    # (valid_events grows from local events too, not just sync)
+    # Compare totals, not per-peer dicts, to avoid false positives from
+    # blocked events moving between peers
+    queue_changed = current['queue_size'] != prev_snapshot['queue_size']
+    prev_blocked_total = sum(prev_snapshot['blocked_counts'].values())
+    total_blocked = sum(current['blocked_counts'].values())
+    blocked_changed = total_blocked != prev_blocked_total
+
+    return {
+        'progressed': queue_changed or blocked_changed,
+        'valid_deltas': valid_deltas,
+        'queue_size': current['queue_size'],
+        'blocked_count': total_blocked,
+        'total_valid': total_valid,
+        'snapshot': current  # Include for next comparison
+    }

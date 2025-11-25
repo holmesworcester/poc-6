@@ -12,7 +12,6 @@ from db import Database
 import schema
 from events.identity import user, invite, peer
 from tests.utils import tick_helper
-import tick
 
 
 def test_sync_three_players_convergence():
@@ -67,39 +66,7 @@ def test_sync_three_players_convergence():
 
     # Run sync to convergence
     print("\n=== Running Sync ===")
-    start_t_ms = 4000
-    max_rounds = tick_helper.CONVERGENCE_ROUNDS  # ~10 seconds for complete convergence
-    for round_num in range(max_rounds):
-        # Run one tick cycle (send + receive)
-        tick.tick(t_ms=start_t_ms + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
-
-        # Check Bob's progress
-        bob_shareable_now = set(row['event_id'] for row in db.query(
-            "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
-            (bob['peer_id'],)
-        ))
-        bob_has_alice_now = alice_shareable & bob_shareable_now
-
-        # Check what Bob has recorded (not just in store)
-        bob_recorded_now = set()
-        for row in db.query("SELECT id, blob FROM store"):
-            try:
-                data = json.loads(row['blob'])
-                if data.get('type') == 'recorded' and data.get('recorded_by') == bob['peer_id']:
-                    bob_recorded_now.add(data.get('ref_id'))
-            except:
-                pass
-        bob_received_alice = alice_shareable & bob_recorded_now
-
-        print(f"Round {round_num + 1}: Bob has {len(bob_has_alice_now)}/{len(alice_shareable)} "
-              f"of Alice's events shareable, {len(bob_received_alice)} recorded")
-
-        # Check if converged (Bob recorded all of Alice's shareable events)
-        if bob_received_alice == alice_shareable:
-            print(f"✓ Converged after {round_num + 1} rounds!")
-            break
-    else:
-        print(f"✗ Did not converge after {max_rounds} rounds")
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
 
     # Final verification
     print("\n=== Final State ===")

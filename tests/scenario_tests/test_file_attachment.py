@@ -198,7 +198,6 @@ def test_two_party_file_attachment_and_sync():
 
     print("\n=== Test reprojection ===")
 
-    # Verify reprojection (can rebuild all state from events)
     # NOTE: Skipped for multi-peer scenarios - reprojection requires sync protocol state
     # that isn't persisted in the event store. Same as test_user_removal.py.
     # from tests.utils import assert_reprojection
@@ -207,7 +206,6 @@ def test_two_party_file_attachment_and_sync():
 
     print("\n=== Test convergence ===")
 
-    # Verify convergence (different order of events produces same state)
     # NOTE: Skipped for multi-peer scenarios - convergence requires sync protocol state
     # that isn't persisted in the event store. Same as test_user_removal.py.
     # from tests.utils import assert_convergence

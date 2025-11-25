@@ -1,5 +1,11 @@
 """User event type (shareable, encrypted) - represents network membership."""
 from typing import Any
+
+# Registry metadata
+EVENT_TYPE = 'user'
+SHAREABLE = True  # User events sync across the network
+EPHEMERAL = False
+PROJECTION_TABLE = ('users', 'user_id')
 import base64
 import logging
 import crypto
@@ -347,9 +353,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # Note: We need group_id, channel_id, key_id for the invite, but they don't exist yet!
     # Solution: Create placeholder IDs that will be filled in after content is created
     # For now, use empty strings - the invite just needs to authorize user creation
-
-    # Create a minimal bootstrap invite that just authorizes user creation
-    # Group/channel metadata will be added to user's state after content is created
+    # Admin privileges are granted via admin event after join (not via invite)
     invite_id, invite_private_key, invite_pubkey = invite.create_bootstrap_user_invite(
         network_id=network_id,
         network_private_key=network_private_key,
@@ -357,7 +361,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         channel_id='',  # Placeholder - channel created after peer_shared
         key_id='',  # Placeholder - key created with group
         peer_id=peer_id,
-        first_peer='PENDING',  # Will be set to peer_shared_id after it's created
+        peer_shared_id='PENDING',  # Will be set to peer_shared_id after it's created
         t_ms=t_ms + 20,
         db=db
     )
@@ -376,7 +380,6 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'invite_prekey_id': invite_prekey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': 'PENDING',  # Will connect to self after peer_shared created
-        'first_peer': 'PENDING',
         'ip': '127.0.0.1',
         'port': 6100,
     }
@@ -556,7 +559,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         'user_id': user_id,
         'invite_id': invite_id,
         'admin_grant_id': admin_grant_id,
-        # Backward compatibility
+        # Backward compatibility - group_id and key_id reference all_users group
         'group_id': all_users_group_id,
         'key_id': all_users_key_id,
     }
@@ -702,8 +705,9 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
 
     # Now project invite (after peer_shared, so creator's public key is available for validation)
+    # Skip admin check for out-of-band invites - the joiner trusts the invite link they received
     from events.identity import invite
-    invite.project(invite_id, peer_id, t_ms, db)
+    invite.project(invite_id, peer_id, t_ms, db, skip_admin_check=True)
     log.info(f"join() projected invite: {invite_id[:20]}...")
 
     # Extract secrets from invite link (all b64 encoded)
@@ -718,9 +722,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
     channel_id = invite_event_data['channel_id']
     key_id = invite_event_data['key_id']
 
-    # Phase 5: Extract first_peer from invite link (for network creator self-bootstrapping)
-    first_peer = invite_data.get('first_peer')
-
     # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
     # This restores the invite private key via projection BEFORE user.create() is called
     # This allows reprojection to work without the original invite link
@@ -731,8 +732,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         invite_private_key=invite_private_key,
         peer_id=peer_id,
         t_ms=t_ms + 1,  # Before user creation
-        db=db,
-        first_peer=first_peer  # Phase 5: Pass first_peer for admin grant
+        db=db
     )
 
     # 2. Create user membership (auto-creates transit_prekey + transit_prekey_shared)

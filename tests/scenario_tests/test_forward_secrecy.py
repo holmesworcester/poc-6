@@ -15,7 +15,7 @@ from events.identity import user, invite, peer
 from events.content import message, message_deletion
 from events.network import transit_prekey, transit_key
 from events.group import group_prekey
-import tick
+from tests.utils import tick_helper
 import purge_expired
 
 
@@ -205,8 +205,7 @@ def test_forward_secrecy_multi_peer():
 
     # Sync to converge
     print("\n=== Sync to converge ===")
-    for round_num in range(9):
-        tick.tick(t_ms=3000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
@@ -223,8 +222,7 @@ def test_forward_secrecy_multi_peer():
 
     # Sync message to Bob
     print("\n=== Sync message to Bob ===")
-    for round_num in range(9):
-        tick.tick(t_ms=5000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
 
     # Verify Bob sees the message
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
@@ -253,8 +251,7 @@ def test_forward_secrecy_multi_peer():
 
     # Sync deletion to Bob
     print("\n=== Sync deletion to Bob ===")
-    for round_num in range(9):
-        tick.tick(t_ms=8000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1)
 
     # Verify Bob also deleted the message
     bob_msg_after = bob_safedb.query_one(
@@ -554,9 +551,8 @@ def test_new_user_joins_after_rekey():
     print(f"Bob joined as peer: {bob['peer_id'][:20]}...")
 
     # Sync to converge
-    print("\n=== t=6000+: Sync to converge (3 rounds) ===")
-    for round_num in range(9):
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+    print("\n=== t=6000+: Sync to converge ===")
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
     print("✓ Bob synced with Alice")
 
     # Verify that Bob's state converged with Alice's state
@@ -692,9 +688,8 @@ def test_new_user_with_preexisting_invite_after_rekey():
     print("✓ Bob used the invite created before deletion/rekey")
 
     # Sync to converge
-    print("\n=== t=6000+: Sync to converge (3 rounds) ===")
-    for round_num in range(9):
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+    print("\n=== t=6000+: Sync to converge ===")
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
     print("✓ Bob synced with Alice")
 
     # Verify Bob's state converged

@@ -32,7 +32,7 @@ SUBJECTIVE_TABLES = {
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)
     'users',
     'group_members',
-    'group_members',
+    'admins',                      # Admin events for authorization chain (peer-scoped)
     'valid_events',
     'blocked_events_ephemeral',
     'blocked_event_deps_ephemeral',

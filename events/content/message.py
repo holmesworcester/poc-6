@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 
-def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> dict[str, Any]:
+def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, return_latest: bool = True) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages.
 
     Message TTL is determined by the channel's disappearing_time_ms setting:
@@ -31,9 +31,10 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
         content: Message content
         t_ms: Timestamp
         db: Database connection
+        return_latest: If True (default), return list of recent messages. Set to False for bulk creation.
 
     Returns:
-        {'id': message_id, 'latest': list of recent messages}
+        {'id': message_id, 'latest': list of recent messages (or empty list if return_latest=False)}
     """
     log.info(f"message.create() creating message in channel_id={channel_id}, content='{content[:50]}...'")
 
@@ -90,8 +91,8 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any) -> d
 
     log.info(f"message.create() created message_id={event_id}")
 
-    # Get latest messages
-    latest = list(channel_id, peer_id, db)
+    # Get latest messages (skip for bulk creation performance)
+    latest = list(channel_id, peer_id, db) if return_latest else []
 
     # Note: No commit here - caller owns the transaction (future API layer or tests)
 

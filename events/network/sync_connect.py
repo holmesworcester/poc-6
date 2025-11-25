@@ -12,6 +12,12 @@ Flow:
 4. Sync uses established connections instead of looking up prekeys each time
 """
 from typing import Any
+
+# Registry metadata
+EVENT_TYPE = 'sync_connect'
+SHAREABLE = False  # Local-only - connection state is per-peer
+EPHEMERAL = True   # Drop if deps missing - sender will retry
+PROJECTION_TABLE = None
 import logging
 import json
 import crypto

@@ -17,7 +17,7 @@ from db import Database
 import schema
 from events.identity import user, link_invite, link
 from events.content import message
-import tick
+from tests.utils import tick_helper
 
 
 def test_alice_links_phone_to_laptop():
@@ -79,9 +79,7 @@ def test_alice_links_phone_to_laptop():
     # Initial sync to converge (multiple rounds for GKS propagation)
     print("\n=== Initial sync to propagate link event and group keys ===")
 
-    for i in range(60):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=4000 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
 
     # Verify laptop has the group key (from GKS)
     laptop_has_key = db.query_one(
@@ -133,8 +131,7 @@ def test_alice_links_phone_to_laptop():
     # Sync messages between devices
     print("\n=== Sync messages between devices ===")
 
-    for round_num in range(60):  # Increased sync rounds for message propagation
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
 
     # Verify both devices see both messages
     print("\n=== Verifying message delivery ===")
@@ -238,8 +235,7 @@ def test_alice_laptop_joins_after_phone_has_messages():
     # Sync to propagate messages to laptop
     print("\n=== Sync messages to laptop ===")
 
-    for i in range(15):
-        tick.tick(t_ms=4000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
 
     # Discover channel via sync (laptop should have same channel as phone through user linking)
     laptop_channels = db.query_all(
@@ -319,8 +315,7 @@ def test_three_devices_all_linked():
     # Sync
     print("\n=== Sync all devices ===")
 
-    for i in range(18):
-        tick.tick(t_ms=6000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
 
     # Discover the shared channel for all devices
     print("\n=== Discovering shared channel ===")
@@ -366,8 +361,7 @@ def test_three_devices_all_linked():
     # Sync messages
     print("\n=== Sync messages ===")
 
-    for i in range(60):
-        tick.tick(t_ms=8000 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1)
 
     # Discover channels via sync for each device
     print("\n=== Discovering channels for each device ===")

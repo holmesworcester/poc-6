@@ -15,10 +15,8 @@ log = logging.getLogger(__name__)
 def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     """Check if a peer is an admin (centralized admin validation).
 
-    A peer is an admin if their user_id has an admin_grant event in the admins table.
-
-    Phase 7: Uses the first-class admins table (from admin events) instead of
-    checking admins_group membership. Admin grants are event-sourced.
+    A peer is an admin if their user_id has an admin event in the admins table.
+    Admin grants are event-sourced via first-class admin events.
 
     Args:
         peer_shared_id: Public peer ID to check
@@ -30,8 +28,18 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
+    # Get network_id for admin table lookup
+    network_row = safedb.query_one(
+        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+    if not network_row:
+        return False
+
+    network_id = network_row['network_id']
+
     # Get user_id for this peer_shared_id
-    # Phase 3: Look up via linked_peers first (for invite-signed peer_shared),
+    # Phase 3: Check linked_peers first (for invite-signed peer_shared),
     # then fall back to users.peer_id (for legacy/bootstrap peer_shared)
     user_id = None
 
@@ -54,30 +62,13 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     if not user_id:
         return False
 
-    # Check if user has an admin_grant in the admins table (first-class admin events)
+    # Check if user has an admin event in the admins table (per spec)
     admin_row = safedb.query_one(
-        "SELECT 1 FROM admins WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, recorded_by)
+        "SELECT 1 FROM admins WHERE user_id = ? AND network_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, network_id, recorded_by)
     )
 
-    if admin_row:
-        return True
-
-    # Legacy fallback: Check admins group membership (for backward compatibility)
-    network_row = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
-    if network_row and network_row['admins_group_id']:
-        admins_group_id = network_row['admins_group_id']
-        is_admin_member = safedb.query_one(
-            "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-            (admins_group_id, user_id, recorded_by)
-        )
-        if is_admin_member:
-            return True
-
-    return False
+    return admin_row is not None
 
 
 def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: Any) -> bool:
@@ -109,10 +100,14 @@ def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: A
     return is_admin_check is not None
 
 
-def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None, first_peer: str | None = None) -> tuple[str, str, dict[str, Any]]:
+def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
+    Only admins can create invites (checked via admin event chain).
+
+    Note: Bootstrap invites use create_bootstrap_user_invite() instead, which is
+    signed by network_id and doesn't require admin check.
 
     SECURITY: This function trusts that peer_id is correct and owned by the caller.
     In production, the API authentication layer should validate that the authenticated session
@@ -125,8 +120,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         db: Database connection
         mode: 'user' for network join invites, 'link' for device linking invites
         user_id: Required for mode='link', target user to link to. Must be None for mode='user'.
-        first_peer: Optional peer_shared_id of network creator (for self-bootstrapping). When set, this
-                   peer will be auto-granted admin privileges when they join via invite_accepted.
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -153,8 +146,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
-    # Query for network (which contains all_users group and other metadata)
-
     # Get network
     network_row = safedb.query_one(
         "SELECT network_id, all_users_group_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
@@ -167,40 +158,42 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     all_users_group_id = network_row['all_users_group_id']
     admins_group_id = network_row['admins_group_id']
 
-    # Phase 5: Skip admin check for network creator self-invite (first_peer set)
-    # The creator doesn't exist as a user yet, but will become admin on join via first_peer
-    if not first_peer:
-        # Check if inviter is an admin (only admins can create invites)
-        # Use centralized is_admin() function which handles both normal admins and first_peer
-        if not is_admin(peer_shared_id, peer_id, db):
-            raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
+    # Check if inviter is an admin (only admins can create invites)
+    if not is_admin(peer_shared_id, peer_id, db):
+        raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
-        # Get inviter's user_id for the invite event
-        # Phase 3: Check linked_peers first (for invite-signed peer_shared), then fall back to users.peer_id
-        inviter_user_id = None
+    # Get inviter's user_id for the invite event
+    # Phase 3: Check linked_peers first (for invite-signed peer_shared), then fall back to users.peer_id
+    inviter_user_id = None
 
-        # Try linked_peers first (for peers linked via invite(mode=peer))
-        linked_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Try linked_peers first (for peers linked via invite(mode=peer))
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, peer_id)
+    )
+    if linked_row:
+        inviter_user_id = linked_row['user_id']
+    else:
+        # Fall back to users.peer_id (legacy path for initial peer_shared before linking)
+        inviter_user_row = safedb.query_one(
+            "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
             (peer_shared_id, peer_id)
         )
-        if linked_row:
-            inviter_user_id = linked_row['user_id']
-        else:
-            # Fall back to users.peer_id (legacy path for initial peer_shared before linking)
-            inviter_user_row = safedb.query_one(
-                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-                (peer_shared_id, peer_id)
-            )
-            if inviter_user_row:
-                inviter_user_id = inviter_user_row['user_id']
+        if inviter_user_row:
+            inviter_user_id = inviter_user_row['user_id']
 
-        if not inviter_user_id:
-            raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
+    if not inviter_user_id:
+        raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
+
+    # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
+    # Look up the admin event that grants admin to this user
+    from events.identity import admin as admin_module
+    admin_grant_id = admin_module.my_grant(inviter_user_id, network_id, peer_id, db)
+    if admin_grant_id:
+        log.info(f"invite.create() including admin_grant={admin_grant_id[:20]}... for ongoing invite")
     else:
-        # Network creator self-invite - will become admin on join
-        log.info(f"invite.create() skipping admin check for first_peer self-invite")
-        inviter_user_id = None  # Will be set after user.join()
+        # This shouldn't happen if is_admin() passed, but warn just in case
+        log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
 
     # Get key from all_users group
     group_row = safedb.query_one(
@@ -315,9 +308,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'created_at': t_ms
     }
 
-    # Phase 5: Add first_peer to event data for bootstrap
-    if first_peer:
-        invite_event_data['first_peer'] = first_peer
+    # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
+    if admin_grant_id:
+        invite_event_data['admin_grant'] = admin_grant_id
 
     # Add mode-specific fields
     if mode == 'link':
@@ -355,6 +348,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         "SELECT network_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (peer_id,)
     )
+    admin_key_id = None
     if network_row_for_admins and network_row_for_admins['admins_group_id']:
         admins_group_id = network_row_for_admins['admins_group_id']
 
@@ -440,21 +434,13 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'port': inviter_port,
     }
 
-    # Phase 5: Add first_peer for network creator self-bootstrapping
-    # When present, invite_accepted.project() will auto-grant admin to this peer
-    if first_peer:
-        invite_link_data['first_peer'] = first_peer
-        log.info(f"invite.create() added first_peer={first_peer[:20]}... for self-bootstrapping")
-
-    # For mode='link', also include the network blob (for device linking)
-    # The network blob is required for the dependency cascade:
-    # network_id -> bootstrap_invite -> user
-    if mode == 'link':
-        network_blob = store.get(network_id, unsafedb)
-        if network_blob:
-            network_blob_b64 = base64.urlsafe_b64encode(network_blob).decode().rstrip('=')
-            invite_link_data['network_blob'] = network_blob_b64
-            log.info(f"invite.create() added network_blob for mode='link'")
+    # For mode='link', also include the existing user blob (for device linking)
+    if mode == 'link' and user_id:
+        existing_user_blob = store.get(user_id, unsafedb)
+        if existing_user_blob:
+            existing_user_blob_b64 = base64.urlsafe_b64encode(existing_user_blob).decode().rstrip('=')
+            invite_link_data['existing_user_blob'] = existing_user_blob_b64
+            log.info(f"invite.create() added existing_user_blob for mode='link'")
 
     # Encode invite link as base64-urlsafe JSON
     import base64
@@ -470,13 +456,18 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     return (invite_id, invite_link, invite_link_data)
 
 
-def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
+            skip_admin_check: bool = False) -> str | None:
     """Project invite event into invites table.
 
     Phase 4: Supports polymorphic signed_by:
     - signed_by=network_id (bootstrap): verify with network pubkey
     - signed_by=peer_shared_id (ongoing): verify with peer_shared pubkey
     - Legacy (no signed_by): verify with created_by peer_shared pubkey
+
+    Args:
+        skip_admin_check: If True, skip admin validation. Used for invites
+            received out-of-band (invite links) where the joiner trusts the invite.
     """
     # Create db wrappers first (consistent with other projectors)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -568,6 +559,32 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
             log.info(f"invite.project() verified ongoing invite with signer pubkey")
 
+            # Per spec: Validate admin_grant chain for ongoing invite(mode=user)
+            # The signer must be an admin, authorized by admin_grant
+            admin_grant = event_data.get('admin_grant')
+            if admin_grant:
+                # Verify admin_grant references an admin event for the signer's user
+                # Get signer's user_id
+                signer_user_row = safedb.query_one(
+                    "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ?",
+                    (signed_by, recorded_by)
+                )
+                if signer_user_row:
+                    signer_user_id = signer_user_row['user_id']
+                    grant_row = safedb.query_one(
+                        "SELECT user_id FROM admins WHERE admin_id = ? AND recorded_by = ?",
+                        (admin_grant, recorded_by)
+                    )
+                    if grant_row and grant_row['user_id'] == signer_user_id:
+                        log.info(f"invite.project() admin_grant chain verified for signer {signed_by[:20]}...")
+                    else:
+                        log.warning(f"invite.project() admin_grant {admin_grant[:20]}... does not authorize signer {signed_by[:20]}...")
+                        # Note: Don't reject yet for backward compatibility - just warn
+                        # TODO: Make this rejection mandatory once migration is complete
+            else:
+                # Legacy invite without admin_grant - allow for backward compatibility
+                log.info(f"invite.project() no admin_grant in ongoing invite (legacy)")
+
     else:
         # Legacy flow: no signed_by, use inviter_id as signer
         # Phase 9: This path handles legacy events that used created_by instead of signed_by
@@ -589,22 +606,13 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
         log.info(f"invite.project() verified legacy invite with signer pubkey")
 
-        # Legacy admin validation
-        invite_network_id = event_data.get('network_id')
-        if invite_network_id:
-            peer_network = safedb.query_one(
-                "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
-                (invite_network_id, recorded_by)
-            )
-            if peer_network:
-                inviter_user_id = event_data.get('inviter_user_id')
-                if inviter_user_id and peer_network['admins_group_id']:
-                    admins_group_id = peer_network['admins_group_id']
-                    if not validate(inviter_user_id, admins_group_id, recorded_by, db):
-                        log.warning(f"invite.project() authorization FAILED: inviter {inviter_user_id[:20]}... is not an admin")
-                        return None
-                elif inviter_user_id is None:
-                    log.info(f"invite.project() skipping admin validation for first_peer self-invite")
+        # Admin validation using admin events table (not legacy group_members)
+        # created_by is the inviter's peer_shared_id
+        # Skip admin check for out-of-band invites (invite links) where the joiner trusts the invite
+        created_by = event_data.get('created_by') or inviter_id
+        if not skip_admin_check and not is_admin(created_by, recorded_by, db):
+            log.warning(f"invite.project() authorization FAILED: inviter {created_by[:20]}... is not an admin")
+            return None
 
     log.info(f"invite.project() validation passed")
 
@@ -712,14 +720,15 @@ def create_bootstrap_user_invite(
     channel_id: str,
     key_id: str,
     peer_id: str,
-    first_peer: str,
+    peer_shared_id: str,
     t_ms: int,
     db: Any
 ) -> tuple[str, bytes, bytes]:
     """Create an invite(mode=user) for bootstrap - signed by network key.
 
-    Phase 4: Bootstrap user invite is signed by network_id (not peer_shared_id).
+    Bootstrap user invite is signed by network_id (not peer_shared_id).
     This is used when creating the first user in a new network.
+    Admin privileges are granted via admin event after join, not via invite.
 
     Args:
         network_id: The network this invite is for
@@ -728,7 +737,7 @@ def create_bootstrap_user_invite(
         channel_id: Default channel ID
         key_id: Group key ID
         peer_id: Local peer ID (for recording)
-        first_peer: peer_shared_id of the bootstrap peer (grants admin on join)
+        peer_shared_id: Public peer ID of the bootstrap peer (for inviter_peer_shared_id)
         t_ms: Timestamp
         db: Database connection
 
@@ -739,7 +748,7 @@ def create_bootstrap_user_invite(
     invite_private_key, invite_pubkey = crypto.generate_keypair()
 
     # Create bootstrap user invite event
-    # Note: For bootstrap, the first_peer IS the inviter (self-invite)
+    # For bootstrap, the creator IS the inviter (self-invite)
     event_data = {
         'type': 'invite',
         'mode': 'user',
@@ -749,8 +758,7 @@ def create_bootstrap_user_invite(
         'key_id': key_id,
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': network_id,  # Bootstrap: signed by network key
-        'first_peer': first_peer,  # Grants admin on join
-        'inviter_peer_shared_id': first_peer,  # For bootstrap, inviter is self
+        'inviter_peer_shared_id': peer_shared_id,  # For bootstrap, inviter is self
         'created_at': t_ms
     }
 
