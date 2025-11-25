@@ -1,14 +1,14 @@
 """
 Performance test: Alice creates 10,000 messages, Bob syncs them.
 
-Tracks how many sync steps (sync.send_request_to_all() + sync.receive() calls) are needed
-to transfer all messages from Alice to Bob, using the realistic user.join() API.
+Tracks how many tick() calls are needed to transfer all messages from
+Alice to Bob, using the realistic user.join() API.
 """
 import sqlite3
 import logging
 from db import Database
 import schema
-from events.network import sync
+import tick
 from events.identity import user, peer
 from events.content import message
 
@@ -56,7 +56,6 @@ def test_sync_perf_10k():
 
     # Bootstrap: Initial sync rounds to establish connection using tick()
     log.info("Running initial sync rounds to establish connection...")
-    import tick
     for i in range(5):
         tick.tick(t_ms=4000 + i*200, db=db)
 
@@ -89,55 +88,48 @@ def test_sync_perf_10k():
     alice_msg_count = alice_messages[0]['count']
     log.info(f"Alice has {alice_msg_count} messages in messages table")
 
-    # Now sync: track how many sync steps it takes for Bob to get all messages
+    # Now sync: track how many ticks it takes for Bob to get all messages
     log.info("\nStarting sync performance test...")
-    sync_step = 0
-    max_steps = 500  # Safety limit
+    tick_count = 0
+    max_ticks = 500  # Safety limit
 
-    while sync_step < max_steps:
-        sync_step += 1
+    while tick_count < max_ticks:
+        tick_count += 1
 
-        # Refresh connections periodically (every 20 steps)
-        if sync_step % 20 == 1:
-            from events.network import sync_connect
-            sync_connect.send_connect_to_all(t_ms=30000 + sync_step * 100, db=db)
-            sync.receive(batch_size=100, t_ms=30000 + sync_step * 100 + 5, db=db)
+        # Run tick (handles all sync jobs with configured batch_size)
+        tick.tick(t_ms=30000 + tick_count * 100, db=db)
 
-        # Step: All peers send sync requests
-        sync.send_request_to_all(t_ms=30000 + sync_step * 100, db=db)
-
-        # Step: Receive sync requests (unwraps and auto-sends responses)
-        sync.receive(batch_size=100, t_ms=30000 + sync_step * 100 + 10, db=db)
-
-        # Step: Receive sync responses
-        sync.receive(batch_size=100, t_ms=30000 + sync_step * 100 + 20, db=db)
-
-        # Check Bob's message count
-        bob_messages = db.query(
-            "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
-            (bob_peer_id,)
-        )
-        bob_msg_count = bob_messages[0]['count']
-
-        if sync_step % 10 == 0 or bob_msg_count >= num_messages:
-            log.info(f"  Step {sync_step}: Bob has {bob_msg_count}/{num_messages} messages")
-
-        # Check if sync is complete
-        if bob_msg_count >= num_messages:
-            log.info(f"\n✓ Sync complete after {sync_step} sync steps!")
-            break
-
-        # Check if sync has stalled (no progress and no queued blobs)
-        # Note: We don't track prev_count here, we just check if queue is empty
-        # If Bob hasn't received all messages yet and queue is empty, we're stalled
-        if sync_step > 10 and bob_msg_count < num_messages:
-            # Check if there are any events in the incoming queue
-            queue_count = db.query_one(
-                "SELECT COUNT(*) as count FROM incoming_blobs"
+        # Check Bob's message count periodically
+        if tick_count % 10 == 0:
+            bob_messages = db.query(
+                "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
+                (bob_peer_id,)
             )
-            if queue_count and queue_count['count'] == 0:
-                log.warning(f"Sync stalled at step {sync_step}: Bob has {bob_msg_count}/{num_messages} messages, queue empty")
+            bob_msg_count = bob_messages[0]['count']
+
+            log.info(f"  Tick {tick_count}: Bob has {bob_msg_count}/{num_messages} messages")
+
+            # Check if sync is complete
+            if bob_msg_count >= num_messages:
+                log.info(f"\n✓ Sync complete after {tick_count} ticks!")
                 break
+
+            # Check if sync has stalled
+            if tick_count > 10 and bob_msg_count < num_messages:
+                queue_count = db.query_one(
+                    "SELECT COUNT(*) as count FROM incoming_blobs"
+                )
+                if queue_count and queue_count['count'] == 0:
+                    log.warning(f"Sync stalled at tick {tick_count}: Bob has {bob_msg_count}/{num_messages} messages, queue empty")
+                    break
+
+    # Final check
+    bob_messages = db.query(
+        "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
+        (bob_peer_id,)
+    )
+    bob_msg_count = bob_messages[0]['count']
+    sync_step = tick_count  # For backwards compatibility with assertions
 
     db.commit()
 
@@ -174,7 +166,7 @@ def test_sync_perf_10k():
     log.info(f"Messages created:        {num_messages}")
     log.info(f"Alice message count:     {alice_final_count}")
     log.info(f"Bob message count:       {bob_final_count}")
-    log.info(f"Sync steps taken:        {sync_step}")
+    log.info(f"Ticks taken:             {tick_count}")
     log.info(f"Messages match:          {alice_msg_ids == bob_msg_ids}")
     log.info("="*60)
 
@@ -182,8 +174,8 @@ def test_sync_perf_10k():
     assert alice_final_count == num_messages, f"Alice should have {num_messages} messages, has {alice_final_count}"
     assert bob_final_count == num_messages, f"Bob should have {num_messages} messages, has {bob_final_count}"
     assert alice_msg_ids == bob_msg_ids, "Alice and Bob should have the same message list"
-    assert sync_step > 0, "Should take at least 1 sync step"
-    assert sync_step < max_steps, f"Sync took too many steps ({sync_step}), something is wrong"
+    assert tick_count > 0, "Should take at least 1 tick"
+    assert tick_count < max_ticks, f"Sync took too many ticks ({tick_count}), something is wrong"
 
     log.info("\n✓ All assertions passed! Sync performance test successful.")
 
