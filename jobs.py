@@ -94,7 +94,7 @@ class SyncReceiveJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync
-        sync.receive(batch_size=20, t_ms=t_ms, db=db)
+        sync.receive(batch_size=500, t_ms=t_ms, db=db)
         return {}
 
 

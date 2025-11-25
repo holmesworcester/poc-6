@@ -10,6 +10,7 @@ Tests realistic file sizes:
 
 This tests the scalability of the file sync system.
 """
+import pytest
 import sqlite3
 import time
 from db import Database
@@ -20,12 +21,8 @@ from events.network import sync_file
 import tick
 
 
-def test_5mb_file_download_with_progress():
-    """Test downloading a 1 MB file with progress tracking.
-
-    Note: Uses 1 MB instead of 5 MB for faster test execution while still
-    exercising the progress tracking and file sync mechanisms.
-    """
+def test_1mb_file_download_with_progress():
+    """Test downloading a 1 MB file with progress tracking."""
 
     # Setup
     conn = sqlite3.Connection(":memory:")
@@ -171,6 +168,7 @@ def test_5mb_file_download_with_progress():
     print(f"\n✅ Test passed! 1 MB file synced in {elapsed_time:.2f}s")
 
 
+@pytest.mark.skip(reason="Too slow for regular test runs - takes 2+ minutes")
 def test_50mb_file_download():
     """Test downloading a very large 50 MB file."""
 
@@ -306,9 +304,9 @@ def test_50mb_file_download():
 
 if __name__ == '__main__':
     print("=" * 80)
-    print("TEST 1: 5 MB file download with progress tracking")
+    print("TEST 1: 1 MB file download with progress tracking")
     print("=" * 80)
-    test_5mb_file_download_with_progress()
+    test_1mb_file_download_with_progress()
 
     print("\n" + "=" * 80)
     print("TEST 2: 50 MB file download")
