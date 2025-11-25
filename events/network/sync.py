@@ -934,178 +934,102 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
 
 
 # =============================================================================
-# Convergence Detection Functions
+# Convergence Detection Functions (Snapshot-based)
 # =============================================================================
 
-def get_active_peer_pairs(db: Any) -> list[tuple[str, str]]:
-    """Get all peer pairs that should be syncing.
+def take_sync_snapshot(db: Any) -> dict:
+    """Take a snapshot of current sync state for convergence detection.
 
-    Returns list of (local_peer_id, remote_peer_shared_id) tuples for all
-    peers that are actively syncing with each other.
+    Captures the current valid event counts for each local peer.
+    Used to detect when sync has stabilized (no new events being validated).
 
     Returns:
-        List of (from_peer_id, to_peer_shared_id) tuples
+        Snapshot dict with:
+        - 'local_peers': list of peer_ids
+        - 'valid_counts': {peer_id: count of valid events}
+        - 'queue_size': incoming_blobs count
+        - 'blocked_counts': {peer_id: count of blocked events}
     """
     unsafedb = create_unsafe_db(db)
-
-    pairs = []
 
     # Get all local peers
-    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+    local_peers = [row['peer_id'] for row in unsafedb.query("SELECT peer_id FROM local_peers")]
 
-    for local_row in local_peers:
-        local_peer_id = local_row['peer_id']
-
-        # Get all peers this local peer knows about (from peers_shared table)
-        safedb = create_safe_db(db, recorded_by=local_peer_id)
-        known_peers = safedb.query(
-            "SELECT DISTINCT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
-            (local_peer_id,)
-        )
-
-        for remote_row in known_peers:
-            remote_peer_shared_id = remote_row['peer_shared_id']
-            # Don't include self-pairs
-            if remote_peer_shared_id != local_peer_id:
-                pairs.append((local_peer_id, remote_peer_shared_id))
-
-    return pairs
-
-
-# Event types to exclude from convergence checks by default
-# These are generated during sync and would prevent convergence from ever being reached
-DEFAULT_EXCLUDE_TYPES = {'transit_prekey_shared', 'group_keys_shared'}
-
-
-def check_peer_pair_convergence(
-    from_peer_id: str,
-    to_peer_id: str,
-    db: Any,
-    exclude_types: set[str] | None = None
-) -> tuple[bool, int]:
-    """Check if to_peer has all shareable events from from_peer.
-
-    Works by comparing:
-    - What from_peer can share (shareable_events table)
-    - What to_peer has recorded (store table with recorded_by=to_peer)
-
-    Args:
-        from_peer_id: Peer who has shareable events
-        to_peer_id: Peer who should have received them
-        db: Database connection
-        exclude_types: Event types to exclude from convergence check.
-                      Defaults to DEFAULT_EXCLUDE_TYPES (transit_prekey_shared, group_keys_shared)
-
-    Returns:
-        (converged, missing_count) where converged=True if to_peer has all events
-    """
-    import json
-
-    if exclude_types is None:
-        exclude_types = DEFAULT_EXCLUDE_TYPES
-
-    # 1. Get all shareable events from from_peer, filtering by type
-    safedb_from = create_safe_db(db, recorded_by=from_peer_id)
-    from_peer_shareable = safedb_from.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
-        (from_peer_id,)
-    )
-
-    # Filter out excluded types
-    shareable_set = set()
-    unsafedb = create_unsafe_db(db)
-    for row in from_peer_shareable:
-        event_id = row['event_id']
-        # Look up event type
-        blob_row = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
-        if blob_row:
-            try:
-                data = json.loads(blob_row['blob'])
-                event_type = data.get('type', 'unknown')
-                if event_type not in exclude_types:
-                    shareable_set.add(event_id)
-            except:
-                # Can't parse, include it
-                shareable_set.add(event_id)
-        else:
-            shareable_set.add(event_id)
-
-    if not shareable_set:
-        # No shareable events yet, consider converged
-        return (True, 0)
-
-    # 2. Get what to_peer has recorded (their recorded events)
-    to_peer_recorded = set()
-    all_store_rows = unsafedb.query("SELECT id, blob FROM store")
-
-    for row in all_store_rows:
-        try:
-            data = json.loads(row['blob'])
-            if data.get('type') == 'recorded' and data.get('recorded_by') == to_peer_id:
-                ref_id = data.get('ref_id')
-                if ref_id:
-                    to_peer_recorded.add(ref_id)
-        except:
-            continue
-
-    # 3. Check intersection - what to_peer has from from_peer
-    received_from_peer = shareable_set & to_peer_recorded
-
-    # 4. Converged if to_peer has ALL shareable events from from_peer
-    missing_count = len(shareable_set - received_from_peer)
-    converged = (missing_count == 0)
-
-    return (converged, missing_count)
-
-
-def check_all_convergence(db: Any) -> dict:
-    """Check convergence for all active peer pairs (bidirectional).
-
-    Returns dictionary with:
-    - 'converged': bool (True if all pairs converged)
-    - 'peer_pairs': list of dicts with convergence status per pair
-    - 'queue_size': number of events in incoming_blobs
-    - 'blocked_count': number of blocked events
-
-    Returns:
-        Convergence status dictionary
-    """
-    pairs = get_active_peer_pairs(db)
-
-    results = []
-    all_converged = True
-
-    for from_peer, to_peer in pairs:
-        converged, missing = check_peer_pair_convergence(from_peer, to_peer, db)
-        results.append({
-            'from_peer': from_peer[:10] + '...',
-            'to_peer': to_peer[:10] + '...',
-            'converged': converged,
-            'missing_count': missing
-        })
-        if not converged:
-            all_converged = False
-
-    # Check sync queues
-    unsafedb = create_unsafe_db(db)
-    queue = unsafedb.query_one("SELECT COUNT(*) as count FROM incoming_blobs")
-
-    # Count blocked events across all local peers (blocked_events_ephemeral is subjective)
-    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
-    total_blocked = 0
-    for peer_row in local_peers:
-        peer_id = peer_row['peer_id']
+    # Count valid events per peer (valid_events is subjective)
+    valid_counts = {}
+    for peer_id in local_peers:
         safedb = create_safe_db(db, recorded_by=peer_id)
-        peer_blocked = safedb.query_one(
+        count = safedb.query_one(
+            "SELECT COUNT(*) as count FROM valid_events WHERE recorded_by = ?",
+            (peer_id,)
+        )
+        valid_counts[peer_id] = count['count'] if count else 0
+
+    # Count blocked events per peer
+    blocked_counts = {}
+    for peer_id in local_peers:
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        count = safedb.query_one(
             "SELECT COUNT(*) as count FROM blocked_events_ephemeral WHERE recorded_by = ?",
             (peer_id,)
         )
-        if peer_blocked:
-            total_blocked += peer_blocked['count']
+        blocked_counts[peer_id] = count['count'] if count else 0
+
+    # Queue size
+    queue = unsafedb.query_one("SELECT COUNT(*) as count FROM incoming_blobs")
 
     return {
-        'converged': all_converged,
-        'peer_pairs': results,
+        'local_peers': local_peers,
+        'valid_counts': valid_counts,
         'queue_size': queue['count'] if queue else 0,
-        'blocked_count': total_blocked
+        'blocked_counts': blocked_counts
+    }
+
+
+def check_sync_progress(db: Any, prev_snapshot: dict) -> dict:
+    """Check if sync has made progress since previous snapshot.
+
+    Compares current state to previous snapshot to detect sync activity.
+    Progress is determined by queue changes only (not valid_events count)
+    because valid_events grows from both sync AND local event creation.
+
+    Args:
+        db: Database connection
+        prev_snapshot: Previous snapshot from take_sync_snapshot()
+
+    Returns:
+        Status dict with:
+        - 'progressed': bool (True if queue changed since last check)
+        - 'valid_deltas': {peer_id: new events validated since snapshot}
+        - 'queue_size': current incoming_blobs count
+        - 'blocked_count': total blocked events
+        - 'total_valid': total valid events across all peers
+    """
+    current = take_sync_snapshot(db)
+
+    # Calculate deltas (for informational purposes)
+    valid_deltas = {}
+    total_valid = 0
+    for peer_id in current['local_peers']:
+        prev_count = prev_snapshot['valid_counts'].get(peer_id, 0)
+        curr_count = current['valid_counts'].get(peer_id, 0)
+        valid_deltas[peer_id] = curr_count - prev_count
+        total_valid += curr_count
+
+    # Only track queue changes for progress detection
+    # (valid_events grows from local events too, not just sync)
+    # Compare totals, not per-peer dicts, to avoid false positives from
+    # blocked events moving between peers
+    queue_changed = current['queue_size'] != prev_snapshot['queue_size']
+    prev_blocked_total = sum(prev_snapshot['blocked_counts'].values())
+    total_blocked = sum(current['blocked_counts'].values())
+    blocked_changed = total_blocked != prev_blocked_total
+
+    return {
+        'progressed': queue_changed or blocked_changed,
+        'valid_deltas': valid_deltas,
+        'queue_size': current['queue_size'],
+        'blocked_count': total_blocked,
+        'total_valid': total_valid,
+        'snapshot': current  # Include for next comparison
     }

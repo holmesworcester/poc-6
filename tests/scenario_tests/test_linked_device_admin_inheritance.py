@@ -16,7 +16,7 @@ from db import Database
 import schema
 from events.identity import user, link_invite, link, invite
 from events.group import group_member
-import tick
+from tests.utils import tick_helper
 
 
 def test_linked_device_inherits_admin_privileges():
@@ -72,9 +72,7 @@ def test_linked_device_inherits_admin_privileges():
 
     # Sync for link convergence
     print("\n=== Sync for link convergence ===")
-    for i in range(15):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=4000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
 
     # Verify Alice's second device is also admin
     print("\n=== Verifying device 2 is admin ===")
@@ -115,9 +113,7 @@ def test_linked_device_inherits_admin_privileges():
 
     # Sync for Bob's join
     print("\n=== Sync for Bob's join ===")
-    for i in range(15):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=7000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
 
     # Verify Bob successfully joined
     print("\n=== Verifying Bob's membership ===")

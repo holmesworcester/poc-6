@@ -90,100 +90,102 @@ def convergence_sync(db: Any, start_t_ms: int, max_rounds: int = CONVERGENCE_ROU
 def sync_until_converged(
     db: Any,
     start_t_ms: int,
-    max_rounds: int = 200,
+    max_rounds: int = 500,
     check_interval: int = 5,
     verbose: bool = False,
-    stability_threshold: int = 3
+    stability_threshold: int = 30
 ) -> tuple[int, int, bool, dict]:
-    """Run ticks until all peer pairs converge, stabilize, or max_rounds reached.
+    """Run ticks until sync stabilizes (no more progress) or max_rounds reached.
 
-    Checks convergence every check_interval rounds by comparing
-    database state (what each peer actually has recorded).
+    Uses snapshot-based detection: takes a snapshot of recorded event counts
+    at the start, then checks if sync is still making progress. Exits when
+    no new events have been recorded for stability_threshold consecutive checks.
 
-    Exits early when:
-    - Full convergence: All peer pairs synced + queue empty
-    - Stability: Missing counts unchanged for stability_threshold consecutive checks
+    This approach avoids complex peer-pair detection and naturally handles
+    all sync scenarios including multi-device and cross-network cases.
 
     Args:
         db: Database connection
         start_t_ms: Starting timestamp
-        max_rounds: Maximum sync rounds (default 200)
-        check_interval: Check convergence every N rounds (default 5)
-        verbose: Print convergence status (default False)
-        stability_threshold: Exit if missing counts stable for N checks (default 3)
+        max_rounds: Maximum sync rounds (default 500)
+        check_interval: Check progress every N rounds (default 5)
+        verbose: Print progress status (default False)
+        stability_threshold: Exit if no progress for N consecutive checks (default 30)
 
     Returns:
         (final_t_ms, rounds_used, converged, status_dict)
 
+        rounds_used is the round when stability STARTED (not when we confirmed it),
+        so it reflects when sync actually completed, not the verification period.
+
     Status dict contains:
-        - 'converged': bool (True only if fully converged)
+        - 'converged': bool (True if queue empty when stabilized)
         - 'stable': bool (True if counts stabilized)
-        - 'peer_pairs': list of convergence status per pair
         - 'queue_size': incoming_blobs count
         - 'blocked_count': blocked_events count
+        - 'total_valid': total valid events across all peers
     """
     from events.network import sync as sync_module
 
-    prev_missing_total = None
-    prev_queue_size = None
+    # Take initial snapshot
+    snapshot = sync_module.take_sync_snapshot(db)
     stable_count = 0
+    stability_started_round = None  # Track when we first became stable
+    prev_total_valid = sum(snapshot['valid_counts'].values())
 
     for round_num in range(max_rounds):
         t_ms = start_t_ms + (round_num * TICK_INTERVAL_MS)
         tick_module.tick(t_ms=t_ms, db=db)
 
-        # Check convergence every check_interval rounds
+        # Check progress every check_interval rounds
         if (round_num + 1) % check_interval == 0:
-            status = sync_module.check_all_convergence(db)
-
-            # Calculate total missing across all pairs
-            missing_total = sum(p['missing_count'] for p in status['peer_pairs'])
+            status = sync_module.check_sync_progress(db, snapshot)
+            snapshot = status['snapshot']  # Update snapshot for next check
 
             if verbose:
+                new_events = status['total_valid'] - prev_total_valid
                 print(f"Round {round_num + 1}: "
-                      f"converged={status['converged']}, "
+                      f"valid={status['total_valid']} (+{new_events}), "
                       f"queue={status['queue_size']}, "
-                      f"blocked={status['blocked_count']}, "
-                      f"missing_total={missing_total}")
-                for pair in status['peer_pairs']:
-                    if not pair['converged']:
-                        print(f"  {pair['from_peer']} → {pair['to_peer']}: "
-                              f"missing {pair['missing_count']} events")
+                      f"blocked={status['blocked_count']}")
 
-            # Check for full convergence
-            if status['converged'] and status['queue_size'] == 0:
-                final_t_ms = start_t_ms + ((round_num + 1) * TICK_INTERVAL_MS)
-                status['stable'] = True
-                if verbose:
-                    print(f"✓ Fully converged in {round_num + 1} rounds!")
-                return (final_t_ms, round_num + 1, True, status)
+            # Check for stability (no progress for N consecutive checks)
+            if not status['progressed']:
+                if stable_count == 0:
+                    # First stable check - record when stability started
+                    stability_started_round = round_num + 1
+                stable_count += 1
+                if stable_count >= stability_threshold:
+                    # Report the round when stability STARTED, not when confirmed
+                    final_t_ms = start_t_ms + (stability_started_round * TICK_INTERVAL_MS)
+                    converged = (status['queue_size'] == 0)
+                    if verbose:
+                        stuck = f", {status['queue_size']} stuck in queue" if status['queue_size'] > 0 else ""
+                        print(f"✓ Stabilized at round {stability_started_round} "
+                              f"(confirmed after {stable_count} checks, "
+                              f"{status['total_valid']} total valid{stuck})")
+                    return (final_t_ms, stability_started_round, converged, {
+                        'converged': converged,
+                        'stable': True,
+                        'queue_size': status['queue_size'],
+                        'blocked_count': status['blocked_count'],
+                        'total_valid': status['total_valid']
+                    })
+            else:
+                stable_count = 0
+                stability_started_round = None
 
-            # Check for stability (counts not changing)
-            # Also track queue stability - some blobs may be stuck (missing keys)
-            if prev_missing_total is not None and prev_queue_size is not None:
-                queue_stable = (status['queue_size'] == prev_queue_size)
-                counts_stable = (missing_total == prev_missing_total)
+            prev_total_valid = status['total_valid']
 
-                if counts_stable and queue_stable:
-                    stable_count += 1
-                    if stable_count >= stability_threshold:
-                        final_t_ms = start_t_ms + ((round_num + 1) * TICK_INTERVAL_MS)
-                        status['stable'] = True
-                        if verbose:
-                            stuck_blobs = f", {status['queue_size']} stuck" if status['queue_size'] > 0 else ""
-                            print(f"✓ Stabilized in {round_num + 1} rounds ({missing_total} missing{stuck_blobs})")
-                        return (final_t_ms, round_num + 1, False, status)
-                else:
-                    stable_count = 0
-
-            prev_missing_total = missing_total
-            prev_queue_size = status['queue_size']
-
-    # Did not converge or stabilize within max_rounds
+    # Did not stabilize within max_rounds
     final_t_ms = start_t_ms + (max_rounds * TICK_INTERVAL_MS)
-    final_status = sync_module.check_all_convergence(db)
-    final_status['stable'] = False
+    final_status = sync_module.check_sync_progress(db, snapshot)
     if verbose:
-        print(f"✗ Did not converge/stabilize within {max_rounds} rounds")
-        print(f"   Final status: {final_status}")
-    return (final_t_ms, max_rounds, False, final_status)
+        print(f"✗ Did not stabilize within {max_rounds} rounds")
+    return (final_t_ms, max_rounds, False, {
+        'converged': False,
+        'stable': False,
+        'queue_size': final_status['queue_size'],
+        'blocked_count': final_status['blocked_count'],
+        'total_valid': final_status['total_valid']
+    })

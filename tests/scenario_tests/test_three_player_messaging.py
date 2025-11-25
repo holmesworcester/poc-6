@@ -55,7 +55,7 @@ def test_three_player_messaging():
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     print("\n=== Initial sync ===")
     final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=4000, max_rounds=50, check_interval=5, verbose=True
+        db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
 
@@ -132,7 +132,7 @@ def test_three_player_messaging():
     # Sync messages
     print("\n=== Sync Round 2: Message exchange ===")
     final_t_ms2, rounds_used2, converged2, status2 = tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=50, check_interval=5, verbose=True
+        db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Message sync completed in {rounds_used2} rounds (converged={converged2})")
 

@@ -17,7 +17,7 @@ from db import Database
 import schema
 from events.identity import user, link_invite, link
 from events.group import group, group_member
-import tick
+from tests.utils import tick_helper
 
 
 def test_link_device_sees_pre_existing_groups():
@@ -100,8 +100,7 @@ def test_link_device_sees_pre_existing_groups():
 
     # Sync to ensure groups are fully created
     print("\n=== Sync for group creation convergence ===")
-    for i in range(5):
-        tick.tick(t_ms=3500 + i*100, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=3500, max_rounds=200, check_interval=1)
 
     # Alice creates link invite
     print("\n=== Alice creates link invite ===")
@@ -134,9 +133,7 @@ def test_link_device_sees_pre_existing_groups():
 
     # Sync multiple rounds for convergence
     print("\n=== Sync for link and group key propagation ===")
-    for i in range(40):
-        print(f"Sync round {i+1}...")
-        tick.tick(t_ms=6000 + i*200, db=db)
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
 
     # Verify device 2 is a member of all groups
     print("\n=== Verifying device 2 group memberships ===")
