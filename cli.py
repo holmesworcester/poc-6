@@ -49,7 +49,36 @@ Same constraints as scenario tests - acts like an API client.
 import sqlite3
 import sys
 import argparse
+import logging
 from typing import Optional, Dict, List, Any
+
+# Configure logging BEFORE importing any modules that use logging
+# Logging levels (principled tiers):
+#   --quiet:   CRITICAL only (system failures)
+#   default:   WARNING+ (problems worth noting)
+#   --verbose: DEBUG+ (full diagnostic output)
+#
+# Note: Some backend modules misuse ERROR for info messages.
+# We suppress those at WARNING level by default to keep CLI clean.
+_verbose = '--verbose' in sys.argv or '-v' in sys.argv
+_quiet = '--quiet' in sys.argv or '-q' in sys.argv
+
+if _verbose:
+    _log_level = logging.DEBUG
+elif _quiet:
+    _log_level = logging.CRITICAL
+else:
+    _log_level = logging.WARNING
+
+logging.basicConfig(level=_log_level, format='%(name)s: %(message)s')
+
+# Backend modules misuse log levels (ERROR for info, etc.)
+# Suppress them unless verbose mode is explicitly requested
+if not _verbose:
+    _noisy_modules = ['events', 'crypto', 'store', 'tick', 'sync', 'queues', 'db']
+    for name in _noisy_modules:
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
 from db import Database
 import schema
 import tick
@@ -434,18 +463,27 @@ def cmd_create_channel(session: CLISession, name: str):
 
 
 def cmd_create_invite(session: CLISession):
-    """Create an invite link for the current network."""
+    """Create an invite link for the current network (admin only)."""
     account = session.get_selected_account()
 
     if not account.network_id:
         print("✗ no network joined")
+        print("  hint: use 'switch' to select an account that has joined a network")
         return
 
-    invite_id, invite_link, invite_data = invite.create(
-        peer_id=account.peer_id,
-        t_ms=session.current_time_ms,
-        db=session.db
-    )
+    try:
+        invite_id, invite_link, invite_data = invite.create(
+            peer_id=account.peer_id,
+            t_ms=session.current_time_ms,
+            db=session.db
+        )
+    except ValueError as e:
+        if "not an admin" in str(e).lower() or "admin" in str(e).lower():
+            print("✗ only admins can create invites")
+            print("  hint: use 'link-device' to add another device to your account")
+        else:
+            print(f"✗ {e}")
+        return
 
     session.db.commit()
     session.current_time_ms += 100
@@ -501,7 +539,7 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
         peer_shared_id=result['peer_shared_id']
     )
     account.user_id = result['user_id']
-    account.network_id = result.get('network_id')  # May not be available immediately
+    account.network_id = result.get('network_id')  # From invite data
 
     session.add_account(account)
     session.selected_account = account.full_name
@@ -790,7 +828,11 @@ def main():
     """Main entry point for CLI."""
     parser = argparse.ArgumentParser(description="POC-6 CLI")
     parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug logging")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress all but critical logs")
     args = parser.parse_args()
+
+    # Logging already configured at import time based on sys.argv
 
     session = CLISession()
     session.initialize_database()
