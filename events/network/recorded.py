@@ -130,7 +130,6 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # These are either local-only, metadata, or have special handling
     IGNORE_FIELDS = {
         # Local-only fields (never shared between peers)
-        'key_id',           # Keys are received via group_key_shared, not direct sync
         'private_key',      # Never shared
         'ref_id',           # Internal recorded wrapper reference (handled separately)
         'file_id',          # File blobs are raw data, not events in valid_events
@@ -144,8 +143,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         # Self-references (event references itself or its container)
         'network_id',       # Often self-referential for network events
     }
-    # TODO: Once key_id fields are renamed to group_key_id/transit_key_id,
-    # they can become proper semantic dependencies with blocking
+    # Note: key_id is now a proper semantic dependency since group_key events are deterministic
+    # (same key_material = same key_id on all peers via content-addressed hashing)
 
     # Event types with NO dependencies (root events or self-signed)
     NO_DEPS_TYPES = {
@@ -163,7 +162,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
 
     # For invite events, only check signed_by (group/channel are metadata copied into invite)
     # For message_deletion, only check signed_by (message may not exist yet)
-    SIGNER_ONLY_TYPES = {'invite', 'message_deletion'}
+    # For group_key_shared, only check signed_by (key_id is BEING PROVIDED, not a dependency)
+    SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared'}
     if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
     # For user events, check invite (which contains group/channel stubs) not group/channel directly
