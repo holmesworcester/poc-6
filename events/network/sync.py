@@ -1,6 +1,6 @@
 """Sync implementation with bloom-based window protocol."""
 from typing import Any, Iterator
-from events.network import recorded, transit_key, transit_prekey
+from events.network import recorded, transit_key, transit_prekey, sync_window
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 import queues
@@ -167,8 +167,9 @@ def update_sync_state(
 def get_next_window(from_peer_id: str, to_peer_id: str, t_ms: int, db: Any) -> tuple[int, int]:
     """Get next window to sync for peer pair (window_id, w_param)."""
     state = get_sync_state(from_peer_id, to_peer_id, t_ms, db)
-    total_windows = compute_window_count(state['w_param'])
-    next_window = (state['last_window'] + 1) % total_windows
+    # Use SyncWindow to compute next window
+    window = sync_window.SyncWindow(w=state['w_param'], query_window_id=state['last_window'])
+    next_window = window.next_window(state['last_window'])
     return next_window, state['w_param']
 
 
@@ -186,8 +187,8 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
     )
     total_events = total_events_row['count'] if total_events_row else 0
 
-    # Compute optimal w_param for this event count
-    optimal_w = compute_w_for_event_count(total_events)
+    # Compute optimal w_param for this event count using SyncWindow
+    optimal_w = sync_window.SyncWindow.optimal_w_for_event_count(total_events)
     state['w_param'] = max(state['w_param'], optimal_w)
     state['total_events_seen'] = total_events
 
@@ -219,7 +220,8 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
     """
 
     event_id_bytes = crypto.b64decode(event_id)
-    window_id = compute_storage_window_id(event_id_bytes)
+    # Use SyncWindow to compute storage window
+    window_id = sync_window.SyncWindow.storage_window_from_event_id(event_id_bytes)
 
     log.debug(f"add_shareable_event: event={event_id[:20]}..., peer={can_share_peer_id[:20]}..., window={window_id}")
 
@@ -583,9 +585,9 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     log.debug(f"[SEND_REQUEST_WINDOW] from={from_peer_id[:20]}... window_id={window_id}, w_param={w_param}")
     log.info(f"send_request: from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}... window_id={window_id}, w_param={w_param}")
 
-    # Convert storage window_ids to query window_ids for this w_param
-    window_min = window_id << (STORAGE_W - w_param)
-    window_max = (window_id + 1) << (STORAGE_W - w_param)
+    # Use SyncWindow to compute storage window range for this query window
+    window = sync_window.SyncWindow(w=w_param, query_window_id=window_id)
+    window_min, window_max = window.get_storage_window_range()
 
     # Query events the requester has seen (can share) in this window
     safedb = create_safe_db(db, recorded_by=from_peer_id)
