@@ -49,7 +49,7 @@ DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 @projector(
     event_type="message",
-    tables=["messages", "event_dependencies"]
+    tables=["messages", "event_dependencies", "deleted_events"]
 )
 def project(input_dict: dict) -> ProjectorResult:
     """Pure functional projector for message events.
@@ -67,9 +67,16 @@ def project(input_dict: dict) -> ProjectorResult:
     # Check if deletion exists and is valid
     deletion = deps.get("deletion")
     if deletion and deletion.get("is_valid"):
-        # Message has valid deletion - don't project
-        # (deleted_events table is handled separately)
-        return ProjectorResult(valid=True, tables={})
+        # Message has valid deletion - don't project message, but record deletion
+        return ProjectorResult(
+            valid=True,
+            tables={
+                "deleted_events": [{
+                    "event_id": event_id,
+                    "recorded_by": recorded_by
+                }]
+            }
+        )
 
     # Get channel dependency
     channel = deps.get("channel")

@@ -59,8 +59,10 @@ def resolve_message(event_id: str, recorded_by: str, recorded_at: int, db: Any) 
     key_id = crypto.b64encode(key_id_bytes)
 
     # Resolve channel dependency
+    # NOTE: We fetch the PROJECTED channel state, not the raw event, because
+    # channel_update events can modify TTL settings and we need the current value
     channel_id = event_data.get("channel_id")
-    channel_dep = resolve_event(channel_id, recorded_by, db)
+    channel_dep = resolve_channel_for_message(channel_id, recorded_by, db)
 
     # Check for deletion (optional)
     deletion_dep = None
@@ -237,6 +239,39 @@ def resolve_group_member(event_id: str, recorded_by: str, recorded_at: int, db: 
             "user": user_dep,
             "adder_user": adder_user_dep,
             "admin_grant": admin_grant_dep
+        }
+    }
+
+
+def resolve_channel_for_message(channel_id: str, recorded_by: str, db: Any) -> dict | None:
+    """Resolve channel data for message projection.
+
+    Unlike other dependencies, we fetch the PROJECTED channel state because
+    channel_update events can modify TTL settings. The message needs the
+    current effective settings, not the original channel event data.
+
+    This is still "dependency resolution" - we're just using the projected
+    state as the authoritative source for mutable channel properties.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    channel_row = safedb.query_one(
+        "SELECT * FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        (channel_id, recorded_by)
+    )
+
+    if not channel_row:
+        return None
+
+    # Convert to the expected format (event_id + event_data)
+    return {
+        "event_id": channel_id,
+        "event_data": {
+            "name": channel_row.get("name"),
+            "group_id": channel_row.get("group_id"),
+            "disappearing_time_ms": channel_row.get("disappearing_time_ms", 0),
+            "is_main": channel_row.get("is_main"),
+            "created_at": channel_row.get("created_at"),
         }
     }
 

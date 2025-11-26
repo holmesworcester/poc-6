@@ -136,113 +136,54 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a single message event into the database.
 
-    Message TTL is calculated from the channel's disappearing_time_ms setting:
-    - If disappearing_time_ms is 0: message is permanent (ttl_ms = 0)
-    - If disappearing_time_ms > 0: message expires at created_at + disappearing_time_ms
-
-    If channel settings change via channel_update, existing messages recalculate their
-    effective TTL on next projection (lazy recalculation for convergence).
+    Uses pure functional projector - all logic is in pure_projectors.message.
+    This wrapper handles:
+    1. Building the input dict via resolver
+    2. Applying the pure projector's output to the database
+    3. Handling side effects (invalid deletion cleanup)
     """
-    import json
     log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
 
-    unsafedb = create_unsafe_db(db)
+    from pure_projectors import resolver
+    from pure_projectors.message import project as pure_project
+    from pure_projectors.framework import apply_result
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get and unwrap event
-    event_blob = store.get(event_id, unsafedb)
-    if not event_blob:
-        log.warning(f"message.project() blob not found for message_id={event_id}")
+    # Build input dict for pure projector
+    input_dict = resolver.resolve_message(event_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.warning(f"message.project() resolver failed for message_id={event_id}")
         return None
 
-    unwrapped, _ = crypto.unwrap(event_blob, recorded_by, db)
-    if not unwrapped:
-        log.warning(f"message.project() unwrap failed for message_id={event_id}")
-        return None  # Already blocked by recorded.project() if keys missing
+    # Handle invalid deletion side-effect (cleanup)
+    # This is a side effect that can't be expressed in the pure output
+    deletion = input_dict["dependencies"].get("deletion")
+    if deletion and not deletion.get("is_valid"):
+        log.warning(f"message.project() removing invalid deletion for message {event_id[:20]}...")
+        safedb.execute(
+            "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
+            (event_id, recorded_by)
+        )
 
-    event_data = crypto.parse_json(unwrapped)
-    log.info(f"message.project() projected message content='{event_data.get('content', '')[:50]}...', id={event_id}")
+    # Run pure projector
+    result = pure_project(input_dict)
 
-    # Verify signature - get public key from signed_by peer_shared
-    from events.identity import peer_shared
-    signed_by = event_data.get('signed_by')
-    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
-    if not crypto.verify_event(event_data, public_key):
-        return None  # Reject unsigned or invalid signature
+    if result.blocked:
+        log.info(f"message.project() blocked, missing deps: {result.missing_deps}")
+        return None
 
-    # Extract fields from event
-    message_id = event_id
-    channel_id = event_data.get('channel_id')
-    group_id = event_data.get('group_id')
-    author_id = event_data.get('author_id')  # user_id (person who authored the content)
-    content = event_data.get('content', '')
-    created_at = event_data.get('created_at')
+    if not result.valid:
+        log.warning(f"message.project() validation failed: {result.reason}")
+        return None
 
-    # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
-    # before projection begins, so we don't need to check here.
+    # Apply result to database
+    apply_result(result, recorded_by, recorded_at, db)
 
-    # Calculate TTL based on channel's disappearing_time_ms setting
-    # Look up current channel settings to support dynamic TTL updates
-    channel_row = safedb.query_one(
-        "SELECT disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
-        (channel_id, recorded_by)
-    )
-
-    if channel_row and channel_row['disappearing_time_ms'] and channel_row['disappearing_time_ms'] > 0:
-        # Channel has disappearing messages enabled - use that TTL
-        ttl_ms = created_at + channel_row['disappearing_time_ms']
+    # Return event_id if we projected, None if deleted
+    if "messages" in result.tables:
+        log.info(f"message.project() projected message content='{input_dict['event_data'].get('content', '')[:50]}...', id={event_id}")
+        return event_id
     else:
-        # Channel is permanent (disappearing_time_ms = 0 or not found)
-        # Fall back to default for backward compatibility if channel not yet projected
-        ttl_ms = 0 if channel_row else (created_at + DEFAULT_MESSAGE_TTL_MS)
-
-    # Extract key_id from blob for efficient purge lookups
-    # Key ID is the first 16 bytes of the blob (the hint)
-    key_id_bytes = event_blob[:crypto.ID_SIZE]
-    key_id_b64 = crypto.b64encode(key_id_bytes)
-
-    # Check if deletion exists (may have arrived before message)
-    deletion_check = safedb.query_one(
-        "SELECT deleted_by FROM message_deletions WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-        (message_id, recorded_by)
-    )
-
-    if deletion_check:
-        # Deletion exists - validate it now that we have the message
-        from events.content import message_deletion
-        deleted_by = deletion_check['deleted_by']
-
-        if message_deletion.validate(message_id, deleted_by, recorded_by, db):
-            log.info(f"message.project() message {message_id[:20]}... has valid deletion - skipping projection")
-            # Add to deleted_events so upstream knows it was deleted
-            safedb.execute(
-                "INSERT OR IGNORE INTO deleted_events (event_id, recorded_by) VALUES (?, ?)",
-                (message_id, recorded_by)
-            )
-            return None  # Don't project the message
-        else:
-            # Deletion was invalid - remove it
-            log.warning(f"message.project() removing invalid deletion for message {message_id[:20]}...")
-            safedb.execute(
-                "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
-                (message_id, recorded_by)
-            )
-            # Continue to project the message normally
-
-    # Insert into messages table with peer and timestamp from recorded
-    safedb.execute(
-        """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, signed_by, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, signed_by, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
-    )
-
-    # Record dependency: message depends on channel (for cascading deletion)
-    safedb.execute(
-        """INSERT OR IGNORE INTO event_dependencies
-           (child_event_id, parent_event_id, recorded_by, dependency_type)
-           VALUES (?, ?, ?, ?)""",
-        (message_id, channel_id, recorded_by, 'channel')
-    )
-
-    return event_id
+        log.info(f"message.project() message {event_id[:20]}... has valid deletion - skipping projection")
+        return None

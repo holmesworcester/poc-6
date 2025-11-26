@@ -56,6 +56,10 @@ def apply_result(result: ProjectorResult, recorded_by: str, recorded_at: int, db
     """Apply a projector result to the database.
 
     Returns True if applied, False if blocked or invalid.
+
+    Note: The projector output must include all required columns explicitly.
+    This function does NOT auto-add recorded_by or recorded_at - projectors
+    should include these in their output if the table requires them.
     """
     if result.blocked:
         log.info(f"Projector blocked, missing deps: {result.missing_deps}")
@@ -74,23 +78,7 @@ def apply_result(result: ProjectorResult, recorded_by: str, recorded_at: int, db
             columns = list(row.keys())
             placeholders = ', '.join(['?' for _ in columns])
             column_list = ', '.join(columns)
-
-            # Add recorded_by and recorded_at if not present
-            if 'recorded_by' not in row:
-                columns.append('recorded_by')
-                placeholders += ', ?'
-                column_list += ', recorded_by'
-
-            if 'recorded_at' not in row:
-                columns.append('recorded_at')
-                placeholders += ', ?'
-                column_list += ', recorded_at'
-
-            values = [row[c] for c in list(row.keys())]
-            if 'recorded_by' not in row:
-                values.append(recorded_by)
-            if 'recorded_at' not in row:
-                values.append(recorded_at)
+            values = [row[c] for c in columns]
 
             sql = f"INSERT OR IGNORE INTO {table_name} ({column_list}) VALUES ({placeholders})"
             safedb.execute(sql, tuple(values))
