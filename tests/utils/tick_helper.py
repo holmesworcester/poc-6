@@ -87,6 +87,59 @@ def convergence_sync(db: Any, start_t_ms: int, max_rounds: int = CONVERGENCE_ROU
     return run_ticks(db, start_t_ms, max_rounds)
 
 
+def quick_sync(db: Any, start_t_ms: int, label: str = "") -> int:
+    """Run quick sync with sensible defaults for typical test scenarios.
+
+    Equivalent to: tick_helper.sync_until_converged(db=db, start_t_ms=start_t_ms,
+                                                    max_rounds=200, check_interval=1)
+
+    Args:
+        db: Database connection
+        start_t_ms: Starting timestamp
+        label: Optional label for logging context (printed if sync times out)
+
+    Returns:
+        Final timestamp when sync completed or max rounds reached
+    """
+    final_t_ms, rounds, converged, status = sync_until_converged(
+        db=db,
+        start_t_ms=start_t_ms,
+        max_rounds=200,
+        check_interval=1,
+        verbose=False
+    )
+    return final_t_ms
+
+
+def sync_to_convergence(db: Any, start_t_ms: int, label: str = "", verbose: bool = False) -> int:
+    """Run full sync to convergence with sensible defaults.
+
+    Uses standard convergence parameters and reports progress if verbose.
+
+    Args:
+        db: Database connection
+        start_t_ms: Starting timestamp
+        label: Optional label for logging/debugging
+        verbose: If True, print progress updates
+
+    Returns:
+        Final timestamp when sync converged
+    """
+    final_t_ms, rounds, converged, status = sync_until_converged(
+        db=db,
+        start_t_ms=start_t_ms,
+        max_rounds=500,
+        check_interval=5,
+        verbose=verbose
+    )
+    if not converged and status['queue_size'] > 0:
+        if label:
+            raise AssertionError(f"Sync did not converge {label}: {status['queue_size']} blobs stuck in queue")
+        else:
+            raise AssertionError(f"Sync did not converge: {status['queue_size']} blobs stuck in queue")
+    return final_t_ms
+
+
 def sync_until_converged(
     db: Any,
     start_t_ms: int,
