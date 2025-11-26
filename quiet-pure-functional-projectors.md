@@ -223,6 +223,28 @@ The current code was checked - no projectors actually need data from transitive 
 ### 4. Schema Evolution
 Still open - but less critical than originally thought since projections are derivable from events.
 
+## Critical Discovery: When Event Dependencies Are Not Enough
+
+Some projections require **projected state** rather than raw event data. This happens when:
+1. The dependency can be **mutated by later events** (e.g., channel_update changes disappearing_time_ms)
+2. The projection needs the **current effective value**, not the original
+
+### Known Exceptions
+
+| Projector | Dependency | Why Projected State Needed |
+|-----------|------------|---------------------------|
+| `message` | `channel` | `disappearing_time_ms` can be changed by `channel_update` events |
+| ??? | ??? | (hunting for more...) |
+
+### Implications
+
+For these cases, the resolver must:
+1. Fetch from the **projection table** (e.g., `channels`), not the raw event
+2. Still block if the projection doesn't exist yet
+3. Document clearly why this exception exists
+
+This is still "pure" in the sense that the projector function itself has no DB access - the resolver does all lookups. But it means some dependencies are on **projected state** rather than **event data**.
+
 ## Open Questions
 
 1. **Schema evolution?**
