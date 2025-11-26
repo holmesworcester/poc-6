@@ -18,7 +18,24 @@ from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
+# Constants
 SLICE_SIZE = 450  # bytes - matches ideal protocol design
+LOG_SIZE_THRESHOLD_BYTES = 10 * 1024 * 1024  # 10 MB - threshold for info vs debug logging
+TARGET_IMAGE_SIZE_KB = 200  # Target compressed image size
+NONCE_PREFIX_LENGTH = 20  # Bytes of nonce prefix to use
+IMAGE_QUALITY_LEVELS = [85, 75, 65, 55, 45, 40]  # JPEG quality levels for compression
+MAX_IMAGE_DIMENSION = 2048  # Maximum width/height in pixels
+
+
+def _log_file_size(file_size: int, message: str) -> None:
+    """Log file operation with size threshold.
+
+    Uses info level for smaller files, debug for larger files to reduce spam.
+    """
+    if file_size < LOG_SIZE_THRESHOLD_BYTES:
+        log.info(message)
+    else:
+        log.debug(message)
 
 
 def create(peer_id: str, message_id: str, file_data: bytes,
@@ -49,13 +66,9 @@ def create(peer_id: str, message_id: str, file_data: bytes,
             'attachment_event_id': attachment_event_id
         }
     """
-    # Only log if not a large file (to avoid spam for batch operations)
-    if len(file_data) < 10 * 1024 * 1024:  # Log for files < 10 MB
-        log.info(f"message_attachment.create() message_id={message_id[:20]}..., "
-                 f"file_size={len(file_data)}B")
-    else:
-        log.debug(f"message_attachment.create() message_id={message_id[:20]}..., "
-                  f"file_size={len(file_data)}B")
+    _log_file_size(len(file_data),
+                   f"message_attachment.create() message_id={message_id[:20]}..., "
+                   f"file_size={len(file_data)}B")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
@@ -81,7 +94,7 @@ def create(peer_id: str, message_id: str, file_data: bytes,
 
     # Step 1-2: Generate encryption key and nonce prefix
     enc_key = crypto.generate_secret()  # 32 bytes
-    nonce_prefix = crypto.generate_secret()[:20]  # Use first 20 bytes
+    nonce_prefix = crypto.generate_secret()[:NONCE_PREFIX_LENGTH]
 
     # Step 3: Split file into slices and encrypt
     slice_ciphertexts = []  # For computing root_hash and file_id
@@ -114,12 +127,9 @@ def create(peer_id: str, message_id: str, file_data: bytes,
         db=db
     )
 
-    if len(file_data) < 10 * 1024 * 1024:  # Log for files < 10 MB
-        log.info(f"message_attachment.create() created {slice_count} slices, "
-                 f"file_id={file_id[:20]}...")
-    else:
-        log.debug(f"message_attachment.create() created {slice_count} slices, "
-                  f"file_id={file_id[:20]}...")
+    _log_file_size(len(file_data),
+                   f"message_attachment.create() created {slice_count} slices, "
+                   f"file_id={file_id[:20]}...")
 
     # Step 6: Compute root_hash
     root_hash = crypto.compute_root_hash(slice_ciphertexts)
@@ -169,9 +179,51 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     }
 
 
+def _try_compress_format(img: Any, format_name: str, quality_levels: list[int],
+                         target_size_bytes: int) -> tuple[bytes | None, int, str]:
+    """Try compressing image with specified format and quality levels.
+
+    Args:
+        img: PIL Image object
+        format_name: Format name ('JPEG', 'WEBP', etc.)
+        quality_levels: List of quality values to try in order
+        target_size_bytes: Target size in bytes
+
+    Returns:
+        (compressed_data, final_size, method_name) or (None, inf, 'failed')
+    """
+    best_result = None
+    best_size = float('inf')
+    method_name = f"{format_name.lower()}_conversion" if format_name != 'JPEG' else 'quality_reduction'
+
+    for quality in quality_levels:
+        output = io.BytesIO()
+        save_kwargs = {'format': format_name, 'quality': quality}
+        if format_name == 'WEBP':
+            save_kwargs['method'] = 4
+        else:
+            save_kwargs['optimize'] = True
+
+        img.save(output, **save_kwargs)
+        size = output.tell()
+
+        log.debug(f"_try_compress_format() {format_name} quality={quality} → {size:,}B")
+
+        if size <= target_size_bytes:
+            best_result = output.getvalue()
+            best_size = size
+            break
+
+        if size < best_size:
+            best_result = output.getvalue()
+            best_size = size
+
+    return best_result, best_size, method_name
+
+
 def compress_image_if_needed(file_data: bytes, mime_type: str | None,
-                             target_size_kb: int = 200,
-                             max_dimension: int = 2048) -> tuple[bytes, dict[str, Any]]:
+                             target_size_kb: int = TARGET_IMAGE_SIZE_KB,
+                             max_dimension: int = MAX_IMAGE_DIMENSION) -> tuple[bytes, dict[str, Any]]:
     """Compress image to target size if it's an image and over the limit.
 
     Strategy:
@@ -265,50 +317,24 @@ def compress_image_if_needed(file_data: bytes, mime_type: str | None,
                 img = img.convert('RGB')
 
         # Try progressive quality reduction for JPEG
-        quality_levels = [85, 75, 65, 55, 45, 40]
-        best_result = None
-        best_size = float('inf')
-
-        for quality in quality_levels:
-            output = io.BytesIO()
-            img.save(output, format='JPEG', quality=quality, optimize=True)
-            size = output.tell()
-
-            log.debug(f"compress_image_if_needed() JPEG quality={quality} → {size:,}B")
-
-            if size <= target_size_bytes:
-                best_result = output.getvalue()
-                best_size = size
-                metadata['method'] = 'quality_reduction'
-                metadata['final_format'] = 'JPEG'
-                break
-
-            if size < best_size:
-                best_result = output.getvalue()
-                best_size = size
+        best_result, best_size, jpeg_method = _try_compress_format(
+            img, 'JPEG', IMAGE_QUALITY_LEVELS, target_size_bytes
+        )
+        if best_result:
+            metadata['method'] = 'quality_reduction'
+            metadata['final_format'] = 'JPEG'
 
         # If JPEG still too large, try WebP (typically 25-35% smaller)
         if best_size > target_size_bytes:
             log.info(f"compress_image_if_needed() JPEG still too large ({best_size:,}B), trying WebP")
-
-            for quality in quality_levels:
-                output = io.BytesIO()
-                img.save(output, format='WEBP', quality=quality, method=4)
-                size = output.tell()
-
-                log.debug(f"compress_image_if_needed() WebP quality={quality} → {size:,}B")
-
-                if size <= target_size_bytes:
-                    best_result = output.getvalue()
-                    best_size = size
-                    metadata['method'] = 'webp_conversion'
-                    metadata['final_format'] = 'WEBP'
-                    break
-
-                if size < best_size:
-                    best_result = output.getvalue()
-                    best_size = size
-                    metadata['final_format'] = 'WEBP'
+            webp_result, webp_size, webp_method = _try_compress_format(
+                img, 'WEBP', IMAGE_QUALITY_LEVELS, target_size_bytes
+            )
+            if webp_result and webp_size < best_size:
+                best_result = webp_result
+                best_size = webp_size
+                metadata['method'] = 'webp_conversion'
+                metadata['final_format'] = 'WEBP'
 
         # Use best result (or original if compression failed)
         if best_result and best_size < original_size:
