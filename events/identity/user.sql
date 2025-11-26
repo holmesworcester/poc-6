@@ -1,9 +1,9 @@
 -- Schema for user events (network membership)
 -- Each peer has their own view of users they've seen
--- Phase 2: user_pubkey is user's OWN unique key (for verifying signed_by=user_id on first peer invite)
+-- user_pubkey is user's OWN unique key (for verifying signed_by=user_id on first peer invite)
+-- NOTE: user→peer relationship is in linked_peers table (one user can have many peers/devices)
 CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT NOT NULL,
-    peer_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,              -- Event hash of user event (person identity)
     name TEXT NOT NULL,
     network_id TEXT,
     created_at INTEGER NOT NULL,
@@ -16,5 +16,5 @@ CREATE TABLE IF NOT EXISTS users (
 -- NOTE: group_members table is defined in events/group/group_member.sql
 -- The duplicate definition here was removed to avoid schema conflicts
 
-CREATE INDEX IF NOT EXISTS idx_users_peer
-ON users(peer_id, recorded_by);
+-- To find peers for a user, query linked_peers table
+-- To find user for a peer_shared_id, query: SELECT user_id FROM linked_peers WHERE peer_id = ?

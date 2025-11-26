@@ -208,12 +208,16 @@ def project(invite_proof_id: str, recorded_by: str, recorded_at: int, db: Any) -
     if mode == 'user':
         # Add to group_members (user joining network)
         group_id = invite_data['group_id']
+        # Generate unique member_id (synthetic event ID for bootstrap membership)
+        # Format: hash(group_id + user_id + recorded_by) to ensure uniqueness
+        member_id_data = f"{group_id}:{user_id}:{recorded_by}".encode('utf-8')
+        member_id = crypto.b64encode(crypto.hash(member_id_data))
         safedb.execute("""
             INSERT OR IGNORE INTO group_members
             (member_id, group_id, user_id, added_by, created_at, recorded_by, recorded_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
-            user_id,  # Use user_id as member_id for invite joins
+            member_id,  # Unique synthetic member_id for bootstrap membership
             group_id,
             user_id,
             joiner_peer_shared_id,  # Self-added via invite

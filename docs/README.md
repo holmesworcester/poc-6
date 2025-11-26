@@ -146,7 +146,7 @@ for i in range(10):
     tick(t_ms=4000 + i*100, db=db)
 
 # Check convergence
-messages = message.list_messages(channel_id, peer_id, db)
+messages = message.list(channel_id, peer_id, db)
 assert len(messages) == expected_count
 ```
 
@@ -581,11 +581,11 @@ Scenario tests validate end-to-end functionality by simulating realistic API usa
 
 ### Principles
 
-1. **API-Only Testing**: Scenario tests must ONLY interact with the system through command and query functions (e.g., `peer_secret.create()`, `message.list_messages()`, etc.). Treat these as if they were API endpoints being called by a frontend.
+1. **API-Only Testing**: Scenario tests must ONLY interact with the system through command and query functions (e.g., `peer_secret.create()`, `message.list()`, etc.). Treat these as if they were API endpoints being called by a frontend.
 
 2. **No Direct Database Inspection**: Test assertions must NEVER use direct database queries (e.g., `SELECT * FROM messages`). All verification must be done via:
    - Returned data from command functions (e.g., the `{id, latest}` dict from `message.create_message()`)
-   - Query function results (e.g., `message.list_messages()`, `channel.list_channels()`)
+   - Query function results (e.g., `message.list()`, `channel.list_channels()`)
 
 3. **Realistic Flows**: Tests should follow realistic user workflows, creating all necessary prerequisites (identity, groups, channels) before performing the main test action.
 
@@ -660,7 +660,7 @@ Most data retrieval functions include a `recorded_by` parameter that specifies w
 - `peer.get_public_key(peer_id, recorded_by, db)` - verifies ownership
 - `group.pick_key(group_id, recorded_by, db)` - verifies group access
 - `key.get_key(key_id, recorded_by, db)` - verifies key access
-- All projection and list functions (e.g., `list_messages()`, `list_all_groups()`)
+- All projection and list functions (e.g., `list()`, `list_all_groups()`)
 
 ### Safe Functions Without `recorded_by`
 

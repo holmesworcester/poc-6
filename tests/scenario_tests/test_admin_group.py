@@ -27,6 +27,7 @@ import schema
 from events.identity import user, invite, network, peer, peer_shared, admin
 from events.group import group_member
 from events.network import transit_prekey
+from tests.utils import tick_helper
 import tick
 import store
 import crypto
@@ -59,9 +60,10 @@ def test_admin_group_workflow():
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
@@ -73,10 +75,9 @@ def test_admin_group_workflow():
     )
     print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
 
-    # Get admin group ID from network (still used for reference)
-    admin_group_id = network.get_admin_group_id(alice['network_id'], alice['peer_id'], db)
+    # Get admin group ID from new_network return value
+    admin_group_id = alice['admins_group_id']
     print(f"\nAdmin group ID: {admin_group_id[:20]}...")
-    assert admin_group_id == alice['admins_group_id'], "Admin group ID should match"
 
     # Verify Alice is admin (using admin.is_user_admin() with new model)
     print("\n=== Verify Alice is admin ===")
@@ -245,16 +246,17 @@ def test_admin_group_workflow():
     print(f"Bob created invite for Charlie: {charlie_invite_id[:20]}...")
 
     # Charlie joins via Bob's invite
-    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=8000, db=db)
+    charlie_peer_id = peer.create(t_ms=8000, db=db)
 
     charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=8000, db=db)
+    charlie_peer_shared_id = charlie['peer_shared_id']
     print(f"Charlie joined network, peer_id: {charlie['peer_id'][:20]}...")
     db.commit()
 
     # Sync between all three peers (need more rounds for 3-way sync)
     print("\n=== Sync to integrate Charlie ===")
-    for round_num in range(80):  # Much more rounds for 3-peer convergence with new timing model
-        tick.tick(t_ms=9000 + round_num * 100, db=db)
+    # Use convergence_sync for complete event convergence (100 rounds = ~10 seconds)
+    tick_helper.convergence_sync(db, start_t_ms=9000)
 
     # Verify Charlie sees both Alice and Bob as admins
     print("\n=== Verify Charlie sees both Alice and Bob as admins ===")
@@ -363,7 +365,7 @@ def test_admin_group_workflow():
     # Sync the rogue invite to Alice (who should reject it)
     print("\n=== Syncing rogue invite to Alice ===")
     for round_num in range(10):
-        tick.tick(t_ms=12000 + round_num * 100, db=db)
+        tick.tick(t_ms=12000 + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
 
     # Verify Alice rejected the rogue invite (should not be in her invites table)
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])

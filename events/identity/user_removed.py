@@ -26,15 +26,15 @@ def validate(removed_user_id: str, removed_by_peer_id: str, recorded_by: str, db
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get removed_by's user_id (map peer_shared_id to user_id)
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get removed_by's user_id from linked_peers (user→peer is one-to-many)
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (removed_by_peer_id, recorded_by)
     )
-    if not user_row:
+    if not linked_row:
         return False
 
-    removed_by_user_id = user_row['user_id']
+    removed_by_user_id = linked_row['user_id']
 
     # Rule 1: User can remove themselves
     if removed_by_user_id == removed_user_id:
@@ -117,36 +117,30 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
         (removed_user_id, removed_at, removed_by, recorded_by)
     )
 
-    # Cascade: Find all peers for this user and mark them as removed by peer_shared_id
+    # Cascade: Find all peers for this user from linked_peers and mark them as removed
+    # Note: linked_peers.peer_id IS the peer_shared_id
     peers = safedb.query(
-        "SELECT peer_id FROM users WHERE user_id = ? AND recorded_by = ?",
+        "SELECT peer_id FROM linked_peers WHERE user_id = ? AND recorded_by = ?",
         (removed_user_id, recorded_by)
     )
 
     for peer_row in peers:
-        local_peer_id = peer_row['peer_id']
-        # Look up peer_shared_id for this local peer_id from this peer's perspective
-        peer_self_row = safedb.query_one(
-            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-            (local_peer_id, recorded_by)
+        peer_shared_id = peer_row['peer_id']  # peer_id in linked_peers IS peer_shared_id
+        # Mark peer as removed in device-wide table by peer_shared_id
+        unsafe_db.execute(
+            """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, removed_by)
+               VALUES (?, ?, ?)""",
+            (peer_shared_id, removed_at, removed_by)
         )
-        if peer_self_row:
-            peer_shared_id = peer_self_row['peer_shared_id']
-            # Mark peer as removed in device-wide table by peer_shared_id
-            unsafe_db.execute(
-                """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, removed_by)
-                   VALUES (?, ?, ?)""",
-                (peer_shared_id, removed_at, removed_by)
-            )
 
-            # DELETE ALL CONNECTIONS for this peer (enforcement mechanism)
-            # This mirrors the enforcement in peer_removed.project()
-            cursor = unsafe_db.execute(
-                """DELETE FROM sync_connections WHERE peer_shared_id = ?""",
-                (peer_shared_id,)
-            )
-            deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
-            log.info(f"user_removed.project() deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
+        # DELETE ALL CONNECTIONS for this peer (enforcement mechanism)
+        # This mirrors the enforcement in peer_removed.project()
+        cursor = unsafe_db.execute(
+            """DELETE FROM sync_connections WHERE peer_shared_id = ?""",
+            (peer_shared_id,)
+        )
+        deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+        log.info(f"user_removed.project() deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
 
     # Rotate group keys for all groups this user was a member of
     # This prevents the removed user from decrypting future messages

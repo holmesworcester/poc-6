@@ -431,8 +431,9 @@ def test_incomplete_file_returns_none():
         t_ms=4000,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=5000, db=db)
+    bob_peer_id = peer.create(t_ms=5000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=5000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     # Bob tries to get the file but doesn't have slices yet

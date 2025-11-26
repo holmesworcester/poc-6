@@ -142,9 +142,10 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         # Check that signer's user is admin via admin_grant
         safedb = create_safe_db(db, recorded_by=recorded_by)
 
-        # Get signer's user_id
+        # Get signer's user_id from linked_peers (user→peer is one-to-many)
+        # linked_peers.peer_id stores peer_shared_id
         signer_user_row = safedb.query_one(
-            "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ?",
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
             (signed_by, recorded_by)
         )
         if not signer_user_row:
@@ -184,26 +185,22 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         )
     )
 
+    # For bootstrap admin (signed_by == network_id), set creator_user_id on network
+    # This makes the first admin the "creator" of the network
+    if is_bootstrap:
+        safedb.execute(
+            """UPDATE networks SET creator_user_id = ?
+               WHERE network_id = ? AND recorded_by = ? AND (creator_user_id IS NULL OR creator_user_id = '')""",
+            (user_id, network_id, recorded_by)
+        )
+        log.info(f"[ADMIN_PROJECT] Set networks.creator_user_id={user_id[:20]}...")
+
     log.warning(f"[ADMIN_PROJECT_SUCCESS] Admin grant inserted: admin_id={admin_id[:20]}..., "
                 f"user_id={user_id[:20]}...")
 
-    # Notify events waiting for this user's admin status
-    # user_id is the user event ID, but waiters block on peer_shared_id
-    # Look up the peer_shared_id for this user
-    user_row = safedb.query_one(
-        "SELECT peer_id FROM users WHERE user_id = ? AND recorded_by = ?",
-        (user_id, recorded_by)
-    )
-    if user_row:
-        peer_shared_id = user_row['peer_id']  # users.peer_id stores peer_shared_id
-        import queues
-        dep_key = f"admin_status_{peer_shared_id}"
-        unblocked = queues.blocked.notify_event_valid(dep_key, recorded_by, safedb)
-        if unblocked:
-            log.info(f"[ADMIN_PROJECT] Unblocked {len(unblocked)} events waiting for admin status of {peer_shared_id[:20]}...")
-            # Re-project unblocked events
-            from events.network import recorded as recorded_module
-            recorded_module.project_ids(unblocked, db)
+    # Note: Unblocking is handled by recorded.project() after we return.
+    # Events with admin_grant field reference this admin_id directly as a dependency,
+    # so recorded.project() will call notify_event_valid(admin_id, ...) automatically.
 
     return admin_id
 

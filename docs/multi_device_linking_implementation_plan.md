@@ -722,7 +722,7 @@ def test_linked_device_messaging():
         tick.tick(t_ms=7000 + i*200, db=db)
 
     # Verify: Primary device sees both messages
-    messages_primary = message.list_messages(
+    messages_primary = message.list(
         group_id=group_id,
         peer_id=alice['peer_id'],
         db=db
@@ -732,7 +732,7 @@ def test_linked_device_messaging():
     assert any(m['content'] == 'Message from phone' for m in messages_primary)
 
     # Verify: Phone sees both messages
-    messages_phone = message.list_messages(
+    messages_phone = message.list(
         group_id=group_id,
         peer_id=alice_phone_peer_id,
         db=db

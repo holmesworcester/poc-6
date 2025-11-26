@@ -15,8 +15,8 @@ log = logging.getLogger(__name__)
 def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     """Check if a peer is an admin (centralized admin validation).
 
-    Per spec, admin status is determined by the admin event chain, not group membership.
     A peer is an admin if their user_id has an admin event in the admins table.
+    Admin grants are event-sourced via first-class admin events.
 
     Args:
         peer_shared_id: Public peer ID to check
@@ -38,16 +38,15 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
     network_id = network_row['network_id']
 
-    # Get user_id for this peer_shared_id
-    # Note: users.peer_id stores the public peer_shared_id, not local peer_id
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get user_id for this peer_shared_id from linked_peers (user→peer is one-to-many)
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, recorded_by)
     )
-    if not user_row:
+    if not linked_row:
         return False
 
-    user_id = user_row['user_id']
+    user_id = linked_row['user_id']
 
     # Check if user has an admin event in the admins table (per spec)
     admin_row = safedb.query_one(
@@ -135,28 +134,31 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Get network
     network_row = safedb.query_one(
-        "SELECT network_id, all_users_group_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (peer_id,)
     )
     if not network_row:
         raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
     network_id = network_row['network_id']
-    all_users_group_id = network_row['all_users_group_id']
-    admins_group_id = network_row['admins_group_id']
+
+    # Get all_users group by signature (network-signed group = all_users)
+    from events.identity import network as network_module
+    all_users_group_id = network_module.get_all_users_group_id(network_id, peer_id, db)
 
     # Check if inviter is an admin (only admins can create invites)
     if not is_admin(peer_shared_id, peer_id, db):
         raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
-    # Get inviter's user_id for the invite event
-    inviter_user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get inviter's user_id from linked_peers (user→peer is one-to-many)
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, peer_id)
     )
-    if not inviter_user_row:
-        raise ValueError(f"User record not found for peer {peer_id}. Cannot create invite.")
-    inviter_user_id = inviter_user_row['user_id']
+    if not linked_row:
+        raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
+
+    inviter_user_id = linked_row['user_id']
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
@@ -188,13 +190,43 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     channel_id = channel_row['channel_id']
 
-    # Generate Ed25519 keypair for invite proof + GKS decryption
-    invite_private_key, invite_public_key = crypto.generate_keypair()
-    invite_pubkey_b64 = crypto.b64encode(invite_public_key)
+    # Create a group_prekey (generates keypair) then share it via group_prekey_shared
+    # This ensures invite_prekey_id is an actual event ID, so dependencies work naturally
+    from events.group import group_prekey, group_prekey_shared
 
-    # Generate deterministic prekey ID from public key hash
-    # This serves as the crypto hint for group_key_shared decryption
-    invite_prekey_id = crypto.b64encode(crypto.hash(invite_public_key)[:16])
+    # Create local prekey with keypair
+    local_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms + 1, db)
+
+    # Get the public key from the created prekey for the invite event
+    prekey_blob = store.get(local_prekey_id, unsafedb)
+    prekey_data = crypto.parse_json(prekey_blob)
+    invite_pubkey_b64 = prekey_data['public_key']
+
+    # Create shareable prekey event - its event ID becomes invite_prekey_id
+    # Context depends on mode:
+    # - mode='user': group context (all_users_group)
+    # - mode='link': user context (user_id being linked to)
+    if mode == 'link':
+        # Device linking: context is the user being linked to
+        invite_prekey_id = group_prekey_shared.create(
+            prekey_id=local_prekey_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 2,
+            db=db,
+            user_id=user_id  # User context for device linking
+        )
+    else:
+        # User invite: context is the all_users group
+        invite_prekey_id = group_prekey_shared.create(
+            prekey_id=local_prekey_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 2,
+            db=db,
+            group_id=all_users_group_id,
+            key_id=key_id
+        )
 
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table
@@ -210,9 +242,11 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
     # Get prekey_shared_id from transit_prekeys_shared table
+    # Phase 3: Query by recorded_by only (not peer_id) since peer_id may be old peer_shared
+    # after Phase 3 isomorphic linking creates new peer_shared_id
     inviter_prekey_shared_row = safedb.query_one(
-        "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
-        (peer_shared_id, peer_id)
+        "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        (peer_id,)
     )
 
     if not inviter_prekey_shared_row:
@@ -283,34 +317,31 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for all_users group key")
 
     # Share admins group key (so all users can see who admins are)
-    # Get admins group ID from network
-    from events.identity import network
-    network_row_for_admins = safedb.query_one(
-        "SELECT network_id, admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (peer_id,)
+    # Get admins group - find by querying groups with network_id that are NOT signed by network
+    # (admins group is peer-signed, not network-signed like all_users)
+    admin_key_id = None
+    admins_group_row = safedb.query_one(
+        """SELECT group_id, key_id FROM groups
+           WHERE network_id = ? AND signed_by != ? AND recorded_by = ?
+           AND name LIKE '% - Admins'
+           LIMIT 1""",
+        (network_id, network_id, peer_id)
     )
-    if network_row_for_admins and network_row_for_admins['admins_group_id']:
-        admins_group_id = network_row_for_admins['admins_group_id']
 
-        # Get admin group key
-        admin_group_row = safedb.query_one(
-            "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-            (admins_group_id, peer_id)
+    if admins_group_row:
+        admins_group_id = admins_group_row['group_id']
+        admin_key_id = admins_group_row['key_id']
+
+        # Share admin group key
+        admin_key_shared_id = group_key_shared.create_for_invite(
+            key_id=admin_key_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            invite_id=invite_id,
+            t_ms=t_ms + 4,
+            db=db
         )
-
-        if admin_group_row:
-            admin_key_id = admin_group_row['key_id']
-
-            # Share admin group key
-            admin_key_shared_id = group_key_shared.create_for_invite(
-                key_id=admin_key_id,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,
-                t_ms=t_ms + 4,
-                db=db
-            )
-            log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
+        log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
     # For mode='link', share keys for ALL groups this user is a member of
     # This ensures the new device can decrypt all groups the user belongs to
@@ -504,9 +535,9 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
             admin_grant = event_data.get('admin_grant')
             if admin_grant:
                 # Verify admin_grant references an admin event for the signer's user
-                # Get signer's user_id
+                # Get signer's user_id from linked_peers (user→peer is one-to-many)
                 signer_user_row = safedb.query_one(
-                    "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ?",
+                    "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
                     (signed_by, recorded_by)
                 )
                 if signer_user_row:
@@ -549,6 +580,7 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
         # Admin validation using admin events table (not legacy group_members)
         # created_by is the inviter's peer_shared_id
         # Skip admin check for out-of-band invites (invite links) where the joiner trusts the invite
+        created_by = event_data.get('created_by') or inviter_id
         if not skip_admin_check and not is_admin(created_by, recorded_by, db):
             log.warning(f"invite.project() authorization FAILED: inviter {created_by[:20]}... is not an admin")
             return None
@@ -557,7 +589,8 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
 
     # Insert into invites table
     mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility
-    user_id = event_data.get('user_id')  # None for mode='user', set for mode='link'
+    user_id = event_data.get('user_id')  # None for mode='user', set for mode='link' and mode='peer'
+    group_id = event_data.get('group_id')  # None for mode='peer' (peer invites don't have group context)
 
     safedb.execute(
         """INSERT OR IGNORE INTO invites
@@ -566,7 +599,7 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
         (
             invite_id,
             event_data['invite_pubkey'],
-            event_data['group_id'],
+            group_id,  # May be None for mode='peer'
             inviter_id,  # Use inviter_id (inviter's peer_shared_id)
             mode,
             user_id,

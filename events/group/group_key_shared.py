@@ -250,33 +250,39 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         log.warning(f"key_shared.project() signature verification failed for key_shared_id={key_shared_id}")
         return None
 
-    # Insert the shared key into group_keys table
-    # Use the original key_id from the creator
+    # Create DETERMINISTIC group_key event from the shared key material
+    # This produces the SAME key_id that the creator has (same key material = same hash)
     original_key_id = event_data['key_id']
     symmetric_key = crypto.b64decode(event_data['symmetric_key'])
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_keys (key_id, key, recorded_by, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (
-            original_key_id,
-            symmetric_key,
-            recorded_by,
-            event_data['created_at']
-        )
+    # Create deterministic group_key event
+    from events.group import group_key
+    computed_key_id = group_key.create_with_material(
+        symmetric_key,
+        recorded_by,
+        event_data['created_at'],  # Use sharing event's timestamp for metadata
+        db
     )
 
-    log.warning(f"[GROUP_KEY_SHARED_PROJECT] INSERTED key {original_key_id[:20]}... to group_keys for peer {recorded_by[:20]}...")
+    # Verify determinism: computed key_id should match original
+    if computed_key_id != original_key_id:
+        log.warning(f"[GROUP_KEY_SHARED_PROJECT] key_id mismatch! computed={computed_key_id[:20]}... vs original={original_key_id[:20]}...")
+        # This can happen if the sender used old non-deterministic format
+        # Still proceed but use computed_key_id for consistency
+
+    log.warning(f"[GROUP_KEY_SHARED_PROJECT] Created deterministic key {computed_key_id[:20]}... for peer {recorded_by[:20]}...")
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Insert into group_keys_shared table to track this event
+    # Store original_key_id for auditing (what sender claimed), but we use computed_key_id
     safedb.execute(
         """INSERT OR IGNORE INTO group_keys_shared
            (key_shared_id, original_key_id, signed_by, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
         (
             key_shared_id,
-            original_key_id,
+            computed_key_id,  # Use computed (deterministic) key_id
             event_data['signed_by'],
             event_data['created_at'],
             recorded_by,
@@ -290,17 +296,18 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         (key_shared_id, recorded_by)
     )
 
-    # Also mark the original key_id as valid since we now have it
+    # Also mark the computed key_id as valid since we now have it
+    # (group_key.create_with_material already does this, but be explicit)
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (original_key_id, recorded_by)
+        (computed_key_id, recorded_by)
     )
 
     # Notify blocked queue - unblock events that were waiting for this key
     import queues
-    unblocked_ids = queues.blocked.notify_event_valid(original_key_id, recorded_by, safedb)
+    unblocked_ids = queues.blocked.notify_event_valid(computed_key_id, recorded_by, safedb)
     if unblocked_ids:
-        log.warning(f"[GROUP_KEY_SHARED_PROJECT] Unblocked {len(unblocked_ids)} events waiting for key {original_key_id[:20]}...")
+        log.warning(f"[GROUP_KEY_SHARED_PROJECT] Unblocked {len(unblocked_ids)} events waiting for key {computed_key_id[:20]}...")
         # Re-project the unblocked events
         from events.network import recorded
         recorded.project_ids(unblocked_ids, db)

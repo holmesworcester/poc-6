@@ -209,11 +209,30 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Canonicalize to JSON
     canonical = crypto.canonicalize_json(signed_connect)
 
-    # Wrap with recipient's transit prekey
-    to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
-    if not to_key:
-        log.warning(f"[SYNC_CONNECT_NO_PREKEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... CANNOT_SEND")
-        return
+    # Try to get established connection first (uses symmetric transit key)
+    # This allows bidirectional sync_connect even before transit_prekey_shared syncs
+    unsafedb = create_unsafe_db(db)
+    conn = unsafedb.query_one("""
+        SELECT response_transit_key_id, response_transit_key
+        FROM sync_connections
+        WHERE peer_shared_id = ?
+          AND last_seen_ms + ttl_ms > ?
+    """, (to_peer_shared_id, t_ms))
+
+    if conn:
+        # Use established connection's transit key (symmetric)
+        to_key = {
+            'id': crypto.b64decode(conn['response_transit_key_id']),
+            'key': conn['response_transit_key'],
+            'type': 'symmetric'
+        }
+        log.info(f"sync_connect: using established connection with {to_peer_shared_id[:20]}...")
+    else:
+        # Fall back to transit prekey (asymmetric)
+        to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+        if not to_key:
+            log.warning(f"[SYNC_CONNECT_NO_PREKEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... CANNOT_SEND")
+            return
 
     wrapped = crypto.wrap(canonical, to_key, db)
 

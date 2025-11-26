@@ -50,22 +50,27 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
 
     group_id = channel_row['group_id']
 
-    # Query peer_self to get peer_shared_id (subjective table)
+    # Look up our identity from peer_self (set when we created/linked our account)
+    # This is the canonical source for "what user am I?" - single lookup, no fallback chain
     peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (peer_id, peer_id)
     )
     if not peer_self_row or not peer_self_row['peer_shared_id']:
-        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set in peer_self table")
+        raise ValueError(f"Peer {peer_id} not found in peer_self table")
+    if not peer_self_row['user_id']:
+        raise ValueError(f"User identity not set for peer {peer_id}. Must create or link account first.")
 
     peer_shared_id = peer_self_row['peer_shared_id']
+    user_id = peer_self_row['user_id']
 
     # Build standardized event structure
     event_data = {
         'type': 'message',
         'channel_id': channel_id,
         'group_id': group_id,
-        'signed_by': peer_shared_id,  # References shareable peer identity
+        'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
+        'author_id': user_id,  # User who authored the message content (for display)
         'content': content,
         'created_at': t_ms
     }
@@ -87,7 +92,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     log.info(f"message.create() created message_id={event_id}")
 
     # Get latest messages (skip for bulk creation performance)
-    latest = list_messages(channel_id, peer_id, db) if return_latest else []
+    latest = list(channel_id, peer_id, db) if return_latest else []
 
     # Note: No commit here - caller owns the transaction (future API layer or tests)
 
@@ -97,15 +102,20 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     }
 
 
-def list_messages(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List messages in a channel for a specific peer, including attachments.
+def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
+    """List messages in a channel for a specific peer, including attachments and author names.
 
-    Returns message dicts with 'attachments' field containing list of attached files:
-    [{'file_id', 'filename', 'mime_type', 'blob_bytes'}, ...]
+    Returns message dicts with 'attachments' field containing list of attached files
+    and 'author_name' field from the users table:
+    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...]}, ...]
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
-        "SELECT * FROM messages WHERE channel_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 50",
+        """SELECT m.*, u.name as author_name
+           FROM messages m
+           LEFT JOIN users u ON m.author_id = u.user_id AND m.recorded_by = u.recorded_by
+           WHERE m.channel_id = ? AND m.recorded_by = ?
+           ORDER BY m.created_at DESC LIMIT 50""",
         (channel_id, recorded_by)
     )
 
@@ -164,9 +174,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     message_id = event_id
     channel_id = event_data.get('channel_id')
     group_id = event_data.get('group_id')
-    author_id = event_data.get('signed_by')
+    author_id = event_data.get('author_id')  # user_id (person who authored the content)
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
+
+    # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
+    # before projection begins, so we don't need to check here.
 
     # Calculate TTL based on channel's disappearing_time_ms setting
     # Look up current channel settings to support dynamic TTL updates
@@ -219,9 +232,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Insert into messages table with peer and timestamp from recorded
     safedb.execute(
         """INSERT OR IGNORE INTO messages
-           (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, channel_id, group_id, author_id, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
+           (message_id, channel_id, group_id, author_id, signed_by, content, created_at, ttl_ms, key_id, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (message_id, channel_id, group_id, author_id, signed_by, content, created_at, ttl_ms, key_id_b64, recorded_by, recorded_at)
     )
 
     # Record dependency: message depends on channel (for cascading deletion)

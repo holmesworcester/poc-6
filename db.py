@@ -57,6 +57,7 @@ SUBJECTIVE_TABLES = {
     'removed_users',               # Removed users tracking (peer-scoped)
     'invite_accepteds',            # Invite acceptance metadata (peer-scoped)
     'channel_updates',             # Channel updates (peer-scoped)
+    'admins',                      # Admin grants (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

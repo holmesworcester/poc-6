@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS groups (
     created_at INTEGER NOT NULL,
     key_id TEXT NOT NULL,
     is_main INTEGER DEFAULT 0,  -- 1 if this is the peer's main group for inviting
+    network_id TEXT DEFAULT '',  -- Network this group belongs to (if any)
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,
     PRIMARY KEY (group_id, recorded_by)
@@ -19,3 +20,7 @@ ON groups(recorded_by);
 -- Index for looking up by key_id
 CREATE INDEX IF NOT EXISTS idx_groups_key
 ON groups(key_id);
+
+-- Index for looking up groups by network
+CREATE INDEX IF NOT EXISTS idx_groups_network
+ON groups(network_id, recorded_by);
