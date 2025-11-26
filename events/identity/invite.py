@@ -401,6 +401,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'invite_private_key': crypto.b64encode(invite_private_key),  # Key material for GKS decryption + proof
         'inviter_peer_shared_id': peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
         'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
+        'network_id': network_id,  # For joiner to know which network they're joining
         'ip': inviter_ip,
         'port': inviter_port,
     }
