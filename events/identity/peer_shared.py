@@ -11,25 +11,24 @@ log = logging.getLogger(__name__)
 
 
 def create(peer_id: str, t_ms: int, db: Any,
-           invite_id: str | None = None,
-           invite_private_key: bytes | None = None) -> str:
+           invite_id: str,
+           invite_private_key: bytes) -> str:
     """Create a shareable peer_shared event from a local peer.
 
-    Phase 3: Two modes:
-    1. Legacy (no invite): Self-signed with peer's own key (backward compat)
-    2. Invite-based: Signed with invite_private_key (signed_by=invite_id)
+    peer_shared is ALWAYS signed by an invite (mode=peer). This ensures every
+    peer_shared is linked to a user_id via the invite chain.
 
     Args:
         peer_id: Local peer ID
         t_ms: Timestamp
         db: Database connection
-        invite_id: Optional peer invite ID (for Phase 3 uniform peer linking)
-        invite_private_key: Optional invite private key for signing
+        invite_id: Peer invite ID (required - from invite(mode=peer))
+        invite_private_key: Invite private key for signing (required)
 
     Returns:
         peer_shared_id: The ID of the created peer_shared event
     """
-    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}, invite_id={invite_id[:20] if invite_id else 'None'}...")
+    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}, invite_id={invite_id[:20]}...")
 
     # Get peer's public key (always needed)
     public_key = peer.get_public_key(peer_id, peer_id, db)
@@ -42,18 +41,11 @@ def create(peer_id: str, t_ms: int, db: Any,
         'created_at': t_ms
     }
 
-    # Phase 3: Determine signing mode
-    if invite_id and invite_private_key:
-        # Invite-based signing (uniform peer linking)
-        event_data['invite_id'] = invite_id
-        event_data['signed_by'] = invite_id
-        signed_event = crypto.sign_event(event_data, invite_private_key)
-        log.info(f"peer_shared.create() signed with invite key (signed_by={invite_id[:20]}...)")
-    else:
-        # Legacy self-signed mode (backward compat)
-        private_key = peer.get_private_key(peer_id, peer_id, db)
-        signed_event = crypto.sign_event(event_data, private_key)
-        log.info(f"peer_shared.create() self-signed (legacy mode)")
+    # Sign with invite key (links peer_shared to user via invite)
+    event_data['invite_id'] = invite_id
+    event_data['signed_by'] = invite_id
+    signed_event = crypto.sign_event(event_data, invite_private_key)
+    log.info(f"peer_shared.create() signed with invite key (signed_by={invite_id[:20]}...)")
 
     # Canonicalize to get deterministic blob
     blob = crypto.canonicalize_json(signed_event)
@@ -171,13 +163,20 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         log.info(f"peer_shared.project() linked peer to user: peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}...")
 
     # Insert into peer_self table (subjective mapping) if this is our own peer
+    # ONLY update peer_self for invite-signed peer_shared (has user_id)
+    # Self-signed peer_shared from bootstrap should NOT update peer_self to avoid convergence issues
     owner_peer_id = event_data['peer_id']
-    if owner_peer_id == recorded_by:
+    if owner_peer_id == recorded_by and user_id:
+        # Invite-based peer_shared: update peer_self with user_id
+        # This makes peer_self the canonical source for "what user am I?"
         safedb.execute(
-            "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?)",
-            (owner_peer_id, peer_shared_id, recorded_by, recorded_at)
+            "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
+            (owner_peer_id, peer_shared_id, user_id, recorded_by, recorded_at)
         )
-        log.info(f"peer_shared.project() inserted into peer_self: peer_id={owner_peer_id[:20]}..., peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
+        log.info(f"peer_shared.project() inserted into peer_self with user_id: peer_id={owner_peer_id[:20]}..., peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    elif owner_peer_id == recorded_by:
+        # Self-signed peer_shared: skip peer_self update (bootstrap only, not canonical)
+        log.info(f"peer_shared.project() skipping peer_self update for self-signed peer_shared (no user_id)")
 
     # Mark as valid for this peer
     safedb.execute(

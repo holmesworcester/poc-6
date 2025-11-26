@@ -33,7 +33,7 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
-           skip_admin_check: bool = False) -> str:
+           skip_admin_check: bool = False, admin_grant: str | None = None) -> str:
     """Create a group_member event to add a user to a group.
 
     Only admins can add new members to groups.
@@ -47,6 +47,8 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         t_ms: Timestamp
         db: Database connection
         skip_admin_check: If True, skip admin authorization check (for internal use only)
+        admin_grant: Optional admin_id that grants authority to add members.
+                    If provided, used directly. If None, looked up from admins table.
 
     Returns:
         member_id: The stored group_member event ID
@@ -68,6 +70,33 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     if not skip_admin_check and not validate(group_id, peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id} (only admins can add members)")
 
+    # Get admin_grant for the adding user (explicit dependency for convergence)
+    # This is REQUIRED for events that need admin authorization to project correctly
+    # when replayed in different orders on receiving peers.
+    admin_grant_id = admin_grant  # Use passed-in value if provided
+
+    if not admin_grant_id:
+        # Look up admin_grant from admins table
+        # Get adder's user_id from linked_peers (user→peer is one-to-many)
+        adder_user_row = safedb.query_one(
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+            (peer_shared_id, peer_id)
+        )
+        if adder_user_row:
+            # Get network_id
+            network_row = safedb.query_one(
+                "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+                (peer_id,)
+            )
+            if network_row:
+                from events.identity import admin as admin_module
+                admin_grant_id = admin_module.my_grant(adder_user_row['user_id'], network_row['network_id'], peer_id, db)
+
+    if admin_grant_id:
+        log.info(f"group_member.create() including admin_grant={admin_grant_id[:20]}...")
+    else:
+        log.warning(f"group_member.create() NO admin_grant found - event may fail projection on receivers!")
+
     # Create event data
     event_data = {
         'type': 'group_member',
@@ -77,6 +106,10 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         'signed_by': peer_shared_id,
         'created_at': t_ms
     }
+
+    # Include explicit admin_grant dependency
+    if admin_grant_id:
+        event_data['admin_grant'] = admin_grant_id
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -95,9 +128,9 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     log.info(f"group_member.create() created member_id={member_id}")
 
     # Share group key with new member
-    # Get the new member's peer_id from users table
+    # Get the new member's peer_id from linked_peers (user→peer is one-to-many)
     member_peer = safedb.query_one(
-        "SELECT peer_id FROM users WHERE user_id = ? AND recorded_by = ?",
+        "SELECT peer_id FROM linked_peers WHERE user_id = ? AND recorded_by = ?",
         (user_id, peer_id)
     )
 
@@ -115,6 +148,32 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
             log.info(f"group_member.create() shared key with new member {user_id}")
         except Exception as e:
             log.warning(f"group_member.create() failed to share key with {user_id}: {e}")
+
+    # Per design doc: Share key to outstanding link invites for this user
+    # "any new keys are also wrapped to all outstanding invite-referenced group_prekey_shared keys"
+    # This ensures devices linking later can decrypt groups created after the invite
+    from events.group import group_key_shared
+    outstanding_link_invites = safedb.query(
+        "SELECT invite_id FROM invites WHERE mode = 'link' AND user_id = ? AND recorded_by = ?",
+        (user_id, peer_id)
+    )
+
+    key_share_ts = t_ms + 2
+    for invite_row in outstanding_link_invites:
+        invite_id = invite_row['invite_id']
+        try:
+            group_key_shared.create_for_invite(
+                key_id=group['key_id'],
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,
+                t_ms=key_share_ts,
+                db=db
+            )
+            log.info(f"group_member.create() shared key to outstanding link invite {invite_id[:20]}...")
+            key_share_ts += 1
+        except Exception as e:
+            log.warning(f"group_member.create() failed to share key to link invite {invite_id[:20]}...: {e}")
 
     return member_id
 
@@ -173,11 +232,36 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         # Don't block here - let recorded.project() handle blocking with recorded_id
         return None
 
-    # Check authorization using shared validate() function
-    # Authorization is based on admin event chain (via is_admin())
-    if not validate(event_data['group_id'], added_by, recorded_by, db):
-        log.warning(f"group_member.project() authorization FAILED: {added_by} cannot add members to group {event_data['group_id']} (only admins can add members)")
-        return None
+    # Check authorization via explicit admin_grant chain
+    # Per spec: admin_grant is the explicit dependency that proves admin status
+    admin_grant = event_data.get('admin_grant')
+    if admin_grant:
+        # Verify admin_grant references an admin event for the adder's user
+        # Get adder's user_id from linked_peers (user→peer is one-to-many)
+        adder_user_row = safedb.query_one(
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+            (added_by, recorded_by)
+        )
+        if adder_user_row:
+            grant_row = safedb.query_one(
+                "SELECT user_id FROM admins WHERE admin_id = ? AND recorded_by = ?",
+                (admin_grant, recorded_by)
+            )
+            if grant_row and grant_row['user_id'] == adder_user_row['user_id']:
+                log.info(f"group_member.project() admin_grant chain verified for adder {added_by[:20]}...")
+            else:
+                log.warning(f"group_member.project() admin_grant {admin_grant[:20]}... does not authorize adder {added_by[:20]}...")
+                return None
+        else:
+            log.warning(f"group_member.project() adder user not found for {added_by[:20]}...")
+            return None
+    else:
+        # Legacy group_member without admin_grant - fall back to validate() check
+        # This maintains backward compatibility with events created before admin_grant was added
+        if not validate(event_data['group_id'], added_by, recorded_by, db):
+            log.warning(f"group_member.project() authorization FAILED: {added_by} cannot add members (only admins can add members)")
+            return None
+        log.info(f"group_member.project() legacy validation passed (no admin_grant)")
 
     # Insert into group_members table
     safedb.execute(
@@ -244,15 +328,16 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
         db: Database connection
 
     Returns:
-        List of member dicts with user_id, added_by, created_at
+        List of member dicts with user_id, name, added_by, created_at
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Query group_members table
+    # Query group_members table with user names joined
     return safedb.query(
-        """SELECT user_id, added_by, created_at
-           FROM group_members
-           WHERE group_id = ? AND recorded_by = ?
-           ORDER BY created_at ASC""",
+        """SELECT gm.user_id, u.name, gm.added_by, gm.created_at
+           FROM group_members gm
+           JOIN users u ON gm.user_id = u.user_id AND gm.recorded_by = u.recorded_by
+           WHERE gm.group_id = ? AND gm.recorded_by = ?
+           ORDER BY gm.created_at ASC""",
         (group_id, recorded_by)
     )

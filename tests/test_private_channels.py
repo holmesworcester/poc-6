@@ -18,15 +18,17 @@ alice = user.new_network(name='Alice', t_ms=1000, db=db)
 print(f"✓ Alice created: {alice['user_id']}")
 
 invite_id, invite_link, invite_data = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+bob_peer_id = peer.create(t_ms=2000, db=db)
 
 bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+bob_peer_shared_id = bob['peer_shared_id']  # Get from join result
 print(f"✓ Bob joined: {bob['user_id']}")
 
-charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=2500, db=db)
+charlie_peer_id = peer.create(t_ms=2500, db=db)
 
 
 charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link, name='Charlie', t_ms=2500, db=db)
+charlie_peer_shared_id = charlie['peer_shared_id']  # Get from join result
 print(f"✓ Charlie joined: {charlie['user_id']}")
 
 # Test 1: Non-admin cannot create channels

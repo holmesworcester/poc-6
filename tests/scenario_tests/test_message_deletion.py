@@ -123,10 +123,10 @@ def test_message_deletion_admin():
         db=db
     )
 
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
-
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     # Sync to converge
@@ -226,9 +226,10 @@ def test_message_deletion_unauthorized():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     # Sync
@@ -254,9 +255,10 @@ def test_message_deletion_unauthorized():
         t_ms=6000,
         db=db
     )
-    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=7000, db=db)
+    charlie_peer_id = peer.create(t_ms=7000, db=db)
 
     charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=7000, db=db)
+    charlie_peer_shared_id = charlie['peer_shared_id']
     db.commit()
 
     # Sync
@@ -310,9 +312,10 @@ def test_message_deletion_ordering():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     # Sync

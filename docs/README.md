@@ -1,3 +1,32 @@
+# Documentation Index
+
+## Core Specifications
+- **ideal_protocol_design.md** - Complete protocol specification and design
+
+## Design Documents
+- **admin_access_design.md** - Admin access to private channels design
+- **event_registry_design.md** - Event type registration pattern
+- **network_root_linking_design.md** - Network creation and linking design
+- **removal_enforcement_design.md** - User and peer removal design
+
+## Implementation Summaries (Completed Features)
+- **disappearing_messages.md** - Disappearing messages feature summary
+- **focused_file_sync.md** - Focused file sync implementation
+- **multi_device_sync_connection_scoping.md** - Multi-device sync connection handling
+
+## Implementation Plans (Active & Future)
+- **bootstrap_simplification_plan.md** - Bootstrap process refactoring
+- **joining_linking_simplification_plan.md** - Join/link unification plan
+- **multi_device_linking_implementation_plan.md** - Multi-device support plan
+- **forward_secrecy_plan.md** - Forward secrecy architecture
+- **tick_jobs_refactor_plan.md** - Jobs system refactoring
+
+## Testing & Operational
+- **convergence_testing.md** - Convergence testing framework and tools
+- **file_features.md** - File attachment feature documentation
+
+---
+
 # NOTES:
 
 - Bootstrap flow: Invite link contains signed invite event blob. Invitee stores it as an event, creates user event referencing it. User projection extracts metadata from invite, creates stub group/channel rows. This enables immediate messaging before sync completes.
@@ -117,7 +146,7 @@ for i in range(10):
     tick(t_ms=4000 + i*100, db=db)
 
 # Check convergence
-messages = message.list_messages(channel_id, peer_id, db)
+messages = message.list(channel_id, peer_id, db)
 assert len(messages) == expected_count
 ```
 
@@ -552,11 +581,11 @@ Scenario tests validate end-to-end functionality by simulating realistic API usa
 
 ### Principles
 
-1. **API-Only Testing**: Scenario tests must ONLY interact with the system through command and query functions (e.g., `peer_secret.create()`, `message.list_messages()`, etc.). Treat these as if they were API endpoints being called by a frontend.
+1. **API-Only Testing**: Scenario tests must ONLY interact with the system through command and query functions (e.g., `peer_secret.create()`, `message.list()`, etc.). Treat these as if they were API endpoints being called by a frontend.
 
 2. **No Direct Database Inspection**: Test assertions must NEVER use direct database queries (e.g., `SELECT * FROM messages`). All verification must be done via:
    - Returned data from command functions (e.g., the `{id, latest}` dict from `message.create_message()`)
-   - Query function results (e.g., `message.list_messages()`, `channel.list_channels()`)
+   - Query function results (e.g., `message.list()`, `channel.list_channels()`)
 
 3. **Realistic Flows**: Tests should follow realistic user workflows, creating all necessary prerequisites (identity, groups, channels) before performing the main test action.
 
@@ -631,7 +660,7 @@ Most data retrieval functions include a `recorded_by` parameter that specifies w
 - `peer.get_public_key(peer_id, recorded_by, db)` - verifies ownership
 - `group.pick_key(group_id, recorded_by, db)` - verifies group access
 - `key.get_key(key_id, recorded_by, db)` - verifies key access
-- All projection and list functions (e.g., `list_messages()`, `list_all_groups()`)
+- All projection and list functions (e.g., `list()`, `list_all_groups()`)
 
 ### Safe Functions Without `recorded_by`
 

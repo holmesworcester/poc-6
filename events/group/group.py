@@ -11,7 +11,9 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_main: bool = False) -> tuple[str, str]:
+def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
+           is_main: bool = False, network_id: str | None = None,
+           signer_id: str | None = None, signer_private_key: bytes | None = None) -> tuple[str, str]:
     """Create a shareable, encrypted group event.
 
     Groups own their encryption keys. The key is created internally and its id stored
@@ -26,6 +28,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
 
     Args:
         is_main: True if this is the peer's main group for inviting (default: False)
+        network_id: Network ID this group belongs to (for dependency ordering)
+        signer_id: Optional signer ID (e.g., network_id for network-signed all_users group)
+                   If not provided, uses peer_shared_id
+        signer_private_key: Optional private key for signing (required if signer_id provided)
+                            If not provided, uses peer's private key
 
     Returns:
         (group_id, key_id): The group event ID and its encryption key ID
@@ -33,20 +40,30 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
     # Create the group's encryption key
     key_id = group_key.create(peer_id=peer_id, t_ms=t_ms, db=db)
 
-    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}")
+    # Determine signer - either explicit (network) or default (peer_shared)
+    actual_signer_id = signer_id if signer_id else peer_shared_id
+
+    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}, signed_by={actual_signer_id}")
 
     # Create event dict
     event_data = {
         'type': 'group',
         'name': name,
-        'signed_by': peer_shared_id,  # References shareable peer identity
+        'signed_by': actual_signer_id,  # Network ID or peer_shared_id
         'created_at': t_ms,
         'key_id': key_id,  # Store key_id in event for later retrieval
         'is_main': 1 if is_main else 0  # Store is_main flag
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
+    # Add network_id for dependency ordering (ensures network projects before group)
+    if network_id:
+        event_data['network_id'] = network_id
+
+    # Sign the event - use provided key or peer's private key
+    if signer_private_key:
+        private_key = signer_private_key
+    else:
+        private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
@@ -64,7 +81,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any, is_
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project group event into groups table and shareable_events table."""
+    """Project group event into groups table.
+
+    Supports polymorphic signature verification:
+    - If signed_by matches a network_id, verify with network's public key
+    - Otherwise, verify with peer_shared's public key
+    """
     log.debug(f"group.project() projecting group_id={event_id}, seen_by={recorded_by}")
 
     unsafedb = create_unsafe_db(db)
@@ -85,19 +107,37 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Parse JSON
     event_data = crypto.parse_json(unwrapped)
 
-    # Verify signature - get public key from signed_by peer_shared
-    from events.identity import peer_shared
+    # Polymorphic signature verification
+    # Check if signed_by is a network_id or a peer_shared_id
     signed_by = event_data['signed_by']
-    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+
+    # Try network first (for network-signed all_users groups)
+    network_row = safedb.query_one(
+        "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ?",
+        (signed_by, recorded_by)
+    )
+
+    if network_row:
+        # Signed by network - verify with network's public key
+        public_key = crypto.b64decode(network_row['network_pubkey'])
+        log.debug(f"group.project() verifying network-signed group {event_id[:20]}...")
+    else:
+        # Signed by peer_shared - verify with peer's public key
+        from events.identity import peer_shared
+        public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"group.project() signature verification FAILED for group_id={event_id}")
         return None  # Reject unsigned or invalid signature
 
+    # Extract network_id from event data (for dependency ordering)
+    network_id = event_data.get('network_id', '')
+
     # Insert into groups table (use REPLACE to overwrite stubs from user.project())
     safedb.execute(
         """INSERT OR REPLACE INTO groups
-           (group_id, name, signed_by, created_at, key_id, is_main, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (group_id, name, signed_by, created_at, key_id, is_main, network_id, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event_data['name'],
@@ -105,10 +145,14 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             event_data['created_at'],
             event_data['key_id'],
             event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
+            network_id,
             recorded_by,
             recorded_at
         )
     )
+
+    if network_id:
+        log.info(f"group.project() stored group {event_id[:20]}... in network {network_id[:20]}...")
 
     return event_id
 

@@ -45,9 +45,10 @@ def test_user_removal_blocks_sync_but_preserves_history():
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, user_id: {bob['user_id'][:20]}...")
     print(f"Bob peer_id: {bob['peer_id'][:20]}...")
     print(f"Bob channel_id: {bob['channel_id'][:20]}...")
@@ -157,18 +158,20 @@ def test_authorization_rules():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
 
     charlie_invite_id, charlie_invite_link, _ = invite.create(
         peer_id=alice['peer_id'],
         t_ms=2500,
         db=db
     )
-    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=3000, db=db)
+    charlie_peer_id = peer.create(t_ms=3000, db=db)
 
     charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
+    charlie_peer_shared_id = charlie['peer_shared_id']
 
     db.commit()
 
@@ -222,9 +225,10 @@ def test_authorization_rules():
         t_ms=5500,
         db=db
     )
-    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=6000, db=db)
+    charlie_peer_id = peer.create(t_ms=6000, db=db)
 
     charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=6000, db=db)
+    charlie_peer_shared_id = charlie['peer_shared_id']
     db.commit()
 
     print("\n=== Test: Charlie cannot remove Alice's peer (not admin) ===")
@@ -287,9 +291,10 @@ def test_receive_path_removal_check():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     print("\n=== Initial sync to converge ===")
@@ -357,9 +362,10 @@ def test_user_removal_rotates_group_keys():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     # Initial sync to converge
@@ -431,9 +437,10 @@ def test_peer_removal_last_device_rotates_keys():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
     # Initial sync to converge
@@ -512,8 +519,9 @@ def test_removed_peer_cannot_sync_messages():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
@@ -539,7 +547,7 @@ def test_removed_peer_cannot_sync_messages():
     tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
 
     # Verify Bob received Alice's message (using public API)
-    bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
     bob_contents = [msg['content'] for msg in bob_messages]
     print(f"Bob sees {len(bob_messages)} messages: {bob_contents}")
 
@@ -582,7 +590,7 @@ def test_removed_peer_cannot_sync_messages():
     # Verify observable behavior: Bob did NOT receive Alice's post-removal message
     print("\n=== Verifying message delivery (observable behavior) ===")
 
-    bob_messages_after = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages_after = message.list(bob['channel_id'], bob['peer_id'], db)
     bob_contents_after = [msg['content'] for msg in bob_messages_after]
     print(f"Bob sees {len(bob_messages_after)} messages: {bob_contents_after}")
 
@@ -598,7 +606,7 @@ def test_removed_peer_cannot_sync_messages():
 #
 # ✓ test_removed_peer_cannot_sync_messages (REALISTIC SCENARIO TEST)
 #   - Follows three-player messaging pattern
-#   - Only uses public APIs (message.create, message.list_messages, tick.tick)
+#   - Only uses public APIs (message.create, message.list, tick.tick)
 #   - Verifies observable behavior (message delivery blocked after removal)
 #   - Proves: Removed peer cannot sync messages with network
 #   - This is the primary test showing removal enforcement works from user perspective

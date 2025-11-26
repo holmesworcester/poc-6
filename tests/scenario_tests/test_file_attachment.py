@@ -18,6 +18,7 @@ from db import Database
 import schema
 from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
+from tests.utils import tick_helper
 import tick
 import crypto
 
@@ -45,18 +46,17 @@ def test_two_party_file_attachment_and_sync():
     print(f"✓ Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"✓ Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
-    for i in range(15):
-        print(f"\n=== Sync Round {i+1} ===")
-        tick.tick(t_ms=2100 + i*200, db=db)
-
+    print("\n=== Initial Sync ===")
+    t_ms = tick_helper.initial_sync(db, start_t_ms=4000)
     print("✓ Initial sync completed")
 
     print("\n=== Alice creates message with file attachment ===")
@@ -101,7 +101,7 @@ def test_two_party_file_attachment_and_sync():
     print(f"✓ Alice retrieved file successfully, matches original")
 
     # Verify attachment appears in message query
-    alice_messages = message.list_messages(alice['channel_id'], alice['peer_id'], db)
+    alice_messages = message.list(alice['channel_id'], alice['peer_id'], db)
     assert len(alice_messages) == 1
     assert len(alice_messages[0]['attachments']) == 1
     attachment = alice_messages[0]['attachments'][0]
@@ -146,21 +146,22 @@ def test_two_party_file_attachment_and_sync():
 
     # Sync file events to Bob (need multiple rounds for message + file + slices + attachment)
     # More rounds needed because: round 1 sends events, round 2 may trigger key shares, plus window rotation
+    # Use extra rounds for file sync (30 rounds = ~3 seconds)
     for round_num in range(30):
-        tick.tick(t_ms=5000 + round_num * 100, db=db)
+        tick.tick(t_ms=t_ms + round_num * tick_helper.TICK_INTERVAL_MS, db=db)
 
         # Show progress (demonstrating the progress API for frontends)
         if round_num % 2 == 0:  # Show every other round to reduce noise
             progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
             if progress and not progress['is_complete']:
-                print(f"  Sync round {round_num}: {progress['slices_received']}/{progress['total_slices']} slices ({progress['percentage_complete']}%)")
+                print(f"  Sync round {round_num + 1}: {progress['slices_received']}/{progress['total_slices']} slices ({progress['percentage_complete']}%)")
 
     print("✓ Sync completed")
 
     print("\n=== Verify Bob received file ===")
 
     # Bob should see the message with attachment
-    bob_messages = message.list_messages(bob['channel_id'], bob['peer_id'], db)
+    bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
     print(f"Bob sees {len(bob_messages)} messages")
     assert len(bob_messages) == 1, f"Expected 1 message for Bob, got {len(bob_messages)}"
 
@@ -175,9 +176,16 @@ def test_two_party_file_attachment_and_sync():
     assert bob_attachment['blob_bytes'] == 2000
     print(f"✓ Bob sees message with attachment metadata")
 
+    # Debug: Check Bob's slices before retrieval
+    bob_slices_debug = db.query_all(
+        "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
+        (file_id, bob['peer_id'])
+    )
+    print(f"Debug: Bob has {len(bob_slices_debug)} slices: {[s['slice_number'] for s in bob_slices_debug]}")
+
     # Bob should be able to retrieve and decrypt the file
     bob_retrieved = message_attachment.get_file_data(file_id, bob['peer_id'], db)
-    assert bob_retrieved is not None, "Bob should be able to retrieve the file"
+    assert bob_retrieved is not None, f"Bob should be able to retrieve the file (has {len(bob_slices_debug)}/5 slices)"
     assert bob_retrieved == file_data, "Bob's retrieved file should match original"
     print(f"✓ Bob retrieved and decrypted file successfully, matches original")
 

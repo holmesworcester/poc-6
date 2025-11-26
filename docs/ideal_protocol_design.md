@@ -58,6 +58,17 @@ In this case we follow a *Block and Unblock* pattern whenever an event depends o
 
 This is a [topological sorting](https://en.wikipedia.org/wiki/Topological_sorting) problem for which there are efficient algorithms, such as Khan's algorithm. We can use queue's of incoming and unblocked events, as well as SQLite's atomicity guarantees, to ensure that no blocked event is left behind.
 
+### Implicit Dependencies Rule
+
+**All event IDs referenced in a shared event are implicit dependencies.** If event B contains a field like `peer_shared_id=X`, `group_id=Y`, or `key_id=Z`, then B cannot project until X, Y, and Z have projected. This rule ensures:
+
+1. Signature verification works (signer's public key is available)
+2. Authorization checks work (referenced entities exist in projection tables)
+3. Decryption works (key_id references are event IDs, so the key is available)
+4. The DAG is consistent (no dangling references)
+
+This works for both sync (deps arrive from network) and bootstrap (deps are created locally and project in cascade once a root event is marked valid).
+
 ## Targets (Local Post‑Projection Actions)
 
 Targets are local, deterministic side effects triggered after projection of the target event. They do not add DAG edges.
@@ -106,9 +117,33 @@ This allows us to have shared tables for most event types (such as messages, use
 
 ## Network Creation
 
-To create a network, Alice creates a `network` event with `created_by` equal to her `peer_shared_id`.
+To create a network, Alice:
 
-She then creates an `admin` event with network equal to `network_id` and its `created_by` equal to her `peer_shared_id` also.  
+1. Creates a `network` event with `signed_by='SELF'` - the network is self-signed using its own `network_private_key`, with `network_pubkey` included in the event body (like a root CA certificate).
+
+2. Creates an `all_users` group event **signed by `network_id`** using `network_private_key`. This cryptographically marks this group as the network's primary membership group. Any peer can discover the all_users group by querying: `SELECT group_id FROM groups WHERE signed_by = network_id`.
+
+3. Creates an `admin_grant` event with `network_id` and `user_id`, signed by `network_id`.
+
+4. Creates a bootstrap `invite(mode=user)` signed by `network_id`.
+
+5. Joins her own invite (creates `user` event signed by invite).
+
+6. Creates `invite(mode=peer)` signed by `user_id`, then `peer_shared` signed by the peer invite.
+
+7. Creates content (channel, transit_prekey_shared, etc.) signed by her `peer_shared_id`.
+
+The `network_private_key` is discarded after bootstrap. Only the `network_pubkey` (in the network event) persists for signature verification.
+
+### Network-Signed All-Users Group
+
+The all_users group is special: it's **signed by `network_id`** rather than `peer_shared_id`. This provides:
+
+1. **Cryptographic discovery**: Any peer can find the all_users group by querying `WHERE signed_by = network_id`
+2. **Authorization proof**: The network key proves this group was created as part of network bootstrap
+3. **No metadata dependency**: No need for `network_role` fields or networks table storing group IDs
+
+When creating invites, admins find the all_users group via signature query and share its key to the invite prekey.
 
 Note that network and admin events remain blocked until Joining admits the first user via an invite; Alice must invite herself and join to complete network creation. Accepting an invitation link forces the `network_id` named in the invite to be valid; this validity cascades to the other events.
 
@@ -173,9 +208,24 @@ When creating a network:
 
 ## Joining (Event-Layer Encryption)
 
-To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey_shared` event, includes its `id` in the `invite` event (`invite_prekey_id`), and includes the corresponding private `group_prekey` in `invite_data`.
+To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey` (local, contains keypair) and then a `group_prekey_shared` event (shareable, contains public key). The `group_prekey_shared` event's `id` becomes the `invite_prekey_id` in the invite event.
 
-She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are also wrapped to all outstanding invite‑referenced `group_prekey_shared` keys just as they are to each member’s current `group_prekey_shared`.
+**Design principle**: All key IDs must be real event IDs. The `invite_prekey_id` is a `group_prekey_shared_id`, not a synthetic hash. This ensures dependencies work naturally through the event graph - events can block/unblock on the prekey event existing and being valid.
+
+### Prekey Context by Invite Mode
+
+The `group_prekey_shared` event includes context that depends on the invite mode. Exactly one context type must be provided:
+
+| Mode | Context | Description |
+|------|---------|-------------|
+| `user` (network join) | `group_id` + `key_id` | Group context (all_users group) |
+| `link`/`peer` (device linking) | `user_id` | User context - the user being linked to |
+
+Note: Bootstrap (first user) doesn't need an `invite_prekey_id` at all since there are no existing encrypted events to decrypt.
+
+Alice includes the corresponding private `group_prekey` material in `invite_data` so Bob can decrypt `group_key_shared` events sealed to this prekey.
+
+She then wraps all group keys used for the default `all_members` group in `group_key_shared` events to this `group_prekey_shared`, and any new keys are also wrapped to all outstanding invite‑referenced `group_prekey_shared` keys just as they are to each member's current `group_prekey_shared`.
 
 ## Address Publishing
 

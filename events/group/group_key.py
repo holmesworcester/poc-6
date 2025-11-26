@@ -16,17 +16,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     # Generate symmetric key
     key = crypto.generate_secret()
 
-    # Create event blob (plaintext JSON, no encryption for local-only)
+    # Create DETERMINISTIC event blob - only type and key
+    # This ensures same key material = same key_id on all peers
     event_data = {
         'type': 'group_key',
-        'key': crypto.b64encode(key),
-        'signed_by': peer_id,  # Local peer who created this key
-        'created_at': t_ms
+        'key': crypto.b64encode(key)
     }
 
-    blob = json.dumps(event_data).encode()
+    # Use sort_keys=True for canonical ordering
+    blob = json.dumps(event_data, sort_keys=True).encode()
 
     # Store event with recorded wrapper and projection
+    # t_ms is used for recorded_at metadata, not in the blob itself
     key_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group_key.create() created key_id={key_id}")
@@ -36,10 +37,13 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) -> str:
     """Create group key event with provided key material (for invite group keys).
 
+    Creates a DETERMINISTIC group_key event from the key material.
+    Same key_material = same key_id on all peers.
+
     Args:
         key_material: The symmetric key bytes
         peer_id: Peer ID that owns this key
-        t_ms: Timestamp
+        t_ms: Timestamp (used for recorded_at, NOT in the blob)
         db: Database connection
 
     Returns:
@@ -47,22 +51,30 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     """
     log.info(f"group_key.create_with_material() creating key for peer_id={peer_id}, t_ms={t_ms}")
 
+    # Create DETERMINISTIC event blob - only type and key
+    # This ensures same key material = same key_id on all peers
     event_data = {
         'type': 'group_key',
-        'key': crypto.b64encode(key_material),
-        'signed_by': peer_id,  # Local peer who created this key
-        'created_at': t_ms
+        'key': crypto.b64encode(key_material)
     }
 
-    blob = json.dumps(event_data).encode()
+    # Use sort_keys=True for canonical ordering
+    blob = json.dumps(event_data, sort_keys=True).encode()
     key_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group_key.create_with_material() created key_id={key_id}")
     return key_id
 
 
-def project(key_id: str, recorded_by: str, db: Any) -> None:
-    """Project group key event into group_keys table and mark valid for owning peer."""
+def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Project group key event into group_keys table and mark valid for owning peer.
+
+    Args:
+        key_id: The group_key event ID
+        recorded_by: Peer projecting this event
+        recorded_at: Timestamp to use for created_at (since blob has no timestamp)
+        db: Database connection
+    """
     log.debug(f"group_key.project() projecting key_id={key_id}, seen_by={recorded_by}")
 
     # Get blob from store
@@ -75,6 +87,7 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     event_data = crypto.parse_json(blob)
 
     # Insert into group_keys table (subjective)
+    # Note: created_at comes from recorded_at, NOT the blob (deterministic blobs have no timestamp)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     log.debug(f"group_key.project() inserting key_id={key_id} into group_keys table")
     safedb.execute(
@@ -83,7 +96,7 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
         (
             key_id,
             crypto.b64decode(event_data['key']),
-            event_data['created_at'],
+            recorded_at,  # Use recorded_at since blob has no timestamp
             recorded_by
         )
     )

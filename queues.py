@@ -204,12 +204,20 @@ class blocked:
 
         log.debug(f"queues.blocked.notify_event_valid() found {len(waiting_events)} events waiting for {event_id}")
 
-        # Decrement counters atomically using UPDATE...RETURNING
+        # ATOMIC FIX: Delete satisfied dependency from deps table BEFORE decrementing counter
+        # This keeps counter and table in sync (prevents drift)
         # Build placeholders for IN clause
         placeholders = ','.join(['(?, ?)' for _ in waiting_events])
         params = []
         for evt in waiting_events:
             params.extend([evt['recorded_id'], evt['recorded_by']])
+
+        # Delete the satisfied dependency from deps table (atomic with counter decrement)
+        safedb.execute(f"""
+            DELETE FROM blocked_event_deps_ephemeral
+            WHERE dep_id = ? AND recorded_by = ?
+              AND (recorded_id, recorded_by) IN (VALUES {placeholders})
+        """, (event_id, recorded_by) + tuple(params))
 
         try:
             # Try atomic UPDATE...RETURNING (SQLite 3.35+)
@@ -258,12 +266,62 @@ class blocked:
         #         WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
         #     """, tuple(unblocked) + (recorded_by,))
 
-        if unblocked:
-            log.info(f"queues.blocked.notify_event_valid() UNBLOCKED (awaiting re-projection confirmation) {len(unblocked)} events: {unblocked}")
+        # ADDITIONAL FIX: Also check for any events that already have deps_remaining=0
+        # (they may have reached 0 in a previous call but weren't re-projected successfully)
+        all_ready = safedb.query("""
+            SELECT recorded_id FROM blocked_events_ephemeral
+            WHERE deps_remaining = 0 AND recorded_by = ?
+        """, (recorded_by,))
+
+        all_ready_ids = [row['recorded_id'] for row in all_ready]
+
+        # Combine newly unblocked with already-ready events (dedupe)
+        unblocked_set = set(unblocked) | set(all_ready_ids)
+        final_unblocked = list(unblocked_set)
+
+        if final_unblocked:
+            if len(all_ready_ids) > len(unblocked):
+                log.info(f"queues.blocked.notify_event_valid() UNBLOCKED {len(unblocked)} new + {len(all_ready_ids) - len(unblocked)} pre-existing = {len(final_unblocked)} total events")
+            else:
+                log.info(f"queues.blocked.notify_event_valid() UNBLOCKED (awaiting re-projection confirmation) {len(final_unblocked)} events: {final_unblocked[:3]}")
 
             # Timeline: Log unblocking event
             from tests.utils import timeline
             timeline.log('unblock', ref_id=event_id, recorded_by=recorded_by,
-                         count=len(unblocked), unblocked=unblocked[:3])  # First 3 IDs
+                         count=len(final_unblocked), unblocked=final_unblocked[:3])  # First 3 IDs
 
-        return unblocked
+        return final_unblocked
+
+    @staticmethod
+    def assert_deps_consistency(recorded_by: str, safedb: SafeDB) -> None:
+        """INVARIANT TEST: Verify deps_remaining always equals actual count in deps table.
+
+        This enforces that the counter (deps_remaining) and the source of truth
+        (blocked_event_deps_ephemeral table) are always in sync.
+
+        Raises:
+            AssertionError if any events have counter != actual deps count
+        """
+        inconsistent = safedb.query("""
+            SELECT
+                be.recorded_id,
+                be.recorded_by,
+                be.deps_remaining as counter,
+                COUNT(bed.dep_id) as actual
+            FROM blocked_events_ephemeral be
+            LEFT JOIN blocked_event_deps_ephemeral bed
+                ON be.recorded_id = bed.recorded_id
+                AND be.recorded_by = bed.recorded_by
+            WHERE be.recorded_by = ?
+            GROUP BY be.recorded_id, be.recorded_by
+            HAVING counter != actual
+        """, (recorded_by,))
+
+        if inconsistent:
+            details = []
+            for row in inconsistent[:5]:  # Show first 5
+                details.append(f"  Event {row['recorded_id'][:20]}...: counter={row['counter']}, actual={row['actual']}")
+            raise AssertionError(
+                f"Deps counter/table mismatch for peer {recorded_by[:20]}...: "
+                f"{len(inconsistent)} events have inconsistent state:\n" + "\n".join(details)
+            )

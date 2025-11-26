@@ -42,15 +42,15 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, str, dict[str, Any]]:
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
-    # Get user_id for this peer
-    user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get user_id for this peer from linked_peers (user→peer is one-to-many)
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, peer_id)
     )
-    if not user_row:
+    if not linked_row:
         raise ValueError(f"User not found for peer {peer_id}")
 
-    user_id = user_row['user_id']
+    user_id = linked_row['user_id']
 
     log.info(f"link_invite.create() delegating to invite.create(mode='link') for user_id={user_id}")
 
