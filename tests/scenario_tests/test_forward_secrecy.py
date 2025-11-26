@@ -8,30 +8,21 @@ Tests that:
 5. TTL-based expiry: prekeys expire after TTL
 6. purge_expired event deletes expired events
 """
-import sqlite3
-from db import Database, create_safe_db, create_unsafe_db
-import schema
+from db import create_safe_db, create_unsafe_db
+import crypto
 from events.identity import user, invite, peer
 from events.content import message, message_deletion
 from events.network import transit_prekey, transit_key
 from events.group import group_prekey
-from tests.utils import tick_helper
+from tests.utils import tick_helper, assertions
 import purge_expired
 
 
-def test_delete_message_marks_key_for_purging():
+def test_delete_message_marks_key_for_purging(fresh_db_with_alice):
     """Test that deleting a message marks its key for purging."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     # Alice sends a message
-    print("\n=== Alice sends message ===")
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
@@ -40,11 +31,9 @@ def test_delete_message_marks_key_for_purging():
         db=db
     )
     message_id = msg_result['id']
-    print(f"Message created: {message_id[:20]}...")
     db.commit()
 
     # Get the key that encrypted the message
-    safedb = create_safe_db(db, recorded_by=alice['peer_id'])
     unsafedb = create_unsafe_db(db)
     message_blob = unsafedb.query_one(
         "SELECT blob FROM store WHERE id = ?",
@@ -52,31 +41,21 @@ def test_delete_message_marks_key_for_purging():
     )
     assert message_blob is not None
 
-    import crypto
     key_id_bytes = message_blob['blob'][:crypto.ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
-    print(f"Message encrypted with key: {key_id_b64[:20]}...")
 
     # Delete the message
-    print("\n=== Alice deletes her message ===")
     deletion_id = message_deletion.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,
         db=db
     )
-    print(f"Deletion created: {deletion_id[:20]}...")
     db.commit()
 
     # Verify key is marked for purging
-    key_to_purge = safedb.query_one(
-        "SELECT key_id FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?",
-        (key_id_b64, alice['peer_id'])
-    )
-    assert key_to_purge is not None, "Key should be marked for purging"
-    print(f"✓ Key {key_id_b64[:20]}... is marked for purging")
-
-    print("\n✅ Mark key for purging test passed")
+    safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    assertions.assert_key_marked_for_purging(safedb, key_id_b64, alice['peer_id'])
 
 
 def test_delete_and_rekey_message():
