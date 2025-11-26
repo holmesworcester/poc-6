@@ -105,8 +105,9 @@ def test_alice_and_bob_see_messages_disappear_together():
         db=db
     )
 
-    bob_peer_id, bob_peer_shared_id = peer_module.create(t_ms=2000, db=db)
+    bob_peer_id = peer_module.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
     print("✓ Alice and Bob set up")
 

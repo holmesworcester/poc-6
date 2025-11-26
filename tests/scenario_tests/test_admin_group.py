@@ -60,9 +60,10 @@ def test_admin_group_workflow():
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
@@ -74,10 +75,9 @@ def test_admin_group_workflow():
     )
     print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
 
-    # Get admin group ID from network (still used for reference)
-    admin_group_id = network.get_admin_group_id(alice['network_id'], alice['peer_id'], db)
+    # Get admin group ID from new_network return value
+    admin_group_id = alice['admins_group_id']
     print(f"\nAdmin group ID: {admin_group_id[:20]}...")
-    assert admin_group_id == alice['admins_group_id'], "Admin group ID should match"
 
     # Verify Alice is admin (using admin.is_user_admin() with new model)
     print("\n=== Verify Alice is admin ===")
@@ -246,9 +246,10 @@ def test_admin_group_workflow():
     print(f"Bob created invite for Charlie: {charlie_invite_id[:20]}...")
 
     # Charlie joins via Bob's invite
-    charlie_peer_id, charlie_peer_shared_id = peer.create(t_ms=8000, db=db)
+    charlie_peer_id = peer.create(t_ms=8000, db=db)
 
     charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=8000, db=db)
+    charlie_peer_shared_id = charlie['peer_shared_id']
     print(f"Charlie joined network, peer_id: {charlie['peer_id'][:20]}...")
     db.commit()
 

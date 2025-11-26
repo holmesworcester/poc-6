@@ -117,9 +117,33 @@ This allows us to have shared tables for most event types (such as messages, use
 
 ## Network Creation
 
-To create a network, Alice creates a `network` event with `created_by` equal to her `peer_shared_id`.
+To create a network, Alice:
 
-She then creates an `admin` event with network equal to `network_id` and its `created_by` equal to her `peer_shared_id` also.  
+1. Creates a `network` event with `signed_by='SELF'` - the network is self-signed using its own `network_private_key`, with `network_pubkey` included in the event body (like a root CA certificate).
+
+2. Creates an `all_users` group event **signed by `network_id`** using `network_private_key`. This cryptographically marks this group as the network's primary membership group. Any peer can discover the all_users group by querying: `SELECT group_id FROM groups WHERE signed_by = network_id`.
+
+3. Creates an `admin_grant` event with `network_id` and `user_id`, signed by `network_id`.
+
+4. Creates a bootstrap `invite(mode=user)` signed by `network_id`.
+
+5. Joins her own invite (creates `user` event signed by invite).
+
+6. Creates `invite(mode=peer)` signed by `user_id`, then `peer_shared` signed by the peer invite.
+
+7. Creates content (channel, transit_prekey_shared, etc.) signed by her `peer_shared_id`.
+
+The `network_private_key` is discarded after bootstrap. Only the `network_pubkey` (in the network event) persists for signature verification.
+
+### Network-Signed All-Users Group
+
+The all_users group is special: it's **signed by `network_id`** rather than `peer_shared_id`. This provides:
+
+1. **Cryptographic discovery**: Any peer can find the all_users group by querying `WHERE signed_by = network_id`
+2. **Authorization proof**: The network key proves this group was created as part of network bootstrap
+3. **No metadata dependency**: No need for `network_role` fields or networks table storing group IDs
+
+When creating invites, admins find the all_users group via signature query and share its key to the invite prekey.
 
 Note that network and admin events remain blocked until Joining admits the first user via an invite; Alice must invite herself and join to complete network creation. Accepting an invitation link forces the `network_id` named in the invite to be valid; this validity cascades to the other events.
 

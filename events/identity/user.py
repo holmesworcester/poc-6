@@ -74,14 +74,14 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     user_private_key, user_pubkey = crypto.generate_keypair()
 
     # Create user event with signed_by=invite_id and user_pubkey
+    # NOTE: user event does NOT contain peer_id - the user→peer relationship
+    # is established when peer_shared is projected (populates linked_peers table)
     event_data = {
         'type': 'user',
         'invite_id': invite_id,  # Reference to invite that authorized this user
         'signed_by': invite_id,  # Polymorphic signer field (verified with invite_pubkey)
         'user_pubkey': crypto.b64encode(user_pubkey),  # User's OWN public key (for signing first peer invite)
-        'peer_id': peer_shared_id,  # References the public peer identity
         'name': name,
-        # Note: signed_by is invite_id (above), not peer_shared_id
         'created_at': t_ms
     }
 
@@ -204,19 +204,18 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
             invite_data = crypto.parse_json(invite_blob)
             network_id = invite_data.get('network_id')
 
-    # Insert into users table with user_pubkey (not invite_pubkey)
-    log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}..., peer_id={event_data['peer_id'][:20]}...")
+    # Insert into users table (user→peer relationship is in linked_peers, populated by peer_shared.project())
+    log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}...")
     safedb.execute(
         """INSERT OR IGNORE INTO users
-           (user_id, peer_id, name, network_id, created_at, user_pubkey, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (user_id, name, network_id, created_at, user_pubkey, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
-            event_data['peer_id'],
             event_data['name'],
             network_id,
             event_data['created_at'],
-            user_pubkey,  # Phase 2: User's OWN public key (for verifying signed_by=user_id)
+            user_pubkey,  # User's OWN public key (for verifying signed_by=user_id)
             recorded_by,
             recorded_at
         )
@@ -333,13 +332,11 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     safedb.execute(
         """INSERT OR IGNORE INTO networks
-           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (network_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             network_id,
-            '',  # all_users_group_id - set later
-            '',  # admins_group_id - set later
-            '',  # creator_user_id - set later
+            '',  # creator_user_id - set later by admin.project()
             network_pubkey,
             'SELF',  # signed_by
             t_ms + 10,
@@ -460,7 +457,8 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     recorded.project_ids([recorded_id], db)
 
     # 8. Create ALL_USERS group (main group for all users)
-    # Include network_id and network_role so group.project() updates networks table
+    # NETWORK-SIGNED: This group is signed by network_id (using network_private_key)
+    # This is how joiners discover the all_users group: query WHERE signed_by = network_id
     all_users_group_id, all_users_key_id = group.create(
         name=f"{name}",
         peer_id=peer_id,
@@ -469,12 +467,14 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         db=db,
         is_main=True,
         network_id=network_id,
-        network_role='all_users'
+        signer_id=network_id,  # Sign with network key (cryptographic role marker)
+        signer_private_key=network_private_key
     )
-    log.info(f"new_network() created all_users group: {all_users_group_id[:20]}...")
+    log.info(f"new_network() created network-signed all_users group: {all_users_group_id[:20]}...")
 
     # 9. Create ADMINS group (admin-only group)
-    # Include network_id and network_role so group.project() updates networks table
+    # Regular peer-signed group (not network-signed like all_users)
+    # Admin membership is controlled via admin events, not group signature
     admins_group_id, admins_key_id = group.create(
         name=f"{name} - Admins",
         peer_id=peer_id,
@@ -482,25 +482,20 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         t_ms=t_ms + 80,
         db=db,
         is_main=False,
-        network_id=network_id,
-        network_role='admins'
+        network_id=network_id  # For dependency ordering only
     )
     log.info(f"new_network() created admins group: {admins_group_id[:20]}...")
 
-    # Note: networks table is updated via event projection:
-    # - admin.project() sets creator_user_id for bootstrap admin
-    # - group.project() sets all_users_group_id and admins_group_id based on network_role
-
-    # 10. Create default channel
+    # 10. Create default channel (normal path - no bootstrap special case)
+    # Pass admin_grant directly so the event has explicit dependency for convergence
     channel_id = channel.create(
         name='general',
-        group_id=all_users_group_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        key_id=all_users_key_id,
         t_ms=t_ms + 90,
         db=db,
-        is_main=True
+        is_main=True,
+        admin_grant=admin_grant_id  # Explicit dependency for convergence
     )
     log.info(f"new_network() created channel: {channel_id[:20]}...")
 
@@ -521,6 +516,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     log.info(f"new_network() created transit prekey: {prekey_id[:20]}..., shared={transit_prekey_shared_id[:20]}...")
 
     # Add user to all_users group
+    # Pass admin_grant directly so the event has explicit dependency for convergence
     from events.group import group_member
     all_users_member_id = group_member.create(
         group_id=all_users_group_id,
@@ -529,7 +525,8 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         peer_shared_id=peer_shared_id,
         t_ms=t_ms + 110,
         db=db,
-        skip_admin_check=True  # Bootstrap: first user adds themselves
+        skip_admin_check=True,  # Bootstrap: first user adds themselves
+        admin_grant=admin_grant_id  # Explicit dependency for convergence
     )
     log.info(f"new_network() added user to all_users group: {all_users_member_id[:20]}...")
 
@@ -541,7 +538,8 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         peer_shared_id=peer_shared_id,
         t_ms=t_ms + 120,
         db=db,
-        skip_admin_check=True  # Bootstrap: first user adds themselves
+        skip_admin_check=True,  # Bootstrap: first user adds themselves
+        admin_grant=admin_grant_id  # Explicit dependency for convergence
     )
     log.info(f"new_network() added user to admins group: {admin_member_id[:20]}...")
 
@@ -648,7 +646,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
     """
     log.info(f"join() user '{name}' joining via invite at t_ms={t_ms} with peer_id={peer_id[:20]}...")
 
-    # Phase 5: Get peer_shared_id from existing peer
+    # Phase 5: Get peer_shared_id from existing peer or create PENDING entry
     from db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
     peer_self_row = safedb.query_one(
@@ -656,8 +654,22 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         (peer_id, peer_id)
     )
     if not peer_self_row:
-        raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
-    peer_shared_id = peer_self_row['peer_shared_id']
+        # Verify peer was created (check local_peers table)
+        unsafedb = create_unsafe_db(db)
+        peer_exists = unsafedb.query_one("SELECT 1 FROM local_peers WHERE peer_id = ?", (peer_id,))
+        if not peer_exists:
+            raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
+
+        # Create PENDING peer_self entry - will be updated after peer_shared is created
+        # This follows the same pattern as new_network() bootstrap
+        safedb.execute(
+            "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
+            (peer_id, 'PENDING', None, peer_id, t_ms)
+        )
+        peer_shared_id = 'PENDING'
+        log.info(f"join() created PENDING peer_self entry for peer {peer_id[:20]}...")
+    else:
+        peer_shared_id = peer_self_row['peer_shared_id']
 
     # Parse invite link
     import base64
@@ -752,6 +764,42 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
 
     log.info(f"join() user '{name}' joined: peer={peer_id[:20]}..., group={group_id[:20]}...")
 
+    # =========================================================================
+    # Phase 3: Complete isomorphic bootstrap - create peer_shared signed by invite
+    # =========================================================================
+
+    # 5. Create invite (mode=peer) signed by user_id
+    # For first peer, signer_id=user_id (user signs invite for their own peer)
+    peer_invite_id, peer_invite_private_key, _ = invite.create_peer_invite(
+        user_id=user_id,
+        signer_id=user_id,  # For first peer, user signs the peer invite
+        signer_private_key=user_private_key,
+        peer_id=peer_id,
+        t_ms=t_ms + 10,
+        db=db
+    )
+    log.info(f"join() created peer invite: {peer_invite_id[:20]}... signed by user_id")
+
+    # Project the peer invite so it's in invites table
+    invite.project(peer_invite_id, peer_id, t_ms + 11, db)
+
+    # 6. Create peer_shared signed by peer invite (THE canonical peer_shared)
+    from events.identity import peer_shared as peer_shared_module
+    peer_shared_id = peer_shared_module.create(
+        peer_id=peer_id,
+        t_ms=t_ms + 20,
+        db=db,
+        invite_id=peer_invite_id,
+        invite_private_key=peer_invite_private_key
+    )
+    log.info(f"join() created invite-signed peer_shared: {peer_shared_id[:20]}...")
+
+    # Project the peer_shared - this updates peer_self with real peer_shared_id
+    from events.network import recorded
+    recorded_id = recorded.create(peer_shared_id, peer_id, t_ms + 21, db, return_dupes=True)
+    recorded.project_ids([recorded_id], db)
+    log.info(f"join() projected peer_shared, peer_self should now have real peer_shared_id")
+
     # Create network_joined event immediately to mark bootstrap intent
     # The inviter_peer_shared_id comes from the invite event
     inviter_peer_shared_id = invite_event_data.get('inviter_peer_shared_id')
@@ -759,9 +807,9 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         from events.identity import network_joined
         network_joined_id = network_joined.create(
             peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
+            peer_shared_id=peer_shared_id,  # Now using real peer_shared_id
             inviter_peer_shared_id=inviter_peer_shared_id,
-            t_ms=t_ms + 3,  # After user creation
+            t_ms=t_ms + 30,  # After peer_shared creation
             db=db
         )
         log.info(f"join() created network_joined {network_joined_id[:20]}... for peer {peer_id[:20]}...")
@@ -770,7 +818,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
 
     return {
         'peer_id': peer_id,
-        'peer_shared_id': peer_shared_id,
+        'peer_shared_id': peer_shared_id,  # Now the REAL peer_shared_id
         'user_id': user_id,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,
@@ -779,5 +827,4 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         'key_id': key_id,
         'invite_data': invite_data,
         'invite_accepted_id': invite_accepted_id,
-        'user_private_key': user_private_key,  # Phase 2: For signing first peer invite (Phase 3)
     }

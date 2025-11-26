@@ -115,9 +115,9 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
     log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
 
     # Check if this was the last peer of a user (if so, rotate group keys)
-    # Map removed peer to its user_id
+    # Map removed peer to its user_id from linked_peers (user→peer is one-to-many)
     user_row = safedb.query_one(
-        "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
         (removed_peer_shared_id, recorded_by)
     )
 
@@ -125,32 +125,26 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
         removed_user_id = user_row['user_id']
 
         # Check if user has any other peers that are NOT removed
-        # Get all peers of this user, then check if any are NOT in removed_peers
+        # Get all peers of this user from linked_peers, then check if any are NOT in removed_peers
         all_user_peers = safedb.query(
-            """SELECT u.peer_id FROM users u
-               WHERE u.user_id = ? AND u.recorded_by = ?""",
+            """SELECT peer_id FROM linked_peers
+               WHERE user_id = ? AND recorded_by = ?""",
             (removed_user_id, recorded_by)
         )
 
         # Check how many of these peers are NOT in removed_peers
+        # Note: linked_peers.peer_id IS the peer_shared_id
         unsafe_db = create_unsafe_db(db)
         active_peer_count = 0
-        for peer in all_user_peers:
-            peer_id = peer['peer_id']
-            # Get peer_shared_id for this peer
-            peer_self_row = safedb.query_one(
-                "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-                (peer_id, recorded_by)
+        for peer_row in all_user_peers:
+            peer_shared_id_check = peer_row['peer_id']  # peer_id in linked_peers IS peer_shared_id
+            # Check if this peer is NOT removed
+            removed_check = unsafe_db.query_one(
+                "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+                (peer_shared_id_check,)
             )
-            if peer_self_row:
-                peer_shared_id_check = peer_self_row['peer_shared_id']
-                # Check if this peer is NOT removed
-                removed_check = unsafe_db.query_one(
-                    "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
-                    (peer_shared_id_check,)
-                )
-                if not removed_check:
-                    active_peer_count += 1
+            if not removed_check:
+                active_peer_count += 1
 
         other_peers = [{'count': active_peer_count}]
 

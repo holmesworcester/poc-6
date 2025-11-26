@@ -102,15 +102,13 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
 
     # Insert into networks table (minimal - no groups, no creator)
     # Groups and admin grants are separate events created after network
+    # Network only stores its own identity data - groups store their network_id/network_role
     safedb.execute(
-        """INSERT OR IGNORE INTO networks
-           (network_id, all_users_group_id, admins_group_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT OR REPLACE INTO networks
+           (network_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
+           VALUES (?, '', ?, ?, ?, ?, ?)""",
         (
             network_id,
-            '',  # all_users_group_id - set later by group event
-            '',  # admins_group_id - set later by group event
-            '',  # creator_user_id - set later by admin_grant event
             network_pubkey_b64,
             signed_by,
             event_data['created_at'],
@@ -119,40 +117,17 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
         )
     )
 
-    log.info(f"network.project() inserted self-signed network into networks table")
+    log.info(f"network.project() inserted self-signed network in networks table")
 
     return network_id
 
 
-def get_admin_group_id(network_id: str, recorded_by: str, db: Any) -> str:
-    """Get admin group ID for a network.
-
-    Args:
-        network_id: Network ID
-        recorded_by: Peer ID querying
-        db: Database connection
-
-    Returns:
-        Admin group ID
-
-    Raises:
-        ValueError: If network not found
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    network = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ?",
-        (network_id, recorded_by)
-    )
-
-    if not network:
-        raise ValueError(f"Network {network_id} not found")
-
-    return network['admins_group_id']
-
-
 def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
     """Get all_users group ID for a network.
+
+    The all_users group is cryptographically identified by being signed by the
+    network itself (signed_by = network_id). This is the principled way to
+    discover which group is the network's main membership group.
 
     Args:
         network_id: Network ID
@@ -163,19 +138,20 @@ def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
         All users group ID
 
     Raises:
-        ValueError: If network not found
+        ValueError: If all_users group not found for network
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    network = safedb.query_one(
-        "SELECT all_users_group_id FROM networks WHERE network_id = ? AND recorded_by = ?",
+    # Query by signature - the all_users group is signed by the network
+    group = safedb.query_one(
+        "SELECT group_id FROM groups WHERE signed_by = ? AND recorded_by = ?",
         (network_id, recorded_by)
     )
 
-    if not network:
-        raise ValueError(f"Network {network_id} not found")
+    if not group:
+        raise ValueError(f"Network-signed all_users group not found for network {network_id}")
 
-    return network['all_users_group_id']
+    return group['group_id']
 
 
 def get_public_key(network_id: str, recorded_by: str, db: Any) -> bytes:
@@ -220,15 +196,24 @@ def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
         db: Database connection
 
     Returns:
-        Dict with network_id, all_users_group_id, admins_group_id
+        Dict with network_id (use get_all_users_group_id/get_admin_group_id for groups)
         or None if peer not in a network
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get network_id from users table
-    user_row = safedb.query_one(
-        "SELECT network_id FROM users WHERE peer_id = ? AND recorded_by = ?",
+    # Get user_id for this peer from linked_peers (user→peer is one-to-many)
+    linked_row = safedb.query_one(
+        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
         (peer_id, recorded_by)
+    )
+
+    if not linked_row:
+        return None
+
+    # Get network_id from users table using user_id
+    user_row = safedb.query_one(
+        "SELECT network_id FROM users WHERE user_id = ? AND recorded_by = ?",
+        (linked_row['user_id'], recorded_by)
     )
 
     if not user_row or not user_row['network_id']:
@@ -236,9 +221,9 @@ def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
 
     network_id = user_row['network_id']
 
-    # Get network details
+    # Get network details (no longer includes group IDs - query groups table for those)
     network = safedb.query_one(
-        "SELECT network_id, all_users_group_id, admins_group_id FROM networks WHERE network_id = ? AND recorded_by = ?",
+        "SELECT network_id, network_pubkey, signed_by, created_at FROM networks WHERE network_id = ? AND recorded_by = ?",
         (network_id, recorded_by)
     )
 

@@ -32,7 +32,7 @@ def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            group_id: str | None = None, member_user_ids: list[str] | None = None,
            key_id: str | None = None, is_main: bool = False,
-           disappearing_time_ms: int = 0) -> str:
+           disappearing_time_ms: int = 0, admin_grant: str | None = None) -> str:
     """Create a shareable, encrypted channel event.
 
     Only admins can create channels (except during initial network setup where group_id is explicitly provided).
@@ -58,6 +58,8 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         key_id: Optional explicit key_id (only used if group_id provided, otherwise derived)
         is_main: True if this is the main channel for a group
         disappearing_time_ms: Messages expire after this duration in ms (0 = permanent, >0 = milliseconds)
+        admin_grant: Optional admin_id that grants authority to create channels.
+                    If provided, used directly. If None, looked up from admins table.
 
     Returns:
         channel_id: The created channel event ID
@@ -69,9 +71,39 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         raise ValueError("disappearing_time_ms must be non-negative")
 
     # Check authorization - only admins can create channels
-    # Exception: if group_id is explicitly provided, skip admin check (used in initial network setup)
-    if not group_id and not _validate_admin(peer_shared_id, peer_id, db):
+    admin_grant_id = admin_grant  # Use passed-in value if provided
+
+    if not _validate_admin(peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to create channels (only admins can)")
+
+    # Get admin_grant for inclusion in event (REQUIRED for convergence)
+    # This is needed whether group_id is explicit or not
+    if not admin_grant_id:
+        # Look up admin_grant from admins table
+        from events.identity import admin as admin_module
+
+        # Get user_id for this peer_shared_id
+        creator_user_id = None
+        linked_row = safedb.query_one(
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+            (peer_shared_id, peer_id)
+        )
+        if linked_row:
+            creator_user_id = linked_row['user_id']
+
+        if creator_user_id:
+            # Get network_id for admin lookup
+            network_row = safedb.query_one(
+                "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+                (peer_id,)
+            )
+            if network_row:
+                admin_grant_id = admin_module.my_grant(creator_user_id, network_row['network_id'], peer_id, db)
+
+    if admin_grant_id:
+        log.info(f"channel.create() including admin_grant={admin_grant_id[:20]}...")
+    else:
+        log.warning(f"channel.create() NO admin_grant found - event may fail projection on receivers!")
 
     # Determine group_id and key_id
     if member_user_ids:
@@ -92,28 +124,15 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         key_id = private_key_id
 
         # First, ensure the creator is added to the private channel group
-        # Get creator's user_id
-        # Phase 3: Check linked_peers first (for invite-signed peer_shared), then fall back to users.peer_id
-        creator_user_id = None
-
-        # Try linked_peers first (for peers linked via invite(mode=peer))
+        # Get creator's user_id from linked_peers (user→peer is one-to-many)
         linked_row = safedb.query_one(
             "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
             (peer_shared_id, peer_id)
         )
-        if linked_row:
-            creator_user_id = linked_row['user_id']
-        else:
-            # Fall back to users.peer_id (legacy path for initial peer_shared before linking)
-            creator_user_row = safedb.query_one(
-                "SELECT user_id FROM users WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-                (peer_shared_id, peer_id)
-            )
-            if creator_user_row:
-                creator_user_id = creator_user_row['user_id']
-
-        if not creator_user_id:
+        if not linked_row:
             raise ValueError(f"Creator user not found for peer_shared_id {peer_shared_id}")
+
+        creator_user_id = linked_row['user_id']
 
         # Track which users we've already added
         added_user_ids = set()
@@ -211,6 +230,10 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'is_main': 1 if is_main else 0  # Store is_main flag
     }
 
+    # Include admin_grant for projection-time verification (if available)
+    if admin_grant_id:
+        event_data['admin_grant'] = admin_grant_id
+
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
@@ -230,7 +253,9 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
 
 def _get_admin_user_ids(recorded_by: str, db: Any) -> list[str]:
-    """Get all admin user IDs from the admin group.
+    """Get all admin user IDs from the admins table.
+
+    Uses the event-sourced admins table rather than group membership.
 
     Args:
         recorded_by: Peer perspective for queries
@@ -241,23 +266,13 @@ def _get_admin_user_ids(recorded_by: str, db: Any) -> list[str]:
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get network's admin group ID
-    network_row = safedb.query_one(
-        "SELECT admins_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+    # Query admins table directly (event-sourced admin grants)
+    admin_rows = safedb.query(
+        "SELECT DISTINCT user_id FROM admins WHERE recorded_by = ?",
         (recorded_by,)
     )
-    if not network_row or not network_row['admins_group_id']:
-        return []
 
-    admins_group_id = network_row['admins_group_id']
-
-    # Get all members of admin group
-    admin_members = safedb.query(
-        "SELECT DISTINCT user_id FROM group_members WHERE group_id = ? AND recorded_by = ?",
-        (admins_group_id, recorded_by)
-    )
-
-    return [member['user_id'] for member in admin_members]
+    return [row['user_id'] for row in admin_rows]
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
@@ -299,6 +314,36 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"channel.project() signature verification FAILED for channel_id={event_id}")
         return  # Reject unsigned or invalid signature
+
+    # Verify admin authorization via admin_grant chain
+    # Channels require admin_grant unless they're bootstrap channels (no admin_grant field)
+    admin_grant = event_data.get('admin_grant')
+    if admin_grant:
+        # Verify signer is authorized by admin_grant
+        # Get signer's user_id from linked_peers (user→peer is one-to-many)
+        linked_row = safedb.query_one(
+            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+            (signed_by, recorded_by)
+        )
+        if not linked_row:
+            log.warning(f"channel.project() signer user not found for {signed_by[:20]}...")
+            return  # Dependency not ready
+
+        signer_user_id = linked_row['user_id']
+
+        # Verify admin_grant references an admin event for signer's user
+        grant_row = safedb.query_one(
+            "SELECT user_id FROM admins WHERE admin_id = ? AND recorded_by = ?",
+            (admin_grant, recorded_by)
+        )
+        if not grant_row:
+            log.warning(f"channel.project() admin_grant {admin_grant[:20]}... not found - dependency not ready")
+            return  # Dependency not ready
+        if grant_row['user_id'] != signer_user_id:
+            log.warning(f"channel.project() admin_grant {admin_grant[:20]}... does not authorize signer {signer_user_id[:20]}...")
+            return  # Invalid authorization
+
+        log.info(f"channel.project() admin authorization verified for channel {event_id[:20]}...")
 
     # Insert into channels table (use REPLACE to overwrite stubs from user.project())
     log.warning(f"[CHANNEL_PROJECT] Inserting into channels table: channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}... recorded_at={recorded_at}")

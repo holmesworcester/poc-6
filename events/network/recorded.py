@@ -116,57 +116,71 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     """Check dependencies exist in valid_events for this peer.
 
     Returns list of missing dependency IDs (empty if all satisfied).
+
+    Design: Instead of explicitly listing deps per event type (brittle),
+    we treat ALL fields ending in '_id' as potential dependencies, then
+    skip those in an ignore list. This is more robust as new event types
+    automatically get dependency checking.
     """
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Common dependency fields across event types
-    # Note: 'key_id' is intentionally excluded because symmetric keys are local-only
-    # and not shared between peers. Events encrypted with a key are sent as plaintext
-    # during sync responses, so the recording peer should not be required to possess
-    # the creator's key event.
-    # Note: 'author_id' is the user_id of the message author (distinct from signed_by which is peer_shared_id)
-    dep_fields = ['group_id', 'channel_id', 'signed_by', 'peer_id', 'peer_shared_id', 'invite_id', 'message_id', 'user_id', 'author_id']
-
-    # User events reference invite_id (which contains group/channel metadata)
-    # They create stub group/channel rows from the invite during projection
     event_type = event_data.get('type')
-    if event_type == 'user':
-        dep_fields = ['signed_by', 'peer_id', 'invite_id']  # Depend on invite, not group/channel
-    elif event_type == 'network':
-        # Network events are now self-signed (signed_by='SELF') with no external dependencies
-        # They are the root of trust - groups and admin grants come after
-        dep_fields = []
-    elif event_type == 'admin':
-        # Admin events have different deps for bootstrap vs ongoing:
-        # - Bootstrap (signed_by == network_id): depends on network_id, user_id
-        # - Ongoing (signed_by == peer_shared_id): depends on signed_by, admin_grant, user_id
-        # We include all fields - check_deps skips fields that equal network_id (bootstrap case)
-        dep_fields = ['network_id', 'user_id', 'signed_by', 'admin_grant']
-    elif event_type == 'invite':
-        # Invite events need signer to exist for signature verification
-        # Network/group/channel are metadata and don't need to exist yet
+
+    # Fields to IGNORE as dependencies (whitelist of non-deps)
+    # These are either local-only, metadata, or have special handling
+    IGNORE_FIELDS = {
+        # Local-only fields (never shared between peers)
+        'key_id',           # Keys are received via group_key_shared, not direct sync
+        'private_key',      # Never shared
+        'ref_id',           # Internal recorded wrapper reference (handled separately)
+        'file_id',          # File blobs are raw data, not events in valid_events
+
+        # Metadata fields (not references to events)
+        'type',             # Event type string
+        'created_at',       # Timestamp
+        'recorded_at',      # Timestamp
+        'recorded_by',      # Peer perspective (not a dep)
+
+        # Self-references (event references itself or its container)
+        'network_id',       # Often self-referential for network events
+    }
+    # TODO: Once key_id fields are renamed to group_key_id/transit_key_id,
+    # they can become proper semantic dependencies with blocking
+
+    # Event types with NO dependencies (root events or self-signed)
+    NO_DEPS_TYPES = {
+        'network',          # Root of trust, self-signed
+        'peer_shared',      # Self-signed, peer_id is foreign local
+        'sync_connect',     # Ephemeral, auth handled in projection
+        'peer',             # Local peer event, no external deps
+        'group_key',        # Local key event
+        'transit_key',      # Local key event
+        'invite_accepted',  # Local-only, never synced, signed_by is local peer
+    }
+
+    if event_type in NO_DEPS_TYPES:
+        return []
+
+    # For invite events, only check signed_by (group/channel are metadata copied into invite)
+    # For message_deletion, only check signed_by (message may not exist yet)
+    SIGNER_ONLY_TYPES = {'invite', 'message_deletion'}
+    if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
-    # Phase 5: invite_proof removed - proof IS the signature on user/peer_shared events
-    elif event_type == 'message_deletion':
-        # Deletion events only depend on the signer (for signature verification)
-        # Message doesn't need to exist - deletion can arrive before the message
-        dep_fields = ['signed_by']
-    elif event_type == 'peer_shared':
-        # peer_shared events are self-signed and have no dependencies
-        # peer_id is always a foreign local dep (creator's local peer)
+    # For user events, check invite (which contains group/channel stubs) not group/channel directly
+    elif event_type == 'user':
+        dep_fields = ['signed_by', 'peer_id', 'invite_id']
+    else:
+        # DEFAULT: Find all fields ending in '_id' plus known reference fields
         dep_fields = []
-    elif event_type == 'sync_connect':
-        # sync_connect is ephemeral and can use EITHER invite_signature OR peer_signature for auth
-        # Don't enforce semantic deps - let projection attempt auth and drop if both fail
-        # peer_id is always foreign (sender's local peer)
-        dep_fields = []
-    elif event_type == 'admin':
-        # Admin events depend on network for signature verification
-        # For bootstrap: signed_by == network_id, verify with network_pubkey
-        # For ongoing: signed_by is peer_shared_id + admin_grant chain
-        # NOTE: We only check network_id here; ongoing admin_grant chain is verified in admin.project()
-        dep_fields = ['network_id']
+        for field, value in event_data.items():
+            if field in IGNORE_FIELDS:
+                continue
+            # Fields ending in '_id' are references
+            if field.endswith('_id') and isinstance(value, str) and len(value) > 10:
+                dep_fields.append(field)
+            # Also check known reference fields that don't end in '_id'
+            elif field in ('signed_by', 'added_by', 'created_by', 'admin_grant'):
+                dep_fields.append(field)
 
     missing_deps = []
 
@@ -193,33 +207,6 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         if not valid:
             log.warning(f"recorded.check_deps() missing dep: {field}={dep_id[:20]}... for peer={recorded_by[:20]}...")
             missing_deps.append(dep_id)
-
-    # Phase 7: Bootstrap invites use signed_by=network_id and don't need special blocking
-    # The invite.project() verifies the network signature directly from the stored network blob
-    # No legacy __BOOTSTRAP_FIRST_PEER__ blocking needed anymore
-
-    # For non-bootstrap invites, check if the creator is an admin
-    # If not, add a virtual dependency that will be satisfied when admin.project() runs
-    if event_type == 'invite':
-        signed_by = event_data.get('signed_by')
-        network_id = event_data.get('network_id')
-        log.warning(f"[CHECK_DEPS_INVITE] signed_by={signed_by[:20] if signed_by else 'None'}... network_id={network_id[:20] if network_id else 'None'}...")
-        # Only check admin status for non-bootstrap invites
-        if signed_by != network_id:
-            created_by = event_data.get('created_by')
-            log.warning(f"[CHECK_DEPS_INVITE] Non-bootstrap invite, created_by={created_by[:20] if created_by else 'None'}...")
-            if created_by:
-                from events.identity import invite as invite_module
-                is_admin_result = invite_module.is_admin(created_by, recorded_by, db)
-                log.warning(f"[CHECK_DEPS_INVITE] is_admin({created_by[:20]}...) = {is_admin_result}")
-                if not is_admin_result:
-                    # Creator is not yet an admin from our perspective
-                    # Block on a virtual dependency that admin.project() will notify
-                    admin_dep = f"admin_status_{created_by}"
-                    log.warning(f"[CHECK_DEPS_INVITE] Adding admin_status dep: {admin_dep}")
-                    missing_deps.append(admin_dep)
-        else:
-            log.warning(f"[CHECK_DEPS_INVITE] Bootstrap invite (signed_by == network_id), skipping admin check")
 
     if missing_deps:
         log.debug(f"recorded.check_deps() total missing deps: {missing_deps}")
@@ -427,14 +414,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # NOTE: Invite validation moved to invite.project() for better modularity
     # Invites from URLs (with invite_accepted) skip validation in projector
     # Invites from sync are validated (signature, network, creator) in projector
-
-    if event_type == 'invite_accepted':
-        # invite_accepted events are root-of-trust for joiners - they capture out-of-band
-        # trusted data from the invite link. Only self-created ones are valid.
-        # However, we still need to check signed_by dependency (peer event must exist first
-        # for foreign key constraints in transit_prekeys table)
-        # Do NOT skip dep check - we need peer event to be projected first
-        pass  # signed_by is peer_id for invite_accepted
+    # NOTE: invite_accepted is now in NO_DEPS_TYPES in check_deps() since it's local-only
 
     if not skip_dep_check:
         missing_deps = check_deps(event_data, recorded_by, db)
@@ -491,7 +471,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         projected_id = ref_id
     elif event_type == 'group_key':
         from events.group import group_key
-        group_key.project(ref_id, recorded_by, db)
+        group_key.project(ref_id, recorded_by, recorded_at, db)
         projected_id = ref_id
     elif event_type == 'peer_shared':
         from events.identity import peer_shared
@@ -584,6 +564,14 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'network_intro':
         from events.network import intro as network_intro
         projected_id = network_intro.project(ref_id, recorded_by, recorded_at, db)
+
+    # Only mark event as valid if projection succeeded (projected_id is not None)
+    # Events that fail projection (authorization, missing data) should NOT be marked valid
+    # They will be retried later when dependencies are satisfied
+    if projected_id is None:
+        log.warning(f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid")
+        timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
+        return [None, recorded_id]
 
     # Mark event as valid for this peer
     log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")

@@ -43,8 +43,9 @@ def test_1mb_file_download_with_progress():
     )
 
     # Bob joins
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"✓ Bob joined network")
 
     db.commit()
@@ -190,8 +191,9 @@ def test_50mb_file_download():
     )
 
     # Bob joins
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"✓ Bob joined network")
 
     db.commit()

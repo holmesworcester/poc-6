@@ -261,15 +261,16 @@ def test_users_and_group_members_have_scoping():
     bob_db = create_safe_db(db, recorded_by=bob_id)
 
     # Alice sees a user
+    # Schema: user_id, name, network_id, created_at, user_pubkey, recorded_by, recorded_at
     alice_db.execute(
-        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ('user1', 'peer1', 'User One', 'net1', 1000, 'invite_key', alice_id, 1001)
+        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ('user1', 'User One', 'net1', 1000, 'invite_key', alice_id, 1001)
     )
 
     # Bob sees same user_id but different data
     bob_db.execute(
-        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ('user1', 'peer1', 'Different Name', 'net1', 2000, 'other_key', bob_id, 2001)
+        "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ('user1', 'Different Name', 'net1', 2000, 'other_key', bob_id, 2001)
     )
 
     db.commit()

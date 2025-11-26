@@ -14,7 +14,7 @@ Tests:
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, link_invite, link, invite
+from events.identity import user, link_invite, link, invite, peer, network
 from events.group import group_member
 from tests.utils import tick_helper
 
@@ -101,7 +101,9 @@ def test_linked_device_inherits_admin_privileges():
     # Bob joins via device 2's invite
     print("\n=== Bob joins via device 2's invite ===")
 
+    bob_peer_id = peer.create(t_ms=6000, db=db)
     bob = user.join(
+        peer_id=bob_peer_id,
         invite_link=bob_invite_link,
         name='Bob',
         t_ms=6000,
@@ -119,12 +121,12 @@ def test_linked_device_inherits_admin_privileges():
     print("\n=== Verifying Bob's membership ===")
 
     # Get network's all_users group from Alice's device
-    network_row = db.query_one(
-        "SELECT all_users_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (alice_device1['peer_id'],)
+    # Use network.get_all_users_group_id() which queries groups by signed_by=network_id
+    all_users_group_id = network.get_all_users_group_id(
+        alice_device1['network_id'],
+        alice_device1['peer_id'],
+        db
     )
-    assert network_row, "Network should exist"
-    all_users_group_id = network_row['all_users_group_id']
 
     # Check if Bob is in all_users group
     bob_is_member = group_member.is_member(

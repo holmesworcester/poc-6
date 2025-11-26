@@ -476,8 +476,7 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
         print(f"  using invite #{invite_num}")
 
     # Create the peer first
-    peer_result = peer.create(t_ms=session.current_time_ms, db=session.db)
-    peer_id = peer_result[0]  # peer.create returns (peer_id, peer_shared_id)
+    peer_id = peer.create(t_ms=session.current_time_ms, db=session.db)
 
     session.db.commit()
     session.current_time_ms += 100

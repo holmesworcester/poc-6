@@ -40,9 +40,10 @@ def test_connection_establishment():
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
@@ -101,9 +102,10 @@ def test_connection_expiry():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
 
     db.commit()
 
@@ -158,9 +160,10 @@ def test_sync_uses_connections():
         t_ms=1500,
         db=db
     )
-    bob_peer_id, bob_peer_shared_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
 
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
 
     db.commit()
 

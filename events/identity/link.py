@@ -220,9 +220,11 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Failed to decode link URL: {e}")
 
-    # 1. Create new peer (local + shared)
-    peer_id, peer_shared_id = peer.create(t_ms=t_ms, db=db)
-    log.info(f"link.join() created new peer: {peer_id[:20]}...")
+    # 1. Create new local peer
+    peer_id = peer.create(t_ms=t_ms, db=db)
+    log.info(f"link.join() created new local peer: {peer_id[:20]}...")
+
+    # peer_shared_id will be created later after we have the link_invite info
 
     # Phase: Project network event FIRST if present in link URL
     # The network blob is the root of the dependency cascade:
@@ -325,6 +327,17 @@ def join(link_url: str, t_ms: int, db: Any) -> dict[str, Any]:
         network_id = link_data['network_id']
 
     log.info(f"link.join() extracted link_prekey_id={link_prekey_id[:20]}..., user_id={user_id[:20]}...")
+
+    # 2. Create peer_shared signed by the link invite (proving access to the invite)
+    from events.identity import peer_shared
+    peer_shared_id = peer_shared.create(
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db,
+        invite_id=link_invite_id,
+        invite_private_key=link_private_key
+    )
+    log.info(f"link.join() created peer_shared: {peer_shared_id[:20]}...")
 
     # Create invite_accepted event FIRST to capture invite link data for event-sourcing
     # Use the SAME invite_accepted as user.join() - this ensures the same code path
