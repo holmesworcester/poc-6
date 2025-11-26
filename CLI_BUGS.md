@@ -2,7 +2,7 @@
 
 Bugs discovered through manual testing of the CLI prototype.
 
-## Bug 1: Joining peers have `network_???`
+## Bug 1: ✅ FIXED - Joining peers have `network_???`
 
 **Symptom:** After `new-peer --name bob --device desktop --invite 1`, Bob's account shows `network_???` instead of the actual network ID.
 
@@ -25,7 +25,7 @@ ACCOUNTS:
 
 ---
 
-## Bug 2: Joining peers can't create invites
+## Bug 2: ✅ FIXED - Joining peers can't create invites
 
 **Symptom:** When Bob (a joiner) tries to `create-invite`, it fails with "no network joined". <!-- bob should only be able to create invites if he is admin. Bob should be able to add devices though. -->
 
@@ -45,7 +45,7 @@ ACCOUNTS:
 
 ---
 
-## Bug 3: Joining peers don't see users in sidebar
+## Bug 3: ✅ FIXED - Joining peers don't see users in sidebar
 
 **Symptom:** Alice sees the users list in her sidebar, but Bob and Charlie don't.
 
@@ -71,7 +71,7 @@ SIDEBAR (bob (desktop)):
 
 ---
 
-## Bug 4: Excessive debug logging <!-- Make it so that logs are rational and we can see everything but only if we want/need to-->
+## Bug 4: ✅ FIXED - Excessive debug logging
 
 **Symptom:** Running CLI commands produces thousands of lines of debug output like:
 ```
@@ -86,6 +86,27 @@ queues.blocked.notify_event_valid() no events waiting for event_id=...
 **Location:** Various modules using `log.info()` and `log.warning()`
 
 **Impact:** Low - Usability issue, makes CLI hard to use
+
+---
+
+## Bug 5: ✅ FIXED - Error hint references non-existent command
+
+**Symptom:** When a non-admin tries to `create-invite`, the error hint suggests using `link-device`, but that command doesn't exist.
+
+**Observed:**
+```
+> create-invite
+✗ only admins can create invites
+  hint: use 'link-device' to add another device to your account
+```
+
+**Expected:** Don't suggest commands that don't exist.
+
+**Root cause:** The hint was added in anticipation of the device linking feature, but the command was never implemented.
+
+**Location:** `cli.py:483` - Error handler in `cmd_create_invite()`
+
+**Impact:** Low - Confusing UX, suggests feature that doesn't exist
 
 ---
 

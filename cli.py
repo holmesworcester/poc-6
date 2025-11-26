@@ -480,7 +480,6 @@ def cmd_create_invite(session: CLISession):
     except ValueError as e:
         if "not an admin" in str(e).lower() or "admin" in str(e).lower():
             print("✗ only admins can create invites")
-            print("  hint: use 'link-device' to add another device to your account")
         else:
             print(f"✗ {e}")
         return
