@@ -50,6 +50,7 @@ import sqlite3
 import sys
 import argparse
 import logging
+import shlex
 from typing import Optional, Dict, List, Any
 
 # Configure logging BEFORE importing any modules that use logging
@@ -641,7 +642,11 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
     if not line:
         return True
 
-    parts = line.split()
+    try:
+        parts = shlex.split(line)
+    except ValueError as e:
+        print(f"error: {e}")
+        return True
     cmd = parts[0]
 
     try:
@@ -768,8 +773,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         return False
     except Exception as e:
         print(f"error: {e}")
-        import traceback
-        traceback.print_exc()
+        if _verbose:
+            import traceback
+            traceback.print_exc()
         return True
 
 
