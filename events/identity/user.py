@@ -822,6 +822,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         'user_id': user_id,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,
+        'network_id': invite_data.get('network_id'),  # From invite
         'group_id': group_id,
         'channel_id': channel_id,
         'key_id': key_id,
