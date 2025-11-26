@@ -19,13 +19,11 @@ from events.group import group_member
 from tests.utils import tick_helper
 
 
-def test_linked_device_inherits_admin_privileges():
+def test_linked_device_inherits_admin_privileges(fresh_db):
     """Linked device inherits admin privileges from user."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network (becomes admin) ===")
 

@@ -20,13 +20,11 @@ from events.content import message
 from tests.utils import tick_helper
 
 
-def test_linked_devices_bidirectional_messaging():
+def test_linked_devices_bidirectional_messaging(fresh_db):
     """Messages sync bidirectionally between linked devices."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network ===")
 

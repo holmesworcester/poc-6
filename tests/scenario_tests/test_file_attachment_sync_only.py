@@ -18,13 +18,11 @@ from events.content import channel, message, message_attachment
 import tick
 
 
-def test_file_attachment_sync_only():
+def test_file_attachment_sync_only(fresh_db):
     """Test that file attachment events are properly synced to Bob."""
 
     # Setup: Initialize in-memory database
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create networks and invite ===")
 

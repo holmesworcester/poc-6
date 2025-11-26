@@ -18,13 +18,11 @@ from events.network import sync_file
 import tick
 
 
-def test_pause_and_resume_file_download():
+def test_pause_and_resume_file_download(fresh_db):
     """Test pausing and resuming a file download."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 
@@ -211,13 +209,11 @@ def test_pause_and_resume_file_download():
     print(f"\n✅ Pause/Resume test passed!")
 
 
-def test_cancel_file_download():
+def test_cancel_file_download(fresh_db):
     """Test cancelling a file download mid-transfer."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 

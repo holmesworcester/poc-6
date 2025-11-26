@@ -12,7 +12,7 @@ from events.identity import user
 from events.content import channel, message
 
 
-def test_alice_sends_to_herself():
+def test_alice_sends_to_herself(fresh_db):
     """Alice creates her identity, a group, a channel, and sends messages to herself."""
 
     # Setup: Initialize in-memory database

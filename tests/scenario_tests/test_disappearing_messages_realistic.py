@@ -21,12 +21,10 @@ import purge_expired
 import tick
 
 
-def test_alice_creates_disappearing_channel_and_sends_messages():
+def test_alice_creates_disappearing_channel_and_sends_messages(fresh_db):
     """Alice creates channel with disappearing messages and verifies expiration."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -89,12 +87,10 @@ def test_alice_creates_disappearing_channel_and_sends_messages():
     print("\n✅ Disappearing messages expiration test passed")
 
 
-def test_alice_and_bob_see_messages_disappear_together():
+def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     """Alice and Bob both see messages disappear at the same time."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network, Bob joins ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -177,12 +173,10 @@ def test_alice_and_bob_see_messages_disappear_together():
     print("\n✅ Multi-peer convergence test passed")
 
 
-def test_channel_ttl_update_affects_new_messages():
+def test_channel_ttl_update_affects_new_messages(fresh_db):
     """Updating a channel's TTL affects new messages."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)

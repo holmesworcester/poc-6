@@ -20,13 +20,11 @@ from events.network import intro as intro_module
 import network_config
 
 
-def test_nat_hole_punch_simple():
+def test_nat_hole_punch_simple(fresh_db):
     """Test basic NAT hole punch: Alice introduces Bob and Charlie."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     # Configure network: low latency, no loss
     network_config.set_network_config(

@@ -23,12 +23,10 @@ from events.group import group_member
 from tests.utils import tick_helper
 
 
-def test_message_deletion_self():
+def test_message_deletion_self(fresh_db):
     """Test self-deletion: author deletes their own message."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -107,12 +105,10 @@ def test_message_deletion_self():
 
 
 @pytest.mark.xfail(reason="Multi-peer sync convergence issue - deletion events not syncing between peers")
-def test_message_deletion_admin():
+def test_message_deletion_admin(fresh_db):
     """Test admin deletion: admin deletes another user's message."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network, Bob joins ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -210,12 +206,10 @@ def test_message_deletion_admin():
 
 
 @pytest.mark.xfail(reason="Multi-peer sync convergence issue - deletion events not syncing between peers")
-def test_message_deletion_unauthorized():
+def test_message_deletion_unauthorized(fresh_db):
     """Test that non-admin cannot delete other's messages."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network, Bob and Charlie join ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -297,12 +291,10 @@ def test_message_deletion_unauthorized():
 
 
 @pytest.mark.skip(reason="Key propagation issue: events blocked waiting for missing keys (same as linked device issues)")
-def test_message_deletion_ordering():
+def test_message_deletion_ordering(fresh_db):
     """Test that deletion works regardless of whether message or deletion arrives first."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice and Bob ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)

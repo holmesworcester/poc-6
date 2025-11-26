@@ -18,13 +18,11 @@ from events.network import sync_file
 import tick
 
 
-def test_progress_bytes_accuracy():
+def test_progress_bytes_accuracy(fresh_db):
     """Test that bytes_received matches actual ciphertext bytes."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 
@@ -147,13 +145,11 @@ def test_progress_bytes_accuracy():
     print("\n✅ Progress bytes accuracy test passed!")
 
 
-def test_speed_and_eta_accuracy():
+def test_speed_and_eta_accuracy(fresh_db):
     """Test that speed and ETA calculations are accurate."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 
@@ -282,13 +278,11 @@ def test_speed_and_eta_accuracy():
     print("\n✅ Speed and ETA accuracy test passed!")
 
 
-def test_bytes_increase_monotonically():
+def test_bytes_increase_monotonically(fresh_db):
     """Test that bytes_received increases monotonically during download."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 

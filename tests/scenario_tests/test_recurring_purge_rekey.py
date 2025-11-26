@@ -16,12 +16,10 @@ import tick
 import crypto
 
 
-def test_tick_runs_message_rekey_and_purge():
+def test_tick_runs_message_rekey_and_purge(fresh_db):
     """Test that tick() runs message rekey and purge cycle for forward secrecy."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
     tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Alice creates network ===")
@@ -142,12 +140,10 @@ def test_tick_runs_message_rekey_and_purge():
     print("\n✅ tick() message rekey and purge test passed")
 
 
-def test_tick_runs_purge_expired():
+def test_tick_runs_purge_expired(fresh_db):
     """Test that tick() runs purge_expired to remove expired events based on TTL."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
     tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Alice creates network ===")
@@ -211,12 +207,10 @@ def test_tick_runs_purge_expired():
     print("\n✅ tick() purge_expired test passed")
 
 
-def test_end_to_end_forward_secrecy_with_tick():
+def test_end_to_end_forward_secrecy_with_tick(fresh_db):
     """End-to-end test: delete message, run tick(), verify forward secrecy."""
 
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
     tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Alice creates network ===")

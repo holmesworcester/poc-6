@@ -17,13 +17,11 @@ from tests.utils import tick_helper
 import tick
 
 
-def test_connection_establishment():
+def test_connection_establishment(fresh_db):
     """Test that sync_connect establishes connections between peers."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network and users ===")
 
@@ -83,13 +81,11 @@ def test_connection_establishment():
     print("✓ Connection timestamp refreshed")
 
 
-def test_connection_expiry():
+def test_connection_expiry(fresh_db):
     """Test that expired connections are purged."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network and establish connection ===")
 
@@ -141,13 +137,11 @@ def test_connection_expiry():
         print("✓ Expired connections were purged")
 
 
-def test_sync_uses_connections():
+def test_sync_uses_connections(fresh_db):
     """Test that sync preferentially uses established connections over prekeys."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network and users ===")
 

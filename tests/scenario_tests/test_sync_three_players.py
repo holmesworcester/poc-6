@@ -14,13 +14,11 @@ from events.identity import user, invite, peer
 from tests.utils import tick_helper
 
 
-def test_sync_three_players_convergence():
+def test_sync_three_players_convergence(fresh_db):
     """Test that shareable events sync correctly between Alice and Bob."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     # Alice creates a network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
