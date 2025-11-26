@@ -30,6 +30,71 @@ TARGET_FPR = 0.025  # ~2.5% wasted bandwidth from false positives
 
 
 # ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _normalize_peer_id(peer_id: str | bytes) -> str:
+    """Normalize peer_id to base64 string format for logging.
+
+    Handles both bytes and string inputs, returning consistent format.
+    """
+    if isinstance(peer_id, bytes):
+        return crypto.b64encode(peer_id)
+    return peer_id
+
+
+def _create_transit_key_dict(key_id: bytes | str, key_material: bytes, key_type: str = 'symmetric') -> dict[str, Any]:
+    """Create standardized transit key dict for wrapping operations.
+
+    Args:
+        key_id: Key identifier (bytes or base64 string)
+        key_material: Raw key material (bytes)
+        key_type: Type of key - 'symmetric' (default) or 'asymmetric'
+
+    Returns:
+        Dict with 'id', 'key', and 'type' fields
+    """
+    if isinstance(key_id, str):
+        key_id = crypto.b64decode(key_id)
+
+    return {
+        'id': key_id,
+        'key': key_material,
+        'type': key_type
+    }
+
+
+def _decode_event_id(event_id: str) -> bytes:
+    """Decode base64-encoded event ID to bytes."""
+    return crypto.b64decode(event_id)
+
+
+def _validate_sync_request(sync_data: dict[str, Any]) -> tuple[bool, str]:
+    """Validate sync request has all required fields.
+
+    Returns:
+        (is_valid, error_message)
+    """
+    required_fields = {
+        'peer_id': 'Requester peer ID',
+        'signed_by': 'Requester peer_shared ID',
+        'response_transit_key_id': 'Response transit key ID',
+        'response_transit_key': 'Response transit key material',
+    }
+
+    for field, desc in required_fields.items():
+        if not sync_data.get(field):
+            return False, f"Missing {desc} ({field})"
+
+    window_fields = {'window_id', 'window_min', 'window_max', 'bloom'}
+    for field in window_fields:
+        if sync_data.get(field) is None:
+            return False, f"Missing window/bloom data ({field})"
+
+    return True, ""
+
+
+# ============================================================================
 # Bloom Filter Functions
 # ============================================================================
 
@@ -441,12 +506,7 @@ def send_request_to_all(t_ms: int, db: Any) -> None:
 
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
-
-        # peer_id from DB might be bytes or base64 string - standardize to base64 string for logging
-        if isinstance(peer_id, bytes):
-            peer_id_str = crypto.b64encode(peer_id)
-        else:
-            peer_id_str = peer_id
+        peer_id_str = _normalize_peer_id(peer_id)
 
         # Find this peer's peer_shared_id
         peer_shared_id = None
@@ -533,11 +593,8 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     then sync operates on those established connections.
     """
 
-    # Standardize encoding for logging
-    if isinstance(from_peer_id, bytes):
-        peer_id_str = crypto.b64encode(from_peer_id)
-    else:
-        peer_id_str = from_peer_id
+    # Normalize peer_id for logging
+    peer_id_str = _normalize_peer_id(from_peer_id)
 
     # Query active connections (device-wide, no recorded_by)
     unsafedb = create_unsafe_db(db)
@@ -669,11 +726,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     if conn:
         # Use established connection's transit key
-        to_key = {
-            'id': crypto.b64decode(conn['response_transit_key_id']),
-            'key': conn['response_transit_key'],
-            'type': 'symmetric'
-        }
+        to_key = _create_transit_key_dict(conn['response_transit_key_id'], conn['response_transit_key'])
         log.info(f"send_request: using established connection with {to_peer_shared_id[:20]}...")
     else:
         # Fall back to transit prekey for initial contact (asymmetric)
@@ -741,13 +794,10 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 
     log.info(f"sync.project() processing sync request: window_id={window_id}, window_range={window_min}-{window_max}")
 
-    if not requester_peer_id or not requester_peer_shared_id or not response_transit_key_id or not response_transit_key_b64:
-        log.info(f"Invalid sync request: missing requester info")
-        return  # Invalid sync request
-
-    if window_id is None or window_min is None or window_max is None or not bloom_b64:
-        log.info(f"Missing bloom/window data in sync request")
-        return  # Invalid bloom-based sync request
+    is_valid, error_msg = _validate_sync_request(sync_data)
+    if not is_valid:
+        log.info(f"Invalid sync request: {error_msg}")
+        return
 
     # Only respond to sync requests from peers we recognize (have their peer_shared valid)
     # or that have an active connection entry. This allows multi-device/link bootstrap
@@ -781,13 +831,8 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 
     # Build transit_key dict for wrapping responses
     # response_transit_key_id is already base64 string (key ID from DB)
-    # Decode it to bytes for crypto hint
-    transit_key_id_bytes = crypto.b64decode(response_transit_key_id)
-    transit_key_dict = {
-        'id': transit_key_id_bytes,
-        'key': crypto.b64decode(response_transit_key_b64),
-        'type': 'symmetric'
-    }
+    transit_key_dict = _create_transit_key_dict(response_transit_key_id, crypto.b64decode(response_transit_key_b64))
+    transit_key_id_bytes = transit_key_dict['id']
     log.debug(f"[SYNC_PROJECT] extracted transit_key_id={response_transit_key_id} (len={len(response_transit_key_id)} chars, decoded to {len(transit_key_id_bytes)} bytes)")
 
     # Decode bloom filter
