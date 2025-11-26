@@ -34,13 +34,11 @@ import crypto
 from tests.utils import tick_helper
 
 
-def test_admin_group_workflow():
+def test_admin_group_workflow(fresh_db):
     """Test admin workflow: Alice creates network, Bob joins, Alice makes Bob admin."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
     tick.reset_state(db)  # Reset tick state for clean test
 
     print("\n=== Setup: Create network and invite ===")

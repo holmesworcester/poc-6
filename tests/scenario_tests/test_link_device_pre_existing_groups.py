@@ -20,13 +20,11 @@ from events.group import group, group_member
 from tests.utils import tick_helper
 
 
-def test_link_device_sees_pre_existing_groups():
+def test_link_device_sees_pre_existing_groups(fresh_db):
     """Second device can see groups created before link invite."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network on first device ===")
 

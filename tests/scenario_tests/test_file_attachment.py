@@ -23,13 +23,11 @@ import tick
 import crypto
 
 
-def test_two_party_file_attachment_and_sync():
+def test_two_party_file_attachment_and_sync(fresh_db):
     """Complete file attachment flow with two peers and sync."""
 
     # Setup: Initialize in-memory database
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create networks and invite ===")
 

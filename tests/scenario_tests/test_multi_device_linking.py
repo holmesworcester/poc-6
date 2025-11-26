@@ -20,13 +20,11 @@ from events.content import message
 from tests.utils import tick_helper
 
 
-def test_alice_links_phone_to_laptop():
+def test_alice_links_phone_to_laptop(fresh_db):
     """Alice links her phone and laptop via link URL."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network on phone ===")
 
@@ -196,13 +194,11 @@ def test_alice_links_phone_to_laptop():
     print(f"\n✅ All assertions passed!")
 
 
-def test_alice_laptop_joins_after_phone_has_messages():
+def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
     """Alice's laptop joins after phone already has messages."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network and sends messages ===")
 
@@ -293,13 +289,11 @@ def test_alice_laptop_joins_after_phone_has_messages():
     print(f"✅ Laptop received all historical messages after linking!")
 
 
-def test_three_devices_all_linked():
+def test_three_devices_all_linked(fresh_db):
     """Alice links phone, laptop, and tablet - all three share messages."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network on phone ===")
 

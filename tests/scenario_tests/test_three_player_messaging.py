@@ -17,13 +17,11 @@ from events.content import message
 from tests.utils import tick_helper
 
 
-def test_three_player_messaging():
+def test_three_player_messaging(fresh_db):
     """Three peers: Alice creates network, Bob joins, Charlie separate."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create networks and invite ===")
 

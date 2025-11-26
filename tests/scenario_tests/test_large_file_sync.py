@@ -21,13 +21,11 @@ from events.network import sync_file
 import tick
 
 
-def test_1mb_file_download_with_progress():
+def test_1mb_file_download_with_progress(fresh_db):
     """Test downloading a 1 MB file with progress tracking."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 
@@ -170,13 +168,11 @@ def test_1mb_file_download_with_progress():
 
 
 @pytest.mark.skip(reason="Too slow for regular test runs - takes 2+ minutes")
-def test_50mb_file_download():
+def test_50mb_file_download(fresh_db):
     """Test downloading a very large 50 MB file."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 

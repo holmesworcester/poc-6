@@ -20,13 +20,11 @@ from events.group import group, group_member
 from tests.utils import tick_helper
 
 
-def test_link_device_sees_new_groups_after_invite():
+def test_link_device_sees_new_groups_after_invite(fresh_db):
     """Second device can see groups created between invite creation and device linking."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Alice creates network and Group A ===")
 

@@ -21,13 +21,11 @@ import store
 from tests.utils import assert_convergence, assert_reprojection, assert_idempotency
 
 
-def test_user_removal_blocks_sync_but_preserves_history():
+def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
     """Test that removing a user blocks future sync but preserves their message history."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network and users ===")
 
@@ -141,13 +139,11 @@ def test_user_removal_blocks_sync_but_preserves_history():
     print("\n✅ User removal test passed!")
 
 
-def test_authorization_rules():
+def test_authorization_rules(fresh_db):
     """Test authorization rules for peer and user removal."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network ===")
 
@@ -272,13 +268,11 @@ def test_authorization_rules():
     print("\n✅ Authorization rules test passed!")
 
 
-def test_receive_path_removal_check():
+def test_receive_path_removal_check(fresh_db):
     """Test that removal checks work during sync.receive()."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network with Alice and Bob ===")
 
@@ -343,13 +337,11 @@ def test_receive_path_removal_check():
     print("\n✅ Receive path removal check test passed!")
 
 
-def test_user_removal_rotates_group_keys():
+def test_user_removal_rotates_group_keys(fresh_db):
     """Test that user removal triggers group key rotation."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network with users ===")
 
@@ -418,13 +410,11 @@ def test_user_removal_rotates_group_keys():
     print("\n✅ User removal group key rotation test passed!")
 
 
-def test_peer_removal_last_device_rotates_keys():
+def test_peer_removal_last_device_rotates_keys(fresh_db):
     """Test that peer removal triggers group key rotation."""
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network with users ===")
 
@@ -493,7 +483,7 @@ def test_peer_removal_last_device_rotates_keys():
     print("\n✅ Peer removal group key rotation test passed!")
 
 
-def test_removed_peer_cannot_sync_messages():
+def test_removed_peer_cannot_sync_messages(fresh_db):
     """Verify that a removed peer cannot sync messages (realistic scenario test).
 
     This test follows the three-player messaging pattern:
@@ -503,9 +493,7 @@ def test_removed_peer_cannot_sync_messages():
     """
 
     # Setup
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
+    db = fresh_db
 
     print("\n=== Setup: Create network with Alice and Bob ===")
 
