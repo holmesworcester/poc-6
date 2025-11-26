@@ -843,6 +843,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
     # Query random candidates to share (LIMIT to avoid O(n) scans for large event counts)
     # Random sampling ensures we eventually cover all events across multiple rounds.
     # Bloom filter prevents re-sending events receiver already has.
+    # TODO: This optimization breaks test_sync_perf_10k - need to fix the test or tune MAX_CANDIDATES
     MAX_CANDIDATES = 2000  # Bound the scan per response
     safedb = create_safe_db(db, recorded_by=from_peer_id)
     shareable_rows = safedb.query(
