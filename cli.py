@@ -444,14 +444,21 @@ def cmd_create_channel(session: CLISession, name: str):
     # Get all_users group for the channel
     all_users_group_id = network.get_all_users_group_id(account.network_id, account.peer_id, session.db)
 
-    result = channel.create(
-        name=name,
-        peer_id=account.peer_id,
-        peer_shared_id=account.peer_shared_id,
-        t_ms=session.current_time_ms,
-        db=session.db,
-        group_id=all_users_group_id
-    )
+    try:
+        result = channel.create(
+            name=name,
+            peer_id=account.peer_id,
+            peer_shared_id=account.peer_shared_id,
+            t_ms=session.current_time_ms,
+            db=session.db,
+            group_id=all_users_group_id
+        )
+    except ValueError as e:
+        if "not authorized" in str(e).lower() or "admin" in str(e).lower():
+            print("✗ only admins can create channels")
+        else:
+            print(f"✗ {e}")
+        return
 
     session.db.commit()
     session.current_time_ms += 100

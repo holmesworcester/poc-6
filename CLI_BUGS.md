@@ -158,6 +158,28 @@ Traceback (most recent call last):
 
 ---
 
+## Bug 8: ✅ FIXED - create-channel shows internal user ID in error
+
+**Symptom:** When non-admin tries to create a channel, error shows raw user ID.
+
+**Observed:**
+```
+> create-channel random
+error: User JguadnT/AXKO1K+OQNxy8Q== not authorized to create channels (only admins can)
+```
+
+**Expected:** Clean error message without internal IDs.
+
+**Root cause:** ValueError from backend not caught and translated.
+
+**Location:** `cli.py:447-455` - `cmd_create_channel()`
+
+**Fix:** Catch ValueError and show "✗ only admins can create channels"
+
+**Impact:** Low - Confusing error message
+
+---
+
 ## Suggested Fixes
 
 ### Fix for Bugs 1, 2, 3 (network_id not available) 
