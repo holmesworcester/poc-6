@@ -309,35 +309,34 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     from db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # 3. Create bootstrap user invite signed by network_id
-    # Note: We need group_id, channel_id, key_id for the invite, but they don't exist yet!
-    # Solution: Create placeholder IDs that will be filled in after content is created
-    # For now, use empty strings - the invite just needs to authorize user creation
-    # Admin privileges are granted via admin event after join (not via invite)
+    # Stage 3b: Create bootstrap user invite WITHOUT placeholder IDs
+    # Don't reference content events that don't exist yet - joiners discover them via sync
+    # This eliminates the placeholder IDs (empty strings) entirely
     invite_id, invite_private_key, invite_pubkey = invite.create_bootstrap_user_invite(
         network_id=network_id,
         network_private_key=network_private_key,
-        group_id='',  # Placeholder - groups created after peer_shared
-        channel_id='',  # Placeholder - channel created after peer_shared
-        key_id='',  # Placeholder - key created with group
+        group_id='',  # Not available yet - content created after peer_shared
+        channel_id='',  # Not available yet - content created after peer_shared
+        key_id='',  # Not available yet - content created after peer_shared
         peer_id=peer_id,
         peer_shared_id='PENDING',  # Will be set to peer_shared_id after it's created
         t_ms=t_ms + 20,
         db=db
     )
-    log.info(f"new_network() created bootstrap user invite signed by network: {invite_id[:20]}...")
+    log.info(f"new_network() created bootstrap user invite: {invite_id[:20]}...")
 
     # Build invite_link for join() - must match the format expected by join()
     import json
     invite_blob = store.get(invite_id, db)
 
-    # Generate deterministic prekey ID from public key hash
-    invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey)[:16])
+    # Generate deterministic prekey ID from public key hash (for bootstrap user invite)
+    # This is needed for invite_accepted.project() to restore invite secrets
+    bootstrap_invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey)[:16])
 
     invite_link_data = {
         'invite_blob': base64.urlsafe_b64encode(invite_blob).decode().rstrip('='),
         'invite_id': invite_id,
-        'invite_prekey_id': invite_prekey_id,
+        'invite_prekey_id': bootstrap_invite_prekey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': 'PENDING',  # Will connect to self after peer_shared created
         'ip': '127.0.0.1',
@@ -346,7 +345,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     invite_json = json.dumps(invite_link_data, separators=(',', ':'), sort_keys=True)
     invite_code = base64.urlsafe_b64encode(invite_json.encode()).decode().rstrip('=')
     invite_link = f"quiet://invite/{invite_code}"
-    log.info(f"new_network() built invite_link with invite_prekey_id={invite_prekey_id[:20]}...")
+    log.info(f"new_network() built invite_link with invite_prekey_id={bootstrap_invite_prekey_id[:20]}...")
 
     # 4. Join using own invite (creates user_id)
     # Note: join() expects peer to already have peer_self entry
@@ -368,8 +367,10 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     user_private_key = join_result['user_private_key']
     log.info(f"new_network() created user via bootstrap join: user_id={user_id[:20]}...")
 
-    # 5. Create peer invite (mode=peer) signed by user_id
-    peer_invite_id, peer_invite_private_key, peer_invite_pubkey = invite.create_peer_invite(
+    # 5-7. Delegate to peer_shared.join() for canonical peer creation flow
+    # This reuses the same code as user.join(), eliminating duplication
+    # Create peer invite (mode=peer) signed by user_id
+    peer_invite_id, peer_invite_private_key, _ = invite.create_peer_invite(
         user_id=user_id,
         signer_id=user_id,  # First peer: signed by user
         signer_private_key=user_private_key,
@@ -382,26 +383,26 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     # Project the peer invite so it's in invites table
     invite.project(peer_invite_id, peer_id, t_ms + 41, db)
 
-    # 6. Create peer_shared signed by peer invite (THE canonical peer_shared)
+    # Delegate to peer_shared.join() - the canonical peer-joining operation
+    # (reused by both user.join() and user.new_network())
     from events.identity import peer_shared
-    peer_shared_id = peer_shared.create(
+    peer_shared_join_result = peer_shared.join(
         peer_id=peer_id,
+        peer_invite_id=peer_invite_id,
+        peer_invite_private_key=peer_invite_private_key,
+        user_id=user_id,
+        prekey_id=bootstrap_invite_prekey_id,  # Bootstrap user invite's prekey ID
         t_ms=t_ms + 50,
-        db=db,
-        invite_id=peer_invite_id,
-        invite_private_key=peer_invite_private_key
+        db=db
     )
-    log.info(f"new_network() created invite-signed peer_shared: {peer_shared_id[:20]}...")
-
-    # Project the peer_shared - this sets peer_self.user_id via projection
-    from events.network import recorded
-    recorded_id = recorded.create(peer_shared_id, peer_id, t_ms + 51, db, return_dupes=True)
-    recorded.project_ids([recorded_id], db)
-    log.info(f"new_network() projected peer_shared, peer_self.user_id should now be set")
+    peer_shared_id = peer_shared_join_result['peer_shared_id']
+    log.info(f"new_network() delegated to peer_shared.join(): {peer_shared_id[:20]}...")
 
     # =========================================================================
     # PHASE 2: Content setup (after peer_shared exists)
     # =========================================================================
+
+    from events.network import recorded
 
     # 7. Create admin_grant event signed by network (grants admin to first user)
     admin_grant_id = admin.create(
