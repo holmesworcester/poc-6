@@ -199,6 +199,26 @@ This separation ensures:
 - User key proves "I am this specific user" (short-lived, first-peer only)
 - After first peer links, all subsequent operations use `peer_shared` keys
 
+### Unified Peer Linking (First and Later Devices)
+
+A critical insight is that **first-peer joining and device linking follow identical flows** (both use `invite(mode=peer)`). This enables:
+
+1. **Single canonical operation** `peer_shared.join()` handles both:
+   - First device linking: `user` exists, create `peer_shared` and link via `invite(mode=peer)`
+   - Subsequent devices: user already exists, create another `peer_shared` via same flow
+
+2. **Code reuse hierarchy**:
+   - `peer_shared.join(peer_id, peer_invite_id, peer_invite_private_key, user_id, prekey_id)` = base operation
+   - Called by both `user.join()` (network join with new user) and `user.new_network()` (network creation)
+   - No duplicate peer-linking code across flows
+
+3. **Network creation bootstrap** uses the same mechanism:
+   - Creator links their initial device via `peer_shared.join()`
+   - `invite_accepted` event unblocks `network_id` valid → cascade unblocks dependent events
+   - All subsequent user joins use the same `invite(mode=peer)` → `peer_shared` flow
+
+This design eliminates separate "link" events or "link invites" - peer linking is fundamental to the protocol, not a special case.
+
 ### Key Lifecycle (Network Bootstrap)
 
 When creating a network:
