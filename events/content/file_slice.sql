@@ -9,6 +9,10 @@ CREATE TABLE IF NOT EXISTS file_slices (
     ttl_ms INTEGER NOT NULL DEFAULT 0,  -- Absolute time (ms since epoch) when expires. 0 = never
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,
+    -- Consolidated blob offset information (set during consolidation)
+    ciphertext_len INTEGER,  -- Exact ciphertext length (fixes AEAD size variance)
+    blob_offset_start INTEGER,  -- Byte offset where this slice starts in consolidated blob
+    blob_offset_end INTEGER,  -- Byte offset where this slice ends in consolidated blob
     PRIMARY KEY (file_id, slice_number, recorded_by)
 );
 
