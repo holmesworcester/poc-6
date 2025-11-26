@@ -231,3 +231,93 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
         raise ValueError(f"access denied: peer {recorded_by} cannot access signing info for peer_shared {peer_shared_id}")
 
     return peer_id
+
+
+def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
+         user_id: str | None, prekey_id: str | None, t_ms: int, db: Any) -> dict[str, Any]:
+    """Join/link a peer via peer invite (first peer or linking device).
+
+    This is the canonical, reusable operation for peer joining/linking.
+    Called by user.join() and user.new_network() to avoid code duplication.
+
+    Args:
+        peer_id: Local peer ID (must already exist - create with peer.create() first)
+        peer_invite_id: Peer invite ID (mode='peer')
+        peer_invite_private_key: Private key from peer invite URL
+        user_id: User being linked to (extracted from invite)
+        prekey_id: Optional group_prekey_shared_id from invite URL
+        t_ms: Base timestamp
+        db: Database connection
+
+    Returns:
+        {
+            'peer_id': str,
+            'peer_shared_id': str,
+            'user_id': str,
+            'prekey_id': str | None,
+            'transit_prekey_id': str,
+            'transit_prekey_shared_id': str,
+        }
+    """
+    log.info(f"peer_shared.join() peer_id={peer_id}, peer_invite_id={peer_invite_id[:20]}..., user_id={user_id[:20] if user_id else 'None'}...")
+
+    # 1. Create peer_shared signed by peer_invite (proves access to invite)
+    peer_shared_id = create(
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db,
+        invite_id=peer_invite_id,
+        invite_private_key=peer_invite_private_key
+    )
+    log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
+
+    # 2. Create invite_accepted to event-source the secrets (triggers notify_event_valid cascade)
+    from events.identity import invite_accepted
+    invite_accepted_id = invite_accepted.create(
+        invite_id=peer_invite_id,
+        invite_prekey_id=prekey_id,
+        invite_private_key=peer_invite_private_key,
+        peer_id=peer_id,
+        t_ms=t_ms + 1,
+        db=db
+    )
+    log.info(f"peer_shared.join() created invite_accepted: {invite_accepted_id[:20]}...")
+
+    # 3. Auto-create transit_prekey + transit_prekey_shared for sync
+    from events.network import transit_prekey, transit_prekey_shared
+    transit_prekey_id, transit_prekey_private = transit_prekey.create(
+        peer_id=peer_id,
+        t_ms=t_ms + 2,
+        db=db
+    )
+
+    transit_prekey_shared_id = transit_prekey_shared.create(
+        prekey_id=transit_prekey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms + 3,
+        db=db
+    )
+    log.info(f"peer_shared.join() created transit prekey_shared: {transit_prekey_shared_id[:20]}...")
+
+    # 4. Project peer_shared immediately (establishes peer↔user link, updates peer_self)
+    from events.network import recorded
+    peer_shared_recorded_id = recorded.create(peer_shared_id, peer_id, t_ms + 4, db, return_dupes=True)
+    recorded.project_ids([peer_shared_recorded_id], db)
+    log.info(f"peer_shared.join() projected peer_shared, peer_self updated with user_id")
+
+    # invite_accepted.project() will be called by recorded.project_ids() which will:
+    # - Store invite_private_key in group_prekeys (for GKS decryption)
+    # - Call notify_event_valid(peer_invite_id) - unblocks dependent events
+    # - Call notify_event_valid(prekey_id) - unblocks group_key_shared events sealed to this prekey
+    # This is the "unblock cascade" that drives the joining flow
+
+    return {
+        'peer_id': peer_id,
+        'peer_shared_id': peer_shared_id,
+        'user_id': user_id,
+        'prekey_id': prekey_id,
+        'transit_prekey_id': transit_prekey_id,
+        'transit_prekey_shared_id': transit_prekey_shared_id,
+        'invite_accepted_id': invite_accepted_id,
+    }
