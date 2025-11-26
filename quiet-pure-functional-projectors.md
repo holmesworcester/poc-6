@@ -192,24 +192,88 @@ This maintains the nice DX of chaining commands based on returned event IDs.
 - **No hidden state**: everything explicit in the input
 - **Easy testing**: just call the function with a dict
 
+## Resolved Questions
+
+### 1. "All messages in channel" - Not Needed
+This was a confusion. Projectors operate on **single events**, not collections. If you need "all messages in channel", that's a **query** on projected data, not a projector concern.
+
+### 2. Updates vs Inserts
+Prefer INSERT-only projections - they're idempotent and eventually consistent. For the rare cases needing UPDATE (like `channel_update` changing `name`), use GC patterns or separate tables.
+
+**Tables that currently UPDATE in place:**
+| Table | Update Use Case | Pure Alternative |
+|-------|-----------------|------------------|
+| `store` | message_rekey | GC + new row |
+| `messages` | key_id update | Immutable, separate key_tracking table |
+| `file_sync_wanted` | status changes | New status rows, query latest |
+| `message_attachments` | consolidated_blob | Accumulator pattern |
+| `pending_intros` | processed flag | Separate processed_intros table |
+| `channels` | name, disappearing_time | channel_updates table (already exists!) |
+| `networks` | creator_user_id | Should be immutable, set at creation |
+| `peer_self` | user_id | Should be immutable after link |
+| `groups` | key_id | key_rotation events, query latest |
+
+### 3. Transitive Dependencies - Assume Transitive Validity
+**We don't need to fetch transitive deps.** If B depends on A, and C depends on B, then C only needs to verify B is valid. B being valid implies A is valid (otherwise B couldn't be valid).
+
+The current code was checked - no projectors actually need data from transitive dependencies. They only need:
+- Immediate dependency existence (for blocking)
+- Data from immediate dependencies' event payloads
+
+### 4. Schema Evolution
+Still open - but less critical than originally thought since projections are derivable from events.
+
 ## Open Questions
 
-1. **How do we express "all messages in channel"?** The input dict has specific events, not collections. Maybe:
-   - Projections can query other projections for aggregates?
-   - Or: aggregate projections are a different kind of projector with different rules?
-
-2. **What about projections that update, not just insert?**
-   - `INSERT OR IGNORE` only works for new rows
-   - Could support `INSERT OR REPLACE` for idempotent updates?
-   - Or explicit `UPSERT` patterns?
-
-3. **How do we handle "derived" dependencies?**
-   - Event A depends on event B, but we also need to know about event C which B depended on
-   - Flatten all transitive deps? Or just immediate?
-
-4. **Schema evolution?**
+1. **Schema evolution?**
    - When projector output format changes, do we re-run all events?
    - Versioned projectors?
+
+## Proof of Concept Implementation
+
+Three complex projectors were implemented as pure functions to validate the design:
+
+### 1. `pure_projectors/message.py`
+Tests: TTL calculation from channel dependency, deletion checking
+```python
+@projector(event_type="message", tables=["messages", "event_dependencies"])
+def project(input_dict: dict) -> ProjectorResult:
+    # Gets channel's disappearing_time_ms from dependencies
+    # Calculates TTL, builds output dict
+    # No DB queries needed!
+```
+
+### 2. `pure_projectors/channel.py`
+Tests: Admin authorization chain
+```python
+def project(input_dict: dict) -> ProjectorResult:
+    # Verifies admin_grant authorizes the signer
+    # Uses INSERT OR REPLACE (special case)
+```
+
+### 3. `pure_projectors/group_member.py`
+Tests: Multiple existence checks, authorization
+```python
+@projector(event_type="group_member", tables=["group_members"])
+def project(input_dict: dict) -> ProjectorResult:
+    # Checks group exists, user exists
+    # Verifies admin_grant chain or legacy creator auth
+```
+
+### Resolver Layer
+`pure_projectors/resolver.py` builds input dicts from event store:
+- Fetches event blob, unwraps, verifies signature
+- Resolves immediate dependencies
+- Pre-computes validation results (e.g., deletion validity)
+
+### Test Results
+All tests pass, proving pure projectors produce identical output to current projectors:
+```
+test_pure_message_projector - SUCCESS
+test_pure_channel_projector - SUCCESS
+test_pure_group_member_projector - SUCCESS
+test_message_projector_with_disappearing_messages - SUCCESS
+```
 
 ## Comparison to Current System
 
