@@ -49,6 +49,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
 
     group_id = channel_row['group_id']
+    disappearing_time_ms = channel_row.get('disappearing_time_ms', 0) or 0
 
     # Look up our identity from peer_self (set when we created/linked our account)
     # This is the canonical source for "what user am I?" - single lookup, no fallback chain
@@ -72,7 +73,8 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
         'author_id': user_id,  # User who authored the message content (for display)
         'content': content,
-        'created_at': t_ms
+        'created_at': t_ms,
+        'disappearing_time_ms': disappearing_time_ms  # TTL setting at creation time (0 = permanent)
     }
 
     # Sign the event with local peer's private key
@@ -136,14 +138,13 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a single message event into the database.
 
-    Message TTL is calculated from the channel's disappearing_time_ms setting:
+    Message TTL is calculated from the event's disappearing_time_ms field:
     - If disappearing_time_ms is 0: message is permanent (ttl_ms = 0)
     - If disappearing_time_ms > 0: message expires at created_at + disappearing_time_ms
 
-    If channel settings change via channel_update, existing messages recalculate their
-    effective TTL on next projection (lazy recalculation for convergence).
+    The disappearing_time_ms is captured at message creation time, so TTL is
+    deterministic and doesn't change if channel settings are updated later.
     """
-    import json
     log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
 
     unsafedb = create_unsafe_db(db)
@@ -181,20 +182,16 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
     # before projection begins, so we don't need to check here.
 
-    # Calculate TTL based on channel's disappearing_time_ms setting
-    # Look up current channel settings to support dynamic TTL updates
-    channel_row = safedb.query_one(
-        "SELECT disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
-        (channel_id, recorded_by)
-    )
-
-    if channel_row and channel_row['disappearing_time_ms'] and channel_row['disappearing_time_ms'] > 0:
-        # Channel has disappearing messages enabled - use that TTL
-        ttl_ms = created_at + channel_row['disappearing_time_ms']
+    # Calculate TTL from event's disappearing_time_ms (captured at creation time)
+    # This is deterministic - same event always produces same TTL
+    disappearing_time_ms = event_data.get('disappearing_time_ms', 0) or 0
+    if disappearing_time_ms > 0:
+        ttl_ms = created_at + disappearing_time_ms
     else:
-        # Channel is permanent (disappearing_time_ms = 0 or not found)
-        # Fall back to default for backward compatibility if channel not yet projected
-        ttl_ms = 0 if channel_row else (created_at + DEFAULT_MESSAGE_TTL_MS)
+        # Permanent message (disappearing_time_ms = 0)
+        # For backward compatibility with old events that don't have this field,
+        # use default TTL only if field is missing entirely
+        ttl_ms = 0 if 'disappearing_time_ms' in event_data else (created_at + DEFAULT_MESSAGE_TTL_MS)
 
     # Extract key_id from blob for efficient purge lookups
     # Key ID is the first 16 bytes of the blob (the hint)
