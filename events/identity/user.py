@@ -75,7 +75,7 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
 
     # Create user event with signed_by=invite_id and user_pubkey
     # NOTE: user event does NOT contain peer_id - the user→peer relationship
-    # is established when peer_shared is projected (populates linked_peers table)
+    # is established when peer_shared is projected (user_id stored in peers_shared table)
     event_data = {
         'type': 'user',
         'invite_id': invite_id,  # Reference to invite that authorized this user
@@ -186,7 +186,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
             invite_data = crypto.parse_json(invite_blob)
             network_id = invite_data.get('network_id')
 
-    # Insert into users table (user→peer relationship is in linked_peers, populated by peer_shared.project())
+    # Insert into users table (user→peer relationship is stored in peers_shared table, populated by peer_shared.project())
     log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}...")
     safedb.execute(
         """INSERT OR IGNORE INTO users

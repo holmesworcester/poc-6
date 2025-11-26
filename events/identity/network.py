@@ -201,19 +201,19 @@ def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get user_id for this peer from linked_peers (user→peer is one-to-many)
-    linked_row = safedb.query_one(
-        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+    # Get user_id for this peer from peers_shared (user→peer relationship stored there)
+    peer_row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
         (peer_id, recorded_by)
     )
 
-    if not linked_row:
+    if not peer_row or not peer_row['user_id']:
         return None
 
     # Get network_id from users table using user_id
     user_row = safedb.query_one(
         "SELECT network_id FROM users WHERE user_id = ? AND recorded_by = ?",
-        (linked_row['user_id'], recorded_by)
+        (peer_row['user_id'], recorded_by)
     )
 
     if not user_row or not user_row['network_id']:

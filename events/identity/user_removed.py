@@ -26,15 +26,15 @@ def validate(removed_user_id: str, removed_by_peer_id: str, recorded_by: str, db
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get removed_by's user_id from linked_peers (user→peer is one-to-many)
-    linked_row = safedb.query_one(
-        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get removed_by's user_id from peers_shared (user→peer relationship stored there)
+    peer_row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (removed_by_peer_id, recorded_by)
     )
-    if not linked_row:
+    if not peer_row or not peer_row['user_id']:
         return False
 
-    removed_by_user_id = linked_row['user_id']
+    removed_by_user_id = peer_row['user_id']
 
     # Rule 1: User can remove themselves
     if removed_by_user_id == removed_user_id:
@@ -117,15 +117,14 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
         (removed_user_id, removed_at, removed_by, recorded_by)
     )
 
-    # Cascade: Find all peers for this user from linked_peers and mark them as removed
-    # Note: linked_peers.peer_id IS the peer_shared_id
+    # Cascade: Find all peers for this user from peers_shared and mark them as removed
     peers = safedb.query(
-        "SELECT peer_id FROM linked_peers WHERE user_id = ? AND recorded_by = ?",
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
         (removed_user_id, recorded_by)
     )
 
     for peer_row in peers:
-        peer_shared_id = peer_row['peer_id']  # peer_id in linked_peers IS peer_shared_id
+        peer_shared_id = peer_row['peer_shared_id']
         # Mark peer as removed in device-wide table by peer_shared_id
         unsafe_db.execute(
             """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, removed_by)

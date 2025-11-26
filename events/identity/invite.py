@@ -38,15 +38,15 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
     network_id = network_row['network_id']
 
-    # Get user_id for this peer_shared_id from linked_peers (user→peer is one-to-many)
-    linked_row = safedb.query_one(
-        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get user_id for this peer_shared_id from peers_shared (user→peer relationship stored there)
+    peer_row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, recorded_by)
     )
-    if not linked_row:
+    if not peer_row or not peer_row['user_id']:
         return False
 
-    user_id = linked_row['user_id']
+    user_id = peer_row['user_id']
 
     # Check if user has an admin event in the admins table (per spec)
     admin_row = safedb.query_one(
@@ -150,15 +150,15 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     if not is_admin(peer_shared_id, peer_id, db):
         raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
 
-    # Get inviter's user_id from linked_peers (user→peer is one-to-many)
-    linked_row = safedb.query_one(
-        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get inviter's user_id from peers_shared (user→peer relationship stored there)
+    peer_row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, peer_id)
     )
-    if not linked_row:
+    if not peer_row or not peer_row['user_id']:
         raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
 
-    inviter_user_id = linked_row['user_id']
+    inviter_user_id = peer_row['user_id']
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
@@ -343,44 +343,11 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         )
         log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
-    # For mode='peer', share keys for ALL groups this user is a member of
-    # This ensures the new device can decrypt all groups the user belongs to
+    # For mode='peer', do NOT share keys for all groups at invite time
+    # Instead, groups will automatically seal their keys to all active device links
+    # This is handled in group.create() and group_member.create() by querying peers_shared for the user
     if mode == 'peer':
-        log.info(f"invite.create() mode='peer' - sharing keys for user {user_id[:20]}...'s group memberships")
-
-        # Query groups that THIS USER is a member of (not all groups peer knows about)
-        # Join group_members with groups to get both group_id and key_id
-        group_rows = safedb.query(
-            """SELECT DISTINCT g.group_id, g.key_id
-               FROM group_members gm
-               JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
-               WHERE gm.user_id = ? AND gm.recorded_by = ?
-               ORDER BY g.group_id""",
-            (user_id, peer_id)
-        )
-
-        log.info(f"invite.create() found {len(group_rows)} groups for user {user_id[:20]}...")
-
-        ts = t_ms + 5
-        for group_row in group_rows:
-            group_id = group_row['group_id']
-            key_id_for_group = group_row['key_id']
-
-            # Skip if we already created it above (all_users or admins)
-            if key_id_for_group == key_id or (admin_key_id and key_id_for_group == admin_key_id):
-                continue
-
-            # Create group_key_shared sealed to invite_prekey
-            group_key_shared_id = group_key_shared.create_for_invite(
-                key_id=key_id_for_group,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,
-                t_ms=ts,
-                db=db
-            )
-            ts += 1
-            log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
+        log.info(f"invite.create() mode='peer' - NOT sharing existing group keys (will be seeded by group operations)")
 
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
@@ -536,9 +503,9 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
             admin_grant = event_data.get('admin_grant')
             if admin_grant:
                 # Verify admin_grant references an admin event for the signer's user
-                # Get signer's user_id from linked_peers (user→peer is one-to-many)
+                # Get signer's user_id from peers_shared (user→peer relationship stored there)
                 signer_user_row = safedb.query_one(
-                    "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+                    "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
                     (signed_by, recorded_by)
                 )
                 if signer_user_row:
@@ -857,27 +824,20 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     invite_accepted_module.project(invite_accepted_id, peer_id, t_ms + 1, db)
     log.info(f"invite.accept() projected invite_accepted")
 
-    # For mode='peer', also handle existing_user_blob if present
+    # For mode='peer', also store existing_user_blob if present (for offline bootstrap)
     user_id = None
     if mode == 'peer' and 'existing_user_blob' in link_data:
         existing_user_blob_b64 = link_data['existing_user_blob']
         existing_user_blob = base64.urlsafe_b64decode(existing_user_blob_b64 + '=' * (4 - len(existing_user_blob_b64) % 4))
 
-        # Parse to get user_id
-        user_data = crypto.parse_json(existing_user_blob)
-        user_id = user_data.get('user_id') or user_data.get('id')
-
-        # Store and project the existing user blob (makes user available locally)
+        # Store the existing user blob (makes user available locally for offline bootstrap)
+        # Note: Don't project it here - projection happens naturally via event dependencies
         user_stored_id = store.event(existing_user_blob, peer_id, t_ms, db)
-        from events.identity import user as user_module
-        # Project user event
-        user_module.project(user_id, peer_id, t_ms, db)
-        log.info(f"invite.accept() projected existing user {user_id[:20]}... for device linking")
+        log.info(f"invite.accept() stored existing user blob for device linking (bootstrap)")
 
-    # Extract user_id from invite event if not already set
-    if not user_id:
-        invite_event = crypto.parse_json(invite_blob)
-        user_id = invite_event.get('user_id')
+    # Extract user_id from invite event (for mode='peer', this contains the target user)
+    invite_event = crypto.parse_json(invite_blob)
+    user_id = invite_event.get('user_id')
 
     # Build return dict
     result = {

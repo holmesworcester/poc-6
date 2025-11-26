@@ -219,6 +219,36 @@ A critical insight is that **first-peer joining and device linking follow identi
 
 This design eliminates separate "link" events or "link invites" - peer linking is fundamental to the protocol, not a special case.
 
+### Invite Modes: `mode='user'` vs `mode='peer'`
+
+**Key semantic difference**: Device linking invites (`mode='peer'`) are **long-lived and reusable**, while network join invites (`mode='user'`) are **one-time bootstrap mechanisms**.
+
+#### `mode='user'` (Network Join - Ephemeral)
+- **Purpose**: Bootstrap a new user joining an existing network
+- **Lifetime**: Short-lived, used once to join
+- **Group key seeding**: Only needs `all_users` group key (to prove network membership)
+- **Key updates**: If new users join the network after this invite was created, the `all_users` key changes, but this invite doesn't need updating - each join creates its own invite with the current key
+- **No reuse**: Each new user gets a fresh `invite(mode='user')` sealed to that user's first device join
+
+#### `mode='peer'` (Device Linking - Long-Lived)
+- **Purpose**: Link a new device to an existing user account
+- **Lifetime**: Long-lived and reusable - same invite link can be used for multiple devices
+- **Group key seeding**: Does NOT automatically share all existing group keys
+- **Key updates**: When groups are created or when the user is added to groups AFTER the device links, those groups **automatically include** all active device links for that user
+- **Reuse semantics**: Any group the user belongs to (now or in the future) should include all the user's active device links
+
+#### Implementation of `mode='peer'` Semantics
+1. `invite.create(mode='peer')` only shares `all_users` and `admins` group keys (for the invite itself to work)
+2. Does NOT pre-share keys for all existing groups the user belongs to
+3. When `group.create()` adds the user to a new group, it automatically seals the group key to ALL active device links
+4. When `group_member.add()` adds the user to an existing group, it automatically seals the key to ALL active device links
+5. "Active device links" = all `peer_shared` entries where `user_id = this_user_id` and the peer is not removed
+
+This ensures that:
+- New devices linked after some groups are created still get those group keys (via group operations sealing to device links)
+- No need to pre-share all keys at invite time
+- Cleaner semantics: peer linking is about linking an identity, not about key distribution
+
 ### Key Lifecycle (Network Bootstrap)
 
 When creating a network:

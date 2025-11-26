@@ -58,7 +58,7 @@ def create(peer_id: str, t_ms: int, db: Any,
 
 
 def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project peer_shared event into peers_shared and linked_peers tables.
+    """Project peer_shared event into peers_shared table (including user_id if invite-based).
 
     Phase 3: Two verification modes:
     1. Legacy (no invite_id): Self-signed, verify with public_key from event
@@ -130,37 +130,25 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
             return None
         log.info(f"peer_shared.project() verified self-signed (legacy mode)")
 
-    # Insert into peers_shared table
+    # Insert into peers_shared table (including user_id if invite-based)
     safedb.execute(
         """INSERT OR IGNORE INTO peers_shared
-           (peer_shared_id, peer_id, public_key, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (peer_shared_id, peer_id, public_key, user_id, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             peer_shared_id,
             event_data['peer_id'],
             event_data['public_key'],
+            user_id,  # NULL if self-signed bootstrap, set if invite-based
             event_data['created_at'],
             recorded_by,
             recorded_at
         )
     )
-    log.info(f"peer_shared.project() inserted into peers_shared: peer_shared_id={peer_shared_id}, owner_peer_id={event_data['peer_id']}, recorded_by={recorded_by}")
-
-    # Phase 3: Insert into linked_peers if invite-based (links peer to user)
     if user_id:
-        safedb.execute(
-            """INSERT OR IGNORE INTO linked_peers
-               (link_id, user_id, peer_id, linked_at, recorded_by)
-               VALUES (?, ?, ?, ?, ?)""",
-            (
-                peer_shared_id,  # Use peer_shared_id as link_id
-                user_id,
-                peer_shared_id,  # peer_id in linked_peers is peer_shared_id
-                recorded_at,
-                recorded_by
-            )
-        )
-        log.info(f"peer_shared.project() linked peer to user: peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}...")
+        log.info(f"peer_shared.project() inserted into peers_shared with user_id: peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}...")
+    else:
+        log.info(f"peer_shared.project() inserted into peers_shared (self-signed bootstrap): peer_shared_id={peer_shared_id[:20]}...")
 
     # Insert into peer_self table (subjective mapping) if this is our own peer
     # ONLY update peer_self for invite-signed peer_shared (has user_id)
@@ -183,6 +171,47 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (peer_shared_id, recorded_by)
     )
+
+    # For invite-based peer_shared (device linking): Seed group keys for all groups this user belongs to
+    # This ensures new devices get keys for existing groups
+    if user_id:
+        log.info(f"peer_shared.project() seeding group keys for user {user_id[:20]}... new device {peer_shared_id[:20]}...")
+
+        # Query all groups this user is a member of
+        group_rows = safedb.query(
+            """SELECT DISTINCT g.group_id, g.key_id, gm.added_by
+               FROM group_members gm
+               JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
+               WHERE gm.user_id = ? AND gm.recorded_by = ?
+               ORDER BY g.group_id""",
+            (user_id, recorded_by)
+        )
+
+        log.info(f"peer_shared.project() found {len(group_rows)} groups for user {user_id[:20]}...")
+
+        # For each group, create group_key_shared sealed to this new peer
+        from events.group import group_key_shared
+        key_share_ts = recorded_at + 1000  # Space out timestamps
+        for group_row in group_rows:
+            group_id = group_row['group_id']
+            key_id = group_row['key_id']
+            added_by = group_row['added_by']
+
+            try:
+                # Create group_key_shared sealed to the new device
+                # Use recorded_by as the sealer (the peer discovering the new device)
+                group_key_shared.create(
+                    key_id=key_id,
+                    peer_id=recorded_by,  # Current peer creates the seal
+                    peer_shared_id=added_by,  # Who added the member (for signing)
+                    recipient_peer_id=peer_shared_id,  # The new device to seal to
+                    t_ms=key_share_ts,
+                    db=db
+                )
+                log.info(f"peer_shared.project() sealed group key {key_id[:20]}... to new device {peer_shared_id[:20]}...")
+                key_share_ts += 1
+            except Exception as e:
+                log.warning(f"peer_shared.project() failed to seal group {group_id[:20]}... to new device: {e}")
 
     return peer_shared_id
 
