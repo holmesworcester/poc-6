@@ -343,11 +343,44 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         )
         log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
 
-    # For mode='peer', do NOT share keys for all groups at invite time
-    # Instead, groups will automatically seal their keys to all active device links
-    # This is handled in group.create() and group_member.create() by querying peers_shared for the user
+    # For mode='peer', share keys for ALL groups this user is a member of
+    # This ensures the new device can decrypt all groups the user belongs to
     if mode == 'peer':
-        log.info(f"invite.create() mode='peer' - NOT sharing existing group keys (will be seeded by group operations)")
+        log.info(f"invite.create() mode='peer' - sharing keys for user {user_id[:20]}...'s group memberships")
+
+        # Query groups that THIS USER is a member of (not all groups peer knows about)
+        # Join group_members with groups to get both group_id and key_id
+        group_rows = safedb.query(
+            """SELECT DISTINCT g.group_id, g.key_id
+               FROM group_members gm
+               JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
+               WHERE gm.user_id = ? AND gm.recorded_by = ?
+               ORDER BY g.group_id""",
+            (user_id, peer_id)
+        )
+
+        log.info(f"invite.create() found {len(group_rows)} groups for user {user_id[:20]}...")
+
+        ts = t_ms + 5
+        for group_row in group_rows:
+            group_id = group_row['group_id']
+            key_id_for_group = group_row['key_id']
+
+            # Skip if we already created it above (all_users or admins)
+            if key_id_for_group == key_id or (admin_key_id and key_id_for_group == admin_key_id):
+                continue
+
+            # Create group_key_shared sealed to invite_prekey
+            group_key_shared_id = group_key_shared.create_for_invite(
+                key_id=key_id_for_group,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,
+                t_ms=ts,
+                db=db
+            )
+            ts += 1
+            log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
 
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
