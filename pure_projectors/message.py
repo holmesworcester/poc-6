@@ -78,24 +78,19 @@ def project(input_dict: dict) -> ProjectorResult:
             }
         )
 
-    # Get channel dependency
-    channel = deps.get("channel")
-    if not channel:
-        return ProjectorResult(
-            blocked=True,
-            missing_deps=["channel"]
-        )
-
-    channel_data = channel["event_data"]
-
-    # Calculate TTL from channel's disappearing_time_ms
+    # Calculate TTL from event's disappearing_time_ms (captured at creation time)
+    # This is deterministic - same event always produces same TTL
+    # No channel lookup needed!
     created_at = event_data["created_at"]
-    disappearing_time_ms = channel_data.get("disappearing_time_ms", 0)
+    disappearing_time_ms = event_data.get("disappearing_time_ms", 0) or 0
 
-    if disappearing_time_ms and disappearing_time_ms > 0:
+    if disappearing_time_ms > 0:
         ttl_ms = created_at + disappearing_time_ms
     else:
-        ttl_ms = 0  # Permanent
+        # Permanent message (disappearing_time_ms = 0)
+        # For backward compatibility with old events that don't have this field,
+        # use default TTL only if field is missing entirely
+        ttl_ms = 0 if "disappearing_time_ms" in event_data else (created_at + DEFAULT_MESSAGE_TTL_MS)
 
     # Build message row
     message_row = {

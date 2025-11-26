@@ -58,11 +58,10 @@ def resolve_message(event_id: str, recorded_by: str, recorded_at: int, db: Any) 
     key_id_bytes = event_blob[:crypto.ID_SIZE]
     key_id = crypto.b64encode(key_id_bytes)
 
-    # Resolve channel dependency
-    # NOTE: We fetch the PROJECTED channel state, not the raw event, because
-    # channel_update events can modify TTL settings and we need the current value
-    channel_id = event_data.get("channel_id")
-    channel_dep = resolve_channel_for_message(channel_id, recorded_by, db)
+    # Note: We no longer need to fetch channel data for TTL calculation
+    # because disappearing_time_ms is now stored in the message event itself.
+    # Channel dependency is only needed for blocking (ensure channel exists)
+    # but the pure projector doesn't need any channel data.
 
     # Check for deletion (optional)
     deletion_dep = None
@@ -86,8 +85,8 @@ def resolve_message(event_id: str, recorded_by: str, recorded_at: int, db: Any) 
         "recorded_by": recorded_by,
         "recorded_at": recorded_at,
         "dependencies": {
-            "channel": channel_dep,
             "deletion": deletion_dep
+            # Note: channel dependency removed - TTL now comes from event_data
         }
     }
 

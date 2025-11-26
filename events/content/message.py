@@ -49,6 +49,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
 
     group_id = channel_row['group_id']
+    disappearing_time_ms = channel_row.get('disappearing_time_ms', 0) or 0
 
     # Look up our identity from peer_self (set when we created/linked our account)
     # This is the canonical source for "what user am I?" - single lookup, no fallback chain
@@ -72,7 +73,8 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
         'author_id': user_id,  # User who authored the message content (for display)
         'content': content,
-        'created_at': t_ms
+        'created_at': t_ms,
+        'disappearing_time_ms': disappearing_time_ms  # TTL setting at creation time (0 = permanent)
     }
 
     # Sign the event with local peer's private key

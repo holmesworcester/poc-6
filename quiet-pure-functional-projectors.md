@@ -223,27 +223,31 @@ The current code was checked - no projectors actually need data from transitive 
 ### 4. Schema Evolution
 Still open - but less critical than originally thought since projections are derivable from events.
 
-## Critical Discovery: When Event Dependencies Are Not Enough
+## Critical Discovery: Mutable State Was a Design Bug
 
-Some projections require **projected state** rather than raw event data. This happens when:
-1. The dependency can be **mutated by later events** (e.g., channel_update changes disappearing_time_ms)
-2. The projection needs the **current effective value**, not the original
+Initially we thought `message.project()` needed to query the `channels` table for `disappearing_time_ms` because channel settings can be updated. This seemed like an exception to pure projection.
+
+**But this was a design bug, not a fundamental limitation!**
+
+The fix: store `disappearing_time_ms` in the message event at creation time. Then:
+- `message.create()` captures the TTL from channel settings when creating the event
+- `message.project()` uses the value from `event_data['disappearing_time_ms']`
+- No projection table lookup needed!
+
+### Lesson Learned
+
+When you think you need to query a projection table in a projector, ask:
+1. **Should this data be in the event?** If the value was known at creation time, store it.
+2. **Is this truly mutable state?** Or is it just not being captured correctly?
 
 ### Known Exceptions
 
-| Projector | Dependency | Why Projected State Needed |
-|-----------|------------|---------------------------|
-| `message` | `channel` | `disappearing_time_ms` can be changed by `channel_update` events |
+After fixing the TTL bug, we have **no known exceptions** where projection queries are required.
+
+| Projector | Dependency | Status |
+|-----------|------------|--------|
+| `message` | `channel` | FIXED - `disappearing_time_ms` now in event |
 | ??? | ??? | (hunting for more...) |
-
-### Implications
-
-For these cases, the resolver must:
-1. Fetch from the **projection table** (e.g., `channels`), not the raw event
-2. Still block if the projection doesn't exist yet
-3. Document clearly why this exception exists
-
-This is still "pure" in the sense that the projector function itself has no DB access - the resolver does all lookups. But it means some dependencies are on **projected state** rather than **event data**.
 
 ## Open Questions
 
