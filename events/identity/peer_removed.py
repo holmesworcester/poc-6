@@ -115,29 +115,28 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
     log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
 
     # Check if this was the last peer of a user (if so, rotate group keys)
-    # Map removed peer to its user_id from linked_peers (user→peer is one-to-many)
-    user_row = safedb.query_one(
-        "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Map removed peer to its user_id from peers_shared (user→peer relationship stored there)
+    peer_row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (removed_peer_shared_id, recorded_by)
     )
 
-    if user_row:
-        removed_user_id = user_row['user_id']
+    if peer_row and peer_row['user_id']:
+        removed_user_id = peer_row['user_id']
 
         # Check if user has any other peers that are NOT removed
-        # Get all peers of this user from linked_peers, then check if any are NOT in removed_peers
+        # Get all peers of this user from peers_shared, then check if any are NOT in removed_peers
         all_user_peers = safedb.query(
-            """SELECT peer_id FROM linked_peers
+            """SELECT peer_shared_id FROM peers_shared
                WHERE user_id = ? AND recorded_by = ?""",
             (removed_user_id, recorded_by)
         )
 
         # Check how many of these peers are NOT in removed_peers
-        # Note: linked_peers.peer_id IS the peer_shared_id
         unsafe_db = create_unsafe_db(db)
         active_peer_count = 0
-        for peer_row in all_user_peers:
-            peer_shared_id_check = peer_row['peer_id']  # peer_id in linked_peers IS peer_shared_id
+        for peer_row_check in all_user_peers:
+            peer_shared_id_check = peer_row_check['peer_shared_id']
             # Check if this peer is NOT removed
             removed_check = unsafe_db.query_one(
                 "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",

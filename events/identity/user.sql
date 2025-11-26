@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
     PRIMARY KEY (user_id, recorded_by)
 );
 
+-- NOTE: User-to-peer relationship is now stored in peers_shared table (user_id column)
+-- This replaces the old linked_peers join table for cleaner schema organization
+
 -- NOTE: group_members table is defined in events/group/group_member.sql
 -- The duplicate definition here was removed to avoid schema conflicts
-
--- To find peers for a user, query linked_peers table
--- To find user for a peer_shared_id, query: SELECT user_id FROM linked_peers WHERE peer_id = ?

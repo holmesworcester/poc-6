@@ -84,12 +84,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
         # Get user_id for this peer_shared_id
         creator_user_id = None
-        linked_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        peer_row = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
             (peer_shared_id, peer_id)
         )
-        if linked_row:
-            creator_user_id = linked_row['user_id']
+        if peer_row and peer_row['user_id']:
+            creator_user_id = peer_row['user_id']
 
         if creator_user_id:
             # Get network_id for admin lookup
@@ -124,15 +124,15 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         key_id = private_key_id
 
         # First, ensure the creator is added to the private channel group
-        # Get creator's user_id from linked_peers (user→peer is one-to-many)
-        linked_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        # Get creator's user_id from peers_shared (user→peer relationship stored there)
+        peer_row = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
             (peer_shared_id, peer_id)
         )
-        if not linked_row:
+        if not peer_row or not peer_row['user_id']:
             raise ValueError(f"Creator user not found for peer_shared_id {peer_shared_id}")
 
-        creator_user_id = linked_row['user_id']
+        creator_user_id = peer_row['user_id']
 
         # Track which users we've already added
         added_user_ids = set()
@@ -320,16 +320,16 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     admin_grant = event_data.get('admin_grant')
     if admin_grant:
         # Verify signer is authorized by admin_grant
-        # Get signer's user_id from linked_peers (user→peer is one-to-many)
-        linked_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+        # Get signer's user_id from peers_shared (user→peer relationship stored there)
+        peer_row = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
             (signed_by, recorded_by)
         )
-        if not linked_row:
+        if not peer_row or not peer_row['user_id']:
             log.warning(f"channel.project() signer user not found for {signed_by[:20]}...")
             return  # Dependency not ready
 
-        signer_user_id = linked_row['user_id']
+        signer_user_id = peer_row['user_id']
 
         # Verify admin_grant references an admin event for signer's user
         grant_row = safedb.query_one(

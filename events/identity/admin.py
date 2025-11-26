@@ -142,13 +142,12 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         # Check that signer's user is admin via admin_grant
         safedb = create_safe_db(db, recorded_by=recorded_by)
 
-        # Get signer's user_id from linked_peers (user→peer is one-to-many)
-        # linked_peers.peer_id stores peer_shared_id
+        # Get signer's user_id from peers_shared (user→peer relationship stored there)
         signer_user_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
             (signed_by, recorded_by)
         )
-        if not signer_user_row:
+        if not signer_user_row or not signer_user_row['user_id']:
             log.warning(f"[ADMIN_PROJECT_EARLY_RETURN] Signer user not found for {signed_by[:20]}...")
             return None
 

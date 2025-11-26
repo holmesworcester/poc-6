@@ -2,7 +2,7 @@
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, link_invite, link
+from events.identity import user, invite, peer_shared, peer
 from events.content import message
 import tick
 
@@ -16,11 +16,13 @@ print(f"Alice phone: peer_id={alice_phone['peer_id'][:20]}, user_id={alice_phone
 db.commit()
 
 # Create link invite
-link_invite_id, link_url, link_data = link_invite.create(
-    peer_id=alice_phone['peer_id'],
-    t_ms=2000,
-    db=db
-)
+link_invite_id, link_url, _ = invite.create(
+        peer_id=alice_phone['peer_id'],
+        t_ms=2000,
+        db=db,
+        mode='peer',
+        user_id=alice_phone['user_id']
+    )
 db.commit()
 
 # Check what's in the link_data
@@ -28,7 +30,18 @@ print(f"\nLink data keys: {list(link_data.keys())}")
 print(f"Has network_blob: {'network_blob' in link_data}")
 
 # Alice joins on laptop
-alice_laptop = link.join(link_url=link_url, t_ms=3000, db=db)
+alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    assert accepted['mode'] == 'peer'
+    alice_laptop = peer_shared.join(
+        peer_id=alice_laptop_peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=accepted['user_id'],
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=3002,
+        db=db
+    )
 print(f"\nAlice laptop: peer_id={alice_laptop['peer_id'][:20]}, user_id={alice_laptop['user_id'][:20]}")
 print(f"  link_id={alice_laptop['link_id'][:20]}")
 db.commit()
