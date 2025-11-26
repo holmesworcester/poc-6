@@ -3,6 +3,7 @@ import pytest
 import sqlite3
 import logging
 from db import Database
+import schema
 import tick
 import jobs
 
@@ -27,3 +28,70 @@ def reset_global_state():
     # This is handled per-test by calling tick.reset_state(db)
 
     yield
+
+
+@pytest.fixture
+def fresh_db():
+    """Create a fresh in-memory database with all tables initialized.
+
+    Eliminates boilerplate setup:
+        conn = sqlite3.Connection(":memory:")
+        db = Database(conn)
+        schema.create_all(db)
+    """
+    conn = sqlite3.Connection(":memory:")
+    db = Database(conn)
+    schema.create_all(db)
+    return db
+
+
+@pytest.fixture
+def fresh_db_with_alice(fresh_db):
+    """Create a fresh database with Alice's network already set up.
+
+    Eliminates repeated 5-line setup pattern from test_forward_secrecy.py,
+    test_user_removal.py, and many others.
+
+    Usage:
+        def test_something(fresh_db_with_alice):
+            db, alice = fresh_db_with_alice
+            # Use alice['peer_id'], alice['channel_id'], etc.
+    """
+    from events.identity import user
+    db = fresh_db
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    db.commit()
+    return db, alice
+
+
+@pytest.fixture
+def fresh_db_with_alice_and_bob(fresh_db_with_alice):
+    """Create a fresh database with Alice's network and Bob joined.
+
+    Further eliminates test setup for multi-peer scenarios.
+
+    Usage:
+        def test_something(fresh_db_with_alice_and_bob):
+            db, alice, bob = fresh_db_with_alice_and_bob
+    """
+    from events.identity import user as user_module
+    from events.identity import invite as invite_module
+    from events.identity import peer as peer_module
+    from tests.utils import tick_helper
+
+    db, alice = fresh_db_with_alice
+
+    invite_id, invite_link, invite_data = invite_module.create(
+        peer_id=alice['peer_id'],
+        t_ms=1500,
+        db=db
+    )
+
+    bob_peer_id = peer_module.create(t_ms=2000, db=db)
+    bob = user_module.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    db.commit()
+
+    # Sync to converge
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+
+    return db, alice, bob
