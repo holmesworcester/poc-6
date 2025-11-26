@@ -1035,6 +1035,54 @@ def take_sync_snapshot(db: Any) -> dict:
     }
 
 
+def _compute_valid_deltas(current: dict, prev_snapshot: dict) -> tuple[dict, int]:
+    """Compute per-peer valid event deltas and total valid count.
+
+    Args:
+        current: Current snapshot from take_sync_snapshot()
+        prev_snapshot: Previous snapshot from take_sync_snapshot()
+
+    Returns:
+        (valid_deltas dict, total_valid count)
+    """
+    valid_deltas = {}
+    total_valid = 0
+    for peer_id in current['local_peers']:
+        prev_count = prev_snapshot['valid_counts'].get(peer_id, 0)
+        curr_count = current['valid_counts'].get(peer_id, 0)
+        valid_deltas[peer_id] = curr_count - prev_count
+        total_valid += curr_count
+    return valid_deltas, total_valid
+
+
+def _check_queue_progress(current: dict, prev_snapshot: dict) -> bool:
+    """Check if incoming queue has changed (indicator of sync activity).
+
+    Args:
+        current: Current snapshot from take_sync_snapshot()
+        prev_snapshot: Previous snapshot from take_sync_snapshot()
+
+    Returns:
+        True if queue size changed
+    """
+    return current['queue_size'] != prev_snapshot['queue_size']
+
+
+def _check_blocked_progress(current: dict, prev_snapshot: dict) -> tuple[bool, int]:
+    """Check if blocked events have changed and return total blocked count.
+
+    Args:
+        current: Current snapshot from take_sync_snapshot()
+        prev_snapshot: Previous snapshot from take_sync_snapshot()
+
+    Returns:
+        (blocked_changed: bool, total_blocked: int)
+    """
+    prev_blocked_total = sum(prev_snapshot['blocked_counts'].values())
+    total_blocked = sum(current['blocked_counts'].values())
+    return total_blocked != prev_blocked_total, total_blocked
+
+
 def check_sync_progress(db: Any, prev_snapshot: dict) -> dict:
     """Check if sync has made progress since previous snapshot.
 
@@ -1057,22 +1105,11 @@ def check_sync_progress(db: Any, prev_snapshot: dict) -> dict:
     current = take_sync_snapshot(db)
 
     # Calculate deltas (for informational purposes)
-    valid_deltas = {}
-    total_valid = 0
-    for peer_id in current['local_peers']:
-        prev_count = prev_snapshot['valid_counts'].get(peer_id, 0)
-        curr_count = current['valid_counts'].get(peer_id, 0)
-        valid_deltas[peer_id] = curr_count - prev_count
-        total_valid += curr_count
+    valid_deltas, total_valid = _compute_valid_deltas(current, prev_snapshot)
 
-    # Only track queue changes for progress detection
-    # (valid_events grows from local events too, not just sync)
-    # Compare totals, not per-peer dicts, to avoid false positives from
-    # blocked events moving between peers
-    queue_changed = current['queue_size'] != prev_snapshot['queue_size']
-    prev_blocked_total = sum(prev_snapshot['blocked_counts'].values())
-    total_blocked = sum(current['blocked_counts'].values())
-    blocked_changed = total_blocked != prev_blocked_total
+    # Check for progress in queue and blocked events
+    queue_changed = _check_queue_progress(current, prev_snapshot)
+    blocked_changed, total_blocked = _check_blocked_progress(current, prev_snapshot)
 
     return {
         'progressed': queue_changed or blocked_changed,
