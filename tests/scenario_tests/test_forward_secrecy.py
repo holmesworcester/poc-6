@@ -58,16 +58,9 @@ def test_delete_message_marks_key_for_purging(fresh_db_with_alice):
     assertions.assert_key_marked_for_purging(safedb, key_id_b64, alice['peer_id'])
 
 
-def test_delete_and_rekey_message():
+def test_delete_and_rekey_message(fresh_db_with_alice):
     """Test that purge cycle rekeys messages and purges old keys."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     # Alice sends two messages
     print("\n=== Alice sends two messages ===")
@@ -160,15 +153,9 @@ def test_delete_and_rekey_message():
     print("\n✅ Delete and rekey test passed")
 
 
-def test_forward_secrecy_multi_peer():
+def test_forward_secrecy_multi_peer(fresh_db_with_alice):
     """Test forward secrecy with multiple peers."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network, Bob joins ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    db, alice = fresh_db_with_alice
 
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
@@ -257,16 +244,9 @@ def test_forward_secrecy_multi_peer():
     print("\n✅ Multi-peer forward secrecy test passed")
 
 
-def test_prekey_ttl_and_purge_expired():
+def test_prekey_ttl_and_purge_expired(fresh_db_with_alice):
     """Test: Create prekeys with TTL → purge_expired deletes them."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== Alice generates 5 transit prekeys ===")
     transit_prekey_ids = transit_prekey.generate_batch(alice['peer_id'], count=5, t_ms=2000, db=db)
@@ -312,16 +292,9 @@ def test_prekey_ttl_and_purge_expired():
     print("\n✅ TTL and purge_expired test passed")
 
 
-def test_generate_batch_prekeys():
+def test_generate_batch_prekeys(fresh_db_with_alice):
     """Test: generate_batch creates multiple prekeys efficiently."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== Alice generates 10 transit prekeys ===")
     transit_ids = transit_prekey.generate_batch(alice['peer_id'], count=10, t_ms=2000, db=db)
@@ -353,16 +326,9 @@ def test_generate_batch_prekeys():
     print("\n✅ Batch generation test passed")
 
 
-def test_multi_peer_purge_convergence():
+def test_multi_peer_purge_convergence(fresh_db_with_alice):
     """Test: Alice and Bob both purge_expired independently, reach same state."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== Alice generates 5 transit prekeys ===")
     alice_transit_ids = transit_prekey.generate_batch(alice['peer_id'], count=5, t_ms=2000, db=db)
@@ -446,7 +412,7 @@ def test_multi_peer_purge_convergence():
     print(f"✓ Purge events are in store and can be replayed")
 
 
-def test_new_user_joins_after_rekey():
+def test_new_user_joins_after_rekey(fresh_db_with_alice):
     """Test: A new user joining after rekey can decrypt messages at new key.
 
     Timeline:
@@ -462,14 +428,7 @@ def test_new_user_joins_after_rekey():
     This demonstrates forward secrecy: K1 is destroyed, so compromise of K1 at later time
     doesn't reveal M.
     """
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== t=1000: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== t=2000: Alice sends message ===")
     msg_result = message.create(
@@ -555,7 +514,7 @@ def test_new_user_joins_after_rekey():
     print("  6. Rekeyed events ensure eventual consistency across peers")
 
 
-def test_new_user_with_preexisting_invite_after_rekey():
+def test_new_user_with_preexisting_invite_after_rekey(fresh_db_with_alice):
     """Test: User with invite created BEFORE rekey can still decrypt group keys.
 
     This tests that during purge/rekey cycles, we re-encapsulate group keys
@@ -575,14 +534,7 @@ def test_new_user_with_preexisting_invite_after_rekey():
     Expected: Bob can decrypt group keys because we re-encapsulated them to
     his invite during the purge cycle, even though he wasn't a peer yet.
     """
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== t=1000: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== t=1500: Alice creates invite link (BEFORE deletion) ===")
     invite_id, invite_link, invite_data = invite.create(
@@ -701,16 +653,9 @@ def test_new_user_with_preexisting_invite_after_rekey():
     print("  6. Forward secrecy maintained: K1 destroyed, only K2 accessible")
 
 
-def test_deterministic_rekeying():
+def test_deterministic_rekeying(fresh_db_with_alice):
     """Test: Rekeying is deterministic - same cutoff produces same results."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== Alice sends 3 messages at different times ===")
     msg_ids = []
@@ -787,16 +732,9 @@ def test_deterministic_rekeying():
     print("\n✅ Deterministic rekeying test passed")
 
 
-def test_rekey_no_duplicates():
+def test_rekey_no_duplicates(fresh_db_with_alice):
     """Test: Duplicate rekeys (same plaintext) are deduplicated, only new key variant is kept."""
-
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
+    db, alice = fresh_db_with_alice
 
     print("\n=== Alice sends a message ===")
     msg_result = message.create(
@@ -876,15 +814,3 @@ def test_rekey_no_duplicates():
     print(f"✓ For message {message_id[:20]}..., only keeping best rekey (smallest sufficient TTL)")
 
 
-if __name__ == "__main__":
-    test_delete_message_marks_key_for_purging()
-    test_delete_and_rekey_message()
-    test_forward_secrecy_multi_peer()
-    test_prekey_ttl_and_purge_expired()
-    test_generate_batch_prekeys()
-    test_multi_peer_purge_convergence()
-    test_new_user_joins_after_rekey()
-    test_new_user_with_preexisting_invite_after_rekey()
-    test_deterministic_rekeying()
-    test_rekey_no_duplicates()
-    print("\n🎉 All forward secrecy tests passed!")
