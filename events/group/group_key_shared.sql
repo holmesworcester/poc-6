@@ -3,6 +3,7 @@
 CREATE TABLE IF NOT EXISTS group_keys_shared (
     key_shared_id TEXT NOT NULL,
     original_key_id TEXT NOT NULL,  -- The key_id being shared
+    recipient_prekey_id TEXT,        -- The prekey used for wrapping
     signed_by TEXT NOT NULL,         -- peer_shared_id of signer
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,       -- Who decrypted and projected this event
@@ -15,3 +16,6 @@ CREATE INDEX IF NOT EXISTS idx_group_keys_shared_by_peer
 
 CREATE INDEX IF NOT EXISTS idx_group_keys_shared_by_key
     ON group_keys_shared(original_key_id, recorded_by);
+
+CREATE INDEX IF NOT EXISTS idx_group_keys_shared_by_prekey
+    ON group_keys_shared(recipient_prekey_id, recorded_by);

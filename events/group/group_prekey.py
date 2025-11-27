@@ -235,3 +235,35 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
     log.info(f"group_prekey.replenish_for_all_peers() complete: {stats['peers_processed']} peers processed, {stats['peers_replenished']} replenished, {stats['total_prekeys_generated']} prekeys generated")
     return stats
+
+
+def list(peer_id: str, t_ms: int, db: Any) -> list[dict[str, Any]]:
+    """List all group prekeys with status and group_key counts.
+
+    Status:
+    - active: has private key, not marked for purge
+    - pending_purge: marked for purge (all group_keys purged)
+
+    Args:
+        peer_id: Local peer ID
+        t_ms: Current time for TTL check
+        db: Database connection
+
+    Returns:
+        List of dicts with: prekey_id, status, group_key_count, created_at
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    prekeys = safedb.query(
+        """SELECT gp.prekey_id, gp.created_at,
+                  CASE WHEN ptp.prekey_id IS NOT NULL THEN 'pending_purge' ELSE 'active' END as status,
+                  (SELECT COUNT(*) FROM group_keys_shared gks
+                   WHERE gks.recipient_prekey_id = gp.prekey_id AND gks.recorded_by = ?) as group_key_count
+           FROM group_prekeys gp
+           LEFT JOIN prekeys_to_purge ptp ON gp.prekey_id = ptp.prekey_id AND ptp.recorded_by = gp.recorded_by
+           WHERE gp.recorded_by = ? AND gp.owner_peer_id = ?
+           ORDER BY gp.created_at DESC""",
+        (peer_id, peer_id, peer_id)
+    )
+
+    return [row for row in prekeys]

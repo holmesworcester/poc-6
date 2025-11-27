@@ -275,15 +275,19 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
+    # Extract recipient_prekey_id from blob (first 16 bytes is the hint/prekey_id)
+    recipient_prekey_id = crypto.b64encode(blob[:crypto.ID_SIZE])
+
     # Insert into group_keys_shared table to track this event
     # Store original_key_id for auditing (what sender claimed), but we use computed_key_id
     safedb.execute(
         """INSERT OR IGNORE INTO group_keys_shared
-           (key_shared_id, original_key_id, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (key_shared_id, original_key_id, recipient_prekey_id, signed_by, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             key_shared_id,
             computed_key_id,  # Use computed (deterministic) key_id
+            recipient_prekey_id,
             event_data['signed_by'],
             event_data['created_at'],
             recorded_by,

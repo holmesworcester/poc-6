@@ -442,7 +442,39 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
         log.info(f"message_deletion.run_message_purge_cycle() purged key {purge_key_id[:20]}...")
         stats['keys_purged'] += 1
 
-    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged")
+    # After purging group_keys, check for prekeys that can be purged
+    # A prekey can be purged if ALL group_keys shared via it are now purged
+    prekeys_purged = []
+
+    # Find prekeys where all their group_keys are gone
+    orphaned_prekeys = safedb.query(
+        """SELECT DISTINCT gks.recipient_prekey_id as prekey_id
+           FROM group_keys_shared gks
+           WHERE gks.recorded_by = ?
+           AND NOT EXISTS (
+               SELECT 1 FROM group_keys gk
+               WHERE gk.key_id = gks.original_key_id AND gk.recorded_by = ?
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM group_keys_shared gks2
+               JOIN group_keys gk ON gks2.original_key_id = gk.key_id AND gk.recorded_by = gks2.recorded_by
+               WHERE gks2.recipient_prekey_id = gks.recipient_prekey_id AND gks2.recorded_by = ?
+           )""",
+        (peer_id, peer_id, peer_id)
+    )
+
+    for row in orphaned_prekeys:
+        prekey_id = row['prekey_id']
+        # Delete private key from group_prekeys
+        safedb.execute(
+            "DELETE FROM group_prekeys WHERE prekey_id = ? AND recorded_by = ?",
+            (prekey_id, peer_id)
+        )
+        prekeys_purged.append(prekey_id)
+        log.info(f"message_deletion.run_message_purge_cycle() purged prekey {prekey_id[:20]}...")
+
+    stats['prekeys_purged'] = len(prekeys_purged)
+    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged, {stats['prekeys_purged']} prekeys purged")
     return stats
 
 
