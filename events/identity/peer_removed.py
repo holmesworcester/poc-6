@@ -114,7 +114,9 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
     deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
     log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
 
-    # Check if this was the last peer of a user (if so, rotate group keys)
+    # Rotate group keys when ANY peer is removed
+    # This ensures removed peers cannot decrypt future messages, even if they have cached keys
+    # The new key is shared with remaining members via group_key_shared events
     # Map removed peer to its user_id from peers_shared (user→peer relationship stored there)
     peer_row = safedb.query_one(
         "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
@@ -123,36 +125,8 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
 
     if peer_row and peer_row['user_id']:
         removed_user_id = peer_row['user_id']
-
-        # Check if user has any other peers that are NOT removed
-        # Get all peers of this user from peers_shared, then check if any are NOT in removed_peers
-        all_user_peers = safedb.query(
-            """SELECT peer_shared_id FROM peers_shared
-               WHERE user_id = ? AND recorded_by = ?""",
-            (removed_user_id, recorded_by)
-        )
-
-        # Check how many of these peers are NOT in removed_peers
-        unsafe_db = create_unsafe_db(db)
-        active_peer_count = 0
-        for peer_row_check in all_user_peers:
-            peer_shared_id_check = peer_row_check['peer_shared_id']
-            # Check if this peer is NOT removed
-            removed_check = unsafe_db.query_one(
-                "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
-                (peer_shared_id_check,)
-            )
-            if not removed_check:
-                active_peer_count += 1
-
-        other_peers = [{'count': active_peer_count}]
-
-        # If no other peers remain (this was the last one), rotate keys
-        if other_peers and other_peers[0]['count'] == 0:
-            log.info(f"peer_removed.project() removed_peer {removed_peer_shared_id[:20]}... was the last peer of user {removed_user_id[:20]}..., rotating group keys")
-            _rotate_keys_for_removed_peer_user(removed_user_id, recorded_by, removed_at, db)
-        else:
-            log.info(f"peer_removed.project() removed_peer {removed_peer_shared_id[:20]}... had other active peers, no key rotation needed")
+        log.info(f"peer_removed.project() removed_peer {removed_peer_shared_id[:20]}... belongs to user {removed_user_id[:20]}..., rotating group keys")
+        _rotate_keys_for_removed_peer_user(removed_user_id, recorded_by, removed_at, db)
 
 
 def _rotate_keys_for_removed_peer_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:
