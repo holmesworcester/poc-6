@@ -3,7 +3,7 @@
 import sqlite3
 from db import Database, create_safe_db
 import schema
-from events.identity import user, invite, peer
+from events.identity import user, invite, peer, admin
 from events.content import channel
 from events.group import group_member
 
@@ -36,32 +36,40 @@ charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link, name='Char
 charlie_peer_shared_id = charlie['peer_shared_id']  # Get from join result
 print(f"  ✓ Charlie joined: {charlie['user_id']}")
 
-# Get admin group (from new_network() return value)
-admins_group_id = alice['admins_group_id']
-
 # Make Bob an admin
 print("\nStep 4: Alice promotes Bob to admin")
-group_member.create(
-    group_id=admins_group_id,
-    user_id=bob['user_id'],
-    peer_id=alice['peer_id'],
-    peer_shared_id=alice['peer_shared_id'],
-    t_ms=3000,
-    db=db
+alice_admin_grant = admin.my_grant(
+    alice['user_id'],
+    alice['network_id'],
+    alice['peer_id'],
+    db
 )
-print(f"  ✓ Bob added to admin group")
+alice_private_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
+admin.create(
+    user_id=bob['user_id'],
+    network_id=alice['network_id'],
+    signed_by=alice['peer_shared_id'],
+    signer_private_key=alice_private_key,
+    t_ms=3000,
+    peer_id=alice['peer_id'],
+    db=db,
+    admin_grant=alice_admin_grant
+)
+print(f"  ✓ Bob promoted to admin")
 
 # Make Charlie an admin
 print("\nStep 5: Alice promotes Charlie to admin")
-group_member.create(
-    group_id=admins_group_id,
+admin.create(
     user_id=charlie['user_id'],
-    peer_id=alice['peer_id'],
-    peer_shared_id=alice['peer_shared_id'],
+    network_id=alice['network_id'],
+    signed_by=alice['peer_shared_id'],
+    signer_private_key=alice_private_key,
     t_ms=3100,
-    db=db
+    peer_id=alice['peer_id'],
+    db=db,
+    admin_grant=alice_admin_grant
 )
-print(f"  ✓ Charlie added to admin group")
+print(f"  ✓ Charlie promoted to admin")
 
 # Create a private channel with only Bob as a member
 print("\nStep 6: Alice creates private channel 'secret_sales' with only Bob as member")

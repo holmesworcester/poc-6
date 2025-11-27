@@ -257,9 +257,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
     PHASE 2: Content setup (after peer_shared exists)
     7. admin_grant -> signed by network (grants admin to first user)
     8. group (all_users) -> signed by peer_shared_id
-    9. group (admins) -> signed by peer_shared_id
-    10. channel -> signed by peer_shared_id
-    11. transit_prekey + transit_prekey_shared -> for sync
+    9. channel -> signed by peer_shared_id
+    10. transit_prekey + transit_prekey_shared -> for sync
 
     Args:
         name: Username/display name
@@ -274,7 +273,6 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
             'prekey_id': str,
             'network_id': str,
             'all_users_group_id': str,
-            'admins_group_id': str,
             'channel_id': str,
             'user_id': str,
         }
@@ -438,21 +436,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
     )
     log.info(f"new_network() created network-signed all_users group: {all_users_group_id[:20]}...")
 
-    # 9. Create ADMINS group (admin-only group)
-    # Regular peer-signed group (not network-signed like all_users)
-    # Admin membership is controlled via admin events, not group signature
-    admins_group_id, admins_key_id = group.create(
-        name=f"{name} - Admins",
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 80,
-        db=db,
-        is_main=False,
-        network_id=network_id  # For dependency ordering only
-    )
-    log.info(f"new_network() created admins group: {admins_group_id[:20]}...")
-
-    # 10. Create default channel (normal path - no bootstrap special case)
+    # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence
     channel_id = channel.create(
         name='general',
@@ -496,19 +480,6 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
     )
     log.info(f"new_network() added user to all_users group: {all_users_member_id[:20]}...")
 
-    # Add user to admins group
-    admin_member_id = group_member.create(
-        group_id=admins_group_id,
-        user_id=user_id,
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 120,
-        db=db,
-        skip_admin_check=True,  # Bootstrap: first user adds themselves
-        admin_grant=admin_grant_id  # Explicit dependency for convergence
-    )
-    log.info(f"new_network() added user to admins group: {admin_member_id[:20]}...")
-
     db.commit()
 
     return {
@@ -518,7 +489,6 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
         'transit_prekey_shared_id': transit_prekey_shared_id,
         'network_id': network_id,
         'all_users_group_id': all_users_group_id,
-        'admins_group_id': admins_group_id,
         'channel_id': channel_id,
         'user_id': user_id,
         'invite_id': invite_id,

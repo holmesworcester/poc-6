@@ -16,7 +16,7 @@ import pytest
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, invite, peer
+from events.identity import user, invite, peer, admin
 from events.content import message
 from events.content import message_deletion
 from events.group import group_member
@@ -104,7 +104,6 @@ def test_message_deletion_self(fresh_db):
     print("\n✅ Self-deletion test passed")
 
 
-@pytest.mark.xfail(reason="Multi-peer sync convergence issue - deletion events not syncing between peers")
 def test_message_deletion_admin(fresh_db):
     """Test admin deletion: admin deletes another user's message."""
 
@@ -129,20 +128,29 @@ def test_message_deletion_admin(fresh_db):
     print("\n=== Sync to converge ===")
     tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
-    # Make Bob an admin
+    # Make Bob an admin via admin_grant
     print("\n=== Alice makes Bob an admin ===")
-    admin_group_id = alice['admins_group_id']
-    group_member.create(
-        group_id=admin_group_id,
+    alice_admin_grant = admin.my_grant(
+        alice['user_id'],
+        alice['network_id'],
+        alice['peer_id'],
+        db
+    )
+    alice_private_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
+    admin.create(
         user_id=bob['user_id'],
-        peer_id=alice['peer_id'],
-        peer_shared_id=alice['peer_shared_id'],
+        network_id=alice['network_id'],
+        signed_by=alice['peer_shared_id'],
+        signer_private_key=alice_private_key,
         t_ms=4000,
-        db=db
+        peer_id=alice['peer_id'],
+        db=db,
+        admin_grant=alice_admin_grant
     )
     db.commit()
 
     # Sync admin status
+    print("\n=== Syncing admin grant to Bob ===")
     tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
 
     # Alice sends a message
@@ -170,6 +178,10 @@ def test_message_deletion_admin(fresh_db):
     )
     assert bob_msg_check is not None, "Bob should see Alice's message"
     print("✓ Bob sees message before deletion")
+
+    # Ensure Bob's admin status is fully synced to himself before deleting
+    print("\n=== Syncing admin status to Bob (ensure visible to himself) ===")
+    tick_helper.sync_until_converged(db=db, start_t_ms=7500, max_rounds=200, check_interval=1)
 
     # Bob (admin) deletes Alice's message
     print("\n=== Bob (admin) deletes Alice's message ===")
@@ -205,7 +217,6 @@ def test_message_deletion_admin(fresh_db):
     print("\n✅ Admin deletion test passed")
 
 
-@pytest.mark.xfail(reason="Multi-peer sync convergence issue - deletion events not syncing between peers")
 def test_message_deletion_unauthorized(fresh_db):
     """Test that non-admin cannot delete other's messages."""
 
@@ -229,14 +240,23 @@ def test_message_deletion_unauthorized(fresh_db):
     # Sync
     tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
-    # Make Bob admin
-    group_member.create(
-        group_id=alice['admins_group_id'],
+    # Make Bob admin via admin_grant
+    alice_admin_grant = admin.my_grant(
+        alice['user_id'],
+        alice['network_id'],
+        alice['peer_id'],
+        db
+    )
+    alice_private_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
+    admin.create(
         user_id=bob['user_id'],
-        peer_id=alice['peer_id'],
-        peer_shared_id=alice['peer_shared_id'],
+        network_id=alice['network_id'],
+        signed_by=alice['peer_shared_id'],
+        signer_private_key=alice_private_key,
         t_ms=4000,
-        db=db
+        peer_id=alice['peer_id'],
+        db=db,
+        admin_grant=alice_admin_grant
     )
     db.commit()
 

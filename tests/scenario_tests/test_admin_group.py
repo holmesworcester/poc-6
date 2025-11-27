@@ -47,7 +47,6 @@ def test_admin_group_workflow(fresh_db):
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
     print(f"Alice created network, network_id: {alice['network_id'][:20]}...")
     print(f"Alice all_users_group_id: {alice['all_users_group_id'][:20]}...")
-    print(f"Alice admins_group_id: {alice['admins_group_id'][:20]}...")
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(
@@ -72,10 +71,6 @@ def test_admin_group_workflow(fresh_db):
         db=db, start_t_ms=4000, max_rounds=50, check_interval=5, verbose=True
     )
     print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
-
-    # Get admin group ID from new_network return value
-    admin_group_id = alice['admins_group_id']
-    print(f"\nAdmin group ID: {admin_group_id[:20]}...")
 
     # Verify Alice is admin (using admin.is_user_admin() with new model)
     print("\n=== Verify Alice is admin ===")

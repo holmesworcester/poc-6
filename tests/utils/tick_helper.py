@@ -93,7 +93,7 @@ def sync_until_converged(
     max_rounds: int = 500,
     check_interval: int = 5,
     verbose: bool = False,
-    stability_threshold: int = 30
+    stability_threshold: int = 200
 ) -> tuple[int, int, bool, dict]:
     """Run ticks until sync stabilizes (no more progress) or max_rounds reached.
 
@@ -110,7 +110,7 @@ def sync_until_converged(
         max_rounds: Maximum sync rounds (default 500)
         check_interval: Check progress every N rounds (default 5)
         verbose: Print progress status (default False)
-        stability_threshold: Exit if no progress for N consecutive checks (default 30)
+        stability_threshold: Exit if no progress for N consecutive checks (default 200)
 
     Returns:
         (final_t_ms, rounds_used, converged, status_dict)
