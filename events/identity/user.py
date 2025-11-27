@@ -241,7 +241,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
     return user_id
 
-def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
+def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> dict[str, Any]:
     """Create a new user with their own implicit network.
 
     Simplified bootstrap: minimal identity events first, content after peer_shared exists.
@@ -265,6 +265,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         name: Username/display name
         t_ms: Base timestamp (each event gets incremented)
         db: Database connection
+        device_name: Device name (e.g., "Phone", "Desktop")
 
     Returns:
         {
@@ -393,7 +394,8 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
         user_id=user_id,
         prekey_id=bootstrap_invite_prekey_id,  # Bootstrap user invite's prekey ID
         t_ms=t_ms + 50,
-        db=db
+        db=db,
+        device_name=device_name
     )
     peer_shared_id = peer_shared_join_result['peer_shared_id']
     log.info(f"new_network() delegated to peer_shared.join(): {peer_shared_id[:20]}...")
@@ -579,7 +581,8 @@ def join_bootstrap(peer_id: str, invite_id: str, invite_private_key: bytes,
     }
 
 
-def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[str, Any]:
+def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
+         device_name: str = "Device") -> dict[str, Any]:
     """Join an existing network via invite link.
 
     Phase 5: Peer must be created by caller before calling join().
@@ -598,6 +601,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         name: Username/display name
         t_ms: Base timestamp
         db: Database connection
+        device_name: Device name (e.g., "Phone", "Desktop")
 
     Returns:
         {
@@ -756,7 +760,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
         user_id=user_id,
         prekey_id=invite_prekey_id,  # From user invite (for dependency tracking)
         t_ms=t_ms + 20,
-        db=db
+        db=db,
+        device_name=device_name
     )
     peer_shared_id = peer_shared_join_result['peer_shared_id']
     prekey_id = peer_shared_join_result['transit_prekey_id']

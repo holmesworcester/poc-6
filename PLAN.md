@@ -1,127 +1,262 @@
-# Plan: Eliminate Blob Unpacking Heuristics
+# Device Names Implementation Plan (Updated for Master)
 
-## Problem
+## Goal
+Add device names (e.g., "Desktop", "Phone") to distinguish between multiple devices for the same user in the CLI.
 
-Current implementation (message_attachment.py:714-770) uses fragile heuristics to unpack consolidated file slices:
+## Current State (Post-Master Merge)
+- **No more link events** - `link.py` and `link_invite.py` have been deleted
+- **peer_shared is the canonical peer event** - represents each device/peer's shareable identity
+- **peers_shared table** - stores peer_shared events with user_id linking
+- **CLI already supports device_name** - AccountContext.__init__() takes device_name parameter
+- **No device names stored yet** - peers_shared table has no device_name column
 
-```python
-expected_ciphertext_len = SLICE_SIZE  # Assumes ciphertext == plaintext size
-poly_tag = consolidated_blob[offset+expected_ciphertext_len:offset+expected_ciphertext_len+16]
-ciphertext = consolidated_blob[offset:offset+expected_ciphertext_len]
+## Implementation Overview
+
+The peer_shared event is the natural place to store device_name because:
+1. Each device/peer has exactly one peer_shared event
+2. peer_shared already carries identity information (public_key, user_id, etc.)
+3. It's synced across the network (SHAREABLE = True)
+4. Projection already stores data in peers_shared table
+
+## Implementation Tasks
+
+### Task 1: Add device_name column to peers_shared table
+**File:** `events/identity/peer_shared.sql`
+
+Add column to the peers_shared table:
+```sql
+ALTER TABLE peers_shared ADD COLUMN device_name TEXT DEFAULT 'Device';
 ```
 
-**Issues**:
-- Comment says "heuristic" = brittle code
-- Ciphertext size may vary slightly from plaintext (AEAD overhead)
-- No fallback if heuristic fails mid-stream
-- Hard to debug when unpacking fails
+### Task 2: Update peer_shared.create() to accept device_name parameter
+**File:** `events/identity/peer_shared.py`
 
-## Solution
+Add `device_name` parameter to create():
+```python
+def create(peer_id: str, t_ms: int, db: Any,
+           invite_id: str,
+           invite_private_key: bytes,
+           device_name: str = "Device") -> str:  # NEW parameter
+```
 
-Store slice boundaries deterministically in database instead of computing from heuristics.
+Include device_name in event data:
+```python
+event_data = {
+    'type': 'peer_shared',
+    'public_key': crypto.b64encode(public_key),
+    'peer_id': peer_id,
+    'device_name': device_name,  # NEW
+    'created_at': t_ms
+}
+```
 
-## Implementation Steps
+### Task 3: Update peer_shared.project() to store device_name
+**File:** `events/identity/peer_shared.py`
 
-### Phase 1: Extend file_slices schema
+Extract device_name from event data and store in peers_shared table:
+```python
+# In project(), extract device_name from event
+device_name = event_data.get('device_name', 'Device')
 
-1. **Read current schema**: `schema.py` - find `file_slices` table definition
-2. **Add slice boundary columns**:
-   ```sql
-   ALTER TABLE file_slices ADD COLUMN (
-       blob_offset_start INTEGER,  -- Byte offset in consolidated blob
-       blob_offset_end INTEGER,    -- Byte offset in consolidated blob
-       ciphertext_len INTEGER      -- Exact ciphertext length
-   );
-   ```
-3. **Rationale**: Store what we know (actual sizes) instead of computing from heuristics
+# When inserting into peers_shared, include the device_name column
+safedb.execute(
+    """INSERT OR IGNORE INTO peers_shared
+       (peer_shared_id, peer_id, public_key, user_id, device_name, created_at, recorded_by, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+    (
+        peer_shared_id,
+        event_data['peer_id'],
+        event_data['public_key'],
+        user_id,
+        device_name,  # NEW
+        event_data['created_at'],
+        recorded_by,
+        recorded_at
+    )
+)
+```
 
-### Phase 2: Update slice creation
+### Task 4: Add get_device_name() query function
+**File:** `events/identity/peer_shared.py`
 
-1. **File**: `events/content/file_slice.py` - `batch_create_slices()` function
-2. **Changes**:
-   - Track cumulative blob offset as slices are created
-   - Store `blob_offset_start`, `blob_offset_end`, `ciphertext_len` for each slice
-   - Calculate boundaries before consolidation happens
+Add function to retrieve device name:
+```python
+def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
+    """Get device name for a peer_shared_id.
 
-### Phase 3: Update consolidation
+    Args:
+        peer_shared_id: The public peer_shared ID
+        recorded_by: Peer ID requesting access (for access control)
+        db: Database connection
 
-1. **File**: `message_attachment.py` - `consolidate_file_slices()` function
-2. **Current behavior**: Reads from `file_slices`, concatenates slices into blob
-3. **New behavior**: SAME (consolidation is correct)
-4. **Only change**: Optionally record which byte ranges went where (for verification)
+    Returns:
+        Device name (e.g., "Phone", "Desktop") or "Device" if not set
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT device_name FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    return row['device_name'] if row and row['device_name'] else "Device"
+```
 
-### Phase 4: Fix unpacking
+### Task 5: Update peer_shared.join() to pass device_name
+**File:** `events/identity/peer_shared.py`
 
-1. **File**: `message_attachment.py` - `get_file_data()` function (lines 714-770)
-2. **Replace heuristic unpacking**:
-   ```python
-   # OLD (heuristic)
-   expected_ciphertext_len = SLICE_SIZE
-   poly_tag = consolidated_blob[offset+expected_ciphertext_len:...]
+Update join() to accept and forward device_name:
+```python
+def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
+         user_id: str | None, prekey_id: str | None, t_ms: int, db: Any,
+         device_name: str = "Device") -> dict[str, Any]:  # NEW parameter
+```
 
-   # NEW (deterministic)
-   slice_row = slice_rows[slice_num]
-   offset = slice_row['blob_offset_start']
-   ciphertext_len = slice_row['ciphertext_len']
-   nonce = consolidated_blob[offset:offset+12]
-   ciphertext = consolidated_blob[offset+12:offset+12+ciphertext_len]
-   poly_tag = consolidated_blob[offset+12+ciphertext_len:offset+12+ciphertext_len+16]
-   ```
-3. **Benefits**:
-   - No heuristics - exact boundaries from DB
-   - Handles variable ciphertext sizes correctly
-   - Clear, self-documenting code
+Pass device_name to create():
+```python
+peer_shared_id = create(
+    peer_id=peer_id,
+    t_ms=t_ms,
+    db=db,
+    invite_id=peer_invite_id,
+    invite_private_key=peer_invite_private_key,
+    device_name=device_name  # NEW
+)
+```
 
-### Phase 5: Add tests
+### Task 6: Update user.new_network() to accept and pass device_name
+**File:** `events/identity/user.py`
 
-1. **File**: `tests/scenario_tests/test_file_data_uri.py` (already exists)
-2. **Add test case**: "Test unpacking with variable ciphertext sizes"
-   - Create file with ciphertext sizes that vary from SLICE_SIZE
-   - Verify unpacking works correctly
-   - This would have caught the original heuristic bug
+Add device_name parameter:
+```python
+def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> dict[str, Any]:
+```
 
-## Files to Modify
+Pass to peer_shared.join():
+```python
+peer_shared_join_result = peer_shared.join(
+    peer_id=peer_id,
+    peer_invite_id=peer_invite_id,
+    peer_invite_private_key=peer_invite_private_key,
+    user_id=user_id,
+    prekey_id=bootstrap_invite_prekey_id,
+    t_ms=t_ms + 50,
+    db=db,
+    device_name=device_name  # NEW
+)
+```
 
-| File | Change | Complexity |
-|------|--------|-----------|
-| schema.py | Add 3 columns to file_slices | Low |
-| events/content/file_slice.py | Track offsets during creation | Medium |
-| message_attachment.py | Replace heuristic unpacking | Medium |
-| tests/scenario_tests/test_file_data_uri.py | Add variable-size test | Low |
+### Task 7: Update user.join() to accept and pass device_name
+**File:** `events/identity/user.py`
 
-## Success Criteria
+Add device_name parameter:
+```python
+def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
+         device_name: str = "Device") -> dict[str, Any]:  # NEW parameter
+```
 
-- [ ] `get_file_data()` never uses heuristics - all boundaries from DB
-- [ ] `consolidated_blob` unpacking works with non-standard ciphertext sizes
-- [ ] All existing tests pass
-- [ ] New test verifies variable ciphertext handling
-- [ ] Code has zero comments about "heuristics"
+Pass to peer_shared.join():
+```python
+peer_shared_join_result = peer_shared.join(
+    peer_id=peer_id,
+    peer_invite_id=peer_invite_id,
+    peer_invite_private_key=peer_invite_private_key,
+    user_id=user_id,
+    prekey_id=invite_prekey_id,
+    t_ms=t_ms + 20,
+    db=db,
+    device_name=device_name  # NEW
+)
+```
+
+### Task 8: Update CLI to use device_name
+**File:** `cli.py`
+
+When creating a network, pass device_name:
+```python
+# In new_network command
+device_name = args.device_name or "Device"
+result = user.new_network(
+    name=user_name,
+    t_ms=session.current_time_ms,
+    db=session.db,
+    device_name=device_name  # NEW
+)
+```
+
+When joining, pass device_name:
+```python
+# In join command
+device_name = args.device_name or "Device"
+result = user.join(
+    peer_id=peer_id,
+    invite_link=invite_link,
+    name=user_name,
+    t_ms=session.current_time_ms,
+    db=session.db,
+    device_name=device_name  # NEW
+)
+```
+
+### Task 9: Verify device names in CLI accounts display
+**File:** `cli.py`
+
+The display_accounts() function already shows account.full_name which includes device_name:
+```python
+account.full_name  # Already shows "alice (desktop)" or "alice (phone)"
+```
+
+This will automatically display device names once the backend stores them.
+
+### Task 10: Test device linking with CLI
+Create a comprehensive test in the CLI:
+1. Create a network with device_name="Desktop"
+2. Link a second device with device_name="Phone"
+3. Verify both devices appear in accounts list with correct names
+4. Verify device names are visible from both devices' perspectives
+5. Test messaging between devices to ensure full functionality
 
 ## Testing Strategy
 
-1. **Unit test**: Direct unpacking with known boundaries
-2. **Integration test**: File creation → consolidation → unpacking round-trip
-3. **Edge case test**: Very small files (single slice, partial slice)
-4. **Property test**: Random ciphertext sizes, verify unpacking always works
+### Unit tests (update existing tests)
+Update scenario tests that use user.new_network() and user.join():
+- Pass device_name parameter to calls
+- Add assertions to verify device_name is stored correctly
 
-## Risk Assessment
+Files to update:
+- `tests/scenario_tests/test_multi_device_linking.py`
+- Any other tests that use new_network() or join()
 
-**Risk Level**: Low
-- Only affects file unpacking path
-- Falls back to slow path on error (existing code)
-- Fully backward compatible (adds columns, doesn't remove)
-- All tests should pass before merge
+### Manual CLI testing
+1. Run CLI
+2. Create network with device_name="Desktop"
+3. Create second device with device_name="Phone"
+4. Verify accounts display shows both with correct names
+5. Test basic messaging between devices
+6. Verify device names persist across restarts
+
+## Files to Modify
+
+### Core Implementation
+1. `events/identity/peer_shared.sql` - Add device_name column
+2. `events/identity/peer_shared.py` - Add device_name handling in create(), project(), join(), and add get_device_name()
+3. `events/identity/user.py` - Add device_name parameter to new_network() and join()
+4. `cli.py` - Prompt for device_name and pass through to API calls
+
+### Test Updates
+5. `tests/scenario_tests/test_multi_device_linking.py` - Pass device_name to new_network() and verify
 
 ## Estimated Effort
+- peer_shared.sql change: 2 minutes
+- peer_shared.py changes (create, project, join, get_device_name): 20 minutes
+- user.py changes (new_network, join): 10 minutes
+- cli.py changes: 10 minutes
+- Test updates: 15 minutes
+- Manual testing: 10 minutes
+- **Total: ~1 hour**
 
-- Analysis: 1 hour
-- Implementation: 2-3 hours
-- Testing: 1-2 hours
-- Total: 4-6 hours
-
-## Benefits
-
-✓ Eliminates fragile heuristic logic
-✓ Makes code self-documenting (boundaries in DB)
-✓ Enables proper error handling
-✓ Fixes potential bugs with variable-size ciphertexts
+## Success Criteria
+✓ Device names stored in peer_shared events
+✓ Device names displayed in CLI accounts list (format: "alice (desktop)", "alice (phone)")
+✓ Device names persist when devices link
+✓ Device names visible to other devices via sync
+✓ Scenario tests pass with device_name parameter
+✓ Manual CLI test: create network, link device, verify both show up with correct names

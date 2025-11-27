@@ -313,7 +313,7 @@ def display_main(session: CLISession):
 
 def cmd_new_network(session: CLISession, name: str, device: str):
     """Create a new network and first account."""
-    result = user.new_network(name=name, t_ms=session.current_time_ms, db=session.db)
+    result = user.new_network(name=name, t_ms=session.current_time_ms, db=session.db, device_name=device)
 
     # Create account context
     account = AccountContext(
@@ -532,7 +532,8 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
         invite_link=invite_link,
         name=name,
         t_ms=session.current_time_ms,
-        db=session.db
+        db=session.db,
+        device_name=device
     )
 
     session.db.commit()

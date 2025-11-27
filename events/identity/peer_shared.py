@@ -12,7 +12,8 @@ log = logging.getLogger(__name__)
 
 def create(peer_id: str, t_ms: int, db: Any,
            invite_id: str,
-           invite_private_key: bytes) -> str:
+           invite_private_key: bytes,
+           device_name: str = "Device") -> str:
     """Create a shareable peer_shared event from a local peer.
 
     peer_shared is ALWAYS signed by an invite (mode=peer). This ensures every
@@ -24,11 +25,12 @@ def create(peer_id: str, t_ms: int, db: Any,
         db: Database connection
         invite_id: Peer invite ID (required - from invite(mode=peer))
         invite_private_key: Invite private key for signing (required)
+        device_name: Device name (e.g., "Phone", "Desktop")
 
     Returns:
         peer_shared_id: The ID of the created peer_shared event
     """
-    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}, invite_id={invite_id[:20]}...")
+    log.info(f"peer_shared.create() creating peer_shared for peer_id={peer_id}, t_ms={t_ms}, invite_id={invite_id[:20]}..., device_name={device_name}")
 
     # Get peer's public key (always needed)
     public_key = peer.get_public_key(peer_id, peer_id, db)
@@ -38,6 +40,7 @@ def create(peer_id: str, t_ms: int, db: Any,
         'type': 'peer_shared',
         'public_key': crypto.b64encode(public_key),
         'peer_id': peer_id,  # Link back to local peer
+        'device_name': device_name,
         'created_at': t_ms
     }
 
@@ -130,16 +133,20 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
             return None
         log.info(f"peer_shared.project() verified self-signed (legacy mode)")
 
+    # Extract device_name from event data
+    device_name = event_data.get('device_name', 'Device')
+
     # Insert into peers_shared table (including user_id if invite-based)
     safedb.execute(
         """INSERT OR IGNORE INTO peers_shared
-           (peer_shared_id, peer_id, public_key, user_id, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (peer_shared_id, peer_id, public_key, user_id, device_name, created_at, recorded_by, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             peer_shared_id,
             event_data['peer_id'],
             event_data['public_key'],
             user_id,  # NULL if self-signed bootstrap, set if invite-based
+            device_name,
             event_data['created_at'],
             recorded_by,
             recorded_at
@@ -288,8 +295,28 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
     return peer_id
 
 
+def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
+    """Get device name for a peer_shared_id.
+
+    Args:
+        peer_shared_id: The public peer_shared ID
+        recorded_by: Peer ID requesting access (for access control)
+        db: Database connection
+
+    Returns:
+        Device name (e.g., "Phone", "Desktop") or "Device" if not set
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT device_name FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    return row['device_name'] if row and row['device_name'] else "Device"
+
+
 def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
-         user_id: str | None, prekey_id: str | None, t_ms: int, db: Any) -> dict[str, Any]:
+         user_id: str | None, prekey_id: str | None, t_ms: int, db: Any,
+         device_name: str = "Device") -> dict[str, Any]:
     """Join/link a peer via peer invite (first peer or linking device).
 
     This is the canonical, reusable operation for peer joining/linking.
@@ -303,6 +330,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         prekey_id: Optional group_prekey_shared_id from invite URL
         t_ms: Base timestamp
         db: Database connection
+        device_name: Device name (e.g., "Phone", "Desktop")
 
     Returns:
         {
@@ -314,7 +342,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
             'transit_prekey_shared_id': str,
         }
     """
-    log.info(f"peer_shared.join() peer_id={peer_id}, peer_invite_id={peer_invite_id[:20]}..., user_id={user_id[:20] if user_id else 'None'}...")
+    log.info(f"peer_shared.join() peer_id={peer_id}, peer_invite_id={peer_invite_id[:20]}..., user_id={user_id[:20] if user_id else 'None'}..., device_name={device_name}")
 
     # 1. Create peer_shared signed by peer_invite (proves access to invite)
     peer_shared_id = create(
@@ -322,7 +350,8 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         t_ms=t_ms,
         db=db,
         invite_id=peer_invite_id,
-        invite_private_key=peer_invite_private_key
+        invite_private_key=peer_invite_private_key,
+        device_name=device_name
     )
     log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
 
