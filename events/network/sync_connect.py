@@ -70,7 +70,7 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
         # 1. Synced peers (discovered via normal sync) - from peers_shared table
         # 2. Bootstrap peers (from invite/link acceptance) - from invite_accepteds table
         # 3. Connected peers (received sync_connect from them) - from sync_connections table
-        # 4. Linked peers (devices linked to same user) - from linked_peers table
+        # 4. Linked peers (devices linked to same user) - from peers_shared table where user_id = our user_id
         # This unified query enables connections before sync completes (e.g., initial join, device linking)
 
         # Query synced peers
@@ -96,11 +96,23 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
             (t_ms,)
         )
 
-        # Query linked peers (devices linked to same user via link events)
-        linked_rows = safedb.query(
-            "SELECT peer_id as peer_shared_id FROM linked_peers WHERE recorded_by = ?",
-            (peer_id,)
+        # Query linked peers (other devices of same user - get our user_id then find all peers with that user_id)
+        our_user_id = None
+        our_peer_row = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (peer_shared_id, peer_id)
         )
+        if our_peer_row and our_peer_row['user_id']:
+            our_user_id = our_peer_row['user_id']
+
+        linked_rows = []
+        if our_user_id:
+            linked_rows = safedb.query(
+                "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ? AND peer_shared_id != ?",
+                (our_user_id, peer_id, peer_shared_id)
+            )
+        else:
+            log.warning(f"[SYNC_CONNECT_LINKED_PEERS] No user_id found for our peer, skipping linked peers discovery")
 
         # Combine and deduplicate all peer IDs
         all_peer_ids = set()

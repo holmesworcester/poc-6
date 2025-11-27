@@ -138,54 +138,35 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a single message event into the database.
 
-    Uses pure functional projector - all logic is in pure_projectors.message.
-    This wrapper handles:
-    1. Building the input dict via resolver
-    2. Applying the pure projector's output to the database
-    3. Handling side effects (invalid deletion cleanup)
+    Uses pure functional projector from projectors.message.
     """
     log.debug(f"message.project() projecting message_id={event_id}, seen_by={recorded_by}")
 
-    from pure_projectors import resolver
-    from pure_projectors.message import project as pure_project
-    from pure_projectors.framework import apply_result
+    from projectors import resolve, apply_result
+    from projectors import message as msg_projector
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Build input dict for pure projector
-    input_dict = resolver.resolve_message(event_id, recorded_by, recorded_at, db)
+    input_dict = resolve("message", event_id, recorded_by, recorded_at, db)
     if not input_dict:
-        log.warning(f"message.project() resolver failed for message_id={event_id}")
         return None
 
-    # Handle invalid deletion side-effect (cleanup)
-    # This is a side effect that can't be expressed in the pure output
+    # Side effect: cleanup invalid deletion
     deletion = input_dict["dependencies"].get("deletion")
     if deletion and not deletion.get("is_valid"):
-        log.warning(f"message.project() removing invalid deletion for message {event_id[:20]}...")
         safedb.execute(
             "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
             (event_id, recorded_by)
         )
 
-    # Run pure projector
-    result = pure_project(input_dict)
+    result = msg_projector.project(input_dict)
 
-    if result.blocked:
-        log.info(f"message.project() blocked, missing deps: {result.missing_deps}")
+    if result.blocked or not result.valid:
         return None
 
-    if not result.valid:
-        log.warning(f"message.project() validation failed: {result.reason}")
-        return None
-
-    # Apply result to database
     apply_result(result, recorded_by, recorded_at, db)
 
-    # Return event_id if we projected, None if deleted
     if "messages" in result.tables:
-        log.info(f"message.project() projected message content='{input_dict['event_data'].get('content', '')[:50]}...', id={event_id}")
+        log.info(f"message.project() projected id={event_id[:20]}...")
         return event_id
-    else:
-        log.info(f"message.project() message {event_id[:20]}... has valid deletion - skipping projection")
-        return None
+    return None

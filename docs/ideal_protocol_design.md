@@ -199,6 +199,56 @@ This separation ensures:
 - User key proves "I am this specific user" (short-lived, first-peer only)
 - After first peer links, all subsequent operations use `peer_shared` keys
 
+### Unified Peer Linking (First and Later Devices)
+
+A critical insight is that **first-peer joining and device linking follow identical flows** (both use `invite(mode=peer)`). This enables:
+
+1. **Single canonical operation** `peer_shared.join()` handles both:
+   - First device linking: `user` exists, create `peer_shared` and link via `invite(mode=peer)`
+   - Subsequent devices: user already exists, create another `peer_shared` via same flow
+
+2. **Code reuse hierarchy**:
+   - `peer_shared.join(peer_id, peer_invite_id, peer_invite_private_key, user_id, prekey_id)` = base operation
+   - Called by both `user.join()` (network join with new user) and `user.new_network()` (network creation)
+   - No duplicate peer-linking code across flows
+
+3. **Network creation bootstrap** uses the same mechanism:
+   - Creator links their initial device via `peer_shared.join()`
+   - `invite_accepted` event unblocks `network_id` valid → cascade unblocks dependent events
+   - All subsequent user joins use the same `invite(mode=peer)` → `peer_shared` flow
+
+This design eliminates separate "link" events or "link invites" - peer linking is fundamental to the protocol, not a special case.
+
+### Invite Modes: `mode='user'` vs `mode='peer'`
+
+**Key semantic difference**: Device linking invites (`mode='peer'`) are **long-lived and reusable**, while network join invites (`mode='user'`) are **one-time bootstrap mechanisms**.
+
+#### `mode='user'` (Network Join - Ephemeral)
+- **Purpose**: Bootstrap a new user joining an existing network
+- **Lifetime**: Short-lived, used once to join
+- **Group key seeding**: Only needs `all_users` group key (to prove network membership)
+- **Key updates**: If new users join the network after this invite was created, the `all_users` key changes, but this invite doesn't need updating - each join creates its own invite with the current key
+- **No reuse**: Each new user gets a fresh `invite(mode='user')` sealed to that user's first device join
+
+#### `mode='peer'` (Device Linking - Long-Lived)
+- **Purpose**: Link a new device to an existing user account
+- **Lifetime**: Long-lived and reusable - same invite link can be used for multiple devices
+- **Group key seeding**: Shares ALL groups the user currently belongs to at invite creation time
+- **Key updates**: When new groups are created AFTER the invite was made and the user is added to them, those groups automatically seal their keys to all active device links
+- **Reuse semantics**: The invite includes all groups the user belonged to at creation time; future groups auto-seal to device links
+
+#### Implementation of `mode='peer'` Semantics
+1. `invite.create(mode='peer')` shares keys for ALL groups the user belongs to, plus `all_users` and `admins`
+2. Pre-shares keys for all existing groups the user is a member of (ensures immediate access)
+3. When `group.create()` adds the user to a new group AFTER the invite was made, it seals the key to ALL active device links
+4. When `group_member.add()` adds the user to an existing group AFTER the invite, it seals the key to ALL active device links
+5. "Active device links" = all `peer_shared` entries where `user_id = this_user_id` and the peer is not removed
+
+This ensures that:
+- New devices get immediate access to all groups the user belonged to when the invite was created
+- Groups created after the invite still include all device links (via automatic sealing in group operations)
+- Reusable invite semantics: any device using it gets the user's complete group context at that moment
+
 ### Key Lifecycle (Network Bootstrap)
 
 When creating a network:
@@ -219,7 +269,7 @@ The `group_prekey_shared` event includes context that depends on the invite mode
 | Mode | Context | Description |
 |------|---------|-------------|
 | `user` (network join) | `group_id` + `key_id` | Group context (all_users group) |
-| `link`/`peer` (device linking) | `user_id` | User context - the user being linked to |
+| `peer` (device linking) | `user_id` | User context - the user being linked to |
 
 Note: Bootstrap (first user) doesn't need an `invite_prekey_id` at all since there are no existing encrypted events to decrypt.
 
@@ -257,26 +307,46 @@ In future iterations we will make it so that only admins can add new members to 
 
 # Linking Peers on Multiple Devices
 
-Users often work on multiple devices (e.g., phone and laptop) and must link them to the same user. Linking uses the same `invite` event type as new-user invitation, with `mode=peer`.
+Users often work on multiple devices (e.g., phone and laptop) and must link them to the same user. Device linking is isomorphic to user creation: it uses the same `invite` event type as new-user invitation with `mode=peer` and proves possession of the invite secret through a single signature on the `peer_shared` event that will identify the device/peer.
 
-Invite (mode=peer)
+## Invite (mode=peer)
+
 - Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
 - Signed_by: a linked `peer_shared_id` of that `user_id` (ongoing device linking).
+- Encodes dependency: The referenced `user_id` must be valid for this peer to accept and the prekey (if provided) must be available before dependent events can project.
 
-Prekeys for immediate E2E (optional)
-- The inviter may publish a `group_prekey_shared` and include its id in `invite_prekey_id`.
+## Prekeys for immediate E2E (optional)
+
+- The inviter may publish a `group_prekey_shared` with context `user_id` and include its id in `invite_prekey_id`.
+- This prekey is a **blocking dependency**: when `peer_shared` projects, it triggers projection of the `invite_prekey_id` via the unblock cascade. Dependent `group_key_shared` events then unblock. <!-- i think this is wrong and should be removed. can you understand why? -->
 - The inviter (and other peers) can wrap existing group keys to this `group_prekey_shared` (via new `group_key_shared` events), so the new device can read previously‑encrypted messages on first sync.
 
-Invite link
-- The inviter generates a one‑time invite keypair and sends an invite link containing `invite_id`, `invite_private_key`, and the private `group_prekey` material corresponding to `invite_prekey_id`.
+## Invite link
 
-Joining flow (device link)
-- Identical to Link Peer in [Joining (Graph)](#joining-graph): the new device publishes `peer_shared` signed_by = `invite_id` (signature over its canonical body). Projectors verify with `invite.invite_pubkey` and insert `peers_shared` and `linked_peers(user_id, peer_shared_id)`.
+- The inviter generates a one‑time invite keypair and sends an invite link containing `invite_id`, `invite_private_key`, and the private `group_prekey` material corresponding to `invite_prekey_id` (if present).
+
+## Joining flow (device link)
+
+Identical to Link Peer in [Joining (Graph)](#joining-graph): the new device publishes `peer_shared` signed_by = `invite_id` (signature over its canonical body).
+
+**Execution** (via `peer_shared.join()`):
+1. Validate `peer_invite` is valid and references correct `user_id` <!-- i think this is wrong. you won't have an invite event until you sync! in joining you just ref it in your peer_shared-->
+2. Create `peer_shared` event signed by `peer_invite_private_key` (from invite link)
+3. Create `invite_accepted` event to event-source the secrets <!-- it's also important for invite_accepted to force-unblock the `network_id` and make it valid etc as currently happens when a new user joins-->
+4. Project `peer_shared` immediately to establish the peer↔user link <!-- i'm not sure this is clear. nothing exceptional should happen here, i'm fairly sure. this is just normal event creation -->
+5. When `peer_shared` projects, it triggers projection of `invite_prekey_id` (if provided) via unblock cascade <!-- I don't think this makes sense. unblock cascade is triggered by the forced validity of network_id, see how user joining works.-->
+6. Dependent `group_key_shared` events unblock once the prekey is valid 
+
+**Projection**: Projectors verify the `peer_shared` signature with `invite_pubkey` from the invite. On success, they:
+- Insert `peers_shared(peer_shared_id, public_key, ...)`
+- Insert `linked_peers(user_id, peer_shared_id)` — establishing the peer↔user relationship
+- Update `peer_self` with the established `user_id`
 
 ## Validation
 
-- `invite(mode=peer)` must reference `network_id`, `peer_shared_id` and `user_id`; it is authorized when signed_by `peer_shared_id` and `peer_shared_id` is a peer of `user_id`.
-- `peer_shared` is signed_by = `invite_id`; projectors load the invite and verify the signature with `invite_pubkey`. On success, they link `(user_id, peer_shared_id)`.
+- `invite(mode=peer)` must reference `network_id`, `user_id`, and `invite_pubkey`. It is authorized when signed_by a `peer_shared_id` that is already linked to that `user_id`.
+- `peer_shared` is signed_by = `invite_id`; projectors load the invite and verify the signature with `invite_pubkey`. On success, they establish the peer↔user link.  
+- `invite_prekey_id` (if present) is a blocking dependency: the prekey must project before dependent `group_key_shared` events can project. <!-- this is wrong and does not make sense-->
 - Any linked peer can subsequently publish updates for that `user_id` (e.g., profile updates) subject to normal validation.
 # Encryption
 
@@ -886,10 +956,10 @@ HTTP codes (400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found). Bo
 - **POST /networks/{network_id}/users/{user_id}/link-invites**  
   Same as above, but for linking. Response includes secret/encoded_data. 403 if not primary/linked.
 
-- **POST /networks/{network_id}/peers/link**  
-  Claim link invite (on new peer). Request: `{"encoded_data": "base64"}`.  
-  Response: 201 Created, `{"peer_shared_id": "hex"}`  
-  (Generates `link` event.)
+- **POST /networks/{network_id}/peers/link**
+  Claim link invite (on new peer). Request: `{"encoded_data": "base64"}`.
+  Response: 201 Created, `{"peer_shared_id": "hex"}`
+  (Generates `peer_shared` event via `peer_shared.join()`; establishes peer↔user link and optionally triggers prekey projection.)
 
 - **DELETE /networks/{network_id}/users/{user_id}/peers/{peer_shared_id}**  
   Remove peer.  

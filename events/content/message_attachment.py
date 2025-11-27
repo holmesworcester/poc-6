@@ -641,18 +641,38 @@ def consolidate_file_slices(file_id: str, recorded_by: str, db: Any) -> bool:
         log.info(f"consolidate_file_slices() incomplete: have {len(slice_rows)}/{total_slices} slices")
         return False
 
-    # Concatenate all slice data (nonce + ciphertext + poly_tag)
+    # Concatenate all slice data and track offsets
     # Format: [nonce(12) + ciphertext(var) + poly_tag(16)] repeated for each slice
     consolidated_parts = []
+    offset_records = []  # Track offset info for each slice
+    current_offset = 0
+
     for slice_row in slice_rows:
         nonce = slice_row['nonce']
         ciphertext = slice_row['ciphertext']
         poly_tag = slice_row['poly_tag']
 
+        blob_offset_start = current_offset
+
         # Pack: nonce (12 bytes) + ciphertext (variable) + poly_tag (16 bytes)
         consolidated_parts.append(nonce)
         consolidated_parts.append(ciphertext)
         consolidated_parts.append(poly_tag)
+
+        # Calculate offsets within the consolidated blob
+        nonce_len = len(nonce)
+        ciphertext_len = len(ciphertext)
+        poly_tag_len = len(poly_tag)
+
+        current_offset += nonce_len + ciphertext_len + poly_tag_len
+        blob_offset_end = current_offset
+
+        offset_records.append({
+            'slice_number': slice_row['slice_number'],
+            'ciphertext_len': ciphertext_len,
+            'blob_offset_start': blob_offset_start,
+            'blob_offset_end': blob_offset_end
+        })
 
     consolidated_blob = b''.join(consolidated_parts)
 
@@ -662,6 +682,15 @@ def consolidate_file_slices(file_id: str, recorded_by: str, db: Any) -> bool:
         "WHERE file_id = ? AND recorded_by = ?",
         (consolidated_blob, file_id, recorded_by)
     )
+
+    # Store offset information for each slice (enables deterministic unpacking)
+    for offset_record in offset_records:
+        safedb.execute(
+            "UPDATE file_slices SET ciphertext_len = ?, blob_offset_start = ?, blob_offset_end = ? "
+            "WHERE file_id = ? AND slice_number = ? AND recorded_by = ?",
+            (offset_record['ciphertext_len'], offset_record['blob_offset_start'],
+             offset_record['blob_offset_end'], file_id, offset_record['slice_number'], recorded_by)
+        )
 
     log.info(f"consolidate_file_slices() consolidated {total_slices} slices "
              f"into {len(consolidated_blob):,} bytes for {file_id[:20]}...")
@@ -715,59 +744,55 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
     if consolidated_blob is not None:
         log.debug(f"get_file_data() using FAST PATH (consolidated blob) for {file_id[:20]}...")
 
-        # Unpack consolidated blob: [nonce(12) + ciphertext(var) + poly_tag(16)] * total_slices
-        plaintext_slices = []
-        ciphertext_slices = []  # For root_hash verification
-        offset = 0
+        # Query slice offset information (set during consolidation)
+        slice_rows = safedb.query_all(
+            "SELECT slice_number, blob_offset_start, blob_offset_end, ciphertext_len FROM file_slices "
+            "WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number ASC",
+            (file_id, recorded_by)
+        )
 
-        for slice_num in range(total_slices):
-            # Read nonce (12 bytes)
-            nonce = consolidated_blob[offset:offset+12]
-            offset += 12
+        # Verify we have offset information for all slices
+        if len(slice_rows) != total_slices or not all(row.get('blob_offset_start') is not None for row in slice_rows):
+            log.debug(f"get_file_data() FAST PATH: offset information not available, falling back to SLOW PATH")
+            consolidated_blob = None
+        else:
+            plaintext_slices = []
+            ciphertext_slices = []  # For root_hash verification
 
-            # Ciphertext length varies, but we know poly_tag is always 16 bytes at the end
-            # We need to find the next nonce start (or end of blob)
-            # Strategy: Read until we hit next slice or end
-
-            # For last slice: read until end - 16 (poly_tag)
-            # For other slices: calculate based on SLICE_SIZE (450 bytes plaintext → ~450 ciphertext)
-            if slice_num == total_slices - 1:
-                # Last slice: read remaining data
-                remaining = consolidated_blob[offset:]
-                poly_tag = remaining[-16:]
-                ciphertext = remaining[:-16]
-            else:
-                # Non-last slice: expect ~450 bytes ciphertext + 16 poly_tag
-                # But ciphertext size can vary slightly, so we look for next nonce position
-                # Heuristic: SLICE_SIZE (450) is the plaintext size, ciphertext is same size
-                expected_ciphertext_len = SLICE_SIZE
-                poly_tag = consolidated_blob[offset+expected_ciphertext_len:offset+expected_ciphertext_len+16]
-                ciphertext = consolidated_blob[offset:offset+expected_ciphertext_len]
-                offset += expected_ciphertext_len + 16
-
-            # Decrypt slice
             try:
-                plaintext = crypto.decrypt_file_slice(ciphertext, poly_tag, enc_key, nonce)
-                plaintext_slices.append(plaintext)
-                ciphertext_slices.append(ciphertext)
+                for slice_row in slice_rows:
+                    blob_offset_start = slice_row['blob_offset_start']
+                    blob_offset_end = slice_row['blob_offset_end']
+                    ciphertext_len = slice_row['ciphertext_len']
+
+                    # Extract slice components from consolidated blob using deterministic offsets
+                    # Format: nonce(12) + ciphertext(var) + poly_tag(16)
+                    slice_blob = consolidated_blob[blob_offset_start:blob_offset_end]
+
+                    nonce = slice_blob[0:12]
+                    ciphertext = slice_blob[12:12+ciphertext_len]
+                    poly_tag = slice_blob[12+ciphertext_len:12+ciphertext_len+16]
+
+                    # Decrypt slice
+                    plaintext = crypto.decrypt_file_slice(ciphertext, poly_tag, enc_key, nonce)
+                    plaintext_slices.append(plaintext)
+                    ciphertext_slices.append(ciphertext)
+
+                # Fast path succeeded, verify root hash and return
+                plaintext_full = b''.join(plaintext_slices)
+                computed_root_hash = crypto.compute_root_hash(ciphertext_slices)
+
+                if computed_root_hash != root_hash:
+                    log.error(f"get_file_data() FAST PATH root_hash mismatch!")
+                    return None
+
+                log.info(f"get_file_data() FAST PATH success: {file_id[:20]}..., size={len(plaintext_full)}B")
+                return plaintext_full
+
             except Exception as e:
-                log.error(f"get_file_data() FAST PATH decryption failed for slice {slice_num}: {e}")
-                # Fall back to slow path on decryption failure
+                log.error(f"get_file_data() FAST PATH decryption failed: {e}")
                 log.info(f"get_file_data() falling back to SLOW PATH due to decryption error")
                 consolidated_blob = None
-                break
-
-        if consolidated_blob is not None:
-            # Fast path succeeded, verify root hash and return
-            plaintext_full = b''.join(plaintext_slices)
-            computed_root_hash = crypto.compute_root_hash(ciphertext_slices)
-
-            if computed_root_hash != root_hash:
-                log.error(f"get_file_data() FAST PATH root_hash mismatch!")
-                return None
-
-            log.info(f"get_file_data() FAST PATH success: {file_id[:20]}..., size={len(plaintext_full)}B")
-            return plaintext_full
 
     # SLOW PATH: Read individual slices from file_slices table
     log.debug(f"get_file_data() using SLOW PATH (individual slices) for {file_id[:20]}...")

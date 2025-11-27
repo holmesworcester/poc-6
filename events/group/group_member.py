@@ -77,12 +77,12 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
 
     if not admin_grant_id:
         # Look up admin_grant from admins table
-        # Get adder's user_id from linked_peers (user→peer is one-to-many)
+        # Get adder's user_id from peers_shared (user→peer relationship stored there)
         adder_user_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
             (peer_shared_id, peer_id)
         )
-        if adder_user_row:
+        if adder_user_row and adder_user_row['user_id']:
             # Get network_id
             network_row = safedb.query_one(
                 "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
@@ -128,9 +128,9 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     log.info(f"group_member.create() created member_id={member_id}")
 
     # Share group key with new member
-    # Get the new member's peer_id from linked_peers (user→peer is one-to-many)
+    # Get the new member's peer_shared_id from peers_shared (user→peer is one-to-many)
     member_peer = safedb.query_one(
-        "SELECT peer_id FROM linked_peers WHERE user_id = ? AND recorded_by = ?",
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
         (user_id, peer_id)
     )
 
@@ -141,7 +141,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
                 key_id=group['key_id'],
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
-                recipient_peer_id=member_peer['peer_id'],
+                recipient_peer_id=member_peer['peer_shared_id'],
                 t_ms=t_ms + 1,
                 db=db
             )
@@ -149,31 +149,35 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         except Exception as e:
             log.warning(f"group_member.create() failed to share key with {user_id}: {e}")
 
-    # Per design doc: Share key to outstanding link invites for this user
-    # "any new keys are also wrapped to all outstanding invite-referenced group_prekey_shared keys"
-    # This ensures devices linking later can decrypt groups created after the invite
+    # Per design doc: Share key to all active device links for this user
+    # Any new group memberships must be sealed to all active device links
+    # This ensures all devices of a user can decrypt groups they're added to
     from events.group import group_key_shared
-    outstanding_link_invites = safedb.query(
-        "SELECT invite_id FROM invites WHERE mode = 'link' AND user_id = ? AND recorded_by = ?",
-        (user_id, peer_id)
+
+    # Get all active device links for this user (peer_shared entries with matching user_id)
+    other_devices = safedb.query(
+        """SELECT peer_shared_id FROM peers_shared
+           WHERE user_id = ? AND recorded_by = ? AND peer_shared_id != ?""",
+        (user_id, peer_id, member_peer['peer_shared_id'] if member_peer else None)
     )
 
     key_share_ts = t_ms + 2
-    for invite_row in outstanding_link_invites:
-        invite_id = invite_row['invite_id']
+    for device_row in other_devices:
+        other_peer_shared_id = device_row['peer_shared_id']
         try:
-            group_key_shared.create_for_invite(
+            # Share key with other device by creating group_key_shared sealed to their identity
+            group_key_shared.create(
                 key_id=group['key_id'],
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
-                invite_id=invite_id,
+                recipient_peer_id=other_peer_shared_id,
                 t_ms=key_share_ts,
                 db=db
             )
-            log.info(f"group_member.create() shared key to outstanding link invite {invite_id[:20]}...")
+            log.info(f"group_member.create() shared key to device link {other_peer_shared_id[:20]}...")
             key_share_ts += 1
         except Exception as e:
-            log.warning(f"group_member.create() failed to share key to link invite {invite_id[:20]}...: {e}")
+            log.warning(f"group_member.create() failed to share key to device link {other_peer_shared_id[:20]}...: {e}")
 
     return member_id
 
@@ -237,12 +241,12 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     admin_grant = event_data.get('admin_grant')
     if admin_grant:
         # Verify admin_grant references an admin event for the adder's user
-        # Get adder's user_id from linked_peers (user→peer is one-to-many)
+        # Get adder's user_id from peers_shared (user→peer relationship stored there)
         adder_user_row = safedb.query_one(
-            "SELECT user_id FROM linked_peers WHERE peer_id = ? AND recorded_by = ?",
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
             (added_by, recorded_by)
         )
-        if adder_user_row:
+        if adder_user_row and adder_user_row['user_id']:
             grant_row = safedb.query_one(
                 "SELECT user_id FROM admins WHERE admin_id = ? AND recorded_by = ?",
                 (admin_grant, recorded_by)

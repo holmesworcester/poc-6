@@ -15,7 +15,7 @@ Tests:
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, link_invite, link
+from events.identity import user, invite, peer_shared, peer
 from events.content import message
 from tests.utils import tick_helper
 
@@ -39,25 +39,41 @@ def test_alice_links_phone_to_laptop():
 
     db.commit()
 
-    # Alice creates a link invite on her phone for her laptop
-    print("\n=== Alice creates link invite for laptop ===")
+    # Alice creates a peer invite on her phone for device linking
+    print("\n=== Alice creates peer invite for laptop (device linking) ===")
 
-    link_invite_id, link_url, link_data = link_invite.create(
+    invite_id, link_url, invite_data = invite.create(
         peer_id=alice_phone['peer_id'],
         t_ms=2000,
-        db=db
+        db=db,
+        mode='peer',
+        user_id=alice_phone['user_id']
     )
-    print(f"Link invite created: {link_invite_id[:20]}...")
+    print(f"Peer invite created: {invite_id[:20]}...")
     print(f"Link URL: {link_url[:50]}...")
 
     db.commit()
 
-    # Alice joins on her laptop via the link URL
+    # Alice links laptop to her account via the link URL
     print("\n=== Alice links laptop to her account ===")
 
-    alice_laptop = link.join(
-        link_url=link_url,
-        t_ms=3000,
+    # Create peer for laptop
+    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    print(f"Created laptop peer: {alice_laptop_peer_id[:20]}...")
+
+    # Accept the invite (handles parsing, projection of backgrounds, and invite_accepted)
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    assert accepted['mode'] == 'peer', f"Expected mode='peer', got {accepted['mode']}"
+    print(f"Accepted peer invite from link URL")
+
+    # Complete the peer linking via peer_shared.join()
+    alice_laptop = peer_shared.join(
+        peer_id=alice_laptop_peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=accepted['user_id'],
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=3002,
         db=db
     )
     print(f"Alice linked laptop")
@@ -218,16 +234,25 @@ def test_alice_laptop_joins_after_phone_has_messages():
     # Now link laptop
     print("\n=== Link laptop after messages already exist ===")
 
-    link_invite_id, link_url, link_data = link_invite.create(
+    invite_id, link_url, invite_data = invite.create(
         peer_id=alice_phone['peer_id'],
         t_ms=2000,
-        db=db
+        db=db,
+        mode='peer',
+        user_id=alice_phone['user_id']
     )
     db.commit()
 
-    alice_laptop = link.join(
-        link_url=link_url,
-        t_ms=3000,
+    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    assert accepted['mode'] == 'peer'
+    alice_laptop = peer_shared.join(
+        peer_id=alice_laptop_peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=accepted['user_id'],
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=3002,
         db=db
     )
     db.commit()
@@ -284,27 +309,51 @@ def test_three_devices_all_linked():
     # Link laptop
     print("\n=== Link laptop ===")
 
-    link_invite_id_1, link_url_1, _ = link_invite.create(
+    invite_id_1, link_url_1, _ = invite.create(
         peer_id=alice_phone['peer_id'],
         t_ms=2000,
-        db=db
+        db=db,
+        mode='peer',
+        user_id=alice_phone['user_id']
     )
     db.commit()
 
-    alice_laptop = link.join(link_url=link_url_1, t_ms=3000, db=db)
+    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    accepted_1 = invite.accept(alice_laptop_peer_id, link_url_1, t_ms=3001, db=db)
+    alice_laptop = peer_shared.join(
+        peer_id=alice_laptop_peer_id,
+        peer_invite_id=accepted_1['invite_id'],
+        peer_invite_private_key=accepted_1['invite_private_key'],
+        user_id=accepted_1['user_id'],
+        prekey_id=accepted_1['invite_prekey_id'],
+        t_ms=3002,
+        db=db
+    )
     db.commit()
 
     # Link tablet
     print("\n=== Link tablet ===")
 
-    link_invite_id_2, link_url_2, _ = link_invite.create(
+    invite_id_2, link_url_2, _ = invite.create(
         peer_id=alice_phone['peer_id'],  # Can create from phone or laptop
         t_ms=4000,
-        db=db
+        db=db,
+        mode='peer',
+        user_id=alice_phone['user_id']
     )
     db.commit()
 
-    alice_tablet = link.join(link_url=link_url_2, t_ms=5000, db=db)
+    alice_tablet_peer_id = peer.create(t_ms=5000, db=db)
+    accepted_2 = invite.accept(alice_tablet_peer_id, link_url_2, t_ms=5001, db=db)
+    alice_tablet = peer_shared.join(
+        peer_id=alice_tablet_peer_id,
+        peer_invite_id=accepted_2['invite_id'],
+        peer_invite_private_key=accepted_2['invite_private_key'],
+        user_id=accepted_2['user_id'],
+        prekey_id=accepted_2['invite_prekey_id'],
+        t_ms=5002,
+        db=db
+    )
     db.commit()
 
     # All three should have same user_id

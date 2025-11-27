@@ -110,6 +110,76 @@ queues.blocked.notify_event_valid() no events waiting for event_id=...
 
 ---
 
+## Bug 6: ✅ FIXED - Names with spaces don't work
+
+**Symptom:** `new-network --name "Alice Smith" --device "MacBook Pro"` fails with argument parsing error.
+
+**Observed:**
+```
+> new-network --name "Alice Smith" --device "MacBook Pro"
+usage: new-network --name <name> --device <device>
+cli.py: error: unrecognized arguments: Smith" Pro"
+```
+
+**Expected:** Quoted arguments should be parsed correctly.
+
+**Root cause:** `line.split()` doesn't respect quotes - splits on all whitespace.
+
+**Location:** `cli.py:644` - Command parsing
+
+**Fix:** Use `shlex.split(line)` which respects shell quoting rules.
+
+**Impact:** Medium - Can't use realistic names
+
+---
+
+## Bug 7: ✅ FIXED - Tracebacks shown for all errors
+
+**Symptom:** Unhandled exceptions print full Python tracebacks even in quiet mode.
+
+**Observed:**
+```
+> create-invite
+error: no account selected
+Traceback (most recent call last):
+  File "/home/hwilson/poc-6/cli.py", line 714, in execute_command
+  ...
+```
+
+**Expected:** Clean error messages without tracebacks (unless in verbose mode).
+
+**Root cause:** Exception handler always printed traceback.
+
+**Location:** `cli.py:775-778` - Exception handler in `execute_command()`
+
+**Fix:** Only print traceback when `_verbose` is True.
+
+**Impact:** Low - Noisy output for users
+
+---
+
+## Bug 8: ✅ FIXED - create-channel shows internal user ID in error
+
+**Symptom:** When non-admin tries to create a channel, error shows raw user ID.
+
+**Observed:**
+```
+> create-channel random
+error: User JguadnT/AXKO1K+OQNxy8Q== not authorized to create channels (only admins can)
+```
+
+**Expected:** Clean error message without internal IDs.
+
+**Root cause:** ValueError from backend not caught and translated.
+
+**Location:** `cli.py:447-455` - `cmd_create_channel()`
+
+**Fix:** Catch ValueError and show "✗ only admins can create channels"
+
+**Impact:** Low - Confusing error message
+
+---
+
 ## Suggested Fixes
 
 ### Fix for Bugs 1, 2, 3 (network_id not available) 

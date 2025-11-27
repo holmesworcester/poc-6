@@ -227,10 +227,10 @@ def project(invite_proof_id: str, recorded_by: str, recorded_at: int, db: Any) -
         ))
         log.info(f"invite_proof.project() added user {user_id[:20]}... to group {group_id[:20]}...")
 
-    else:  # mode == 'link'
-        # For mode='link', the link event itself will handle linked_peers insertion
+    else:  # mode == 'peer'
+        # For mode='peer' (device linking), peer_shared.project handles the user linking
         # invite_proof just validates the invite signature
-        log.info(f"invite_proof.project() validated link proof for peer {joiner_peer_shared_id[:20]}... to user {link_user_id[:20]}...")
+        log.info(f"invite_proof.project() validated device link proof for peer {joiner_peer_shared_id[:20]}... to user {link_user_id[:20]}...")
 
     log.info(f"invite_proof.project() completed for {recorded_by[:20]}...")
     return invite_proof_id

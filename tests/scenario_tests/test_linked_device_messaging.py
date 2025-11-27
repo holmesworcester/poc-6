@@ -14,7 +14,7 @@ Tests:
 import sqlite3
 from db import Database
 import schema
-from events.identity import user, link_invite, link
+from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
 from events.content import message
 from tests.utils import tick_helper
@@ -60,19 +60,28 @@ def test_linked_devices_bidirectional_messaging():
     # Sync for group creation
     tick_helper.sync_until_converged(db=db, start_t_ms=2000, max_rounds=200, check_interval=1)
 
-    # Alice creates link invite and links second device
+    # Alice creates peer invite and links second device
     print("\n=== Link second device ===")
 
-    invite_id, invite_link, _ = link_invite.create(
+    invite_id, invite_link, _ = invite.create(
         peer_id=alice_device1['peer_id'],
         t_ms=3000,
-        db=db
+        db=db,
+        mode='peer',
+        user_id=alice_device1['user_id']
     )
     db.commit()
 
-    alice_device2 = link.join(
-        link_url=invite_link,
-        t_ms=4000,
+    alice_device2_peer_id = peer.create(t_ms=4000, db=db)
+    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=4001, db=db)
+    assert accepted['mode'] == 'peer'
+    alice_device2 = peer_shared.join(
+        peer_id=alice_device2_peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=accepted['user_id'],
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=4002,
         db=db
     )
     print(f"Alice linked device 2")
