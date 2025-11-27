@@ -86,8 +86,8 @@ import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network
-from events.content import channel, message
-from events.group import group_member
+from events.content import channel, message, message_deletion
+from events.group import group_member, group_key, group_prekey
 
 
 class AccountContext:
@@ -640,6 +640,128 @@ def cmd_quit(session: CLISession):
     sys.exit(0)
 
 
+def cmd_keys(session: CLISession, summary: bool = False):
+    """Display key state for forward secrecy demo."""
+    account = session.get_selected_account()
+
+    # Get group keys
+    keys = group_key.list(account.peer_id, session.db)
+
+    # Get prekeys
+    prekeys = group_prekey.list(account.peer_id, session.current_time_ms, session.db)
+
+    if summary:
+        display_keys_summary(account, keys, prekeys)
+    else:
+        display_keys_full(account, keys, prekeys)
+
+
+def display_keys_full(account: AccountContext, keys: list, prekeys: list):
+    """Display full key state."""
+    print(f"KEYS ({account.full_name}):")
+
+    print("  group_keys:")
+    if not keys:
+        print("    (no keys)")
+    else:
+        for i, k in enumerate(keys, 1):
+            key_id_short = k['key_id'][:10]
+            status = k['status']
+            msg_count = k['message_count']
+            print(f"    {i}. key_{key_id_short} - {status} ({msg_count} messages)")
+
+    print()
+    print("  prekeys:")
+    if not prekeys:
+        print("    (no prekeys)")
+    else:
+        for i, pk in enumerate(prekeys, 1):
+            prekey_id_short = pk['prekey_id'][:10]
+            status = pk['status']
+            key_count = pk['group_key_count']
+            print(f"    {i}. prekey_{prekey_id_short} - {status} ({key_count} group_keys)")
+
+
+def display_keys_summary(account: AccountContext, keys: list, prekeys: list):
+    """Display summary key state."""
+    print(f"KEYS ({account.full_name}):")
+
+    active_keys = sum(1 for k in keys if k['status'] == 'active')
+    pending_keys = sum(1 for k in keys if k['status'] == 'pending_purge')
+
+    active_prekeys = sum(1 for p in prekeys if p['status'] == 'active')
+    pending_prekeys = sum(1 for p in prekeys if p['status'] == 'pending_purge')
+
+    print(f"  group_keys: {active_keys} active, {pending_keys} pending_purge")
+    print(f"  prekeys: {active_prekeys} active, {pending_prekeys} pending_purge")
+
+
+def cmd_delete_message(session: CLISession, message_num: int):
+    """Delete a message by number."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Get messages to find the one to delete
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+
+    if not (1 <= message_num <= len(messages)):
+        print(f"✗ message #{message_num} not found")
+        return
+
+    msg = messages[message_num - 1]
+    message_id = msg['message_id']
+
+    deletion_id = message_deletion.create(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    print(f"✓ deleted message")
+    print(f"✓ marked key for purging")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_purge_keys(session: CLISession):
+    """Run forward secrecy purge cycle."""
+    account = session.get_selected_account()
+
+    stats = message_deletion.run_message_purge_cycle(
+        peer_id=account.peer_id,
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    if stats['messages_rekeyed'] > 0:
+        print(f"✓ rekeyed {stats['messages_rekeyed']} messages")
+    if stats['keys_purged'] > 0:
+        print(f"✓ purged {stats['keys_purged']} keys")
+    if stats.get('prekeys_purged', 0) > 0:
+        print(f"✓ purged {stats['prekeys_purged']} prekeys")
+    if stats['errors']:
+        for err in stats['errors']:
+            print(f"⚠ {err}")
+    if stats['messages_rekeyed'] == 0 and stats['keys_purged'] == 0:
+        print("✓ no keys to purge")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
 # ============================================================================
 # COMMAND EXECUTION
 # ============================================================================
@@ -749,6 +871,22 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "list-users":
             cmd_list_users(session)
 
+        elif cmd == "keys":
+            summary = "--summary" in parts
+            cmd_keys(session, summary=summary)
+
+        elif cmd == "delete-message":
+            if len(parts) < 2:
+                print("usage: delete-message <n>")
+            else:
+                try:
+                    cmd_delete_message(session, int(parts[1]))
+                except ValueError:
+                    print("error: message number must be an integer")
+
+        elif cmd == "purge-keys":
+            cmd_purge_keys(session)
+
         elif cmd == "time":
             cmd_time(session)
 
@@ -766,6 +904,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  list-accounts")
             print("  list-channels")
             print("  list-users")
+            print("  keys [--summary]")
+            print("  delete-message <n>")
+            print("  purge-keys")
             print("  time")
             print("  show")
             print("  quit")

@@ -179,3 +179,36 @@ def get_or_create_clean_key(group_id: str, peer_id: str, t_ms: int, db: Any) -> 
     key_id = create(peer_id, t_ms, db)
     log.info(f"group_key.get_or_create_clean_key() created new key {key_id[:20]}...")
     return key_id
+
+
+def list(peer_id: str, db: Any) -> list[dict[str, Any]]:
+    """List all group keys with status and message counts.
+
+    Returns keys in two states:
+    - active: in group_keys, not in keys_to_purge
+    - pending_purge: in group_keys AND in keys_to_purge
+
+    Once purged, keys are gone (not shown).
+
+    Args:
+        peer_id: Local peer ID
+        db: Database connection
+
+    Returns:
+        List of dicts with: key_id, status, message_count, created_at
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    keys = safedb.query(
+        """SELECT gk.key_id, gk.created_at,
+                  CASE WHEN ktp.key_id IS NOT NULL THEN 'pending_purge' ELSE 'active' END as status,
+                  (SELECT COUNT(*) FROM messages m
+                   WHERE m.key_id = gk.key_id AND m.recorded_by = ?) as message_count
+           FROM group_keys gk
+           LEFT JOIN keys_to_purge ktp ON gk.key_id = ktp.key_id AND ktp.recorded_by = gk.recorded_by
+           WHERE gk.recorded_by = ?
+           ORDER BY gk.created_at DESC""",
+        (peer_id, peer_id)
+    )
+
+    return [row for row in keys]
