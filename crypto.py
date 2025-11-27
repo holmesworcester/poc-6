@@ -319,7 +319,8 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
             'type': 'symmetric'
         }
 
-    # Check group_prekeys (asymmetric) - DIRECT lookup, no _shared table
+    # Check group_prekeys (asymmetric) - DIRECT lookup by prekey_id
+    # Hint is now group_prekey_id (matches local prekey_id), consistent with transit_prekey
     group_prekey_row = safedb.query_one(
         "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
         (key_id, recorded_by, recorded_by)
@@ -429,30 +430,20 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
                         'type': 'asymmetric'
                     }
 
-    # Then try group_prekeys (subjective) - need to look up via group_prekeys_shared
-    log.debug(f"get_key_by_id() checking group_prekeys_shared for group_prekey_shared_id={key_id}")
-    group_prekey_shared_row = safedb.query_one(
-        "SELECT group_prekey_shared_id FROM group_prekeys_shared WHERE group_prekey_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (key_id, recorded_by)
+    # Then try group_prekeys (subjective) - direct lookup by prekey_id
+    # Hint is now group_prekey_id (matches local prekey_id), consistent with transit_prekey
+    log.debug(f"get_key_by_id() checking group_prekeys for prekey_id={key_id}")
+    group_prekey_row = safedb.query_one(
+        "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ? LIMIT 1",
+        (key_id, recorded_by, recorded_by)
     )
-    if group_prekey_shared_row:
-        # Need to get group_prekey_id from event data
-        group_prekey_shared_blob = store.get(key_id, db)
-        if group_prekey_shared_blob:
-            group_prekey_shared_data = parse_json(group_prekey_shared_blob)
-            group_prekey_id = group_prekey_shared_data.get('group_prekey_id')
-            if group_prekey_id:
-                group_prekey_row = safedb.query_one(
-                    "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND recorded_by = ? LIMIT 1",
-                    (group_prekey_id, recorded_by)
-                )
-                if group_prekey_row and group_prekey_row['private_key']:
-                    log.debug(f"get_key_by_id() found group prekey via group_prekeys_shared link")
-                    return {
-                        'id': id_bytes,
-                        'private_key': group_prekey_row['private_key'],
-                        'type': 'asymmetric'
-                    }
+    if group_prekey_row and group_prekey_row['private_key']:
+        log.debug(f"get_key_by_id() found group prekey for prekey_id={key_id}")
+        return {
+            'id': id_bytes,
+            'private_key': group_prekey_row['private_key'],
+            'type': 'asymmetric'
+        }
 
     # Finally, try main peer private key from local_peers (with ownership filter)
     log.debug(f"get_key_by_id() checking local_peers for peer_id={key_id}")

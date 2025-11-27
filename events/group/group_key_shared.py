@@ -3,7 +3,7 @@ from typing import Any
 import logging
 import crypto
 import store
-from events.network import transit_key, transit_prekey
+from events.group import group_prekey
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
@@ -37,10 +37,11 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     key_data = crypto.parse_json(key_blob)
     symmetric_key_b64 = key_data['key']
 
-    # Get recipient's prekey for wrapping (asymmetric encryption)
-    recipient_prekey = transit_prekey.get_transit_prekey_for_peer(recipient_peer_id, peer_id, db)
+    # Get recipient's group prekey for wrapping (asymmetric encryption)
+    # Uses group_prekey namespace (content layer) not transit_prekey (sync layer)
+    recipient_prekey = group_prekey.get_group_prekey_for_peer(recipient_peer_id, peer_id, db)
     if not recipient_prekey:
-        raise ValueError(f"No prekey found for recipient peer: {recipient_peer_id}")
+        raise ValueError(f"No group prekey found for recipient peer: {recipient_peer_id}")
 
     # Create the inner event (to be wrapped to recipient's prekey)
     # Note: recipient identity is in the crypto hint (from wrap()), not in event data

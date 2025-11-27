@@ -154,15 +154,15 @@ To invite users or link peers, we use a single `invite` event type with a `mode`
 Note: `invite.mode` is one of `user` | `peer` and determines authorization and dependencies.
 
 ### invite (mode=user)
-- Fields (depends on): `network_id`, `invite_pubkey`, `created_at`, `admin_grant?` (ongoing; references `admin_id`), `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
+- Fields (depends on): `network_id`, `invite_pubkey`, `created_at`, `admin_grant?` (ongoing; references `admin_id`), `invite_prekey_id?` (optional `group_prekey_id` for bootstrap encryption - the local prekey ID, not the shared event ID)
 - Signed_by: `network_id` (bootstrap) | `peer_shared_id` of an admin user (ongoing).
 - Authorization: Ongoing `invite(mode=user)` requires an `admin_grant` such that `admin_grant.user_id == signer_user_id` and `admin_grant.network_id == network_id`.
 
 ### invite (mode=peer)
-- Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
+- Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_id` for bootstrap encryption - the local prekey ID, not the shared event ID)
 - Signed_by: `user_id` (first) | linked `peer_shared_id` of that user (ongoing).
 
-Invite links include the `invite_id` and private material needed by the joiner; group encryption prekeys (`group_prekey_shared` ids with corresponding private `group_prekey`) can be referenced here as needed (see: [Event-layer Encryption](#event-layer-encryption)).
+Invite links include the `invite_id` and private material needed by the joiner; group encryption prekeys (`group_prekey_id` with corresponding private key, and `group_prekey_shared_id` for sync) can be referenced here as needed (see: [Event-layer Encryption](#event-layer-encryption)).
 ## Joining (Graph)
 
 Joining uses a uniform invite → prove-invite model with signatures over entire events:
@@ -208,9 +208,11 @@ When creating a network:
 
 ## Joining (Event-Layer Encryption)
 
-To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey` (local, contains keypair) and then a `group_prekey_shared` event (shareable, contains public key). The `group_prekey_shared` event's `id` becomes the `invite_prekey_id` in the invite event.
+To let Bob read end-to-end encrypted messages immediately upon join (see: [Event-layer Encryption](#event-layer-encryption)) Alice creates a `group_prekey` (local, contains keypair) and then a `group_prekey_shared` event (shareable, contains public key). The `group_prekey` event's `id` becomes the `invite_prekey_id` in the invite event (the crypto hint for decryption).
 
-**Design principle**: All key IDs must be real event IDs. The `invite_prekey_id` is a `group_prekey_shared_id`, not a synthetic hash. This ensures dependencies work naturally through the event graph - events can block/unblock on the prekey event existing and being valid.
+**Design principle**: Crypto hints must be local prekey IDs. The `invite_prekey_id` is a `group_prekey_id` (the local prekey with private key), not the `group_prekey_shared_id`. This ensures consistent key lookup - the hint matches the ID under which the private key is stored. The `group_prekey_shared` event is created for sync/sharing purposes but its ID is not used as the crypto hint.
+
+> **Implementation note**: Both `transit_prekey` and `group_prekey` follow the same hinting pattern: hint with the local prekey ID (where the private key is stored), not the shared event ID. The `*_shared` tables store the local prekey ID (`transit_prekey_id` / `group_prekey_id`) to enable this lookup.
 
 ### Prekey Context by Invite Mode
 
@@ -260,15 +262,15 @@ In future iterations we will make it so that only admins can add new members to 
 Users often work on multiple devices (e.g., phone and laptop) and must link them to the same user. Linking uses the same `invite` event type as new-user invitation, with `mode=peer`.
 
 Invite (mode=peer)
-- Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_shared_id` for bootstrap encryption)
+- Fields (depends on): `network_id`, `user_id`, `invite_pubkey`, `created_at`, `invite_prekey_id?` (optional `group_prekey_id` for bootstrap encryption - the local prekey ID used as crypto hint)
 - Signed_by: a linked `peer_shared_id` of that `user_id` (ongoing device linking).
 
 Prekeys for immediate E2E (optional)
-- The inviter may publish a `group_prekey_shared` and include its id in `invite_prekey_id`.
-- The inviter (and other peers) can wrap existing group keys to this `group_prekey_shared` (via new `group_key_shared` events), so the new device can read previously‑encrypted messages on first sync.
+- The inviter creates a `group_prekey` (local, with keypair) and `group_prekey_shared` (shareable, public key only). The `group_prekey_id` (local ID) is included as `invite_prekey_id`.
+- The inviter (and other peers) can wrap existing group keys to the `group_prekey_shared` public key (via new `group_key_shared` events), hinting with `group_prekey_id`, so the new device can read previously‑encrypted messages on first sync.
 
 Invite link
-- The inviter generates a one‑time invite keypair and sends an invite link containing `invite_id`, `invite_private_key`, and the private `group_prekey` material corresponding to `invite_prekey_id`.
+- The inviter generates a one‑time invite keypair and sends an invite link containing `invite_id`, `invite_private_key`, and the private `group_prekey` material corresponding to `invite_prekey_id` (the `group_prekey_id`).
 
 Joining flow (device link)
 - Identical to Link Peer in [Joining (Graph)](#joining-graph): the new device publishes `peer_shared` signed_by = `invite_id` (signature over its canonical body). Projectors verify with `invite.invite_pubkey` and insert `peers_shared` and `linked_peers(user_id, peer_shared_id)`.
@@ -692,7 +694,7 @@ The CPU cost of decryption on the fly is dominated by the data retrieval cost (t
 
 Terminology notes for shared vs local-only identities and keys:
 - `peer` vs `peer_shared`: `peer` is a LOCAL-ONLY event that holds private key material and never syncs; `peer_shared` is the shared public identity. All shared event fields that reference a peer use `peer_shared_id`.
-- Prekeys: `group_prekey` (local secret) vs `group_prekey_shared` (shared public). Transit uses `transit_prekey` (local) and `transit_prekey_shared` (shared). Shared events reference the `..._shared` ids.
+- Prekeys: `group_prekey` (local secret) vs `group_prekey_shared` (shared public). Transit uses `transit_prekey` (local) and `transit_prekey_shared` (shared). Shared events reference the `..._shared` ids for sync purposes. **Crypto hints use the local prekey ID** (`group_prekey_id` / `transit_prekey_id`), not the shared event ID, because private keys are stored under the local ID.
 
 ##### Local-only Events
 

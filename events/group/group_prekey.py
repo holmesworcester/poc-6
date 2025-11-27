@@ -133,18 +133,18 @@ def get_group_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) ->
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     result = safedb.query_one(
-        "SELECT group_prekey_shared_id, public_key FROM group_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT group_prekey_id, public_key FROM group_prekeys_shared WHERE peer_id = ? AND recorded_by = ? ORDER BY created_at DESC LIMIT 1",
         (peer_shared_id, recorded_by)
     )
 
     if not result:
         return None
 
-    # Use group_prekey_shared_id as the hint/id for asymmetric keys
-    group_prekey_shared_id_bytes = crypto.b64decode(result['group_prekey_shared_id'])
+    # Use group_prekey_id as the hint (matches prekey_id in recipient's group_prekeys table)
+    group_prekey_id_bytes = crypto.b64decode(result['group_prekey_id'])
 
     return {
-        'id': group_prekey_shared_id_bytes,
+        'id': group_prekey_id_bytes,
         'public_key': result['public_key'],
         'type': 'asymmetric'
     }
