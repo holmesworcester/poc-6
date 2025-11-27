@@ -191,7 +191,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     channel_id = channel_row['channel_id']
 
     # Create a group_prekey (generates keypair) then share it via group_prekey_shared
-    # This ensures invite_prekey_id is an actual event ID, so dependencies work naturally
+    # The invite_prekey_id is the local group_prekey_id (for crypto hint lookup)
+    # The group_prekey_shared is created for sync/sharing but its ID is not used as hint
     from events.group import group_prekey, group_prekey_shared
 
     # Create local prekey with keypair
@@ -202,13 +203,13 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     prekey_data = crypto.parse_json(prekey_blob)
     invite_pubkey_b64 = prekey_data['public_key']
 
-    # Create shareable prekey event - its event ID becomes invite_prekey_id
+    # Create shareable prekey event for sync
     # Context depends on mode:
     # - mode='user': group context (all_users_group)
     # - mode='peer': user context (user_id being linked to)
     if mode == 'peer':
         # Device linking: context is the user being linked to
-        invite_prekey_id = group_prekey_shared.create(
+        group_prekey_shared.create(
             prekey_id=local_prekey_id,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
@@ -218,7 +219,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         )
     else:
         # User invite: context is the all_users group
-        invite_prekey_id = group_prekey_shared.create(
+        group_prekey_shared.create(
             prekey_id=local_prekey_id,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
@@ -227,6 +228,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             group_id=all_users_group_id,
             key_id=key_id
         )
+
+    # Use local_prekey_id as invite_prekey_id (consistent with transit_prekey pattern)
+    # This is the ID the recipient uses to look up the private key for decryption
+    invite_prekey_id = local_prekey_id
 
     # Get inviter's prekey for Bob to send sync requests
     # Query prekey from transit_prekeys table

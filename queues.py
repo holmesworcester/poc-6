@@ -77,15 +77,34 @@ class blocked:
 
         log.warning(f"queues.blocked.add() blocking recorded_id={recorded_id}, peer={recorded_by}, missing_deps={missing_deps}")
 
-        # Deduplicate dependencies before counting (INSERT OR IGNORE dedupes, so count must match)
+        # Deduplicate dependencies
         missing_deps_unique = list(set(missing_deps))
-        deps_remaining = len(missing_deps_unique)
+
+        # Filter out deps that are ALREADY valid (race condition fix)
+        # This handles the case where dep became valid before event was blocked
+        actually_missing = []
+        for dep_id in missing_deps_unique:
+            valid = safedb.query_one(
+                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (dep_id, recorded_by)
+            )
+            if not valid:
+                actually_missing.append(dep_id)
+            else:
+                log.info(f"queues.blocked.add() skipping already-valid dep: {dep_id[:20]}...")
+
+        # If all deps are already valid, don't block
+        if not actually_missing:
+            log.info(f"queues.blocked.add() all deps already valid for recorded_id={recorded_id}, not blocking")
+            return
+
+        deps_remaining = len(actually_missing)
 
         # Store blocked event with dependency counter
         safedb.execute(
             """INSERT OR REPLACE INTO blocked_events_ephemeral (recorded_id, recorded_by, missing_deps, deps_remaining)
                VALUES (?, ?, ?, ?)""",
-            (recorded_id, recorded_by, json.dumps(missing_deps_unique), deps_remaining)
+            (recorded_id, recorded_by, json.dumps(actually_missing), deps_remaining)
         )
 
         # Clear and re-insert dependency tracking
@@ -94,7 +113,7 @@ class blocked:
             (recorded_id, recorded_by)
         )
 
-        for dep_id in missing_deps_unique:
+        for dep_id in actually_missing:
             safedb.execute(
                 """INSERT OR IGNORE INTO blocked_event_deps_ephemeral (recorded_id, recorded_by, dep_id)
                    VALUES (?, ?, ?)""",

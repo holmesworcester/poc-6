@@ -1,10 +1,11 @@
 -- Group prekeys shared table for asymmetric encryption of group messages
 -- Stores public group prekeys from the network (peer-subjective)
 -- Each peer sees different network members' group prekeys
--- group_prekey_shared_id is the event ID, used as hint in wrapped blobs
+-- group_prekey_id is used as hint in wrapped blobs (matches recipient's local prekey_id)
 
 CREATE TABLE IF NOT EXISTS group_prekeys_shared (
     group_prekey_shared_id TEXT NOT NULL,
+    group_prekey_id TEXT NOT NULL,  -- Links to group_prekeys table (used as crypto hint)
     peer_id TEXT NOT NULL,
     public_key BLOB NOT NULL,
     created_at INTEGER NOT NULL,

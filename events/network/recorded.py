@@ -109,6 +109,19 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
     if event_type == 'sync_connect' and field == 'peer_id':
         return True
 
+    # transit_prekey_shared.transit_prekey_id references creator's local transit_prekey
+    if event_type == 'transit_prekey_shared' and field == 'transit_prekey_id':
+        # Creator is the peer_id in the event (public identity)
+        # We need to check if we're the creator based on peer_id matching recorded_by's peer_shared
+        # But since we can't easily look this up, just always skip this dep for remote events
+        # The signature verification in projection is the real authorization check
+        return True
+
+    # group_prekey_shared.group_prekey_id references creator's local group_prekey
+    if event_type == 'group_prekey_shared' and field == 'group_prekey_id':
+        # Same logic as transit_prekey_shared
+        return True
+
     return False
 
 
