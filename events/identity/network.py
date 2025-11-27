@@ -8,7 +8,7 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
+def create(peer_id: str, t_ms: int, db: Any, name: str | None = None) -> tuple[str, bytes]:
     """Create a self-signed network event (root of trust).
 
     The network event is the first shared event in bootstrap. It's self-signed
@@ -19,6 +19,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
         peer_id: Local peer ID (for recording, not signing)
         t_ms: Timestamp
         db: Database connection
+        name: Display name for the network
 
     Returns:
         tuple: (network_id, network_private_key)
@@ -38,6 +39,9 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
         'signed_by': 'SELF',  # Special marker for self-signed network event
         'created_at': t_ms
     }
+
+    if name:
+        event_data['name'] = name
 
     # Self-sign with network's own private key
     signed_event = crypto.sign_event(event_data, network_private_key)

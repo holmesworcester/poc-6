@@ -85,9 +85,9 @@ import schema
 import tick
 
 # Import event functions (this is our API)
-from events.identity import user, peer, invite, network
+from events.identity import user, peer, invite, network, user_removed
 from events.content import channel, message, message_deletion
-from events.group import group_member, group_key, group_prekey
+from events.group import group_member, group_key, group_prekey, group
 
 
 class AccountContext:
@@ -311,13 +311,15 @@ def display_main(session: CLISession):
 # COMMANDS
 # ============================================================================
 
-def cmd_new_network(session: CLISession, name: str, device: str):
+def cmd_new_network(session: CLISession, network_name: str, username: str, device: str):
     """Create a new network and first account."""
-    result = user.new_network(name=name, t_ms=session.current_time_ms, db=session.db, device_name=device)
+    # Canonicalize: lowercase for consistent storage and display
+    device = device.lower()
+    result = user.new_network(name=username, t_ms=session.current_time_ms, db=session.db, device_name=device, network_name=network_name)
 
     # Create account context
     account = AccountContext(
-        user_name=name.lower(),
+        user_name=username.lower(),
         device_name=device.lower(),
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
@@ -334,7 +336,7 @@ def cmd_new_network(session: CLISession, name: str, device: str):
 
     account_num = list(session.accounts.keys()).index(account.full_name) + 1
 
-    print(f"✓ created network as {name.lower()}")
+    print(f"✓ created network: {network_name}")
     print(f"✓ selected account #{account_num}: {account.full_name}")
     print(f"✓ selected channel #1: #general")
     print()
@@ -503,12 +505,14 @@ def cmd_create_invite(session: CLISession):
     session.last_invite_link = invite_link
 
     print(f"✓ created invite #{invite_num}")
-    print(f"  use: new-peer --name <name> --device <device> --invite {invite_num}")
+    print(f"  use: new-peer --username <username> --device <device> --invite {invite_num}")
     print()
 
 
-def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
+def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: str):
     """Create a new peer and join a network via invite link or number."""
+    # Canonicalize: lowercase for consistent storage and display
+    device = device.lower()
     # Resolve invite reference (number or full link)
     invite_link = invite_ref
     if invite_ref.isdigit():
@@ -530,7 +534,7 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
     result = user.join(
         peer_id=peer_id,
         invite_link=invite_link,
-        name=name,
+        name=username,
         t_ms=session.current_time_ms,
         db=session.db,
         device_name=device
@@ -541,7 +545,7 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
 
     # Create account context
     account = AccountContext(
-        user_name=name.lower(),
+        user_name=username.lower(),
         device_name=device.lower(),
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
@@ -559,7 +563,7 @@ def cmd_new_peer(session: CLISession, name: str, device: str, invite_ref: str):
 
     account_num = list(session.accounts.keys()).index(account.full_name) + 1
 
-    print(f"✓ created peer and joined network as {name.lower()}")
+    print(f"✓ created peer and joined network as {username.lower()}")
     print(f"✓ selected account #{account_num}: {account.full_name}")
     if channels:
         print(f"✓ selected channel #1: #{channels[0]['name']}")
@@ -762,6 +766,83 @@ def cmd_purge_keys(session: CLISession):
     display_state(session)
 
 
+def cmd_remove_user(session: CLISession, user_num: int):
+    """Remove a user from the network (admin only)."""
+    account = session.get_selected_account()
+
+    # Get all users in the network
+    if not account.network_id:
+        network_info = network.get_for_peer(account.peer_id, account.peer_id, session.db)
+        if not network_info:
+            print("✗ not in a network")
+            return
+        network_id = network_info['network_id']
+    else:
+        network_id = account.network_id
+
+    all_users_group_id = network.get_all_users_group_id(network_id, account.peer_id, session.db)
+    members = group_member.list_members(all_users_group_id, account.peer_id, session.db)
+
+    if not (1 <= user_num <= len(members)):
+        print(f"✗ user #{user_num} not found (must be 1-{len(members)})")
+        return
+
+    user_to_remove = members[user_num - 1]
+    user_id = user_to_remove['user_id']
+    username = user_to_remove['name']
+
+    try:
+        user_removed.create(
+            removed_user_id=user_id,
+            removed_by_peer_id=account.peer_shared_id,
+            removed_by_local_peer_id=account.peer_id,
+            t_ms=session.current_time_ms,
+            db=session.db
+        )
+    except ValueError as e:
+        if "authorized" in str(e).lower() or "admin" in str(e).lower():
+            print("✗ only admins can remove users")
+        else:
+            print(f"✗ {e}")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    print(f"✓ removed user #{user_num}: {username}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_show_group_keys(session: CLISession):
+    """Show current encryption keys for all groups/channels."""
+    account = session.get_selected_account()
+
+    # Get all channels
+    channels_list = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+
+    if not channels_list:
+        print("(no channels)")
+        return
+
+    print(f"GROUP KEYS ({account.full_name}):")
+    for i, ch in enumerate(channels_list, 1):
+        channel_name = ch['name']
+        group_id = ch['group_id']
+
+        # Get the current key for this group
+        current_key_info = group.get_current_key(group_id, account.peer_id, session.db)
+        if current_key_info:
+            key_id = current_key_info['key_id']
+            key_id_short = key_id[:16] if key_id else "???"
+            print(f"  {i}. #{channel_name:16} key_id={key_id_short}...")
+        else:
+            print(f"  {i}. #{channel_name:16} key_id=(none)")
+
+
+
 # ============================================================================
 # COMMAND EXECUTION
 # ============================================================================
@@ -788,12 +869,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "new-network":
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--name", required=True)
+            parser.add_argument("--username", required=True)
             parser.add_argument("--device", required=True)
             try:
                 args = parser.parse_args(parts[1:])
-                cmd_new_network(session, args.name, args.device)
+                cmd_new_network(session, args.name, args.username, args.device)
             except SystemExit:
-                print("usage: new-network --name <name> --device <device>")
+                print("usage: new-network --name <name> --username <username> --device <device>")
 
         elif cmd == "switch":
             if len(parts) < 2:
@@ -850,14 +932,14 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "new-peer":
             parser = argparse.ArgumentParser(add_help=False)
-            parser.add_argument("--name", required=True)
+            parser.add_argument("--username", required=True)
             parser.add_argument("--device", required=True)
             parser.add_argument("--invite", required=True)
             try:
                 args = parser.parse_args(parts[1:])
-                cmd_new_peer(session, args.name, args.device, args.invite)
+                cmd_new_peer(session, args.username, args.device, args.invite)
             except SystemExit:
-                print("usage: new-peer --name <name> --device <device> --invite <link>")
+                print("usage: new-peer --username <username> --device <device> --invite <link>")
 
         elif cmd == "show":
             display_state(session)
@@ -887,13 +969,25 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "purge-keys":
             cmd_purge_keys(session)
 
+        elif cmd == "remove-user":
+            if len(parts) < 2:
+                print("usage: remove-user <n>")
+            else:
+                try:
+                    cmd_remove_user(session, int(parts[1]))
+                except ValueError:
+                    print("error: user number must be an integer")
+
+        elif cmd == "show-group-keys":
+            cmd_show_group_keys(session)
+
         elif cmd == "time":
             cmd_time(session)
 
         elif cmd == "help":
             print("available commands:")
-            print("  new-network --name <name> --device <device>")
-            print("  new-peer --name <name> --device <device> --invite <n|link>")
+            print("  new-network --name <name> --username <username> --device <device>")
+            print("  new-peer --username <username> --device <device> --invite <n|link>")
             print("  switch <n>")
             print("  send <message>")
             print("  sync --ticks <n>")
@@ -907,6 +1001,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  keys [--summary]")
             print("  delete-message <n>")
             print("  purge-keys")
+            print("  remove-user <n>")
+            print("  show-group-keys")
             print("  time")
             print("  show")
             print("  quit")

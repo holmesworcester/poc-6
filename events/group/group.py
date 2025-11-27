@@ -192,3 +192,22 @@ def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
         "SELECT group_id, name, signed_by, created_at FROM groups WHERE recorded_by = ? ORDER BY created_at DESC",
         (recorded_by,)
     )
+
+
+def get_current_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the current key ID for a group.
+
+    Args:
+        group_id: Group ID
+        recorded_by: Peer ID requesting access
+        db: Database connection
+
+    Returns:
+        Dict with key_id, or None if group not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (group_id, recorded_by)
+    )
+    return row

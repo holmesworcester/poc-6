@@ -241,7 +241,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
 
     return user_id
 
-def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> dict[str, Any]:
+def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", network_name: str | None = None) -> dict[str, Any]:
     """Create a new user with their own implicit network.
 
     Simplified bootstrap: minimal identity events first, content after peer_shared exists.
@@ -265,6 +265,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
         t_ms: Base timestamp (each event gets incremented)
         db: Database connection
         device_name: Device name (e.g., "Phone", "Desktop")
+        network_name: Network display name (optional)
 
     Returns:
         {
@@ -296,7 +297,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device") -> d
     network_id, network_private_key = network.create(
         peer_id=peer_id,
         t_ms=t_ms + 10,
-        db=db
+        db=db,
+        name=network_name
     )
     log.info(f"new_network() created self-signed network: {network_id[:20]}...")
 
