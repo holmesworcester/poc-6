@@ -29,7 +29,7 @@ def test_alice_links_phone_to_laptop(fresh_db):
     print("\n=== Setup: Alice creates network on phone ===")
 
     # Alice creates a network on her phone
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
     print(f"Alice created network on phone")
     print(f"  peer_id={alice_phone['peer_id'][:20]}...")
     print(f"  user_id={alice_phone['user_id'][:20]}...")
@@ -72,7 +72,8 @@ def test_alice_links_phone_to_laptop(fresh_db):
         user_id=accepted['user_id'],
         prekey_id=accepted['invite_prekey_id'],
         t_ms=3002,
-        db=db
+        db=db,
+        device_name='Laptop'
     )
     print(f"Alice linked laptop")
     print(f"  peer_id={alice_laptop['peer_id'][:20]}...")
@@ -89,6 +90,13 @@ def test_alice_links_phone_to_laptop(fresh_db):
     assert alice_laptop['peer_id'] != alice_phone['peer_id'], \
         f"Devices should have different peer_ids"
     print(f"✅ Devices have different peer_ids")
+
+    # Verify device names are stored correctly
+    phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
+    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
+    assert phone_device_name == 'Phone', f"Phone device name should be 'Phone', got '{phone_device_name}'"
+    assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
+    print(f"✅ Device names stored correctly: Phone='{phone_device_name}', Laptop='{laptop_device_name}'")
 
     # Initial sync to converge (multiple rounds for GKS propagation)
     print("\n=== Initial sync to propagate link event and group keys ===")
@@ -203,7 +211,7 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
     print("\n=== Setup: Alice creates network and sends messages ===")
 
     # Alice creates network on phone
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
     db.commit()
 
     # Alice sends messages from phone first
@@ -249,9 +257,14 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
         user_id=accepted['user_id'],
         prekey_id=accepted['invite_prekey_id'],
         t_ms=3002,
-        db=db
+        db=db,
+        device_name='Laptop'
     )
     db.commit()
+
+    # Verify device names are stored
+    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
+    assert laptop_device_name == 'Laptop', f"Device name should be 'Laptop', got '{laptop_device_name}'"
 
     # Sync to propagate messages to laptop
     print("\n=== Sync messages to laptop ===")
@@ -297,7 +310,7 @@ def test_three_devices_all_linked(fresh_db):
 
     print("\n=== Setup: Create network on phone ===")
 
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
     db.commit()
 
     # Link laptop
@@ -321,7 +334,8 @@ def test_three_devices_all_linked(fresh_db):
         user_id=accepted_1['user_id'],
         prekey_id=accepted_1['invite_prekey_id'],
         t_ms=3002,
-        db=db
+        db=db,
+        device_name='Laptop'
     )
     db.commit()
 
@@ -346,7 +360,8 @@ def test_three_devices_all_linked(fresh_db):
         user_id=accepted_2['user_id'],
         prekey_id=accepted_2['invite_prekey_id'],
         t_ms=5002,
-        db=db
+        db=db,
+        device_name='Tablet'
     )
     db.commit()
 
@@ -354,6 +369,15 @@ def test_three_devices_all_linked(fresh_db):
     assert alice_laptop['user_id'] == alice_phone['user_id']
     assert alice_tablet['user_id'] == alice_phone['user_id']
     print(f"✅ All three devices share user_id: {alice_phone['user_id'][:20]}...")
+
+    # Verify device names are stored correctly
+    phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
+    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
+    tablet_device_name = peer_shared.get_device_name(alice_tablet['peer_shared_id'], alice_tablet['peer_id'], db)
+    assert phone_device_name == 'Phone', f"Phone device name should be 'Phone', got '{phone_device_name}'"
+    assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
+    assert tablet_device_name == 'Tablet', f"Tablet device name should be 'Tablet', got '{tablet_device_name}'"
+    print(f"✅ All device names stored correctly: Phone, Laptop, Tablet")
 
     # Sync
     print("\n=== Sync all devices ===")
