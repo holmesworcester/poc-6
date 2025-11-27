@@ -310,7 +310,6 @@ def test_message_deletion_unauthorized(fresh_db):
     print("\n✅ Unauthorized deletion prevention test passed")
 
 
-@pytest.mark.skip(reason="Key propagation issue: events blocked waiting for missing keys (same as linked device issues)")
 def test_message_deletion_ordering(fresh_db):
     """Test that deletion works regardless of whether message or deletion arrives first."""
 

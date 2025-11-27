@@ -218,16 +218,7 @@ def test_admin_group_workflow(fresh_db):
     print(f"Bob's view: Bob is admin = {bob_is_admin_bob_view}")
     assert bob_is_admin_bob_view, "Bob should see himself as admin after sync"
 
-    # Skip: Group key propagation issue - Bob can't share admin group key with Charlie
-    # because group_keys_shared events aren't marked as shareable.
-    # Same root cause as linked device test failures.
-    pytest.skip("Third-party sync broken: admin group key not shareable by non-creator")
-
     # === Third-party tests (Charlie) ===
-    # Skip: Group key propagation issue - Bob can't share admin group key with Charlie
-    # because group_keys_shared events aren't marked as shareable.
-    # Same root cause as linked device test failures.
-    pytest.skip("Third-party sync broken: admin group key not shareable by non-creator")
 
     # Now Bob (as admin) invites Charlie
     print("\n=== Bob (now admin) invites Charlie ===")
@@ -300,8 +291,16 @@ def test_admin_group_workflow(fresh_db):
 
     # Get network info from Charlie's perspective
     charlie_network = charlie_safedb.query_one(
-        "SELECT network_id, all_users_group_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
         (charlie['peer_id'],)
+    )
+
+    # Get all_users group ID using the network module
+    from events.identity import network as network_module
+    all_users_group_id = network_module.get_all_users_group_id(
+        charlie_network['network_id'],
+        charlie['peer_id'],
+        db
     )
 
     # Get Charlie's channel
@@ -313,7 +312,7 @@ def test_admin_group_workflow(fresh_db):
     # Get group key
     charlie_group_key_row = charlie_safedb.query_one(
         "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (charlie_network['all_users_group_id'], charlie['peer_id'])
+        (all_users_group_id, charlie['peer_id'])
     )
 
     # Create a fake invite prekey for the rogue invite
@@ -333,7 +332,7 @@ def test_admin_group_workflow(fresh_db):
         'invite_pubkey': rogue_invite_pubkey_b64,
         'invite_prekey_id': rogue_invite_prekey_id,
         'network_id': charlie_network['network_id'],
-        'group_id': charlie_network['all_users_group_id'],
+        'group_id': all_users_group_id,
         'channel_id': charlie_channel['channel_id'],
         'key_id': charlie_group_key_row['key_id'],
         'inviter_peer_shared_id': charlie['peer_shared_id'],
