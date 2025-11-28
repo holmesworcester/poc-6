@@ -37,7 +37,7 @@ def extract_main_section(output: str) -> str:
 def test_single_user_messaging():
     """Alice creates network and sends message to herself."""
     commands = """
-new-network --name alice --device desktop
+new-network --name "Alice's Network" --username alice --device desktop
 send hello world
 show
 """
@@ -61,9 +61,9 @@ show
 def test_two_user_messaging():
     """Alice invites Bob, both send messages and sync."""
     commands = """
-new-network --name alice --device desktop
+new-network --name "Alice's Network" --username alice --device desktop
 create-invite
-new-peer --name bob --device phone --invite 1
+new-peer --username bob --device phone --invite 1
 switch 1
 send hello from alice
 switch 2
@@ -87,9 +87,9 @@ show
 def test_usernames_display_correctly():
     """Test that usernames from other accounts display correctly."""
     commands = """
-new-network --name alice --device desktop
+new-network --name "Alice's Network" --username alice --device desktop
 create-invite
-new-peer --name bob --device phone --invite 1
+new-peer --username bob --device phone --invite 1
 show
 """
     result = run_cli(commands)
@@ -109,7 +109,7 @@ show
 def test_list_commands():
     """Test list-accounts, list-channels, list-users, and time commands."""
     commands = """
-new-network --name alice --device desktop
+new-network --name "Alice's Network" --username alice --device desktop
 create-channel testing
 list-accounts
 list-channels
@@ -150,7 +150,7 @@ time
 def test_create_channel_and_send():
     """Test creating a channel and sending messages to it."""
     commands = """
-new-network --name alice --device desktop
+new-network --name "Alice's Network" --username alice --device desktop
 create-channel random
 select-channel 2
 send test message
@@ -172,9 +172,9 @@ show
 def test_auto_tick_behavior():
     """Test that auto-tick happens after send command."""
     commands = """
-new-network --name alice --device desktop
+new-network --name "Alice's Network" --username alice --device desktop
 create-invite
-new-peer --name bob --device phone --invite 1
+new-peer --username bob --device phone --invite 1
 switch 1
 send from alice
 switch 2

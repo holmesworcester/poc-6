@@ -31,6 +31,7 @@ SUBJECTIVE_TABLES = {
     'group_prekeys_shared',        # Group prekeys shared (subjective)
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)
     'users',
+    'user_names',                  # Encrypted username updates (peer-scoped)
     'group_members',
     'admins',                      # Admin events for authorization chain (peer-scoped)
     'valid_events',
@@ -41,6 +42,7 @@ SUBJECTIVE_TABLES = {
     'invites',
     'link_invites',                # Link invites for multi-device linking (peer-scoped)
     'networks',                    # Networks are subjective (peer-scoped)
+    'network_names',               # Encrypted network name updates (peer-scoped)
     'network_creators',            # Peers who created a network (peer-scoped)
     'network_joiners',             # Peers who joined a network (peer-scoped)
     'bootstrap_completers',        # Peers who received first sync response (peer-scoped)
@@ -53,10 +55,11 @@ SUBJECTIVE_TABLES = {
     'event_dependencies',          # Event dependency tracking for cascading deletion (peer-scoped)
     'network_addresses',           # Network address observations (peer-scoped)
     'pending_intros',              # Pending intro events for hole punching (peer-scoped)
+    'pending_name_updates',        # Pending name update creations (peer-scoped)
+    'pending_name_decrypts',       # Pending name decryptions (peer-scoped)
     'removed_users',               # Removed users tracking (peer-scoped)
     'invite_accepteds',            # Invite acceptance metadata (peer-scoped)
     'channel_updates',             # Channel updates (peer-scoped)
-    'admins',                      # Admin grants (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

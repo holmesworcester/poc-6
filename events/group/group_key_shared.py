@@ -312,7 +312,108 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         from events.network import recorded
         recorded.project_ids(unblocked_ids, db)
 
+    # DETERMINISTIC TRIGGER: Retry pending name updates now that key is available
+    # This handles username_update, network_name_update, peer_name_update creation
+    # when the group key needed for encryption wasn't available before
+    retry_pending_name_updates(recorded_by, db)
+
     return key_shared_id
+
+
+def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
+    """Retry creating pending name update events now that group key is available.
+
+    This is called automatically when a group_key_shared event is projected,
+    providing a deterministic trigger for retrying pending name updates.
+
+    Args:
+        recorded_by: The peer that recorded the key
+        db: Database connection
+    """
+    log.info(f"retry_pending_name_updates() triggered for peer {recorded_by[:20]}...")
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get all pending name updates waiting for key
+    pending_items = safedb.query(
+        "SELECT * FROM pending_name_updates WHERE status = 'waiting_for_key' AND recorded_by = ?",
+        (recorded_by,)
+    )
+
+    if not pending_items:
+        log.debug(f"retry_pending_name_updates() no pending items")
+        return
+
+    log.info(f"retry_pending_name_updates() found {len(pending_items)} pending items")
+
+    from events.identity import username_update, network_name_update, peer_name_update
+    from events.identity import user, network, peer_shared
+
+    for item in pending_items:
+        try:
+            item_type = item['type']
+            entity_id = item['entity_id']
+            name = item['name']
+            peer_id = item['peer_id']
+            peer_shared_id = item['peer_shared_id']
+
+            log.info(f"retry_pending_name_updates() retrying {item_type} for {entity_id[:20]}...")
+
+            # Try to create the name update event
+            if item_type == 'username':
+                username_update.create(
+                    user_id=entity_id,
+                    name=name,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=item['created_at'],
+                    db=db
+                )
+                # Mark as created
+                safedb.execute(
+                    "UPDATE pending_name_updates SET status='created' WHERE id=? AND recorded_by=?",
+                    (item['id'], recorded_by)
+                )
+                log.info(f"retry_pending_name_updates() successfully created username_update for {entity_id[:20]}...")
+
+            elif item_type == 'network_name':
+                network_name_update.create(
+                    network_id=entity_id,
+                    name=name,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=item['created_at'],
+                    db=db
+                )
+                # Mark as created
+                safedb.execute(
+                    "UPDATE pending_name_updates SET status='created' WHERE id=? AND recorded_by=?",
+                    (item['id'], recorded_by)
+                )
+                log.info(f"retry_pending_name_updates() successfully created network_name_update for {entity_id[:20]}...")
+
+            elif item_type == 'peer_name':
+                peer_name_update.create(
+                    peer_id=entity_id,
+                    name=name,
+                    signed_by=peer_shared_id,
+                    t_ms=item['created_at'],
+                    db=db
+                )
+                # Mark as created
+                safedb.execute(
+                    "UPDATE pending_name_updates SET status='created' WHERE id=? AND recorded_by=?",
+                    (item['id'], recorded_by)
+                )
+                log.info(f"retry_pending_name_updates() successfully created peer_name_update for {entity_id[:20]}...")
+
+        except Exception as e:
+            # Mark as failed but continue with other items
+            log.warning(f"retry_pending_name_updates() error for {item['type']}: {e}")
+            safedb.execute(
+                "UPDATE pending_name_updates SET status='failed', error=? WHERE id=? AND recorded_by=?",
+                (str(e), item['id'], recorded_by)
+            )
 
 
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,

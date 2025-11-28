@@ -333,14 +333,17 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
 
     Returns:
         List of member dicts with user_id, name, added_by, created_at
+        (name is preferentially from user_names table (encrypted username), falls back to users.name)
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Query group_members table with user names joined
+    # Prefer encrypted username from user_names table if available, else fall back to plaintext from users table
     return safedb.query(
-        """SELECT gm.user_id, u.name, gm.added_by, gm.created_at
+        """SELECT gm.user_id, COALESCE(un.name, u.name) as name, gm.added_by, gm.created_at
            FROM group_members gm
            JOIN users u ON gm.user_id = u.user_id AND gm.recorded_by = u.recorded_by
+           LEFT JOIN user_names un ON gm.user_id = un.user_id AND gm.recorded_by = un.recorded_by
            WHERE gm.group_id = ? AND gm.recorded_by = ?
            ORDER BY gm.created_at ASC""",
         (group_id, recorded_by)

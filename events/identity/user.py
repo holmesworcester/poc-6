@@ -400,6 +400,59 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     peer_shared_id = peer_shared_join_result['peer_shared_id']
     log.info(f"new_network() delegated to peer_shared.join(): {peer_shared_id[:20]}...")
 
+    # Try to create username_update event (encrypted with group key)
+    # If key is not available yet, store in pending_name_updates table for later
+    from events.identity import username_update
+    try:
+        username_update_id = username_update.create(
+            user_id=user_id,
+            name=name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 52,
+            db=db
+        )
+        log.info(f"new_network() created username_update: {username_update_id[:20]}...")
+    except username_update.KeyNotAvailableError:
+        # Key not available yet - store for later creation when group_key_shared arrives
+        log.info(f"new_network() key not available yet, storing username intent in pending_name_updates")
+        import hashlib
+        pending_id = hashlib.sha256(f"{user_id}:username:{t_ms + 52}".encode()).hexdigest()[:20]
+        safedb.execute(
+            """INSERT OR IGNORE INTO pending_name_updates
+               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pending_id, 'username', user_id, name, peer_id, peer_shared_id,
+             'waiting_for_key', t_ms + 52, peer_id, t_ms + 52)
+        )
+        log.info(f"new_network() stored pending username for user {user_id[:20]}...")
+
+    # Try to create network_name_update event
+    from events.identity import network_name_update
+    try:
+        network_name_update_id = network_name_update.create(
+            network_id=network_id,
+            name=network_name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 53,
+            db=db
+        )
+        log.info(f"new_network() created network_name_update: {network_name_update_id[:20]}...")
+    except network_name_update.KeyNotAvailableError:
+        # Key not available yet - store for later creation
+        log.info(f"new_network() key not available yet, storing network name intent in pending_name_updates")
+        import hashlib
+        pending_id = hashlib.sha256(f"{network_id}:network_name:{t_ms + 53}".encode()).hexdigest()[:20]
+        safedb.execute(
+            """INSERT OR IGNORE INTO pending_name_updates
+               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pending_id, 'network_name', network_id, network_name, peer_id, peer_shared_id,
+             'waiting_for_key', t_ms + 53, peer_id, t_ms + 53)
+        )
+        log.info(f"new_network() stored pending network name for network {network_id[:20]}...")
+
     # =========================================================================
     # PHASE 2: Content setup (after peer_shared exists)
     # =========================================================================
@@ -551,6 +604,53 @@ def join_bootstrap(peer_id: str, invite_id: str, invite_private_key: bytes,
         'user_id': user_id,
         'user_private_key': user_private_key,
     }
+
+
+def try_create_username(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int,
+                        db: Any) -> tuple[str | None, bool]:
+    """Try to create a username_update event, or store pending if key unavailable.
+
+    Args:
+        user_id: The user to set the name for
+        name: The username
+        peer_id: Local peer ID
+        peer_shared_id: Public peer ID
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        (username_update_id or None, was_stored_pending: bool)
+    """
+    from events.identity import username_update
+    from db import create_safe_db
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    try:
+        username_update_id = username_update.create(
+            user_id=user_id,
+            name=name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms,
+            db=db
+        )
+        log.info(f"try_create_username() created username_update: {username_update_id[:20]}...")
+        return username_update_id, False
+
+    except username_update.KeyNotAvailableError:
+        # Key not available yet - store for later creation
+        log.info(f"try_create_username() key not available, storing in pending_name_updates")
+        import hashlib
+        pending_id = hashlib.sha256(f"{user_id}:username:{t_ms}".encode()).hexdigest()[:20]
+        safedb.execute(
+            """INSERT OR IGNORE INTO pending_name_updates
+               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pending_id, 'username', user_id, name, peer_id, peer_shared_id,
+             'waiting_for_key', t_ms, peer_id, t_ms)
+        )
+        return None, True
 
 
 def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
@@ -739,6 +839,33 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     prekey_id = peer_shared_join_result['transit_prekey_id']
     transit_prekey_shared_id = peer_shared_join_result['transit_prekey_shared_id']
     log.info(f"join() delegated to peer_shared.join(): peer_shared_id={peer_shared_id[:20]}...")
+
+    # Try to create username_update event (encrypted with group key)
+    # If key is not available yet, store in pending_name_updates table for later
+    from events.identity import username_update
+    try:
+        username_update_id = username_update.create(
+            user_id=user_id,
+            name=name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 25,
+            db=db
+        )
+        log.info(f"join() created username_update: {username_update_id[:20]}...")
+    except username_update.KeyNotAvailableError:
+        # Key not available yet - store for later creation when group_key_shared arrives
+        log.info(f"join() key not available yet, storing username intent in pending_name_updates")
+        import hashlib
+        pending_id = hashlib.sha256(f"{user_id}:username:{t_ms + 25}".encode()).hexdigest()[:20]
+        safedb.execute(
+            """INSERT OR IGNORE INTO pending_name_updates
+               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pending_id, 'username', user_id, name, peer_id, peer_shared_id,
+             'waiting_for_key', t_ms + 25, peer_id, t_ms + 25)
+        )
+        log.info(f"join() stored pending username for user {user_id[:20]}...")
 
     # Create network_joined event immediately to mark bootstrap intent
     # The inviter_peer_shared_id comes from the invite event
