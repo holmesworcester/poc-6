@@ -95,48 +95,19 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
 
 
 def project(group_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project group_prekey_shared event into group_prekeys_shared table and shareable_events."""
-    log.info(f"group_prekey_shared.project() group_prekey_shared_id={group_prekey_shared_id}, seen_by={recorded_by}")
+    """Project group_prekey_shared event into group_prekeys_shared table."""
+    from projectors import resolve, apply_result
+    from projectors import group_prekey_shared as gpks_projector
 
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    blob = store.get(group_prekey_shared_id, unsafedb)
-    if not blob:
-        log.warning(f"group_prekey_shared.project() blob not found for group_prekey_shared_id={group_prekey_shared_id}")
+    input_dict = resolve("group_prekey_shared", group_prekey_shared_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Parse JSON (signed plaintext, no decryption needed)
-    event_data = crypto.parse_json(blob)
+    result = gpks_projector.project(input_dict)
 
-    # Verify signature - get public key from signed_by peer_shared
-    from events.identity import peer_shared
-    signed_by = event_data['signed_by']
-    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
-    if not crypto.verify_event(event_data, public_key):
-        log.warning(f"group_prekey_shared.project() signature verification failed for group_prekey_shared_id={group_prekey_shared_id}")
+    if not result.valid:
+        log.warning(f"group_prekey_shared.project() failed: {result.reason}")
         return None
 
-    # Insert into group_prekeys_shared table
-    prekey_public = crypto.b64decode(event_data['public_key'])
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_prekeys_shared
-           (group_prekey_shared_id, peer_id, public_key, created_at, recorded_by)
-           VALUES (?, ?, ?, ?, ?)""",
-        (
-            group_prekey_shared_id,
-            event_data['peer_id'],
-            prekey_public,
-            event_data['created_at'],
-            recorded_by
-        )
-    )
-
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (group_prekey_shared_id, recorded_by)
-    )
-
+    apply_result(result, recorded_by, recorded_at, db)
     return group_prekey_shared_id

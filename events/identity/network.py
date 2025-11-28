@@ -55,70 +55,26 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project self-signed network event into networks table.
 
-    The network event is self-signed (root of trust). Admin grants are handled
-    by separate admin_grant events, and groups are created after the network.
-
-    Args:
-        network_id: The network event ID
-        recorded_by: Peer ID recording this event
-        recorded_at: Timestamp when recorded
-        db: Database connection
-
-    Returns:
-        network_id if successful, None if verification fails
+    Uses pure functional projector from projectors.network.
     """
-    log.debug(f"network.project() projecting network_id={network_id}, recorded_by={recorded_by}")
+    log.debug(f"network.project() projecting network_id={network_id[:20]}...")
 
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
+    from projectors import resolve, apply_result
+    from projectors import network as network_projector
 
-    # Get blob from store
-    blob = store.get(network_id, unsafedb)
-    if not blob:
-        log.warning(f"network.project() blob not found for network_id={network_id}")
+    input_dict = resolve("network", network_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Parse JSON (plaintext, no unwrap needed)
-    event_data = crypto.parse_json(blob)
+    result = network_projector.project(input_dict)
 
-    # Verify self-signature using network_pubkey from event body
-    signed_by = event_data.get('signed_by')
-    network_pubkey_b64 = event_data.get('network_pubkey')
-
-    if signed_by != 'SELF':
-        log.warning(f"network.project() expected signed_by='SELF', got {signed_by}")
+    if result.blocked or not result.valid:
+        log.warning(f"network.project() failed: {result.reason}")
         return None
 
-    if not network_pubkey_b64:
-        log.warning(f"network.project() missing network_pubkey in event")
-        return None
+    apply_result(result, recorded_by, recorded_at, db)
 
-    network_pubkey = crypto.b64decode(network_pubkey_b64)
-    if not crypto.verify_event(event_data, network_pubkey):
-        log.warning(f"network.project() self-signature verification FAILED for network_id={network_id}")
-        return None
-
-    log.info(f"network.project() verified self-signed network event")
-
-    # Insert into networks table (minimal - no groups, no creator)
-    # Groups and admin grants are separate events created after network
-    # Network only stores its own identity data - groups store their network_id/network_role
-    safedb.execute(
-        """INSERT OR REPLACE INTO networks
-           (network_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, '', ?, ?, ?, ?, ?)""",
-        (
-            network_id,
-            network_pubkey_b64,
-            signed_by,
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
-        )
-    )
-
-    log.info(f"network.project() inserted self-signed network in networks table")
-
+    log.info(f"network.project() projected network_id={network_id[:20]}...")
     return network_id
 
 

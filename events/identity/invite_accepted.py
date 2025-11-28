@@ -47,7 +47,7 @@ def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
     return invite_accepted_id
 
 
-def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project invite_accepted: restore ALL invite link data for event-sourcing.
 
     This restores the invite_transit_key from the invite link and enables
@@ -62,7 +62,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     blob = store.get(invite_accepted_id, unsafedb)
     if not blob:
         log.warning(f"invite_accepted.project() blob not found")
-        return
+        return None
 
     event_data = crypto.parse_json(blob)
 
@@ -75,7 +75,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     invite_blob = store.get(invite_id, unsafedb)
     if not invite_blob:
         log.warning(f"invite_accepted.project() invite blob not found: {invite_id}")
-        return
+        return None
 
     invite_event = crypto.parse_json(invite_blob)
     log.info(f"[INVITE_ACCEPTED_PROJECT] invite event keys={list(invite_event.keys())}")
@@ -166,3 +166,4 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         recorded_module.project_ids(unblocked_by_invite, db)
 
     log.info(f"invite_accepted.project() completed for {recorded_by}")
+    return invite_accepted_id

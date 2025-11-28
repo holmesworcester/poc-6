@@ -83,77 +83,46 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group event into groups table.
 
-    Supports polymorphic signature verification:
-    - If signed_by matches a network_id, verify with network's public key
-    - Otherwise, verify with peer_shared's public key
+    Uses pure functional projector from projectors.group.
+    Note: Uses INSERT OR REPLACE (not IGNORE) to overwrite stubs from user.project().
     """
-    log.debug(f"group.project() projecting group_id={event_id}, seen_by={recorded_by}")
+    log.debug(f"group.project() projecting group_id={event_id[:20]}...")
 
-    unsafedb = create_unsafe_db(db)
+    from projectors import resolve
+    from projectors import group as group_projector
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get blob from store
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        log.warning(f"group.project() blob not found for group_id={event_id}")
+    input_dict = resolve("group", event_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
-    if not unwrapped:
-        log.warning(f"group.project() unwrap failed for group_id={event_id}")
-        return None  # Already blocked by recorded.project() if keys missing
+    result = group_projector.project(input_dict)
 
-    # Parse JSON
-    event_data = crypto.parse_json(unwrapped)
+    if result.blocked or not result.valid:
+        log.warning(f"group.project() failed: {result.reason}")
+        return None
 
-    # Polymorphic signature verification
-    # Check if signed_by is a network_id or a peer_shared_id
-    signed_by = event_data['signed_by']
-
-    # Try network first (for network-signed all_users groups)
-    network_row = safedb.query_one(
-        "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ?",
-        (signed_by, recorded_by)
-    )
-
-    if network_row:
-        # Signed by network - verify with network's public key
-        public_key = crypto.b64decode(network_row['network_pubkey'])
-        log.debug(f"group.project() verifying network-signed group {event_id[:20]}...")
-    else:
-        # Signed by peer_shared - verify with peer's public key
-        from events.identity import peer_shared
-        public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
-
-    if not crypto.verify_event(event_data, public_key):
-        log.warning(f"group.project() signature verification FAILED for group_id={event_id}")
-        return None  # Reject unsigned or invalid signature
-
-    # Extract network_id from event data (for dependency ordering)
-    network_id = event_data.get('network_id', '')
-
-    # Insert into groups table (use REPLACE to overwrite stubs from user.project())
-    safedb.execute(
-        """INSERT OR REPLACE INTO groups
-           (group_id, name, signed_by, created_at, key_id, is_main, network_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            event_id,
-            event_data['name'],
-            event_data['signed_by'],
-            event_data['created_at'],
-            event_data['key_id'],
-            event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
-            network_id,
-            recorded_by,
-            recorded_at
+    # Apply with INSERT OR REPLACE (special case - overwrites stubs)
+    for row in result.tables.get("groups", []):
+        safedb.execute(
+            """INSERT OR REPLACE INTO groups
+               (group_id, name, signed_by, created_at, key_id, is_main, network_id, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["group_id"],
+                row["name"],
+                row["signed_by"],
+                row["created_at"],
+                row["key_id"],
+                row["is_main"],
+                row["network_id"],
+                row["recorded_by"],
+                row["recorded_at"]
+            )
         )
-    )
 
-    if network_id:
-        log.info(f"group.project() stored group {event_id[:20]}... in network {network_id[:20]}...")
-
+    log.info(f"group.project() stored group {event_id[:20]}...")
     return event_id
 
 

@@ -3,11 +3,10 @@ from typing import Any
 import json
 import logging
 
-from events.group import group
-from events.content import message
 import store
 import crypto
 from db import create_safe_db, create_unsafe_db
+from projectors import dispatch, check_deps
 
 log = logging.getLogger(__name__)
 
@@ -63,158 +62,6 @@ def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: s
         return None
 
 
-def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: str) -> bool:
-    """Check if dependency references another peer's local-only data.
-
-    'Local' is relative to the creator - some deps reference the creator's
-    local state (never shared). These should only be checked when we ARE
-    the creator, and skipped when we're not.
-
-    Examples:
-    - peer_shared.peer_id → references creator's local peer
-    - key.peer_id → references owner's local peer
-    - sync.peer_id → references requester's local peer
-
-    Args:
-        field: Dependency field name (e.g., 'peer_id', 'group_id')
-        event_data: The event being processed
-        recorded_by: Who recorded/is processing this event
-
-    Returns:
-        True if this is a foreign local dep (should skip check), False otherwise
-    """
-    event_type = event_data.get('type')
-    signed_by = event_data.get('signed_by')
-
-    # Schema: key events have signed_by referencing creator's local peer (not peer_shared_id)
-    # peer_shared events have peer_id referencing creator's local peer
-    LOCAL_CREATOR_TYPES = {'transit_key', 'group_key', 'transit_prekey', 'group_prekey'}
-
-    if event_type in LOCAL_CREATOR_TYPES and field == 'signed_by':
-        # Local events have signed_by=peer_id (local). Skip if we're not the creator (foreign local)
-        return recorded_by != signed_by
-
-    if event_type == 'peer_shared' and field == 'peer_id':
-        # peer_shared events have peer_id referencing creator's local peer
-        # The creator is the peer whose identity is being shared (peer_id field)
-        creator_peer_id = event_data.get('peer_id')
-        is_foreign = recorded_by != creator_peer_id
-        return is_foreign
-
-    # Sync events have peer_id referencing requester's local peer (always foreign)
-    if event_type == 'sync' and field == 'peer_id':
-        return True
-
-    # sync_connect events have peer_id referencing sender's local peer (always foreign)
-    if event_type == 'sync_connect' and field == 'peer_id':
-        return True
-
-    return False
-
-
-def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[str]:
-    """Check dependencies exist in valid_events for this peer.
-
-    Returns list of missing dependency IDs (empty if all satisfied).
-
-    Design: Instead of explicitly listing deps per event type (brittle),
-    we treat ALL fields ending in '_id' as potential dependencies, then
-    skip those in an ignore list. This is more robust as new event types
-    automatically get dependency checking.
-    """
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    event_type = event_data.get('type')
-
-    # Fields to IGNORE as dependencies (whitelist of non-deps)
-    # These are either local-only, metadata, or have special handling
-    IGNORE_FIELDS = {
-        # Local-only fields (never shared between peers)
-        'private_key',      # Never shared
-        'ref_id',           # Internal recorded wrapper reference (handled separately)
-        'file_id',          # File blobs are raw data, not events in valid_events
-
-        # Metadata fields (not references to events)
-        'type',             # Event type string
-        'created_at',       # Timestamp
-        'recorded_at',      # Timestamp
-        'recorded_by',      # Peer perspective (not a dep)
-
-        # Self-references (event references itself or its container)
-        'network_id',       # Often self-referential for network events
-    }
-    # Note: key_id is now a proper semantic dependency since group_key events are deterministic
-    # (same key_material = same key_id on all peers via content-addressed hashing)
-
-    # Event types with NO dependencies (root events or self-signed)
-    NO_DEPS_TYPES = {
-        'network',          # Root of trust, self-signed
-        'peer_shared',      # Self-signed, peer_id is foreign local
-        'sync_connect',     # Ephemeral, auth handled in projection
-        'peer',             # Local peer event, no external deps
-        'group_key',        # Local key event
-        'transit_key',      # Local key event
-        'invite_accepted',  # Local-only, never synced, signed_by is local peer
-    }
-
-    if event_type in NO_DEPS_TYPES:
-        return []
-
-    # For invite events, only check signed_by (group/channel are metadata copied into invite)
-    # For message_deletion, only check signed_by (message may not exist yet)
-    # For group_key_shared, only check signed_by (key_id is BEING PROVIDED, not a dependency)
-    SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared'}
-    if event_type in SIGNER_ONLY_TYPES:
-        dep_fields = ['signed_by']
-    # For user events, check invite (which contains group/channel stubs) not group/channel directly
-    elif event_type == 'user':
-        dep_fields = ['signed_by', 'peer_id', 'invite_id']
-    else:
-        # DEFAULT: Find all fields ending in '_id' plus known reference fields
-        dep_fields = []
-        for field, value in event_data.items():
-            if field in IGNORE_FIELDS:
-                continue
-            # Fields ending in '_id' are references
-            if field.endswith('_id') and isinstance(value, str) and len(value) > 10:
-                dep_fields.append(field)
-            # Also check known reference fields that don't end in '_id'
-            elif field in ('signed_by', 'added_by', 'created_by', 'admin_grant'):
-                dep_fields.append(field)
-
-    missing_deps = []
-
-    for field in dep_fields:
-        dep_id = event_data.get(field)
-        if not dep_id:
-            continue
-
-        # Skip special placeholder values (used during bootstrap)
-        if dep_id in ('SELF', 'PENDING'):
-            log.debug(f"recorded.check_deps() skipping special value: {field}={dep_id}")
-            continue
-
-        # Skip foreign local deps (creator's local state we'll never have)
-        if is_foreign_local_dep(field, event_data, recorded_by):
-            log.debug(f"recorded.check_deps() skipping foreign local dep: {field}={dep_id}")
-            continue
-
-        # Check if this dep is valid for this peer
-        valid = safedb.query_one(
-            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
-            (dep_id, recorded_by)
-        )
-        if not valid:
-            log.warning(f"recorded.check_deps() missing dep: {field}={dep_id[:20]}... for peer={recorded_by[:20]}...")
-            missing_deps.append(dep_id)
-
-    if missing_deps:
-        log.debug(f"recorded.check_deps() total missing deps: {missing_deps}")
-    else:
-        log.debug(f"recorded.check_deps() all deps satisfied")
-
-    return missing_deps
-
 def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> list[list[str | None]]:
     """Since `recorded` is the event that triggers projection, this is the central function for projection."""
     """It calls the necessary project functions in other modules for the given event types."""
@@ -248,8 +95,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     Args:
         _triggered_by: What triggered this projection (for debugging causality)
     """
-    from events.identity import peer
-    from events.content import channel
     import queues
     import json
     from tests.utils import timeline
@@ -440,12 +285,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             return [None, recorded_id]
 
     # All dependencies satisfied - proceed with projection
-    projected_id = None
     log.warning(f"[PROJECTION_DISPATCH] Projecting event type: {event_type}, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
     timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
 
     # Check if this event has been marked as deleted (prevents projection of deleted messages)
-    # This handles the case where a deletion arrives before or after the message
     if event_type == 'message':
         deleted_check = safedb.query_one(
             "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
@@ -455,112 +298,14 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
             return [None, recorded_id]
 
-    if event_type == 'message':
-        projected_id = message.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'message_deletion':
-        from events.content import message_deletion
-        projected_id = message_deletion.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group':
-        projected_id = group.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'peer':
-        peer.project(ref_id, recorded_by, db)
-        projected_id = ref_id
-    elif event_type == 'transit_key':
-        from events.network import transit_key
-        transit_key.project(ref_id, recorded_by, db)
-        projected_id = ref_id
-    elif event_type == 'group_key':
-        from events.group import group_key
-        group_key.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'peer_shared':
-        from events.identity import peer_shared
-        projected_id = peer_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'channel':
-        log.error(f"[CHANNEL_PROJECT_DISPATCHER] Dispatching channel.project() for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
-        channel.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-        log.error(f"[CHANNEL_PROJECT_DISPATCHER] ✓ channel.project() completed for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
-    elif event_type == 'sync':
-        from events.network import sync
-        sync.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'sync_connect':
-        from events.network import sync_connect
-        sync_connect.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'invite':
-        from events.identity import invite
-        projected_id = invite.project(ref_id, recorded_by, recorded_at, db)
-    # Phase 5: invite_proof removed - proof IS the signature on user/peer_shared events
-    elif event_type == 'user':
-        from events.identity import user
-        projected_id = user.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'transit_prekey':
-        from events.network import transit_prekey
-        transit_prekey.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'transit_prekey_shared':
-        from events.network import transit_prekey_shared
-        projected_id = transit_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group_prekey':
-        from events.group import group_prekey
-        group_prekey.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'group_prekey_shared':
-        from events.group import group_prekey_shared
-        projected_id = group_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group_key_shared':
-        from events.group import group_key_shared
-        projected_id = group_key_shared.project(ref_id, recorded_by, recorded_at, db)
-        if projected_id is None:
-            # Projection failed (can't decrypt - event not for us)
-            # Don't mark as valid, but it's still shareable
-            log.info(f"group_key_shared projection returned None (not for us), skipping valid marking")
-            return [None, recorded_id]
-    elif event_type == 'invite_accepted':
-        from events.identity import invite_accepted
-        log.warning(f"DISPATCHER: Calling invite_accepted.project() for ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
-        invite_accepted.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group_member':
-        from events.group import group_member
-        projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network':
-        from events.identity import network
-        projected_id = network.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'admin':
-        from events.identity import admin
-        projected_id = admin.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network_created':
-        # Phase 5: network_created removed - kept for backward compat (old events can still project)
-        from events.identity import network_created
-        projected_id = network_created.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network_joined':
-        from events.identity import network_joined
-        projected_id = network_joined.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'bootstrap_complete':
-        from events.identity import bootstrap_complete
-        projected_id = bootstrap_complete.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'admin':
-        from events.identity import admin
-        projected_id = admin.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'address':
-        from events.identity import address
-        projected_id = address.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'file_slice':
-        from events.content import file_slice
-        file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'message_attachment':
-        from events.content import message_attachment
-        message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'network_address':
-        from events.network import address as network_address
-        projected_id = network_address.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network_intro':
-        from events.network import intro as network_intro
-        projected_id = network_intro.project(ref_id, recorded_by, recorded_at, db)
+    # Dispatch to projector
+    projected_id = dispatch(event_type, ref_id, recorded_by, recorded_at, db, event_data)
+
+    # Special case: group_key_shared returns None when event is not for us (can't decrypt)
+    # Still shareable, but don't mark as valid
+    if event_type == 'group_key_shared' and projected_id is None:
+        log.info(f"group_key_shared projection returned None (not for us), skipping valid marking")
+        return [None, recorded_id]
 
     # Only mark event as valid if projection succeeded (projected_id is not None)
     # Events that fail projection (authorization, missing data) should NOT be marked valid

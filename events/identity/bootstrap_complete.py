@@ -50,39 +50,19 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project bootstrap_complete event into bootstrap_completers table.
+    """Project bootstrap_complete event into bootstrap_completers table."""
+    from projectors import resolve, apply_result
+    from projectors import bootstrap_complete as bc_projector
 
-    Marks this peer as having received their first sync request (bootstrap acknowledged).
-    """
-    unsafedb = create_unsafe_db(db)
-
-    # Get blob from store
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        log.warning(f"bootstrap_complete.project() blob not found for event_id={event_id}")
+    input_dict = resolve("bootstrap_complete", event_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Parse JSON (signed plaintext)
-    event_data = crypto.parse_json(blob)
+    result = bc_projector.project(input_dict)
 
-    peer_id = event_data.get('peer_id')
-
-    if not peer_id:
-        log.warning(f"bootstrap_complete.project() missing peer_id")
+    if not result.valid:
+        log.warning(f"bootstrap_complete.project() failed: {result.reason}")
         return None
 
-    # Only project if this is our own bootstrap_complete event
-    if recorded_by != peer_id:
-        log.debug(f"bootstrap_complete.project() skipping foreign bootstrap_complete event")
-        return event_id
-
-    # Mark this peer as having received sync acknowledgment (subjective table, use safedb)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        """INSERT OR IGNORE INTO bootstrap_completers (peer_id, recorded_by) VALUES (?, ?)""",
-        (peer_id, recorded_by)
-    )
-
-    log.info(f"bootstrap_complete.project() marked {peer_id[:20]}... as received sync request")
-
+    apply_result(result, recorded_by, recorded_at, db)
     return event_id

@@ -52,40 +52,19 @@ def create(peer_id: str, peer_shared_id: str, inviter_peer_shared_id: str,
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project network_joined event into network_joiners table.
+    """Project network_joined event into network_joiners table."""
+    from projectors import resolve, apply_result
+    from projectors import network_joined as nj_projector
 
-    Marks this peer as joined network (bootstrap complete).
-    """
-    unsafedb = create_unsafe_db(db)
-
-    # Get blob from store
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        log.warning(f"network_joined.project() blob not found for event_id={event_id}")
+    input_dict = resolve("network_joined", event_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Parse JSON (signed plaintext)
-    event_data = crypto.parse_json(blob)
+    result = nj_projector.project(input_dict)
 
-    peer_id = event_data.get('peer_id')
-    inviter_peer_shared_id = event_data.get('inviter_peer_shared_id')
-
-    if not peer_id or not inviter_peer_shared_id:
-        log.warning(f"network_joined.project() missing peer_id or inviter_peer_shared_id")
+    if not result.valid:
+        log.warning(f"network_joined.project() failed: {result.reason}")
         return None
 
-    # Only project if this is our own network_joined event
-    if recorded_by != peer_id:
-        log.debug(f"network_joined.project() skipping foreign network_joined event")
-        return event_id
-
-    # Mark this peer as joined network (subjective table, use safedb)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        """INSERT OR IGNORE INTO network_joiners (peer_id, recorded_by) VALUES (?, ?)""",
-        (peer_id, recorded_by)
-    )
-
-    log.info(f"network_joined.project() marked {peer_id[:20]}... as joined network")
-
+    apply_result(result, recorded_by, recorded_at, db)
     return event_id

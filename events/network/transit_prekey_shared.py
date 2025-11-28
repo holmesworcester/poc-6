@@ -58,45 +58,19 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any
 
 
 def project(transit_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project transit_prekey_shared into transit_prekeys_shared table.
+    """Project transit_prekey_shared into transit_prekeys_shared table."""
+    from projectors import resolve, apply_result
+    from projectors import transit_prekey_shared as tpks_projector
 
-    This makes the public key available for wrapping sync requests.
-    """
-    log.info(f"transit_prekey_shared.project() transit_prekey_shared_id={transit_prekey_shared_id}, seen_by={recorded_by}")
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    unsafedb = create_unsafe_db(db)
-
-    # Get blob from store
-    blob = store.get(transit_prekey_shared_id, unsafedb)
-    if not blob:
-        log.warning(f"transit_prekey_shared.project() blob not found")
+    input_dict = resolve("transit_prekey_shared", transit_prekey_shared_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Parse event data
-    event_data = crypto.parse_json(blob)
+    result = tpks_projector.project(input_dict)
 
-    # Verify signature using peer_shared public key
-    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
-        log.warning(f"transit_prekey_shared.project() signature verification failed for transit_prekey_shared_id={transit_prekey_shared_id}")
+    if not result.valid:
+        log.warning(f"transit_prekey_shared.project() failed: {result.reason}")
         return None
 
-    public_key = crypto.b64decode(event_data['public_key'])
-
-    # Insert into transit_prekeys_shared table
-    log.info(f"transit_prekey_shared.project() storing transit_prekey_id={event_data['transit_prekey_id'][:30]}... for peer={event_data['peer_id'][:20]}..., recorded_by={recorded_by[:20]}...")
-    safedb.execute(
-        """INSERT OR IGNORE INTO transit_prekeys_shared
-           (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (
-            transit_prekey_shared_id,
-            event_data['transit_prekey_id'],
-            event_data['peer_id'],
-            public_key,
-            event_data['created_at'],
-            recorded_by
-        )
-    )
-
+    apply_result(result, recorded_by, recorded_at, db)
     return transit_prekey_shared_id

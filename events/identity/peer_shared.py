@@ -60,119 +60,61 @@ def create(peer_id: str, t_ms: int, db: Any,
 def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project peer_shared event into peers_shared table (including user_id if invite-based).
 
-    Phase 3: Two verification modes:
-    1. Legacy (no invite_id): Self-signed, verify with public_key from event
-    2. Invite-based (signed_by=invite_id): Verify with invite_pubkey, link to user
+    Uses pure functional projector from projectors.peer_shared.
+    Note: Keeps side effect for device linking (seeding group keys to new devices).
     """
-    log.warning(f"[PEER_SHARED_PROJECT] peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    log.debug(f"peer_shared.project() projecting peer_shared_id={peer_shared_id[:20]}...")
 
-    unsafedb = create_unsafe_db(db)
+    from projectors import resolve
+    from projectors import peer_shared as peer_shared_projector
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get blob from store
-    blob = store.get(peer_shared_id, unsafedb)
-    if not blob:
-        log.warning(f"peer_shared.project() blob not found for peer_shared_id={peer_shared_id}")
+    input_dict = resolve("peer_shared", peer_shared_id, recorded_by, recorded_at, db)
+    if not input_dict:
         return None
 
-    # Parse JSON (signed plaintext)
-    event_data = crypto.parse_json(blob)
+    result = peer_shared_projector.project(input_dict)
 
-    # Get public key from event (always needed for peers_shared table)
-    public_key_b64 = event_data.get('public_key')
-    if not public_key_b64:
-        log.warning(f"peer_shared.project() missing public_key in event data")
+    if result.blocked or not result.valid:
+        log.warning(f"peer_shared.project() failed: {result.reason}")
         return None
 
-    # Phase 3: Determine verification mode
-    invite_id = event_data.get('invite_id')
-    signed_by = event_data.get('signed_by')
-    user_id = None  # Will be set if invite-based linking
-
-    if invite_id and signed_by == invite_id:
-        # Invite-based verification (Phase 3 uniform peer linking)
-        # Get invite_pubkey from invites table or store blob
-        invite_pubkey_bytes = None
-
-        invite_row = safedb.query_one(
-            "SELECT invite_pubkey, user_id FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
-            (invite_id, recorded_by)
+    # Apply peers_shared (INSERT OR IGNORE)
+    for row in result.tables.get("peers_shared", []):
+        safedb.execute(
+            """INSERT OR IGNORE INTO peers_shared
+               (peer_shared_id, peer_id, public_key, user_id, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (row["peer_shared_id"], row["peer_id"], row["public_key"], row["user_id"],
+             row["created_at"], row["recorded_by"], row["recorded_at"])
         )
 
-        if invite_row:
-            invite_pubkey_bytes = crypto.b64decode(invite_row['invite_pubkey'])
-            user_id = invite_row['user_id']
-        else:
-            # Try store blob (bootstrap case)
-            invite_blob = store.get(invite_id, unsafedb)
-            if invite_blob:
-                invite_data = crypto.parse_json(invite_blob)
-                invite_pubkey_b64 = invite_data.get('invite_pubkey')
-                if invite_pubkey_b64:
-                    invite_pubkey_bytes = crypto.b64decode(invite_pubkey_b64)
-                    user_id = invite_data.get('user_id')
-                    log.info(f"peer_shared.project() got invite_pubkey from store blob (bootstrap case)")
-
-        if not invite_pubkey_bytes:
-            log.warning(f"peer_shared.project() invite_id={invite_id[:20]}... not available yet")
-            return None
-
-        if not crypto.verify_event(event_data, invite_pubkey_bytes):
-            log.warning(f"peer_shared.project() signature verification failed using invite_pubkey")
-            return None
-
-        log.info(f"peer_shared.project() verified with invite_pubkey, user_id={user_id[:20] if user_id else 'None'}...")
-    else:
-        # Legacy self-signed verification
-        public_key = crypto.b64decode(public_key_b64)
-        if not crypto.verify_event(event_data, public_key):
-            log.warning(f"peer_shared.project() signature verification failed for peer_shared_id={peer_shared_id}")
-            return None
-        log.info(f"peer_shared.project() verified self-signed (legacy mode)")
-
-    # Insert into peers_shared table (including user_id if invite-based)
-    safedb.execute(
-        """INSERT OR IGNORE INTO peers_shared
-           (peer_shared_id, peer_id, public_key, user_id, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            peer_shared_id,
-            event_data['peer_id'],
-            event_data['public_key'],
-            user_id,  # NULL if self-signed bootstrap, set if invite-based
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
-        )
-    )
-    if user_id:
-        log.info(f"peer_shared.project() inserted into peers_shared with user_id: peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}...")
-    else:
-        log.info(f"peer_shared.project() inserted into peers_shared (self-signed bootstrap): peer_shared_id={peer_shared_id[:20]}...")
-
-    # Insert into peer_self table (subjective mapping) if this is our own peer
-    # ONLY update peer_self for invite-signed peer_shared (has user_id)
-    # Self-signed peer_shared from bootstrap should NOT update peer_self to avoid convergence issues
-    owner_peer_id = event_data['peer_id']
-    if owner_peer_id == recorded_by and user_id:
-        # Invite-based peer_shared: update peer_self with user_id
-        # This makes peer_self the canonical source for "what user am I?"
+    # Apply peer_self (INSERT OR REPLACE - updates existing)
+    for row in result.tables.get("peer_self", []):
         safedb.execute(
             "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
-            (owner_peer_id, peer_shared_id, user_id, recorded_by, recorded_at)
+            (row["peer_id"], row["peer_shared_id"], row["user_id"], row["recorded_by"], row["recorded_at"])
         )
-        log.info(f"peer_shared.project() inserted into peer_self with user_id: peer_id={owner_peer_id[:20]}..., peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}..., recorded_by={recorded_by[:20]}...")
-    elif owner_peer_id == recorded_by:
-        # Self-signed peer_shared: skip peer_self update (bootstrap only, not canonical)
-        log.info(f"peer_shared.project() skipping peer_self update for self-signed peer_shared (no user_id)")
 
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (peer_shared_id, recorded_by)
-    )
+    # Apply valid_events (INSERT OR IGNORE)
+    for row in result.tables.get("valid_events", []):
+        safedb.execute(
+            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+            (row["event_id"], row["recorded_by"])
+        )
 
-    # For invite-based peer_shared (device linking): Seed group keys for all groups this user belongs to
+    # Extract user_id for side effect logic
+    event_data = input_dict["event_data"]
+    owner_peer_id = event_data["peer_id"]
+    user_id = None
+    for row in result.tables.get("peers_shared", []):
+        user_id = row.get("user_id")
+        break
+
+    log.info(f"peer_shared.project() projected peer_shared_id={peer_shared_id[:20]}...")
+
+    # Side effect: For invite-based peer_shared (device linking): Seed group keys for all groups this user belongs to
     # This ensures new devices get keys for existing groups created after the invite
     # Keys must be sealed to the SAME invite prekey that the device will use to decrypt them
     if user_id and owner_peer_id != recorded_by:
