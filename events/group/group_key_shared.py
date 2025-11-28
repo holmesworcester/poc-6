@@ -369,9 +369,9 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                     t_ms=item['created_at'],
                     db=db
                 )
-                # Mark as created
+                # Mark as created and delete from pending
                 safedb.execute(
-                    "UPDATE pending_name_updates SET status='created' WHERE id=? AND recorded_by=?",
+                    "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
                     (item['id'], recorded_by)
                 )
                 log.info(f"retry_pending_name_updates() successfully created username_update for {entity_id[:20]}...")
@@ -385,9 +385,9 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                     t_ms=item['created_at'],
                     db=db
                 )
-                # Mark as created
+                # Mark as created and delete from pending
                 safedb.execute(
-                    "UPDATE pending_name_updates SET status='created' WHERE id=? AND recorded_by=?",
+                    "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
                     (item['id'], recorded_by)
                 )
                 log.info(f"retry_pending_name_updates() successfully created network_name_update for {entity_id[:20]}...")
@@ -400,9 +400,9 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                     t_ms=item['created_at'],
                     db=db
                 )
-                # Mark as created
+                # Mark as created and delete from pending
                 safedb.execute(
-                    "UPDATE pending_name_updates SET status='created' WHERE id=? AND recorded_by=?",
+                    "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
                     (item['id'], recorded_by)
                 )
                 log.info(f"retry_pending_name_updates() successfully created peer_name_update for {entity_id[:20]}...")

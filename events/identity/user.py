@@ -400,59 +400,6 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     peer_shared_id = peer_shared_join_result['peer_shared_id']
     log.info(f"new_network() delegated to peer_shared.join(): {peer_shared_id[:20]}...")
 
-    # Try to create username_update event (encrypted with group key)
-    # If key is not available yet, store in pending_name_updates table for later
-    from events.identity import username_update
-    try:
-        username_update_id = username_update.create(
-            user_id=user_id,
-            name=name,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 52,
-            db=db
-        )
-        log.info(f"new_network() created username_update: {username_update_id[:20]}...")
-    except username_update.KeyNotAvailableError:
-        # Key not available yet - store for later creation when group_key_shared arrives
-        log.info(f"new_network() key not available yet, storing username intent in pending_name_updates")
-        import hashlib
-        pending_id = hashlib.sha256(f"{user_id}:username:{t_ms + 52}".encode()).hexdigest()[:20]
-        safedb.execute(
-            """INSERT OR IGNORE INTO pending_name_updates
-               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pending_id, 'username', user_id, name, peer_id, peer_shared_id,
-             'waiting_for_key', t_ms + 52, peer_id, t_ms + 52)
-        )
-        log.info(f"new_network() stored pending username for user {user_id[:20]}...")
-
-    # Try to create network_name_update event
-    from events.identity import network_name_update
-    try:
-        network_name_update_id = network_name_update.create(
-            network_id=network_id,
-            name=network_name,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 53,
-            db=db
-        )
-        log.info(f"new_network() created network_name_update: {network_name_update_id[:20]}...")
-    except network_name_update.KeyNotAvailableError:
-        # Key not available yet - store for later creation
-        log.info(f"new_network() key not available yet, storing network name intent in pending_name_updates")
-        import hashlib
-        pending_id = hashlib.sha256(f"{network_id}:network_name:{t_ms + 53}".encode()).hexdigest()[:20]
-        safedb.execute(
-            """INSERT OR IGNORE INTO pending_name_updates
-               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pending_id, 'network_name', network_id, network_name, peer_id, peer_shared_id,
-             'waiting_for_key', t_ms + 53, peer_id, t_ms + 53)
-        )
-        log.info(f"new_network() stored pending network name for network {network_id[:20]}...")
-
     # =========================================================================
     # PHASE 2: Content setup (after peer_shared exists)
     # =========================================================================
@@ -490,6 +437,10 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         signer_private_key=network_private_key
     )
     log.info(f"new_network() created network-signed all_users group: {all_users_group_id[:20]}...")
+
+    # Note: Username and network name updates are created during user.join() when other users join,
+    # not during new_network() bootstrap, to ensure deterministic behavior during convergence testing.
+    # The bootstrapper can update their own username via a follow-up call to user.join() if needed.
 
     # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence
