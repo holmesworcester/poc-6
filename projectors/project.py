@@ -47,6 +47,7 @@ def _load_projectors():
     # Pure functional projectors (have SPEC + project(input_dict))
     from projectors import message, channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
     from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
+    from projectors import group_key_shared
 
     _PROJECTORS["message"] = message
     _PROJECTORS["channel"] = channel
@@ -63,6 +64,7 @@ def _load_projectors():
     _PROJECTORS["transit_prekey_shared"] = transit_prekey_shared
     _PROJECTORS["address"] = address
     _PROJECTORS["group_prekey_shared"] = group_prekey_shared
+    _PROJECTORS["group_key_shared"] = group_key_shared
 
 
 def get_spec(event_type: str) -> dict | None:

@@ -210,37 +210,31 @@ def create_for_link_invite(key_id: str, peer_id: str, peer_shared_id: str,
 
 
 def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project key_shared event into keys table and shareable_events."""
+    """Project key_shared event into group_keys_shared table and create derived group_key.
+
+    Uses pure projector for computation, keeps unwrap/signature verification here.
+    """
+    from projectors import apply_result
+    from projectors import group_key_shared as gks_projector
+
     log.debug(f"key_shared.project() key_shared_id={key_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
-    # Get blob from store (already unwrapped by recorded)
+    # Get blob from store
     blob = store.get(key_shared_id, db)
     if not blob:
         log.warning(f"key_shared.project() blob not found for key_shared_id={key_shared_id}")
         return None
 
-    # Unwrap (decrypt) - recorded should have already done this, but we need the plaintext
+    # Unwrap (decrypt) - uses unwrap_event which checks group_keys and group_prekeys
     plaintext, missing_keys = crypto.unwrap_event(blob, recorded_by, db)
     log.debug(f"key_shared.project() unwrap result: plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_keys}")
     if not plaintext:
-        # Can't decrypt - this event is not for us
-        # It's already shareable (marked by recorded.py), but we don't project it
-        # Examples:
-        # - Alice creates group_key_shared wrapped to Bob's invite prekey - Alice can't decrypt
-        # - Bob will receive it and decrypt it
-        log.info(f"key_shared.project() can't decrypt, event not for us (wrapped to someone else)")
-        # Don't mark as valid - we can't use this event
-        # recorded.py already handled crypto blocking if needed
+        # Can't decrypt - this event is not for us (wrapped to someone else)
+        log.info(f"key_shared.project() can't decrypt, event not for us")
         return None
 
     # Parse JSON
     event_data = crypto.parse_json(plaintext)
-
-    # If we successfully decrypted it, we should add the key to our group_keys table
-    # This handles both:
-    # 1. Regular case: recipient_peer_id matches our peer_id
-    # 2. Invite case: recipient_peer_id is invite prekey ID, but we have invite private key
-    # The ability to decrypt is the authorization, not the recipient_peer_id field
 
     # Verify signature - get public key from signed_by peer_shared
     from events.identity import peer_shared
@@ -250,55 +244,36 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         log.warning(f"key_shared.project() signature verification failed for key_shared_id={key_shared_id}")
         return None
 
-    # Create DETERMINISTIC group_key event from the shared key material
-    # This produces the SAME key_id that the creator has (same key material = same hash)
-    original_key_id = event_data['key_id']
-    symmetric_key = crypto.b64decode(event_data['symmetric_key'])
+    # Call pure projector for computation (key_id verification, table rows, derived events)
+    input_dict = {
+        "event_id": key_shared_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+    result = gks_projector.project(input_dict)
 
-    # Create deterministic group_key event
-    from events.group import group_key
-    computed_key_id = group_key.create_with_material(
-        symmetric_key,
-        recorded_by,
-        event_data['created_at'],  # Use sharing event's timestamp for metadata
-        db
-    )
-
-    # Verify determinism: computed key_id MUST match original
-    # Since group_key events are deterministic (content-addressed), a mismatch indicates
-    # either corruption or a malicious sender providing wrong key material
-    if computed_key_id != original_key_id:
-        log.error(f"key_shared.project() key_id mismatch! computed={computed_key_id[:20]}... vs original={original_key_id[:20]}... - rejecting")
+    if not result.valid:
+        log.warning(f"key_shared.project() pure projector failed: {result.reason}")
         return None
+
+    # Apply result: table writes + derived events (creates group_key via create_with_material)
+    apply_result(result, recorded_by, recorded_at, db)
+
+    # Get computed key_id for queue notification
+    symmetric_key = crypto.b64decode(event_data['symmetric_key'])
+    computed_key_id = crypto.hash_group_key_material(symmetric_key)
 
     log.debug(f"key_shared.project() created deterministic key {computed_key_id[:20]}... for peer {recorded_by[:20]}...")
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Insert into group_keys_shared table to track this event
-    # Store original_key_id for auditing (what sender claimed), but we use computed_key_id
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_keys_shared
-           (key_shared_id, original_key_id, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (
-            key_shared_id,
-            computed_key_id,  # Use computed (deterministic) key_id
-            event_data['signed_by'],
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
-        )
-    )
-
     # Mark key_shared event as valid for this peer
-    # Note: computed_key_id is already marked valid by group_key.create_with_material()
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (key_shared_id, recorded_by)
     )
 
-    # Notify blocked queue - unblock events that were waiting for this key
+    # Notify blocked queue - unblock events waiting for this key
     import queues
     unblocked_ids = queues.blocked.notify_event_valid(computed_key_id, recorded_by, safedb)
     if unblocked_ids:

@@ -50,6 +50,21 @@ def kdf(secret: bytes, salt: bytes, size: int = SECRET_SIZE) -> bytes:
     return nacl.hash.blake2b(secret, salt=salt, digest_size=size, encoder=nacl.encoding.RawEncoder)
 
 
+def hash_group_key_material(key_material: bytes) -> str:
+    """Compute the deterministic key_id for a group_key from key material.
+
+    This produces the same key_id that would result from storing a group_key
+    event with this key material (content-addressed, deterministic).
+    """
+    # Must match the blob format in group_key.create_with_material()
+    event_data = {
+        'type': 'group_key',
+        'key': b64encode(key_material)
+    }
+    blob = json.dumps(event_data, sort_keys=True).encode()
+    return b64encode(hash(blob))
+
+
 def sign(message: bytes, private_key: bytes) -> bytes:
     """Sign a message with Ed25519."""
     signing_key = nacl.signing.SigningKey(private_key)
