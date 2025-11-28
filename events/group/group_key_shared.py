@@ -258,13 +258,10 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         return None
 
     # Apply result: table writes + derived events (creates group_key via create_with_material)
+    # Note: create_with_material() calls store.event() which calls recorded.project()
+    # which marks the group_key valid and triggers notify_event_valid(key_id, ...)
+    # so events waiting on that key_id unblock automatically - no manual queue handling needed!
     apply_result(result, recorded_by, recorded_at, db)
-
-    # Get computed key_id for queue notification
-    symmetric_key = crypto.b64decode(event_data['symmetric_key'])
-    computed_key_id = crypto.hash_group_key_material(symmetric_key)
-
-    log.debug(f"key_shared.project() created deterministic key {computed_key_id[:20]}... for peer {recorded_by[:20]}...")
 
     # Mark key_shared event as valid for this peer
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -272,15 +269,6 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (key_shared_id, recorded_by)
     )
-
-    # Notify blocked queue - unblock events waiting for this key
-    import queues
-    unblocked_ids = queues.blocked.notify_event_valid(computed_key_id, recorded_by, safedb)
-    if unblocked_ids:
-        log.info(f"key_shared.project() unblocked {len(unblocked_ids)} events waiting for key {computed_key_id[:20]}...")
-        # Re-project the unblocked events
-        from events.network import recorded
-        recorded.project_ids(unblocked_ids, db)
 
     return key_shared_id
 
