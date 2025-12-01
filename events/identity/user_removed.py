@@ -237,13 +237,13 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
     peer_shared_id = peer_self_row['peer_shared_id']
 
     # Rotate key for each group
-    from events.group import rotate_key
+    from events.group import group_key
     share_timestamp = t_ms + 1000  # Space out key creation from removal events
 
     for group_row in group_memberships:
         group_id = group_row['group_id']
         try:
-            rotate_key.rotate_group_key(
+            group_key.rotate_for_removal(
                 group_id=group_id,
                 peer_id=recorded_by,
                 peer_shared_id=peer_shared_id,

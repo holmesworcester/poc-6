@@ -217,3 +217,63 @@ def list(peer_id: str, db: Any) -> list[dict[str, Any]]:
     )
 
     return [row for row in keys]
+
+
+def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
+                       t_ms: int, removed_user_id: str, db: Any) -> str:
+    """Rotate a group's encryption key when a member is removed.
+
+    Creates a new key and shares it with all remaining members (excluding removed user).
+
+    Args:
+        group_id: Group whose key should be rotated
+        peer_id: Local peer ID performing the rotation
+        peer_shared_id: Public peer ID performing the rotation
+        t_ms: Base timestamp for key creation
+        removed_user_id: User ID being removed (to exclude from sharing)
+        db: Database connection
+
+    Returns:
+        new_key_id: The newly created group key ID
+
+    Raises:
+        ValueError: If group not found
+    """
+    from events.group import group_key_shared
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Verify group exists
+    group_row = safedb.query_one(
+        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (group_id, peer_id)
+    )
+    if not group_row:
+        raise ValueError(f"Group {group_id} not found")
+
+    log.info(f"group_key.rotate_for_removal() rotating key for group={group_id[:20]}..., removed_user={removed_user_id[:20]}...")
+
+    # Create new group key
+    new_key_id = create(peer_id=peer_id, t_ms=t_ms, db=db)
+    log.info(f"group_key.rotate_for_removal() created new key_id={new_key_id[:20]}...")
+
+    # Update group with new key_id
+    safedb.execute(
+        "UPDATE groups SET key_id = ? WHERE group_id = ? AND recorded_by = ?",
+        (new_key_id, group_id, peer_id)
+    )
+    log.info(f"group_key.rotate_for_removal() updated group {group_id[:20]}... with new key")
+
+    # Share new key with all remaining members (excluding removed user)
+    group_key_shared.share_key_with_group_members(
+        key_id=new_key_id,
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms + 1,
+        db=db,
+        exclude_user_id=removed_user_id
+    )
+
+    log.info(f"group_key.rotate_for_removal() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}...")
+    return new_key_id
