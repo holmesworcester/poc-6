@@ -441,6 +441,10 @@ def cmd_send(session: CLISession, msg: str):
         print("✗ no channel selected")
         return
 
+    if not msg or not msg.strip():
+        print("✗ message cannot be empty or whitespace-only")
+        return
+
     result = message.create(
         peer_id=account.peer_id,
         channel_id=session.selected_channel_id,
@@ -509,6 +513,10 @@ def cmd_create_channel(session: CLISession, name: str):
 
     if not account.network_id:
         print("✗ no network joined")
+        return
+
+    if not name or not name.strip():
+        print("✗ channel name cannot be empty or whitespace-only")
         return
 
     # Get all_users group for the channel
@@ -956,11 +964,20 @@ def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: 
 
 def cmd_fast_forward(session: CLISession, days: int):
     """Fast-forward simulation time by days."""
+    if days < 0:
+        print("error: days must be non-negative")
+        return
+
     ms = days * 24 * 60 * 60 * 1000
     session.current_time_ms += ms
 
     # Run purge to delete expired messages
     purge_expired.run_purge_expired_for_all_peers(session.current_time_ms, session.db)
+    session.db.commit()
+
+    # Run a tick cycle to handle any time-dependent jobs (prekey refresh, etc.)
+    # This prevents being in an unnatural state where things expired but jobs haven't run
+    tick.tick(session.current_time_ms, session.db)
     session.db.commit()
 
     print(f"Fast-forwarded {days} day{'s' if days != 1 else ''} (current time: {session.current_time_ms}ms)")
@@ -1219,6 +1236,10 @@ def cmd_add_reaction(session: CLISession, message_num: int, emoji: str):
         print("✗ no channel selected")
         return
 
+    if not emoji or not emoji.strip():
+        print("✗ reaction cannot be empty or whitespace-only")
+        return
+
     # Get messages to find the one to react to
     messages = message.list(session.selected_channel_id, account.peer_id, session.db)
 
@@ -1453,7 +1474,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: link-device --devicename <device> --invite <n|link>")
 
-        elif cmd == "show-ui":
+        elif cmd == "show-ui" or cmd == "show":
             display_state(session)
 
         elif cmd == "list-accounts":
@@ -1494,6 +1515,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "purge-keys":
             cmd_purge_keys(session)
+
+        elif cmd == "show-group-keys":
+            cmd_show_group_keys(session)
 
         elif cmd == "remove-user":
             if len(parts) < 2:
@@ -1603,7 +1627,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    keys [--summary]")
             print("    show-group-keys")
             print("    purge-keys")
-            print("    sync --ticks <n>")
+            print("    tick <n>")
             print("    set-auto-tick <n>")
             print()
             print("  Other:")

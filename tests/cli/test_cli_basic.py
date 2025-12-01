@@ -354,3 +354,137 @@ list-accounts
 
     # Success message should show bob
     assert "linked device to existing user: bob" in result.stdout
+
+
+def test_help_text_matches_dispatcher():
+    """Test that all commands in help text are wired up, and all wired commands are in help."""
+    import sys
+    import re as regex  # Use different name to avoid conflict with later re import
+    sys.path.insert(0, os.path.dirname(CLI_PATH))
+
+    # Get help text
+    result = run_cli("help\nquit")
+    assert result.returncode == 0, f"CLI failed: {result.stderr}"
+    help_output = result.stdout
+
+    # Extract just the help section (between "> help" and "> quit")
+    help_section = help_output.split('> help')[1].split('> quit')[0] if '> help' in help_output else help_output
+
+    # Extract commands from help text (lines that start with spaces and contain a command)
+    help_commands = set()
+    for line in help_section.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('available') or line.startswith('('):
+            continue
+        # Skip lines that end with : (section headers)
+        if line.endswith(':'):
+            continue
+        # Extract the command name (first word before any arguments)
+        parts = line.split()
+        if parts:
+            cmd = parts[0]
+            # Skip section headers and descriptions
+            if cmd in ('Network', 'Joining/linking:', 'Account', 'Channels:', 'Messaging:',
+                       'Admin:', 'Keys/sync:', 'Other:', 'Create', 'Join', 'Link'):
+                continue
+            # Must look like a command (lowercase with optional hyphens)
+            if not regex.match(r'^[a-z][a-z-]*$', cmd):
+                continue
+            help_commands.add(cmd)
+
+    # Read cli.py to extract dispatcher commands
+    with open(CLI_PATH, 'r') as f:
+        cli_source = f.read()
+
+    # Find all 'elif cmd == "xxx"' patterns (including 'or cmd == "xxx"' for aliases)
+    dispatcher_commands = set()
+    for match in regex.finditer(r'(?:elif |or )cmd == ["\']([^"\']+)["\']', cli_source):
+        cmd = match.group(1)
+        dispatcher_commands.add(cmd)
+
+    # Also add 'quit' and 'exit' which use different pattern (if cmd == "quit" or cmd == "exit")
+    dispatcher_commands.add('quit')
+    dispatcher_commands.add('exit')
+
+    # These are intentionally not in help:
+    # - exit: alias for quit
+    # - help: meta-command (you discover it by typing 'help' anyway)
+    internal_commands = {'exit', 'help'}
+    dispatcher_commands -= internal_commands
+
+    # Check that all help commands exist in dispatcher
+    missing_from_dispatcher = help_commands - dispatcher_commands - {'setup:', 'management:'}
+    assert not missing_from_dispatcher, \
+        f"Commands in help but not wired up in dispatcher: {missing_from_dispatcher}"
+
+    # Check that all dispatcher commands exist in help (except internal ones)
+    missing_from_help = dispatcher_commands - help_commands
+    assert not missing_from_help, \
+        f"Commands in dispatcher but not in help text: {missing_from_help}"
+
+
+def test_all_help_commands_execute_without_crash():
+    """Test that every command in help can be executed without crashing (may error but shouldn't crash)."""
+    # Commands that need setup first
+    commands_needing_setup = [
+        'send', 'select-channel', 'create-channel', 'list-channels', 'list-messages',
+        'delete-message', 'edit-message', 'add-reaction', 'remove-reaction', 'list-reactions',
+        'create-invite', 'create-link-invite', 'keys', 'show-group-keys', 'purge-keys',
+        'remove-user', 'set-disappearing', 'show-ui'
+    ]
+
+    # Commands with their required minimal arguments
+    command_tests = [
+        # These work without any setup
+        ('help', None),
+        ('time', None),
+        ('quit', None),
+
+        # These need a network first but can be tested with just setup
+        ('new-network --name Test --username alice --devicename desktop', None),
+        ('list-accounts', None),
+        ('list-users', None),
+        ('switch 1', None),
+        ('tick 1', None),
+        ('set-auto-tick 10', None),
+        ('fast-forward --days 1', None),
+        ('show-ui', None),
+        ('show', None),
+        ('keys', None),
+        ('keys --summary', None),
+        ('show-group-keys', None),
+        ('purge-keys', None),
+        ('list-channels', None),
+        ('create-channel testchan', None),
+        ('select-channel 1', None),
+        ('send "test message"', None),
+        ('list-messages', None),
+        ('edit-message 1 "edited"', None),
+        ('delete-message 1', 'not found'),  # Will fail gracefully after edit
+        ('add-reaction 1 thumbsup', 'not found'),  # Message was deleted
+        ('remove-reaction 1 thumbsup', 'not found'),
+        ('list-reactions 1', 'not found'),
+        ('set-disappearing --days 1', None),
+        ('set-disappearing --off', None),
+        ('create-invite', None),
+        ('join --username bob --devicename phone --invite 1', None),
+        ('create-link-invite', None),
+        ('link-device --devicename tablet --invite 2', None),
+        ('remove-user 2', None),  # Remove bob
+    ]
+
+    # Build command sequence
+    commands = "new-network --name Test --username alice --devicename desktop\n"
+    for cmd, expected_error in command_tests[1:]:  # Skip first new-network
+        if cmd != 'new-network --name Test --username alice --devicename desktop':
+            commands += cmd + "\n"
+    commands += "quit\n"
+
+    result = run_cli(commands)
+
+    # Should not crash (return code 0)
+    assert result.returncode == 0, f"CLI crashed: {result.stderr}\n\nOutput: {result.stdout}"
+
+    # Should not have Python exceptions
+    assert "Traceback" not in result.stderr, f"Python exception occurred: {result.stderr}"
+    assert "Traceback" not in result.stdout, f"Python exception in stdout: {result.stdout}"
