@@ -10,8 +10,10 @@ Uses apply_result_device_wide since transit_prekeys is device-wide.
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import json
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,61 @@ SPEC = {
     "dependencies": [],
     "tables": ["transit_prekeys"],  # Device-wide table
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Transit prekeys only need generated keypair
+    "key_material": {"type": "generated_keypair"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class TransitPrekeyCreateDeps(TypedDict):
+    """Dependencies for transit_prekey creation."""
+    peer_id: str  # Owner of this prekey
+    private_key: bytes  # Generated keypair private
+    public_key: bytes  # Generated keypair public
+
+
+def create_pure(
+    deps: TransitPrekeyCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a transit_prekey event.
+
+    Transit prekeys are device-wide events for receiving sync requests.
+    They store both public and private keys.
+
+    Args:
+        deps: Resolved dependencies (includes generated keypair)
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with prekey blob
+    """
+    event_data = {
+        'type': 'transit_prekey',
+        'public_key': crypto.b64encode(deps['public_key']),
+        'private_key': crypto.b64encode(deps['private_key']),
+        'signed_by': deps['peer_id'],  # Local peer who created this prekey
+        'created_at': t_ms,
+    }
+
+    # Local-only: plain JSON, no signing/encryption
+    blob = json.dumps(event_data).encode()
+    prekey_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=prekey_id, event_type='transit_prekey')],
+        primary_id=prekey_id,
+    )
 
 
 # ============================================================================

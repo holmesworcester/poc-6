@@ -10,8 +10,10 @@ Uses apply_result since group_keys is subjective (has recorded_by).
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import json
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +45,55 @@ SPEC = {
     "dependencies": [],
     "tables": ["group_keys"],  # Subjective table (has recorded_by)
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Group keys only need generated secret
+    "key_material": {"type": "generated_secret"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class GroupKeyCreateDeps(TypedDict):
+    """Dependencies for group_key creation."""
+    key_material: bytes  # Generated symmetric key (32 bytes)
+
+
+def create_pure(
+    deps: GroupKeyCreateDeps,
+) -> CreateResult:
+    """Pure function to create a group_key event.
+
+    Group keys are DETERMINISTIC - same key material produces same key_id.
+    No timestamp in blob ensures identical content-addressed IDs across peers.
+
+    Args:
+        deps: Resolved dependencies (includes generated key material)
+
+    Returns:
+        CreateResult with key blob
+    """
+    # DETERMINISTIC blob - only type and key, no timestamp
+    event_data = {
+        'type': 'group_key',
+        'key': crypto.b64encode(deps['key_material']),
+    }
+
+    # Use sort_keys=True for canonical ordering
+    blob = json.dumps(event_data, sort_keys=True).encode()
+    key_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=key_id, event_type='group_key')],
+        primary_id=key_id,
+    )
 
 
 # ============================================================================

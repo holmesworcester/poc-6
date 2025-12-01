@@ -4,8 +4,9 @@ Peer's network address for direct communication.
 """
 
 from typing import TypedDict, NotRequired
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,71 @@ SPEC = {
     "tables": ["addresses"],
 }
 
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class AddressCreateDeps(TypedDict):
+    """Dependencies for address creation."""
+    peer_shared_id: str
+    private_key: bytes
+
+
+def create_pure(
+    deps: AddressCreateDeps,
+    ip: str,
+    port: int,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create an address event.
+
+    Address events are signed plaintext announcing a peer's network location.
+
+    Args:
+        deps: Resolved dependencies
+        ip: IP address
+        port: Port number
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with address blob
+    """
+    event_data = {
+        'type': 'address',
+        'peer_id': deps['peer_shared_id'],
+        'signed_by': deps['peer_shared_id'],
+        'ip': ip,
+        'port': port,
+        'created_at': t_ms,
+    }
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+
+    # Canonicalize (plaintext, no encryption)
+    blob = crypto.canonicalize_json(signed_event)
+    address_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=address_id, event_type='address')],
+        primary_id=address_id,
+    )
+
+
+# ============================================================================
+# PROJECTOR - pure function: dict -> ProjectorResult
+# ============================================================================
 
 def project(input_dict: AddressInput) -> ProjectorResult:
     """Pure projection: dict -> result."""
