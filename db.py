@@ -62,6 +62,7 @@ SUBJECTIVE_TABLES = {
     'channel_updates',             # Channel updates (peer-scoped)
     'message_reactions',           # Message reactions (peer-scoped)
     'message_reaction_deletions',  # Message reaction deletions (peer-scoped)
+    'message_updates',             # Message updates/edits (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

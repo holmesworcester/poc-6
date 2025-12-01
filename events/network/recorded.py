@@ -473,6 +473,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'message_deletion':
         from events.content import message_deletion
         projected_id = message_deletion.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'message_update':
+        from events.content import message_update
+        projected_id = message_update.project(ref_id, recorded_by, recorded_at, db)
     elif event_type == 'message_reaction':
         from events.content import message_reaction
         projected_id = message_reaction.project(ref_id, recorded_by, recorded_at, db)
