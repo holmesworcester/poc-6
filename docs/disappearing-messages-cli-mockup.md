@@ -92,23 +92,32 @@ Format rules:
 
 ### 4. Fast-Forward Time (`fast-forward`)
 
-Jump simulation time forward by days (without running each tick):
+Jump simulation time forward by days (without running each tick). Runs purge and then shows state.
 
 ```
-poc-6> time
-Current time: 1000ms
-
 poc-6> fast-forward --days 3
-Fast-forwarded 3 days
-Current time: 259201000ms
+Fast-forwarded 3 days (current time: 259201000ms)
 
-poc-6> fast-forward --days 7
-Fast-forwarded 7 days
-Purged 3 expired messages
-Current time: 863401000ms
+STATE:
+  ...
+
+MAIN (#general):
+  1. [1000ms] alice: Hello! (expires in: 4d 0h)
+  ...
 ```
 
-**Implementation note**: After adjusting time, run `purge_expired.run_purge_expired_for_all_peers()` to actually delete expired messages.
+After messages expire:
+```
+poc-6> fast-forward --days 7
+
+Fast-forwarded 7 days (current time: 863401000ms)
+
+STATE:
+  ...
+
+MAIN (#general):
+  (no messages)
+```
 
 ---
 
@@ -225,12 +234,12 @@ def cmd_fast_forward(session: CLISession, days: int):
 
     # Run purge to delete expired messages
     import purge_expired
-    # Count messages before purge for reporting (optional)
     purge_expired.run_purge_expired_for_all_peers(session.current_time_ms, session.db)
     session.db.commit()
 
-    print(f"Fast-forwarded {days} day{'s' if days != 1 else ''}")
-    print(f"Current time: {session.current_time_ms}ms")
+    print(f"Fast-forwarded {days} day{'s' if days != 1 else ''} (current time: {session.current_time_ms}ms)")
+    print()
+    display_state(session)
 ```
 
 ---
