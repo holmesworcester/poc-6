@@ -32,7 +32,7 @@ def test_delete_message_marks_key_for_purging():
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Hello, this will be rekeyed",
@@ -92,7 +92,7 @@ def test_delete_and_rekey_message():
 
     # Alice sends two messages
     print("\n=== Alice sends two messages ===")
-    msg1_result = message.create(
+    msg1_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message 1 - will stay",
@@ -102,7 +102,7 @@ def test_delete_and_rekey_message():
     msg1_id = msg1_result['id']
     print(f"Message 1 created: {msg1_id[:20]}...")
 
-    msg2_result = message.create(
+    msg2_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message 2 - will be deleted",
@@ -209,7 +209,7 @@ def test_forward_secrecy_multi_peer():
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Multi-peer test message",
@@ -493,7 +493,7 @@ def test_new_user_joins_after_rekey():
     db.commit()
 
     print("\n=== t=2000: Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Original message encrypted with K1",
@@ -625,7 +625,7 @@ def test_new_user_with_preexisting_invite_after_rekey():
     print("✓ Invite stored in event log")
 
     print("\n=== t=2000: Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message encrypted with K1, will be rekeyed to K2",
@@ -736,7 +736,7 @@ def test_deterministic_rekeying():
     print("\n=== Alice sends 3 messages at different times ===")
     msg_ids = []
     for i, t_ms in enumerate([2000, 2100, 2200]):
-        msg_result = message.create(
+        msg_result = message.send(
             peer_id=alice['peer_id'],
             channel_id=alice['channel_id'],
             content=f"Message {i+1}",
@@ -820,7 +820,7 @@ def test_rekey_no_duplicates():
     db.commit()
 
     print("\n=== Alice sends a message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message to be rekeyed multiple times",

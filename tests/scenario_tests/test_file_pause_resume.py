@@ -55,7 +55,7 @@ def test_pause_and_resume_file_download():
     print("\n=== Alice creates message with 1 MB file ===")
 
     # Alice sends message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Pausable file attachment',
@@ -248,7 +248,7 @@ def test_cancel_file_download():
     print("\n=== Alice creates message with 500 KB file ===")
 
     # Alice sends message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='File to be cancelled',

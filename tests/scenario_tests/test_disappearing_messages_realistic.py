@@ -48,7 +48,7 @@ def test_alice_creates_disappearing_channel_and_sends_messages():
 
     # Send message at t=3000
     print("\n=== Alice sends message at t=3000 ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=ephemeral_channel_id,
         content="This will disappear in 5 seconds",
@@ -137,7 +137,7 @@ def test_alice_and_bob_see_messages_disappear_together():
 
     # Alice sends a message
     print("\n=== Alice sends message at t=4000 ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Secret message",
@@ -202,7 +202,7 @@ def test_channel_ttl_update_affects_new_messages():
 
     # Send first message
     print("\n=== Alice sends message 1 at t=3000 ===")
-    msg1 = message.create(
+    msg1 = message.send(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Message 1",
@@ -227,7 +227,7 @@ def test_channel_ttl_update_affects_new_messages():
 
     # Send second message (should get 2-second TTL)
     print("\n=== Alice sends message 2 at t=6000 ===")
-    msg2 = message.create(
+    msg2 = message.send(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Message 2",

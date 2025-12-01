@@ -371,7 +371,7 @@ def cmd_send(session: CLISession, msg: str):
         print("✗ no channel selected")
         return
 
-    result = message.create(
+    result = message.send(
         peer_id=account.peer_id,
         channel_id=session.selected_channel_id,
         content=msg,

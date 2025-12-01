@@ -36,7 +36,7 @@ def test_message_deletion_self():
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Hello, this will be deleted",
@@ -145,7 +145,7 @@ def test_message_deletion_admin():
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Alice's message to be deleted by Bob",
@@ -260,7 +260,7 @@ def test_message_deletion_unauthorized():
 
     # Alice sends a message
     print("\n=== Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Alice's message",
@@ -317,7 +317,7 @@ def test_message_deletion_ordering():
 
     # Alice sends message
     print("\n=== Alice sends message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Test ordering",

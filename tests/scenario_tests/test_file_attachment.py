@@ -62,7 +62,7 @@ def test_two_party_file_attachment_and_sync():
     print("\n=== Alice creates message with file attachment ===")
 
     # Alice sends initial message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this file!',

@@ -18,7 +18,7 @@ The framework (in project.py) handles:
   store_create_result() - store all blobs from a create result
 """
 
-from projectors.project import (
+from projection import (
     # Projection types and functions
     ProjectorResult,
     resolve,

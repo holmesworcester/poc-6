@@ -123,7 +123,7 @@ def test_alice_links_phone_to_laptop():
     print("\n=== Creating messages on both devices ===")
 
     # Alice sends from phone
-    alice_phone_msg = message.create(
+    alice_phone_msg = message.send(
         peer_id=alice_phone['peer_id'],
         channel_id=alice_phone['channel_id'],
         content="Hello from Alice's phone!",
@@ -134,7 +134,7 @@ def test_alice_links_phone_to_laptop():
     print(f"Alice (phone) created message: {alice_phone_msg['id'][:20]}...")
 
     # Alice sends from laptop (uses same channel as phone since same user)
-    alice_laptop_msg = message.create(
+    alice_laptop_msg = message.send(
         peer_id=alice_laptop['peer_id'],
         channel_id=alice_phone['channel_id'],  # Same user, same channel
         content="Hello from Alice's laptop!",
@@ -211,7 +211,7 @@ def test_alice_laptop_joins_after_phone_has_messages():
     db.commit()
 
     # Alice sends messages from phone first
-    msg1 = message.create(
+    msg1 = message.send(
         peer_id=alice_phone['peer_id'],
         channel_id=alice_phone['channel_id'],
         content="Message 1 from phone",
@@ -220,7 +220,7 @@ def test_alice_laptop_joins_after_phone_has_messages():
     )
     db.commit()
 
-    msg2 = message.create(
+    msg2 = message.send(
         peer_id=alice_phone['peer_id'],
         channel_id=alice_phone['channel_id'],
         content="Message 2 from phone",
@@ -380,7 +380,7 @@ def test_three_devices_all_linked():
     # Each device sends a message
     print("\n=== Each device sends a message ===")
 
-    msg_phone = message.create(
+    msg_phone = message.send(
         peer_id=alice_phone['peer_id'],
         channel_id=shared_channel_id,
         content="From phone",
@@ -389,7 +389,7 @@ def test_three_devices_all_linked():
     )
     db.commit()
 
-    msg_laptop = message.create(
+    msg_laptop = message.send(
         peer_id=alice_laptop['peer_id'],
         channel_id=shared_channel_id,
         content="From laptop",
@@ -398,7 +398,7 @@ def test_three_devices_all_linked():
     )
     db.commit()
 
-    msg_tablet = message.create(
+    msg_tablet = message.send(
         peer_id=alice_tablet['peer_id'],
         channel_id=shared_channel_id,
         content="From tablet",

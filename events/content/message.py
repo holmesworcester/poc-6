@@ -10,10 +10,12 @@ API functions:
     project_event(event_id, recorded_by, recorded_at, db) -> str | None
 """
 from typing import Any, TypedDict, NotRequired
-from dataclasses import dataclass, field
 import logging
 import crypto
-from db import create_safe_db
+import store
+from db import create_safe_db, create_unsafe_db
+from events.identity import peer
+from events.group import group
 
 log = logging.getLogger(__name__)
 
@@ -35,20 +37,6 @@ class MessageEventData(TypedDict):
     disappearing_time_ms: NotRequired[int]
 
 
-class DeletionDep(TypedDict):
-    deleted_by: str
-    is_valid: bool
-
-
-class MessageInput(TypedDict):
-    event_id: str
-    event_data: MessageEventData
-    key_id: str
-    recorded_by: str
-    recorded_at: int
-    dependencies: dict  # {"deletion": DeletionDep | None}
-
-
 class CreateDeps(TypedDict):
     """Dependencies resolved for message creation."""
     channel_id: str
@@ -61,53 +49,21 @@ class CreateDeps(TypedDict):
 
 
 # ============================================================================
-# SPEC - drives generic resolver
-# ============================================================================
-
-SPEC = {
-    "encrypted": True,
-    "signer_type": "peer_shared",
-    "dependencies": ["deletion:message_deletion?"],
-    "tables": ["messages", "event_dependencies", "deleted_events"],
-}
-
-
-# ============================================================================
-# DEPS - dependencies needed for creation
-# ============================================================================
-
-DEPS = {
-    "channel": {
-        "table": "channels",
-        "key_field": "channel_id",
-        "fields": ["group_id", "disappearing_time_ms"],
-    },
-    "peer_self": {
-        "table": "peer_self",
-        "key_field": "peer_id",
-        "fields": ["peer_shared_id", "user_id"],
-    },
-    "private_key": {"type": "local_peer_key"},
-    "key_data": {"type": "group_key", "from": "channel.group_id"},
-}
-
-
-# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
-def create_event(deps: CreateDeps, content: str, t_ms: int):
+def create(deps: CreateDeps, content: str, t_ms: int):
     """Pure function to create a message event.
 
     Args:
-        deps: Resolved dependencies (from resolve_create_deps)
+        deps: Resolved dependencies
         content: Message content
         t_ms: Timestamp in milliseconds
 
     Returns:
         CreateResult with blob and computed event_id
     """
-    from projectors import CreateResult, BlobSpec, compute_event_id
+    from projection import CreateResult, BlobSpec, compute_event_id
 
     event_data = {
         'type': 'message',
@@ -131,12 +87,12 @@ def create_event(deps: CreateDeps, content: str, t_ms: int):
     )
 
 
-def project(input_dict: MessageInput):
+def project(input_dict: dict):
     """Pure projection: dict -> result. No database access."""
-    from projectors import ProjectorResult
+    from projection import ProjectorResult
 
     event_id = input_dict["event_id"]
-    event_data: MessageEventData = input_dict["event_data"]
+    event_data = input_dict["event_data"]
     key_id = input_dict["key_id"]
     recorded_by = input_dict["recorded_by"]
     recorded_at = input_dict["recorded_at"]
@@ -242,11 +198,6 @@ def make_input(
 def send(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, return_latest: bool = True) -> dict[str, Any]:
     """Send a message to a channel.
 
-    Uses pure functional create pattern:
-    1. resolve_create_deps() gathers dependencies from DB
-    2. create() builds blob (no DB access)
-    3. store_create_result() stores and projects
-
     Args:
         peer_id: Local peer ID creating the message
         channel_id: Channel to post message in
@@ -256,22 +207,51 @@ def send(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, return
         return_latest: If True (default), return list of recent messages.
 
     Returns:
-        {'id': message_id, 'latest': list of recent messages (or empty list if return_latest=False)}
+        {'id': message_id, 'latest': list of recent messages}
     """
-    from projectors import resolve_create_deps, store_create_result
+    from projection import store_create_result
 
     log.info(f"message.send() sending to channel_id={channel_id}, content='{content[:50]}...'")
 
-    # 1. Resolve dependencies (DB queries)
-    deps = resolve_create_deps("message", {"channel_id": channel_id}, peer_id, db)
+    safedb = create_safe_db(db, recorded_by=peer_id)
 
-    if not deps.get('user_id'):
+    # Resolve dependencies inline
+    # 1. Get channel info
+    channel_row = safedb.query_one(
+        "SELECT group_id, disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ?",
+        (channel_id, peer_id)
+    )
+    if not channel_row:
+        raise ValueError(f"Channel not found: {channel_id}")
+
+    # 2. Get peer_self info
+    peer_row = safedb.query_one(
+        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, peer_id)
+    )
+    if not peer_row:
+        raise ValueError(f"Peer self not found: {peer_id}")
+    if not peer_row.get('user_id'):
         raise ValueError(f"User identity not set for peer {peer_id}. Must create or link account first.")
 
-    # 2. Pure create (no DB access)
-    result = create_event(deps, content, t_ms)
+    # 3. Get private key and group key
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(channel_row['group_id'], peer_id, db)
 
-    # 3. Store and project
+    deps = {
+        'channel_id': channel_id,
+        'group_id': channel_row['group_id'],
+        'disappearing_time_ms': channel_row['disappearing_time_ms'] or 0,
+        'peer_shared_id': peer_row['peer_shared_id'],
+        'user_id': peer_row['user_id'],
+        'private_key': private_key,
+        'key_data': key_data,
+    }
+
+    # Pure create
+    result = create(deps, content, t_ms)
+
+    # Store and project
     event_id = store_create_result(result, peer_id, t_ms, db)
 
     log.info(f"message.send() created message_id={event_id}")
@@ -285,12 +265,7 @@ def send(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, return
 
 
 def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List messages in a channel for a specific peer, including attachments and author names.
-
-    Returns message dicts with 'attachments' field containing list of attached files
-    and 'author_name' field from the users table:
-    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...]}, ...]
-    """
+    """List messages in a channel."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
         """SELECT m.*, u.name as author_name
@@ -314,35 +289,70 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     return messages
 
 
-# Backward compatibility alias
-create = send
-
-
 def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project a single message event into the database.
+    """Project a message event into the database.
 
-    This is the impure wrapper that:
-    1. Resolves dependencies from DB
-    2. Calls pure project()
-    3. Applies result to DB
+    Resolves blob, decrypts, verifies signature, checks deletion, then projects.
     """
-    log.debug(f"message.project_event() projecting message_id={event_id}, seen_by={recorded_by}")
+    from projection import apply_result
 
-    from projectors import resolve, apply_result
+    log.debug(f"message.project_event() projecting message_id={event_id}")
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
 
-    input_dict = resolve("message", event_id, recorded_by, recorded_at, db)
-    if not input_dict:
+    # 1. Get and decrypt blob
+    blob = store.get(event_id, unsafedb)
+    if not blob:
         return None
 
-    # Side effect: cleanup invalid deletion
-    deletion = input_dict["dependencies"].get("deletion")
-    if deletion and not deletion.get("is_valid"):
-        safedb.execute(
-            "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
-            (event_id, recorded_by)
-        )
+    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
+    if not unwrapped:
+        return None
+
+    event_data = crypto.parse_json(unwrapped)
+    key_id = crypto.b64encode(blob[:crypto.ID_SIZE])
+
+    # 2. Verify peer_shared signature
+    signed_by = event_data.get("signed_by")
+    if signed_by:
+        from events.identity import peer_shared
+        try:
+            public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+            if not crypto.verify_event(event_data, public_key):
+                log.warning(f"Invalid signature for message {event_id}")
+                return None
+        except (ValueError, KeyError):
+            # Signer not found yet - can't verify
+            return None
+
+    # 3. Resolve deletion dependency
+    deletion = None
+    deletion_row = safedb.query_one(
+        "SELECT deleted_by FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
+        (event_id, recorded_by)
+    )
+    if deletion_row:
+        from events.content import message_deletion
+        is_valid = message_deletion.validate(event_id, deletion_row["deleted_by"], recorded_by, db)
+        deletion = {"deleted_by": deletion_row["deleted_by"], "is_valid": is_valid}
+
+        # Side effect: cleanup invalid deletion
+        if not is_valid:
+            safedb.execute(
+                "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
+                (event_id, recorded_by)
+            )
+
+    # 4. Build input and project
+    input_dict = {
+        "event_id": event_id,
+        "event_data": event_data,
+        "key_id": key_id,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {"deletion": deletion},
+    }
 
     result = project(input_dict)
 

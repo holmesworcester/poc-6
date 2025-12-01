@@ -30,7 +30,7 @@ def test_roundtrip_base64_to_data_uri():
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     # Create message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test message',
@@ -90,7 +90,7 @@ def test_roundtrip_data_uri_to_data_uri():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -144,7 +144,7 @@ def test_different_mime_types():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -201,7 +201,7 @@ def test_different_file_sizes():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -262,7 +262,7 @@ def test_metadata_extraction():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -324,7 +324,7 @@ def test_invalid_base64():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -360,7 +360,7 @@ def test_invalid_data_uri_format():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -398,7 +398,7 @@ def test_incomplete_file_returns_none():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -475,7 +475,7 @@ def test_default_mime_type():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',

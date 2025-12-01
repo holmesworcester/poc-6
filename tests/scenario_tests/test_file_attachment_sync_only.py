@@ -70,7 +70,7 @@ def test_file_attachment_sync_only():
     print("\n=== Alice creates message ===")
 
     # Alice creates a message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='File attachment test',

@@ -61,7 +61,7 @@ def test_1mb_file_download_with_progress():
     print("\n=== Alice creates message with 1 MB file ===")
 
     # Alice sends message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this 1 MB file!',
@@ -207,7 +207,7 @@ def test_50mb_file_download():
     print("\n=== Alice creates message with 50 MB file ===")
 
     # Alice sends message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this 50 MB file!',

@@ -66,7 +66,7 @@ def test_sync_perf_10k():
     log.info("Alice creating 10,000 messages...")
     num_messages = 10000
     for i in range(num_messages):
-        message.create(
+        message.send(
             peer_id=alice_peer_id,
             channel_id=alice_channel_id,
             content=f'Message {i}',

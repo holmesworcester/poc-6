@@ -36,7 +36,7 @@ def test_alice_sends_to_herself():
     assert len(alice['user_id']) == 24
 
     # Send first message in default channel
-    result1 = message.create(
+    result1 = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Hello',
@@ -53,7 +53,7 @@ def test_alice_sends_to_herself():
     assert result1['latest'][0]['author_id'] == alice['user_id']  # Now author_id is user_id, not peer_shared_id
 
     # Send second message
-    result2 = message.create(
+    result2 = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='World',
@@ -78,7 +78,7 @@ def test_alice_sends_to_herself():
     )
 
     # Send message to second channel
-    result3 = message.create(
+    result3 = message.send(
         peer_id=alice['peer_id'],
         channel_id=random_channel_id,
         content='Random thoughts',

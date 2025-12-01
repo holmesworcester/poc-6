@@ -107,7 +107,7 @@ def test_linked_devices_bidirectional_messaging():
     # Device 1 sends message M1
     print("\n=== Device 1 sends message M1 ===")
 
-    msg1_result = message.create(
+    msg1_result = message.send(
         peer_id=alice_device1['peer_id'],
         channel_id=alice_device1['channel_id'],
         content="Message from device 1",
@@ -123,7 +123,7 @@ def test_linked_devices_bidirectional_messaging():
     # (same user, different peers)
     print("\n=== Device 2 sends message M2 ===")
 
-    msg2_result = message.create(
+    msg2_result = message.send(
         peer_id=alice_device2['peer_id'],
         channel_id=alice_device1['channel_id'],  # Linked devices share channels
         content="Message from device 2",

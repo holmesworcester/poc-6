@@ -52,7 +52,7 @@ def test_large_jpeg_compressed_to_target():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -117,7 +117,7 @@ def test_small_image_not_compressed():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -161,7 +161,7 @@ def test_non_image_not_compressed():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -208,7 +208,7 @@ def test_png_image_compression():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -255,7 +255,7 @@ def test_compression_can_be_disabled():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -304,7 +304,7 @@ def test_roundtrip_compressed_image():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -365,7 +365,7 @@ def test_very_large_image_uses_webp():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',

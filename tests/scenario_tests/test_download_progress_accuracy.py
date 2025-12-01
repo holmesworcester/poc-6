@@ -57,7 +57,7 @@ def test_progress_bytes_accuracy():
     print("\n=== Alice creates message with 100 KB file ===")
 
     # Alice sends message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test file',
@@ -182,7 +182,7 @@ def test_speed_and_eta_accuracy():
     print("\n=== Alice creates message with 1 MB file ===")
 
     # Alice sends message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Large test file',
@@ -317,7 +317,7 @@ def test_bytes_increase_monotonically():
     print("\n=== Alice creates message with 500 KB file ===")
 
     # Alice creates larger file to ensure we can observe incremental progress
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Large test',

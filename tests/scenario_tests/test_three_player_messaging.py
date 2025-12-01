@@ -97,7 +97,7 @@ def test_three_player_messaging():
     print("\n=== Creating messages ===")
 
     # Alice sends a message
-    alice_msg = message.create(
+    alice_msg = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice_channel_id,
         content="Hello from Alice!",
@@ -108,7 +108,7 @@ def test_three_player_messaging():
     print(f"Alice created message: {alice_msg['id'][:20]}...")
 
     # Bob sends a message
-    bob_msg = message.create(
+    bob_msg = message.send(
         peer_id=bob['peer_id'],
         channel_id=bob_channel_id,
         content="Hello from Bob!",
@@ -119,7 +119,7 @@ def test_three_player_messaging():
     print(f"Bob created message: {bob_msg['id'][:20]}...")
 
     # Charlie sends a message (in his own network)
-    charlie_msg = message.create(
+    charlie_msg = message.send(
         peer_id=charlie['peer_id'],
         channel_id=charlie_channel_id,
         content="Hello from Charlie!",

@@ -71,7 +71,7 @@ def test_user_removal_blocks_sync_but_preserves_history():
 
     # Bob sends a message before being removed (for testing historical preservation)
     print("\n=== Bob sends a message before removal ===")
-    bob_message = message.create(
+    bob_message = message.send(
         peer_id=bob['peer_id'],
         channel_id=bob['channel_id'],
         content='Hello from Bob!',
@@ -109,7 +109,7 @@ def test_user_removal_blocks_sync_but_preserves_history():
 
     # Bob tries to send another message (he won't know he's removed, so he tries anyway)
     print("\n=== Bob sends another message (after removal) ===")
-    bob_message_2 = message.create(
+    bob_message_2 = message.send(
         peer_id=bob['peer_id'],
         channel_id=bob['channel_id'],
         content='Bob is still here',
@@ -532,7 +532,7 @@ def test_removed_peer_cannot_sync_messages():
 
     # Alice sends a message before Bob is removed
     print("\n=== Alice sends message (before Bob removed) ===")
-    alice_msg_before = message.create(
+    alice_msg_before = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Alice before Bob removal',
@@ -573,7 +573,7 @@ def test_removed_peer_cannot_sync_messages():
 
     # Alice sends a message AFTER removing Bob
     print("\n=== Alice sends message (after Bob removed) ===")
-    alice_msg_after = message.create(
+    alice_msg_after = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Alice after Bob removal',

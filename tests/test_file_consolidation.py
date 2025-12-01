@@ -28,7 +28,7 @@ def test_auto_consolidation_on_upload():
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     # Create message
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -123,7 +123,7 @@ def test_auto_consolidation_on_download_complete():
     print("\n=== Alice uploads 500 KB file ===")
 
     # Alice creates message with file
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Large file test',
@@ -213,7 +213,7 @@ def test_fast_path_vs_slow_path():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',
@@ -267,7 +267,7 @@ def test_consolidation_idempotent():
     schema.create_all(db)
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Test',

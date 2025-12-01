@@ -30,7 +30,7 @@ def test_tick_runs_message_rekey_and_purge():
 
     # Alice sends two messages
     print("\n=== Alice sends two messages ===")
-    msg1_result = message.create(
+    msg1_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message 1 - will stay",
@@ -40,7 +40,7 @@ def test_tick_runs_message_rekey_and_purge():
     message_id_1 = msg1_result['id']
     print(f"Message 1 created: {message_id_1[:20]}...")
 
-    msg2_result = message.create(
+    msg2_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message 2 - will be deleted",
@@ -225,7 +225,7 @@ def test_end_to_end_forward_secrecy_with_tick():
 
     # Alice sends message
     print("\n=== Alice sends sensitive message ===")
-    msg_result = message.create(
+    msg_result = message.send(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Sensitive data that must be destroyed",
