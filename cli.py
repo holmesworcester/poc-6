@@ -86,7 +86,7 @@ import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed
-from events.content import channel, message, message_deletion, message_reaction
+from events.content import channel, message, message_deletion, message_reaction, message_update
 from events.group import group_member, group_key, group_prekey, group
 
 
@@ -304,7 +304,14 @@ def display_main(session: CLISession):
         author_name = msg.get('author_name', '???')
         timestamp = msg.get('created_at', 0)
         content = msg.get('content', '')
-        print(f"  {i}. [{timestamp}ms] {author_name}: {content}")
+        edited_at = msg.get('edited_at', 0)
+
+        # Show edit indicator if message was edited
+        edit_indicator = ""
+        if edited_at:
+            edit_indicator = f" (edited at {edited_at}ms)"
+
+        print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}")
 
         # Display reactions if any
         reactions = msg.get('reactions', [])
@@ -746,6 +753,51 @@ def cmd_delete_message(session: CLISession, message_num: int):
     display_state(session)
 
 
+def cmd_edit_message(session: CLISession, message_num: int, new_content: str):
+    """Edit a message by number (only own messages)."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Get messages to find the one to edit
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+
+    if not (1 <= message_num <= len(messages)):
+        print(f"✗ message #{message_num} not found")
+        return
+
+    msg = messages[message_num - 1]
+    message_id = msg['message_id']
+
+    try:
+        update_id = message_update.create(
+            message_id=message_id,
+            new_content=new_content,
+            peer_id=account.peer_id,
+            t_ms=session.current_time_ms,
+            db=session.db
+        )
+    except ValueError as e:
+        if "author" in str(e).lower():
+            print(f"✗ only the message author can edit")
+        elif "empty" in str(e).lower():
+            print(f"✗ message content cannot be empty")
+        else:
+            print(f"✗ {e}")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    print(f"✓ edited message #{message_num}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
 def cmd_purge_keys(session: CLISession):
     """Run forward secrecy purge cycle."""
     account = session.get_selected_account()
@@ -1048,6 +1100,17 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: message number must be an integer")
 
+        elif cmd == "edit-message":
+            if len(parts) < 3:
+                print("usage: edit-message <message_num> <new_content>")
+            else:
+                try:
+                    message_num = int(parts[1])
+                    new_content = " ".join(parts[2:]).strip('"')
+                    cmd_edit_message(session, message_num, new_content)
+                except ValueError:
+                    print("error: message number must be an integer")
+
         elif cmd == "purge-keys":
             cmd_purge_keys(session)
 
@@ -1104,6 +1167,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  list-users")
             print("  keys [--summary]")
             print("  delete-message <n>")
+            print("  edit-message <message_num> <new_content>")
             print("  purge-keys")
             print("  remove-user <n>")
             print("  show-group-keys")
