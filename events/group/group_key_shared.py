@@ -442,7 +442,8 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
 
 
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
-                                   peer_shared_id: str, t_ms: int, db: Any) -> list[str]:
+                                   peer_shared_id: str, t_ms: int, db: Any,
+                                   exclude_user_id: str | None = None) -> list[str]:
     """Create key_shared events for all members of a group.
 
     Args:
@@ -452,21 +453,31 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
         peer_shared_id: Public peer ID (creator)
         t_ms: Base timestamp
         db: Database connection
+        exclude_user_id: Optional user_id to exclude (e.g., removed member)
 
     Returns:
         List of key_shared event IDs created
     """
-    log.info(f"key_shared.share_key_with_group_members() key={key_id}, group={group_id}")
+    log.info(f"key_shared.share_key_with_group_members() key={key_id[:20]}..., group={group_id[:20]}..., exclude={exclude_user_id[:20] + '...' if exclude_user_id else None}")
 
-    # Get all members of the group (excluding self)
+    # Get all members of the group (excluding self and optionally excluded user)
     safedb = create_safe_db(db, recorded_by=peer_id)
-    members = safedb.query(
-        """SELECT DISTINCT u.peer_id
-           FROM group_members gm
-           JOIN users u ON gm.user_id = u.user_id AND u.recorded_by = gm.recorded_by
-           WHERE gm.group_id = ? AND u.peer_id != ? AND gm.recorded_by = ?""",
-        (group_id, peer_shared_id, peer_id)
-    )
+    if exclude_user_id:
+        members = safedb.query(
+            """SELECT DISTINCT u.peer_id
+               FROM group_members gm
+               JOIN users u ON gm.user_id = u.user_id AND u.recorded_by = gm.recorded_by
+               WHERE gm.group_id = ? AND u.peer_id != ? AND gm.user_id != ? AND gm.recorded_by = ?""",
+            (group_id, peer_shared_id, exclude_user_id, peer_id)
+        )
+    else:
+        members = safedb.query(
+            """SELECT DISTINCT u.peer_id
+               FROM group_members gm
+               JOIN users u ON gm.user_id = u.user_id AND u.recorded_by = gm.recorded_by
+               WHERE gm.group_id = ? AND u.peer_id != ? AND gm.recorded_by = ?""",
+            (group_id, peer_shared_id, peer_id)
+        )
 
     key_shared_ids = []
     for i, member in enumerate(members):
