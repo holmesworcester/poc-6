@@ -15,7 +15,7 @@
 
 ## CLI Mockup
 
-### 1. Set Disappearing Messages (`disappearing-messages`)
+### 1. Set Disappearing Messages (`set-disappearing`)
 
 Uses selected channel. Requires admin.
 
@@ -23,25 +23,25 @@ Uses selected channel. Requires admin.
 poc-6> select-channel 1
 Selected: #general
 
-poc-6> disappearing-messages --days 7
+poc-6> set-disappearing --days 7
 Set disappearing messages to 7 days for #general
 
-poc-6> disappearing-messages --time 3600000
+poc-6> set-disappearing --time 3600000
 Set disappearing messages to 1 hour for #general
 
-poc-6> disappearing-messages --off
+poc-6> set-disappearing --off
 Turned off disappearing messages for #general
 ```
 
 **Error - Not Admin**:
 ```
-poc-6> disappearing-messages --days 7
+poc-6> set-disappearing --days 7
 Error: Only admins can change disappearing messages settings
 ```
 
 **Error - No Channel Selected**:
 ```
-poc-6> disappearing-messages --days 7
+poc-6> set-disappearing --days 7
 Error: No channel selected. Use 'select-channel <n>' first.
 ```
 
@@ -119,7 +119,7 @@ poc-6> help
 
 available commands:
   ...existing commands...
-  disappearing-messages --days <n> | --time <ms> | --off
+  set-disappearing --days <n> | --time <ms> | --off
   fast-forward --days <n>
   ...
 ```
@@ -165,10 +165,10 @@ def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
 
 ### Phase 2: Commands
 
-#### 2.1 `cmd_disappearing_messages()`
+#### 2.1 `cmd_set_disappearing()`
 
 ```python
-def cmd_disappearing_messages(session: CLISession, days: int | None = None, time_ms: int | None = None, off: bool = False):
+def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: int | None = None, off: bool = False):
     """Set disappearing messages time for selected channel."""
     if not session.selected_channel_id:
         print("Error: No channel selected. Use 'select-channel <n>' first.")
@@ -271,7 +271,7 @@ for i, ch in enumerate(channels, 1):
 Add to `execute_command()`:
 
 ```python
-elif cmd == "disappearing-messages":
+elif cmd == "set-disappearing":
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--days", type=int)
     parser.add_argument("--time", type=int)
@@ -279,11 +279,11 @@ elif cmd == "disappearing-messages":
     try:
         args = parser.parse_args(parts[1:])
         if not args.days and not args.time and not args.off:
-            print("usage: disappearing-messages --days <n> | --time <ms> | --off")
+            print("usage: set-disappearing --days <n> | --time <ms> | --off")
         else:
-            cmd_disappearing_messages(session, days=args.days, time_ms=args.time, off=args.off)
+            cmd_set_disappearing(session, days=args.days, time_ms=args.time, off=args.off)
     except SystemExit:
-        print("usage: disappearing-messages --days <n> | --time <ms> | --off")
+        print("usage: set-disappearing --days <n> | --time <ms> | --off")
 
 elif cmd == "fast-forward":
     parser = argparse.ArgumentParser(add_help=False)
@@ -304,13 +304,13 @@ Add to help text.
 #### 5.1 CLI Tests (`tests/cli/test_disappearing_messages_cli.py`)
 
 ```python
-def test_set_disappearing_messages_days():
+def test_set_disappearing_days():
     """Admin can set disappearing messages by days."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 create-channel test-channel
 select-channel 2
-disappearing-messages --days 7
+set-disappearing --days 7
 list-channels
 """
     result = run_cli(commands)
@@ -319,13 +319,13 @@ list-channels
     assert "(disappearing: 7d)" in result.stdout
 
 
-def test_set_disappearing_messages_time():
+def test_set_disappearing_time():
     """Admin can set disappearing messages by milliseconds."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 create-channel test-channel
 select-channel 2
-disappearing-messages --time 3600000
+set-disappearing --time 3600000
 list-channels
 """
     result = run_cli(commands)
@@ -334,14 +334,14 @@ list-channels
     assert "(disappearing: 1h)" in result.stdout
 
 
-def test_turn_off_disappearing_messages():
+def test_set_disappearing_off():
     """Admin can turn off disappearing messages."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 create-channel test-channel
 select-channel 2
-disappearing-messages --days 7
-disappearing-messages --off
+set-disappearing --days 7
+set-disappearing --off
 list-channels
 """
     result = run_cli(commands)
@@ -350,18 +350,18 @@ list-channels
     # Channel should not show "(disappearing: ...)" anymore
 
 
-def test_non_admin_cannot_set_disappearing():
+def test_set_disappearing_non_admin_error():
     """Non-admin gets error when trying to set disappearing messages."""
     # This test needs two peers - Alice (admin) and Bob (non-admin)
     # Bob tries to set disappearing messages and gets error
     ...
 
 
-def test_no_channel_selected_error():
+def test_set_disappearing_no_channel_error():
     """Error when no channel selected."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-disappearing-messages --days 7
+set-disappearing --days 7
 """
     result = run_cli(commands)
     assert "No channel selected" in result.stdout
@@ -373,7 +373,7 @@ def test_fast_forward_deletes_expired_messages():
 new-network --name "Test" --username alice --device desktop
 create-channel ephemeral
 select-channel 2
-disappearing-messages --days 1
+set-disappearing --days 1
 send Hello world
 show
 fast-forward --days 2
@@ -391,7 +391,7 @@ def test_message_shows_expiration_time():
 new-network --name "Test" --username alice --device desktop
 create-channel ephemeral
 select-channel 2
-disappearing-messages --days 7
+set-disappearing --days 7
 send This will disappear
 show
 """
@@ -406,7 +406,7 @@ show
 
 | File | Changes |
 |------|---------|
-| `cli.py` | Add `format_duration_short()`, `format_expires_in()`, `cmd_disappearing_messages()`, `cmd_fast_forward()`, update `display_main()`, update channel display, update `execute_command()`, update help |
+| `cli.py` | Add `format_duration_short()`, `format_expires_in()`, `cmd_set_disappearing()`, `cmd_fast_forward()`, update `display_main()`, update channel display, update `execute_command()`, update help |
 | `tests/cli/test_disappearing_messages_cli.py` | **NEW** - CLI tests |
 
 ---
@@ -425,7 +425,7 @@ create-channel secret-chat
 
 # Enable disappearing messages
 select-channel 2
-disappearing-messages --days 1
+set-disappearing --days 1
 
 # Send some messages
 send "This message will disappear in 1 day"
