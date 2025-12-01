@@ -85,9 +85,46 @@ import schema
 import tick
 
 # Import event functions (this is our API)
-from events.identity import user, peer, invite, network, user_removed
-from events.content import channel, message, message_deletion, message_reaction, message_update
+from events.identity import user, peer, invite, network, user_removed, peer_shared
+from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update
+import purge_expired
 from events.group import group_member, group_key, group_prekey, group
+
+
+class EventLog:
+    """Captures human-readable event descriptions during command execution.
+
+    When enabled, logs events in JSON-lite format:
+        → event_type {field=value, field=<substituted>}
+
+    Angle brackets denote human-readable substitutions for event IDs.
+    """
+
+    def __init__(self):
+        self.entries: List[str] = []
+        self.enabled: bool = False
+
+    def clear(self):
+        """Clear log entries before each command."""
+        self.entries = []
+
+    def log(self, event_type: str, **fields):
+        """Log an event with key=value fields.
+
+        Use angle brackets in values to denote ID substitutions:
+            log("message", channel="<#general>", author="<alice>", content="hello")
+        """
+        if self.enabled:
+            field_strs = [f"{k}={v}" for k, v in fields.items()]
+            self.entries.append(f"  → {event_type} {{{', '.join(field_strs)}}}")
+
+    def display(self):
+        """Display log entries if any exist and logging is enabled."""
+        if self.enabled and self.entries:
+            print("☰ event log:")
+            for entry in self.entries:
+                print(entry)
+            print()
 
 
 class AccountContext:
@@ -122,6 +159,7 @@ class CLISession:
         self.current_time_ms: int = 0
         self.auto_tick_count: int = 100  # Number of auto-ticks after event commands (default 100)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
+        self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
 
     def initialize_database(self):
         """Initialize in-memory database with schema."""
@@ -174,6 +212,68 @@ class CLISession:
 
 # ============================================================================
 # STATE DISPLAY FUNCTIONS (using event module query functions only)
+# ============================================================================
+
+# ============================================================================
+# FORMATTING UTILITIES
+# ============================================================================
+
+def format_duration_short(ms: int) -> str:
+    """Format milliseconds as short duration: 7d, 12h, 30m"""
+    if ms <= 0:
+        return ""
+    days = ms // (24 * 60 * 60 * 1000)
+    if days >= 1:
+        return f"{days}d"
+    hours = ms // (60 * 60 * 1000)
+    if hours >= 1:
+        return f"{hours}h"
+    minutes = ms // (60 * 1000)
+    if minutes >= 1:
+        return f"{minutes}m"
+    return "<1m"
+
+
+def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
+    """Format time remaining until expiration: 'expires in: 6d 23h'"""
+    remaining = expires_at_ms - current_time_ms
+    if remaining <= 0:
+        return "(expired)"
+    days = remaining // (24 * 60 * 60 * 1000)
+    hours = (remaining % (24 * 60 * 60 * 1000)) // (60 * 60 * 1000)
+    if days > 0:
+        return f"(expires in: {days}d {hours}h)"
+    minutes = (remaining % (60 * 60 * 1000)) // (60 * 1000)
+    if hours > 0:
+        return f"(expires in: {hours}h {minutes}m)"
+    return f"(expires in: {minutes}m)"
+
+
+# ============================================================================
+# EVENT LOG HELPERS
+# ============================================================================
+
+def get_channel_name(session: CLISession, channel_id: str) -> str:
+    """Get channel name for event log display."""
+    if not session.selected_account:
+        return "???"
+    account = session.get_selected_account()
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    for ch in channels:
+        if ch['channel_id'] == channel_id:
+            return f"#" + ch['name']
+    return "???"
+
+
+def get_message_preview(content: str, max_len: int = 22) -> str:
+    """Get truncated message preview for event log display."""
+    if len(content) <= max_len:
+        return f'"{content}"'
+    return f'"{content[:max_len-3]}..."'
+
+
+# ============================================================================
+# DISPLAY FUNCTIONS
 # ============================================================================
 
 def display_state(session: CLISession):
@@ -259,7 +359,12 @@ def display_sidebar(session: CLISession):
     if channels:
         for i, ch in enumerate(channels, 1):
             selected = "*" if ch['channel_id'] == session.selected_channel_id else " "
-            print(f"    {i}. {selected} #{ch['name']}")
+            disappearing = ch.get('disappearing_time_ms', 0)
+            if disappearing > 0:
+                disappearing_str = f" (disappearing: {format_duration_short(disappearing)})"
+            else:
+                disappearing_str = ""
+            print(f"    {i}. {selected} #{ch['name']}{disappearing_str}")
     else:
         print("    (no channels)")
 
@@ -305,13 +410,19 @@ def display_main(session: CLISession):
         timestamp = msg.get('created_at', 0)
         content = msg.get('content', '')
         edited_at = msg.get('edited_at', 0)
+        ttl_ms = msg.get('ttl_ms', 0)
 
         # Show edit indicator if message was edited
         edit_indicator = ""
         if edited_at:
             edit_indicator = f" (edited at {edited_at}ms)"
 
-        print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}")
+        # Show expiration if message has TTL
+        expires_indicator = ""
+        if ttl_ms > 0:
+            expires_indicator = f" {format_expires_in(ttl_ms, session.current_time_ms)}"
+
+        print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}{expires_indicator}")
 
         # Display reactions if any
         reactions = msg.get('reactions', [])
@@ -328,16 +439,16 @@ def display_main(session: CLISession):
 # COMMANDS
 # ============================================================================
 
-def cmd_new_network(session: CLISession, network_name: str, username: str, device: str):
+def cmd_new_network(session: CLISession, network_name: str, username: str, devicename: str):
     """Create a new network and first account."""
     # Canonicalize: lowercase for consistent storage and display
-    device = device.lower()
-    result = user.new_network(name=username, t_ms=session.current_time_ms, db=session.db, device_name=device, network_name=network_name)
+    devicename = devicename.lower()
+    result = user.new_network(name=username, t_ms=session.current_time_ms, db=session.db, device_name=devicename, network_name=network_name)
 
     # Create account context
     account = AccountContext(
         user_name=username.lower(),
-        device_name=device.lower(),
+        device_name=devicename,
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
     )
@@ -351,12 +462,22 @@ def cmd_new_network(session: CLISession, network_name: str, username: str, devic
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log events created
+    session.event_log.log("peer", name=username.lower(), device=devicename)
+    session.event_log.log("network", signed_by="<self>")
+    session.event_log.log("user_invite", type="bootstrap")
+    session.event_log.log("user", name=username.lower(), invite="<bootstrap>")
+    session.event_log.log("peer_shared", user=f"<{username.lower()}>", device=devicename)
+    session.event_log.log("admin_grant", user=f"<{username.lower()}>")
+    session.event_log.log("group", name="all_users")
+    session.event_log.log("channel", name="general", group="<all_users>")
+
     account_num = list(session.accounts.keys()).index(account.full_name) + 1
 
     print(f"✓ created network: {network_name}")
     print(f"✓ selected account #{account_num}: {account.full_name}")
     print(f"✓ selected channel #1: #general")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
@@ -401,21 +522,25 @@ def cmd_send(session: CLISession, msg: str):
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log event
+    channel_name = get_channel_name(session, session.selected_channel_id)
+    session.event_log.log("message", channel=f"<{channel_name}>", author=f"<{account.user_name}>", content=f'"{msg}"')
+
     print("✓ sent message")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
 
 
-def cmd_sync(session: CLISession, ticks: int):
-    """Run manual sync ticks."""
-    print(f"⟳ syncing {ticks} ticks...")
+def cmd_tick(session: CLISession, count: int):
+    """Run manual ticks to advance simulation time."""
+    print(f"⟳ ticking {count}...")
     start_t = session.current_time_ms
-    for _ in range(ticks):
+    for _ in range(count):
         session.current_time_ms += 100
         tick.tick(t_ms=session.current_time_ms, db=session.db)
-    print(f"✓ synced (t={start_t}ms -> {session.current_time_ms}ms)")
+    print(f"✓ ticked (t={start_t}ms -> {session.current_time_ms}ms)")
     print()
 
     display_state(session)
@@ -482,8 +607,11 @@ def cmd_create_channel(session: CLISession, name: str):
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log event
+    session.event_log.log("channel", name=name, group="<all_users>")
+
     print(f"✓ created channel #{name}")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
@@ -514,6 +642,9 @@ def cmd_create_invite(session: CLISession):
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log event
+    session.event_log.log("user_invite", created_by=f"<{account.user_name}>")
+
     # Store in invites list for convenient reference
     session.add_invite(invite_link, account.user_name)
     invite_num = len(session.invites)
@@ -522,14 +653,66 @@ def cmd_create_invite(session: CLISession):
     session.last_invite_link = invite_link
 
     print(f"✓ created invite #{invite_num}")
-    print(f"  use: new-peer --username <username> --device <device> --invite {invite_num}")
-    print()
+    print(f"  use: join --username <name> --devicename <device> --invite {invite_num}")
+    session.event_log.display()
 
 
-def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: str):
-    """Create a new peer and join a network via invite link or number."""
+def cmd_create_link_invite(session: CLISession):
+    """Create a device linking invite for the current user (admin only).
+
+    This creates a link that allows adding another device to the currently
+    selected user's account. The user_id is embedded in the invite.
+    """
+    account = session.get_selected_account()
+
+    if not account.network_id:
+        print("✗ no network joined")
+        print("  hint: use 'switch' to select an account that has joined a network")
+        return
+
+    if not account.user_id:
+        print("✗ no user_id for current account")
+        return
+
+    try:
+        invite_id, invite_link, invite_data = invite.create(
+            peer_id=account.peer_id,
+            t_ms=session.current_time_ms,
+            db=session.db,
+            mode='peer',
+            user_id=account.user_id
+        )
+    except ValueError as e:
+        if "not an admin" in str(e).lower() or "admin" in str(e).lower():
+            print("✗ only admins can create device linking invites")
+        else:
+            print(f"✗ {e}")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Log event
+    session.event_log.log("device_invite", created_by=f"<{account.user_name}>", for_user=f"<{account.user_name}>")
+
+    # Store in invites list for convenient reference
+    session.add_invite(invite_link, f"{account.user_name} (link)")
+    invite_num = len(session.invites)
+
+    print(f"✓ created device link invite #{invite_num} for user: {account.user_name}")
+    print(f"  use: link-device --devicename <device> --invite {invite_num}")
+    session.event_log.display()
+
+
+def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
+    """Link a new device to an existing user via link invite.
+
+    Unlike 'join', this does NOT create a new user. The user_id comes from
+    the invite itself (embedded by the admin who created it).
+    """
     # Canonicalize: lowercase for consistent storage and display
-    device = device.lower()
+    devicename = devicename.lower()
+
     # Resolve invite reference (number or full link)
     invite_link = invite_ref
     if invite_ref.isdigit():
@@ -541,20 +724,144 @@ def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: st
         invite_link = resolved_link
         print(f"  using invite #{invite_num}")
 
+    # Validate this is a device linking invite (quiet://link/...)
+    if not invite_link.startswith('quiet://link/'):
+        print("✗ this is not a device linking invite")
+        print("  hint: use 'join' for network join invites (quiet://invite/...)")
+        print("  hint: use 'link-device' for device linking invites (quiet://link/...)")
+        return
+
     # Create the peer first
     peer_id = peer.create(t_ms=session.current_time_ms, db=session.db)
 
     session.db.commit()
     session.current_time_ms += 100
 
-    # Join the network
+    # Accept the invite - this parses the link and extracts user_id
+    try:
+        accepted = invite.accept(peer_id, invite_link, t_ms=session.current_time_ms, db=session.db)
+    except ValueError as e:
+        print(f"✗ failed to accept invite: {e}")
+        return
+
+    if accepted['mode'] != 'peer':
+        print("✗ this is not a device linking invite")
+        print("  hint: use 'join' for network join invites")
+        return
+
+    user_id = accepted.get('user_id')
+    if not user_id:
+        print("✗ invite does not contain user_id")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Complete the peer linking via peer_shared.join()
+    result = peer_shared.join(
+        peer_id=peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=user_id,
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=session.current_time_ms,
+        db=session.db,
+        device_name=devicename
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Get username and network_id from an existing account with the same user_id
+    # (since link-device links to an existing user, there should be another device already)
+    username = None
+    network_id = None
+    for existing_account in session.accounts.values():
+        if existing_account.user_id == user_id:
+            username = existing_account.user_name
+            network_id = existing_account.network_id
+            break
+
+    # Fallback: try to get from database (might work after sync)
+    if not username:
+        from db import create_safe_db
+        safedb = create_safe_db(session.db, recorded_by=peer_id)
+        user_row = safedb.query_one(
+            "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+            (user_id, peer_id)
+        )
+        username = user_row['name'] if user_row else "unknown"
+
+    if not network_id:
+        from db import create_safe_db
+        safedb = create_safe_db(session.db, recorded_by=peer_id)
+        network_row = safedb.query_one(
+            "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+            (peer_id,)
+        )
+        network_id = network_row['network_id'] if network_row else None
+
+    # Create account context
+    account = AccountContext(
+        user_name=username.lower() if username else "unknown",
+        device_name=devicename,
+        peer_id=result['peer_id'],
+        peer_shared_id=result['peer_shared_id']
+    )
+    account.user_id = user_id
+    account.network_id = network_id
+
+    session.add_account(account)
+    session.selected_account = account.full_name
+
+    # Auto-select first channel if available
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    if channels:
+        session.selected_channel_id = channels[0]['channel_id']
+
+    account_num = list(session.accounts.keys()).index(account.full_name) + 1
+
+    print(f"✓ linked device to existing user: {username}")
+    print(f"✓ selected account #{account_num}: {account.full_name}")
+    if channels:
+        print(f"✓ selected channel #1: #{channels[0]['name']}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_join(session: CLISession, username: str, devicename: str, invite_ref: str):
+    """Join a network as a NEW user via invite link or number."""
+    # Canonicalize: lowercase for consistent storage and display
+    devicename = devicename.lower()
+    # Resolve invite reference (number or full link)
+    invite_link = invite_ref
+    invite_display = None  # For event log
+    if invite_ref.isdigit():
+        invite_num = int(invite_ref)
+        resolved_link = session.get_invite_by_number(invite_num)
+        if not resolved_link:
+            print(f"✗ invite #{invite_num} not found")
+            return
+        invite_link = resolved_link
+        invite_display = f"#{invite_num}"
+        print(f"  using invite #{invite_num}")
+
+    # Create the peer first
+    peer_id = peer.create(t_ms=session.current_time_ms, db=session.db)
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Join the network as a new user
     result = user.join(
         peer_id=peer_id,
         invite_link=invite_link,
         name=username,
         t_ms=session.current_time_ms,
         db=session.db,
-        device_name=device
+        device_name=devicename
     )
 
     session.db.commit()
@@ -563,7 +870,7 @@ def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: st
     # Create account context
     account = AccountContext(
         user_name=username.lower(),
-        device_name=device.lower(),
+        device_name=devicename,
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
     )
@@ -580,11 +887,20 @@ def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: st
 
     account_num = list(session.accounts.keys()).index(account.full_name) + 1
 
-    print(f"✓ created peer and joined network as {username.lower()}")
+    # Log events created - use invite number if available, otherwise truncate invite_id from result
+    if not invite_display:
+        invite_id = result.get('invite_id', '')
+        invite_display = invite_id[:8] + "..." if invite_id else "link"
+    session.event_log.log("peer", name=username.lower(), device=devicename)
+    session.event_log.log("invite_accepted", invite=f"<{invite_display}>")
+    session.event_log.log("user", name=username.lower(), invite=f"<{invite_display}>")
+    session.event_log.log("peer_shared", user=f"<{username.lower()}>", device=devicename)
+
+    print(f"✓ joined network as new user: {username.lower()}")
     print(f"✓ selected account #{account_num}: {account.full_name}")
     if channels:
         print(f"✓ selected channel #1: #{channels[0]['name']}")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
@@ -617,7 +933,12 @@ def cmd_list_channels(session: CLISession):
 
     for i, ch in enumerate(channels, 1):
         selected = "*" if ch['channel_id'] == session.selected_channel_id else " "
-        print(f"  {i}. {selected} #{ch['name']}")
+        disappearing = ch.get('disappearing_time_ms', 0)
+        if disappearing > 0:
+            disappearing_str = f" (disappearing: {format_duration_short(disappearing)})"
+        else:
+            disappearing_str = ""
+        print(f"  {i}. {selected} #{ch['name']}{disappearing_str}")
 
 
 def cmd_list_users(session: CLISession):
@@ -650,9 +971,102 @@ def cmd_list_users(session: CLISession):
         print(f"  {i}. {username}")
 
 
+def cmd_list_messages(session: CLISession):
+    """List messages in the selected channel."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("error: no channel selected")
+        return
+
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+    if not messages:
+        print("no messages")
+        return
+
+    for i, msg in enumerate(messages, 1):
+        author_name = msg.get('author_name', '???')
+        content = msg.get('content', '')
+        print(f"  {i}. {author_name}: {content}")
+
+
 def cmd_time(session: CLISession):
     """Show current simulation time."""
     print(f"{session.current_time_ms}ms")
+
+
+def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: int | None = None, off: bool = False):
+    """Set disappearing messages time for selected channel."""
+    if not session.selected_channel_id:
+        print("Error: No channel selected. Use 'select-channel <n>' first.")
+        return
+
+    account = session.get_selected_account()
+
+    # Check admin
+    if not invite.is_admin(account.peer_shared_id, account.peer_id, session.db):
+        print("Error: Only admins can change disappearing messages settings")
+        return
+
+    # Calculate TTL
+    if off:
+        ttl_ms = 0
+    elif days:
+        ttl_ms = days * 24 * 60 * 60 * 1000
+    else:
+        ttl_ms = time_ms
+
+    # Get channel name for display
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channel_name = next((ch['name'] for ch in channels if ch['channel_id'] == session.selected_channel_id), '???')
+
+    try:
+        channel_update.create(
+            channel_id=session.selected_channel_id,
+            peer_id=account.peer_id,
+            peer_shared_id=account.peer_shared_id,
+            t_ms=session.current_time_ms,
+            db=session.db,
+            new_disappearing_time_ms=ttl_ms
+        )
+        session.db.commit()
+        session.current_time_ms += 100
+
+        if ttl_ms == 0:
+            print(f"Turned off disappearing messages for #{channel_name} (affects new messages only)")
+        else:
+            print(f"Set disappearing messages to {format_duration_short(ttl_ms)} for #{channel_name} (affects new messages only)")
+        print()
+
+        session.run_auto_tick()
+        display_state(session)
+    except ValueError as e:
+        print(f"Error: {e}")
+
+
+def cmd_fast_forward(session: CLISession, days: int):
+    """Fast-forward simulation time by days."""
+    ms = days * 24 * 60 * 60 * 1000
+    session.current_time_ms += ms
+
+    # Run purge to delete expired messages
+    purge_expired.run_purge_expired_for_all_peers(session.current_time_ms, session.db)
+    session.db.commit()
+
+    print(f"Fast-forwarded {days} day{'s' if days != 1 else ''} (current time: {session.current_time_ms}ms)")
+    print()
+    display_state(session)
+
+
+def cmd_toggle_log(session: CLISession):
+    """Toggle event logging on/off."""
+    session.event_log.enabled = not session.event_log.enabled
+    state = "ON" if session.event_log.enabled else "OFF"
+    print(f"event log: {state}")
 
 
 def cmd_quit(session: CLISession):
@@ -671,13 +1085,23 @@ def cmd_keys(session: CLISession, summary: bool = False):
     # Get prekeys
     prekeys = group_prekey.list(account.peer_id, session.current_time_ms, session.db)
 
+    # Get channel -> key mappings
+    channels_list = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channel_keys = []
+    for ch in channels_list:
+        current_key_info = group.get_current_key(ch['group_id'], account.peer_id, session.db)
+        channel_keys.append({
+            'name': ch['name'],
+            'key_id': current_key_info['key_id'] if current_key_info else None
+        })
+
     if summary:
-        display_keys_summary(account, keys, prekeys)
+        display_keys_summary(account, keys, prekeys, channel_keys)
     else:
-        display_keys_full(account, keys, prekeys)
+        display_keys_full(account, keys, prekeys, channel_keys)
 
 
-def display_keys_full(account: AccountContext, keys: list, prekeys: list):
+def display_keys_full(account: AccountContext, keys: list, prekeys: list, channel_keys: list):
     """Display full key state."""
     print(f"KEYS ({account.full_name}):")
 
@@ -702,8 +1126,17 @@ def display_keys_full(account: AccountContext, keys: list, prekeys: list):
             key_count = pk['group_key_count']
             print(f"    {i}. prekey_{prekey_id_short} - {status} ({key_count} group_keys)")
 
+    print()
+    print("  channels:")
+    if not channel_keys:
+        print("    (no channels)")
+    else:
+        for i, ck in enumerate(channel_keys, 1):
+            key_id_short = ck['key_id'][:10] if ck['key_id'] else "(none)"
+            print(f"    {i}. #{ck['name']:16} key_{key_id_short}")
 
-def display_keys_summary(account: AccountContext, keys: list, prekeys: list):
+
+def display_keys_summary(account: AccountContext, keys: list, prekeys: list, channel_keys: list):
     """Display summary key state."""
     print(f"KEYS ({account.full_name}):")
 
@@ -715,6 +1148,7 @@ def display_keys_summary(account: AccountContext, keys: list, prekeys: list):
 
     print(f"  group_keys: {active_keys} active, {pending_keys} pending_purge")
     print(f"  prekeys: {active_prekeys} active, {pending_prekeys} pending_purge")
+    print(f"  channels: {len(channel_keys)}")
 
 
 def cmd_delete_message(session: CLISession, message_num: int):
@@ -745,9 +1179,14 @@ def cmd_delete_message(session: CLISession, message_num: int):
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log event
+    content_preview = get_message_preview(msg.get('content', ''))
+    channel_name = get_channel_name(session, session.selected_channel_id)
+    session.event_log.log("message_deletion", content=content_preview, channel=f"<{channel_name}>")
+
     print(f"✓ deleted message")
     print(f"✓ marked key for purging")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
@@ -791,8 +1230,13 @@ def cmd_edit_message(session: CLISession, message_num: int, new_content: str):
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log event
+    content_preview = get_message_preview(msg.get('content', ''))
+    channel_name = get_channel_name(session, session.selected_channel_id)
+    session.event_log.log("message_update", content=content_preview, channel=f"<{channel_name}>", new_content=f'"{new_content}"')
+
     print(f"✓ edited message #{message_num}")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
@@ -907,8 +1351,13 @@ def cmd_add_reaction(session: CLISession, message_num: int, emoji: str):
     session.db.commit()
     session.current_time_ms += 100
 
+    # Log event
+    content_preview = get_message_preview(msg.get('content', ''))
+    channel_name = get_channel_name(session, session.selected_channel_id)
+    session.event_log.log("message_reaction", emoji=emoji, by=f"<{account.user_name}>", content=content_preview, channel=f"<{channel_name}>")
+
     print(f"✓ added reaction {emoji} to message #{message_num}")
-    print()
+    session.event_log.display()
 
     session.run_auto_tick()
     display_state(session)
@@ -1009,8 +1458,6 @@ def cmd_show_group_keys(session: CLISession):
         else:
             print(f"  {i}. #{channel_name:16} key_id=(none)")
 
-
-
 # ============================================================================
 # COMMAND EXECUTION
 # ============================================================================
@@ -1028,6 +1475,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         return True
     cmd = parts[0]
 
+    # Clear event log before each command
+    session.event_log.clear()
+
     try:
         if cmd == "quit" or cmd == "exit":
             if show_prompt:
@@ -1038,12 +1488,12 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--name", required=True)
             parser.add_argument("--username", required=True)
-            parser.add_argument("--device", required=True)
+            parser.add_argument("--devicename", required=True)
             try:
                 args = parser.parse_args(parts[1:])
-                cmd_new_network(session, args.name, args.username, args.device)
+                cmd_new_network(session, args.name, args.username, args.devicename)
             except SystemExit:
-                print("usage: new-network --name <name> --username <username> --device <device>")
+                print("usage: new-network --name <name> --username <username> --devicename <device>")
 
         elif cmd == "switch":
             if len(parts) < 2:
@@ -1061,14 +1511,14 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 msg = " ".join(parts[1:]).strip('"')
                 cmd_send(session, msg)
 
-        elif cmd == "sync":
-            parser = argparse.ArgumentParser(add_help=False)
-            parser.add_argument("--ticks", type=int, required=True)
-            try:
-                args = parser.parse_args(parts[1:])
-                cmd_sync(session, args.ticks)
-            except SystemExit:
-                print("usage: sync --ticks <n>")
+        elif cmd == "tick":
+            if len(parts) < 2:
+                print("usage: tick <n>")
+            else:
+                try:
+                    cmd_tick(session, int(parts[1]))
+                except ValueError:
+                    print("usage: tick <n>")
 
         elif cmd == "set-auto-tick":
             if len(parts) < 2:
@@ -1098,18 +1548,31 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "create-invite":
             cmd_create_invite(session)
 
-        elif cmd == "new-peer":
+        elif cmd == "create-link-invite":
+            cmd_create_link_invite(session)
+
+        elif cmd == "join":
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--username", required=True)
-            parser.add_argument("--device", required=True)
+            parser.add_argument("--devicename", required=True)
             parser.add_argument("--invite", required=True)
             try:
                 args = parser.parse_args(parts[1:])
-                cmd_new_peer(session, args.username, args.device, args.invite)
+                cmd_join(session, args.username, args.devicename, args.invite)
             except SystemExit:
-                print("usage: new-peer --username <username> --device <device> --invite <link>")
+                print("usage: join --username <username> --devicename <device> --invite <n|link>")
 
-        elif cmd == "show":
+        elif cmd == "link-device":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--devicename", required=True)
+            parser.add_argument("--invite", required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_link_device(session, args.devicename, args.invite)
+            except SystemExit:
+                print("usage: link-device --devicename <device> --invite <n|link>")
+
+        elif cmd == "show-ui":
             display_state(session)
 
         elif cmd == "list-accounts":
@@ -1120,6 +1583,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "list-users":
             cmd_list_users(session)
+
+        elif cmd == "list-messages":
+            cmd_list_messages(session)
 
         elif cmd == "keys":
             summary = "--summary" in parts
@@ -1157,9 +1623,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: user number must be an integer")
 
-        elif cmd == "show-group-keys":
-            cmd_show_group_keys(session)
-
         elif cmd == "add-reaction":
             if len(parts) < 3:
                 print("usage: add-reaction <message_num> <emoji>")
@@ -1195,32 +1658,83 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "time":
             cmd_time(session)
 
+        elif cmd == "toggle-log":
+            cmd_toggle_log(session)
+
+        elif cmd == "set-disappearing":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--days", type=int)
+            parser.add_argument("--time", type=int)
+            parser.add_argument("--off", action="store_true")
+            try:
+                args = parser.parse_args(parts[1:])
+                if not args.days and not args.time and not args.off:
+                    print("usage: set-disappearing --days <n> | --time <ms> | --off")
+                else:
+                    cmd_set_disappearing(session, days=args.days, time_ms=args.time, off=args.off)
+            except SystemExit:
+                print("usage: set-disappearing --days <n> | --time <ms> | --off")
+
+        elif cmd == "fast-forward":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--days", type=int, required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_fast_forward(session, args.days)
+            except SystemExit:
+                print("usage: fast-forward --days <n>")
+
         elif cmd == "help":
             print("available commands:")
-            print("  new-network --name <name> --username <username> --device <device>")
-            print("  new-peer --username <username> --device <device> --invite <n|link>")
-            print("  switch <n>")
-            print("  send <message>")
-            print("  sync --ticks <n>")
-            print("  set-auto-tick <n>")
-            print("  select-channel <n>")
-            print("  create-channel <name>")
-            print("  create-invite")
-            print("  list-accounts")
-            print("  list-channels")
-            print("  list-users")
-            print("  keys [--summary]")
-            print("  delete-message <n>")
-            print("  edit-message <message_num> <new_content>")
-            print("  purge-keys")
-            print("  remove-user <n>")
-            print("  show-group-keys")
-            print("  add-reaction <message_num> <emoji>")
-            print("  remove-reaction <message_num> <emoji>")
-            print("  list-reactions <message_num>")
-            print("  time")
-            print("  show")
-            print("  quit")
+            print()
+            print("  Network setup:")
+            print("    new-network --name <name> --username <username> --devicename <device>")
+            print()
+            print("  Joining/linking:")
+            print("    create-invite                  Create invite for new user to join network")
+            print("    join --username <name> --devicename <device> --invite <n|link>")
+            print("                                   Join network as NEW user")
+            print("    create-link-invite             Create device link invite for current user")
+            print("    link-device --devicename <device> --invite <n|link>")
+            print("                                   Link device to EXISTING user (no username needed)")
+            print()
+            print("  Account management:")
+            print("    switch <n>")
+            print("    list-accounts")
+            print("    list-users")
+            print()
+            print("  Channels:")
+            print("    select-channel <n>")
+            print("    create-channel <name>")
+            print("    list-channels")
+            print()
+            print("  Messaging:")
+            print("    send <message>")
+            print("    list-messages")
+            print("    delete-message <n>")
+            print("    edit-message <n> <new_content>")
+            print("    add-reaction <n> <emoji>")
+            print("    remove-reaction <n> <emoji>")
+            print("    list-reactions <n>")
+            print("    set-disappearing --days <n> | --time <ms> | --off")
+            print()
+            print("  Admin:")
+            print("    remove-user <n>")
+            print()
+            print("  Keys/sync:")
+            print("    keys [--summary]")
+            print("    show-group-keys")
+            print("    purge-keys")
+            print("    sync --ticks <n>")
+            print("    set-auto-tick <n>")
+            print()
+            print("  Other:")
+            print("    show")
+            print("    show-ui")
+            print("    time")
+            print("    toggle-log                     Toggle event log display ON/OFF")
+            print("    fast-forward --days <n>")
+            print("    quit")
 
         else:
             print(f"unknown command: {cmd}")

@@ -87,9 +87,9 @@ show-ui
 def test_usernames_display_correctly():
     """Test that usernames from other accounts display correctly."""
     commands = """
-new-network --name "Alice's Network" --username alice --device desktop
+new-network --name "Alice's Network" --username alice --devicename desktop
 create-invite
-new-peer --username bob --device phone --invite 1
+join --username bob --devicename phone --invite 1
 show-ui
 """
     result = run_cli(commands)
