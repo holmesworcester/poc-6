@@ -943,6 +943,15 @@ def resolve_create_deps(event_type: str, args: dict, peer_id: str, db: Any) -> d
     safedb = create_safe_db(db, recorded_by=peer_id)
     result = {}
 
+    # First pass: Get peer_shared_id if needed (commonly needed by other deps)
+    # Look up from peer_self table
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if peer_self_row:
+        result['peer_shared_id'] = peer_self_row['peer_shared_id']
+
     # Process each dependency in the spec
     for dep_name, dep_config in deps_spec.items():
         if isinstance(dep_config, dict):
@@ -951,6 +960,10 @@ def resolve_create_deps(event_type: str, args: dict, peer_id: str, db: Any) -> d
             if dep_type == 'local_peer_key':
                 # Get private key for signing
                 result['private_key'] = peer.get_private_key(peer_id, peer_id, db)
+
+            elif dep_type == 'generated_secret':
+                # Generate random 32-byte secret (for group keys, etc.)
+                result[dep_name] = crypto.generate_secret()
 
             elif dep_type == 'group_key':
                 # Get group key for encryption

@@ -16,6 +16,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            signer_id: str | None = None, signer_private_key: bytes | None = None) -> tuple[str, str]:
     """Create a shareable, encrypted group event.
 
+    Uses pure functional create pattern:
+    1. resolve_create_deps() gathers dependencies
+    2. create_pure() builds blobs (group_key + group)
+    3. store_create_result() stores and projects
+
     Groups own their encryption keys. The key is created internally and its id stored
     in the group event for later retrieval.
 
@@ -37,47 +42,34 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     Returns:
         (group_id, key_id): The group event ID and its encryption key ID
     """
-    # Create the group's encryption key
-    key_id = group_key.create(peer_id=peer_id, t_ms=t_ms, db=db)
+    from projectors import resolve_create_deps, store_create_result
+    from projectors import group as group_projector
 
-    # Determine signer - either explicit (network) or default (peer_shared)
-    actual_signer_id = signer_id if signer_id else peer_shared_id
+    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, is_main={is_main}")
 
-    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}, signed_by={actual_signer_id}")
+    # 1. Resolve dependencies
+    deps = resolve_create_deps("group", {}, peer_id, db)
 
-    # Create event dict
-    event_data = {
-        'type': 'group',
-        'name': name,
-        'signed_by': actual_signer_id,  # Network ID or peer_shared_id
-        'created_at': t_ms,
-        'key_id': key_id,  # Store key_id in event for later retrieval
-        'is_main': 1 if is_main else 0  # Store is_main flag
-    }
+    # Override peer_shared_id if explicitly provided
+    deps['peer_shared_id'] = peer_shared_id
 
-    # Add network_id for dependency ordering (ensures network projects before group)
-    if network_id:
-        event_data['network_id'] = network_id
-
-    # Sign the event - use provided key or peer's private key
+    # Add optional signer overrides for network-signed groups
+    if signer_id:
+        deps['signer_id'] = signer_id
     if signer_private_key:
-        private_key = signer_private_key
-    else:
-        private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
+        deps['signer_private_key'] = signer_private_key
 
-    # Get key_data for encryption
-    key_data = group_key.get_key(key_id, peer_id, db)
+    # 2. Pure create (builds group_key + group blobs)
+    result = group_projector.create_pure(deps, name, t_ms, is_main=is_main, network_id=network_id)
 
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    # 3. Store and project
+    group_id = store_create_result(result, peer_id, t_ms, db)
 
-    # Store event with recorded wrapper and projection
-    event_id = store.event(blob, peer_id, t_ms, db)
+    # Get key_id from the first blob (group_key)
+    key_id = result.blobs[0].event_id
 
-    log.info(f"group.create() created group_id={event_id}, key_id={key_id}")
-    return (event_id, key_id)
+    log.info(f"group.create() created group_id={group_id}, key_id={key_id}")
+    return (group_id, key_id)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:

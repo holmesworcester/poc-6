@@ -3,11 +3,19 @@
 SPEC - declares encrypted, signer_type, dependencies, tables
 project() - pure function: dict -> ProjectorResult
 make_input(), make_event_data() - composable test builders
+
+DEPS - declares dependencies needed for creation
+create_pure() - pure function: deps -> CreateResult (no DB access)
+
+Note: channel.create() in events/content/channel.py is an ORCHESTRATION function
+that may create multiple events (group, group_members, channel) depending on mode.
+The create_pure() here only handles the channel event itself.
 """
 
 from typing import TypedDict, NotRequired
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +63,83 @@ SPEC = {
     "dependencies": ["signer_user:linked_peer", "admin_grant:admin_grant?"],
     "tables": ["channels"],
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+    # Group key for encryption (resolved separately since group_id is an arg)
+    # key_data must be provided by the wrapper
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class ChannelCreateDeps(TypedDict):
+    """Dependencies resolved for channel creation."""
+    peer_shared_id: str
+    private_key: bytes
+    key_data: dict  # {id, key, type} for crypto.wrap
+    admin_grant: NotRequired[str]  # Optional admin grant
+
+
+def create_pure(
+    deps: ChannelCreateDeps,
+    name: str,
+    group_id: str,
+    t_ms: int,
+    is_main: bool = False,
+    disappearing_time_ms: int = 0,
+) -> CreateResult:
+    """Pure function to create a channel event.
+
+    Note: This only creates the channel event itself. For private channels,
+    the orchestration layer must first create the group and members.
+
+    Args:
+        deps: Resolved dependencies
+        name: Channel name
+        group_id: Group this channel belongs to
+        t_ms: Timestamp
+        is_main: Whether this is a main channel
+        disappearing_time_ms: Message expiration time (0 = permanent)
+
+    Returns:
+        CreateResult with channel blob
+    """
+    # Build channel event
+    event_data = {
+        'type': 'channel',
+        'name': name,
+        'group_id': group_id,
+        'signed_by': deps['peer_shared_id'],
+        'created_at': t_ms,
+        'disappearing_time_ms': disappearing_time_ms,
+        'is_main': 1 if is_main else 0,
+    }
+
+    # Include admin_grant if available
+    if deps.get('admin_grant'):
+        event_data['admin_grant'] = deps['admin_grant']
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+
+    # Wrap (canonicalize + encrypt)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, deps['key_data'], None)
+    channel_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=channel_id, event_type='channel')],
+        primary_id=channel_id,
+    )
 
 
 # ============================================================================
