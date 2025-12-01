@@ -86,7 +86,7 @@ import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed
-from events.content import channel, message, message_deletion
+from events.content import channel, message, message_deletion, message_reaction
 from events.group import group_member, group_key, group_prekey, group
 
 
@@ -299,12 +299,22 @@ def display_main(session: CLISession):
         print("  (no messages)")
         return
 
-    for msg in messages:
+    for i, msg in enumerate(messages, 1):
         # Author name is already in the data from message.list()
         author_name = msg.get('author_name', '???')
         timestamp = msg.get('created_at', 0)
         content = msg.get('content', '')
-        print(f"  [{timestamp}ms] {author_name}: {content}")
+        print(f"  {i}. [{timestamp}ms] {author_name}: {content}")
+
+        # Display reactions if any
+        reactions = msg.get('reactions', [])
+        if reactions:
+            reaction_strs = []
+            for reaction in reactions:
+                emoji = reaction.get('emoji', '?')
+                count = reaction.get('count', 0)
+                reaction_strs.append(f"{emoji}({count})")
+            print(f"     reactions: {' '.join(reaction_strs)}")
 
 
 # ============================================================================
@@ -816,6 +826,78 @@ def cmd_remove_user(session: CLISession, user_num: int):
     display_state(session)
 
 
+def cmd_add_reaction(session: CLISession, message_num: int, emoji: str):
+    """Add a reaction (emoji) to a message."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Get messages to find the one to react to
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+
+    if not (1 <= message_num <= len(messages)):
+        print(f"✗ message #{message_num} not found")
+        return
+
+    msg = messages[message_num - 1]
+    message_id = msg['message_id']
+
+    reaction_id = message_reaction.create(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        emoji=emoji,
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    print(f"✓ added reaction {emoji} to message #{message_num}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_remove_reaction(session: CLISession, message_num: int, emoji: str):
+    """Remove a reaction (emoji) from a message."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Get messages to find the one to remove reaction from
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+
+    if not (1 <= message_num <= len(messages)):
+        print(f"✗ message #{message_num} not found")
+        return
+
+    msg = messages[message_num - 1]
+    message_id = msg['message_id']
+
+    deletion_id = message_reaction.remove(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        emoji=emoji,
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    print(f"✓ removed reaction {emoji} from message #{message_num}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
 def cmd_show_group_keys(session: CLISession):
     """Show current encryption keys for all groups/channels."""
     account = session.get_selected_account()
@@ -981,6 +1063,28 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "show-group-keys":
             cmd_show_group_keys(session)
 
+        elif cmd == "add-reaction":
+            if len(parts) < 3:
+                print("usage: add-reaction <message_num> <emoji>")
+            else:
+                try:
+                    message_num = int(parts[1])
+                    emoji = parts[2]
+                    cmd_add_reaction(session, message_num, emoji)
+                except ValueError:
+                    print("error: message number must be an integer")
+
+        elif cmd == "remove-reaction":
+            if len(parts) < 3:
+                print("usage: remove-reaction <message_num> <emoji>")
+            else:
+                try:
+                    message_num = int(parts[1])
+                    emoji = parts[2]
+                    cmd_remove_reaction(session, message_num, emoji)
+                except ValueError:
+                    print("error: message number must be an integer")
+
         elif cmd == "time":
             cmd_time(session)
 
@@ -1003,6 +1107,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  purge-keys")
             print("  remove-user <n>")
             print("  show-group-keys")
+            print("  add-reaction <message_num> <emoji>")
+            print("  remove-reaction <message_num> <emoji>")
             print("  time")
             print("  show")
             print("  quit")
