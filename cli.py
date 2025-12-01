@@ -950,6 +950,40 @@ def cmd_remove_reaction(session: CLISession, message_num: int, emoji: str):
     display_state(session)
 
 
+def cmd_list_reactions(session: CLISession, message_num: int):
+    """List all reactions on a message."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Get messages to find the one to show reactions for
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+
+    if not (1 <= message_num <= len(messages)):
+        print(f"✗ message #{message_num} not found")
+        return
+
+    msg = messages[message_num - 1]
+    message_id = msg['message_id']
+
+    # Get reactions for this message
+    reactions = message_reaction.list_reactions(message_id, account.peer_id, session.db)
+
+    if not reactions:
+        print(f"no reactions on message #{message_num}")
+        print()
+        return
+
+    print(f"reactions on message #{message_num}:")
+    for reaction in reactions:
+        emoji = reaction.get('emoji', '?')
+        reactors = reaction.get('reactors', [])
+        print(f"  {emoji}: {', '.join(reactors)}")
+    print()
+
+
 def cmd_show_group_keys(session: CLISession):
     """Show current encryption keys for all groups/channels."""
     account = session.get_selected_account()
@@ -1148,6 +1182,16 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: message number must be an integer")
 
+        elif cmd == "list-reactions":
+            if len(parts) < 2:
+                print("usage: list-reactions <message_num>")
+            else:
+                try:
+                    message_num = int(parts[1])
+                    cmd_list_reactions(session, message_num)
+                except ValueError:
+                    print("error: message number must be an integer")
+
         elif cmd == "time":
             cmd_time(session)
 
@@ -1173,6 +1217,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  show-group-keys")
             print("  add-reaction <message_num> <emoji>")
             print("  remove-reaction <message_num> <emoji>")
+            print("  list-reactions <message_num>")
             print("  time")
             print("  show")
             print("  quit")
