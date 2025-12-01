@@ -535,6 +535,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.identity import invite_accepted
         log.warning(f"DISPATCHER: Calling invite_accepted.project() for ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
         invite_accepted.project(ref_id, recorded_by, recorded_at, db)
+        projected_id = ref_id
     elif event_type == 'group_member':
         from events.group import group_member
         projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)

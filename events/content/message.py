@@ -105,13 +105,14 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
 
 
 def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List messages in a channel for a specific peer, including attachments and author names.
+    """List messages in a channel for a specific peer, including attachments, reactions and author names.
 
-    Returns message dicts with 'attachments' field containing list of attached files
+    Returns message dicts with 'attachments' field containing list of attached files,
+    'reactions' field containing grouped emoji reactions with reactor names,
     and 'author_name' field from the users table. Shows current message content after
     applying any winning updates.
 
-    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...]}, ...]
+    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...], 'reactions': [...]}, ...]
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
@@ -123,7 +124,7 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
         (channel_id, recorded_by)
     )
 
-    # Enrich each message with attachments and apply any winning updates
+    # Enrich each message with attachments, reactions, and apply any winning updates
     from events.content import message_update
     for msg in messages:
         # Apply any winning message update if it exists
@@ -142,6 +143,29 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
             (msg['message_id'], recorded_by)
         )
         msg['attachments'] = attachments if attachments else []
+
+        # Add reactions (grouped by emoji with reactor names)
+        reactions_data = safedb.query(
+            """SELECT mr.emoji, u.name as reactor_name
+               FROM message_reactions mr
+               LEFT JOIN users u ON mr.reactor_id = u.user_id AND mr.recorded_by = u.recorded_by
+               WHERE mr.message_id = ? AND mr.recorded_by = ?
+               ORDER BY mr.emoji ASC, mr.created_at ASC""",
+            (msg['message_id'], recorded_by)
+        )
+
+        # Group reactions by emoji with counts
+        grouped_reactions = {}
+        for reaction in reactions_data:
+            emoji = reaction['emoji']
+            reactor_name = reaction['reactor_name']
+            if emoji not in grouped_reactions:
+                grouped_reactions[emoji] = {'emoji': emoji, 'reactors': [], 'count': 0}
+            grouped_reactions[emoji]['reactors'].append(reactor_name)
+            grouped_reactions[emoji]['count'] += 1
+
+        # Sort reactions by emoji for consistent display
+        msg['reactions'] = sorted(grouped_reactions.values(), key=lambda x: x['emoji'])
 
     return messages
 
