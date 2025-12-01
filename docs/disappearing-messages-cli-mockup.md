@@ -17,20 +17,20 @@
 
 ### 1. Set Disappearing Messages (`set-disappearing`)
 
-Uses selected channel. Requires admin.
+Uses selected channel. Requires admin. **Changes only affect subsequent messages** - existing messages keep their original expiration time (or lack thereof).
 
 ```
 poc-6> select-channel 1
 Selected: #general
 
 poc-6> set-disappearing --days 7
-Set disappearing messages to 7 days for #general
+Set disappearing messages to 7 days for #general (affects new messages only)
 
 poc-6> set-disappearing --time 3600000
-Set disappearing messages to 1 hour for #general
+Set disappearing messages to 1 hour for #general (affects new messages only)
 
 poc-6> set-disappearing --off
-Turned off disappearing messages for #general
+Turned off disappearing messages for #general (affects new messages only)
 ```
 
 **Error - Not Admin**:
@@ -206,9 +206,9 @@ def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: 
         session.current_time_ms += 100
 
         if ttl_ms == 0:
-            print(f"Turned off disappearing messages for #{channel_name}")
+            print(f"Turned off disappearing messages for #{channel_name} (affects new messages only)")
         else:
-            print(f"Set disappearing messages to {format_duration_short(ttl_ms)} for #{channel_name}")
+            print(f"Set disappearing messages to {format_duration_short(ttl_ms)} for #{channel_name} (affects new messages only)")
 
         session.run_auto_tick()
     except ValueError as e:
@@ -315,7 +315,7 @@ list-channels
 """
     result = run_cli(commands)
     assert result.returncode == 0
-    assert "Set disappearing messages to 7d" in result.stdout
+    assert "Set disappearing messages to 7d for #test-channel (affects new messages only)" in result.stdout
     assert "(disappearing: 7d)" in result.stdout
 
 
@@ -330,7 +330,7 @@ list-channels
 """
     result = run_cli(commands)
     assert result.returncode == 0
-    assert "Set disappearing messages to 1h" in result.stdout
+    assert "Set disappearing messages to 1h for #test-channel (affects new messages only)" in result.stdout
     assert "(disappearing: 1h)" in result.stdout
 
 
@@ -346,7 +346,7 @@ list-channels
 """
     result = run_cli(commands)
     assert result.returncode == 0
-    assert "Turned off disappearing messages" in result.stdout
+    assert "Turned off disappearing messages for #test-channel (affects new messages only)" in result.stdout
     # Channel should not show "(disappearing: ...)" anymore
 
 
