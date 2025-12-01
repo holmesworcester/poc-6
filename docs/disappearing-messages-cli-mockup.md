@@ -55,9 +55,9 @@ Messages show time remaining when disappearing is enabled:
 poc-6> show
 
 MAIN (#general):
-  1. [1000ms] alice: Hello everyone! (expires in 6d 23h)
-  2. [2000ms] bob: Hey Alice! (expires in 6d 23h)
-  3. [500000ms] alice: Meeting at 3pm (expires in 6d 17h)
+  1. [1000ms] alice: Hello everyone! (expires in: 6d 23h)
+  2. [2000ms] bob: Hey Alice! (expires in: 6d 23h)
+  3. [500000ms] alice: Meeting at 3pm (expires in: 6d 17h)
 ```
 
 When disappearing is off (ttl_ms = 0):
@@ -147,18 +147,18 @@ def format_duration_short(ms: int) -> str:
     return f"{minutes}m"
 
 def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
-    """Format time remaining until expiration: 'expires in 6d 23h'"""
+    """Format time remaining until expiration: 'expires in: 6d 23h'"""
     remaining = expires_at_ms - current_time_ms
     if remaining <= 0:
         return "(expired)"
     days = remaining // (24 * 60 * 60 * 1000)
     hours = (remaining % (24 * 60 * 60 * 1000)) // (60 * 60 * 1000)
     if days > 0:
-        return f"(expires in {days}d {hours}h)"
+        return f"(expires in: {days}d {hours}h)"
     minutes = (remaining % (60 * 60 * 1000)) // (60 * 1000)
     if hours > 0:
-        return f"(expires in {hours}h {minutes}m)"
-    return f"(expires in {minutes}m)"
+        return f"(expires in: {hours}h {minutes}m)"
+    return f"(expires in: {minutes}m)"
 ```
 
 ---
@@ -397,7 +397,7 @@ show
 """
     result = run_cli(commands)
     assert result.returncode == 0
-    assert "expires in" in result.stdout
+    assert "expires in:" in result.stdout
 ```
 
 ---
@@ -433,7 +433,7 @@ send "So will this one"
 show
 
 # See expiration times in message list
-# Output: "[1000ms] alice: This message will disappear... (expires in 23h 59m)"
+# Output: "[1000ms] alice: This message will disappear... (expires in: 23h 59m)"
 
 # Fast-forward past expiration
 fast-forward --days 2
