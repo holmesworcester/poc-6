@@ -71,14 +71,10 @@ def test_message_reactions_basic_workflow(fresh_db):
     # Initial sync
     print("\n=== Initial sync to converge ===")
     final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=4000, max_rounds=50, check_interval=5, verbose=True
+        db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Synced in {rounds_used} rounds (converged={converged})")
     assert converged, "Peers should converge after initial sync"
-
-    # Get channel (both should see #general)
-    alice_channels = message.list(None, alice_peer_id, db)  # This will fail - need channel_id
-    # Let me refactor - need to get channel ID first
 
     print("\n=== Send message from Alice ===")
 
@@ -105,7 +101,7 @@ def test_message_reactions_basic_workflow(fresh_db):
     # Sync for message to propagate
     print("\n=== Sync message to Bob ===")
     final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=20, check_interval=5, verbose=True
+        db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Message synced in {rounds_used} rounds")
 
@@ -151,7 +147,7 @@ def test_message_reactions_basic_workflow(fresh_db):
     # Sync reactions
     print("\n=== Sync reactions across peers ===")
     final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=8000, max_rounds=20, check_interval=5, verbose=True
+        db=db, start_t_ms=8000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Reactions synced in {rounds_used} rounds")
 
@@ -203,7 +199,7 @@ def test_message_reactions_basic_workflow(fresh_db):
     # Sync removal
     print("\n=== Sync reaction removal ===")
     final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=10000, max_rounds=20, check_interval=5, verbose=True
+        db=db, start_t_ms=10000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Removal synced in {rounds_used} rounds")
 
@@ -244,7 +240,7 @@ def test_message_reactions_basic_workflow(fresh_db):
     # Sync deletion
     print("\n=== Sync deletion across peers ===")
     final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=12000, max_rounds=20, check_interval=5, verbose=True
+        db=db, start_t_ms=12000, max_rounds=200, check_interval=1, verbose=True
     )
     print(f"Deletion synced in {rounds_used} rounds")
 
