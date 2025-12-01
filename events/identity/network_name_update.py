@@ -1,4 +1,11 @@
 """Network name update event type (encrypted name update for networks)."""
+
+# Registry metadata
+EVENT_TYPE = 'network_name_update'
+SHAREABLE = True  # Name updates sync across network
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

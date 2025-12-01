@@ -52,7 +52,7 @@ def create(t_ms: int, db: Any) -> str:
     return peer_id
 
 
-def project(peer_id: str, recorded_by: str, db: Any) -> None:
+def project(peer_id: str, recorded_by: str, recorded_at: int, db: Any) -> str:
     """Project peer event into peers table (for local peers, both IDs are the same)."""
     log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
 
@@ -82,13 +82,17 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
         )
     )
 
-    # Mark as valid for this peer
+    # Mark as valid immediately (before returning) to ensure other events
+    # see this peer as valid during dependency checking. This is critical
+    # for convergence - the timing of when events become valid matters.
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (peer_id, recorded_by)
     )
 
     log.info(f"peer.project() projected peer_id={peer_id} into peers table")
+
+    return peer_id
 
 
 def get_private_key(peer_id: str, recorded_by: str, db: Any) -> bytes:

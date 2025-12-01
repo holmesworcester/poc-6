@@ -4,6 +4,13 @@ This is a first-class event type, NOT a group. Admin status is granted by:
 - Bootstrap: signed_by=network_id (verified with network_pubkey)
 - Ongoing: signed_by=peer_shared_id (verified with peer.pubkey + admin_grant chain)
 """
+
+# Registry metadata
+EVENT_TYPE = 'admin'
+SHAREABLE = True  # Admin grants sync across network
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

@@ -1,4 +1,11 @@
 """Network joined event type - marks successful bootstrap with inviter."""
+
+# Registry metadata
+EVENT_TYPE = 'network_joined'
+SHAREABLE = False  # Local-only - tracks joiner's bootstrap state
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

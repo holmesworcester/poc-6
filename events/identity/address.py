@@ -1,4 +1,11 @@
 """Address event type (peer's network address for direct communication)."""
+
+# Registry metadata
+EVENT_TYPE = 'address'
+SHAREABLE = True  # Addresses sync to enable peer discovery
+EPHEMERAL = False
+PROJECTION_TABLE = ('addresses', 'address_id')
+
 from typing import Any
 import logging
 import crypto

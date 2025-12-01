@@ -145,7 +145,8 @@ def is_ephemeral(event_type: str) -> bool:
 def get_projection_table(event_type: str) -> tuple[str, str] | None:
     """Get projection table info for an event type.
 
-    Used by _get_authoritative_created_at to look up created_at.
+    Returns the table name and ID column for events that project to database tables.
+    Used for looking up created_at or other projection-specific data.
 
     Args:
         event_type: The event type

@@ -1,4 +1,11 @@
 """Group key event type (subjective symmetric keys for network/group content encryption)."""
+
+# Registry metadata
+EVENT_TYPE = 'group_key'
+SHAREABLE = False  # Local-only - contains symmetric key material
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging
@@ -66,14 +73,17 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     return key_id
 
 
-def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project group key event into group_keys table and mark valid for owning peer.
+def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project group key event into group_keys table.
 
     Args:
         key_id: The group_key event ID
         recorded_by: Peer projecting this event
         recorded_at: Timestamp to use for created_at (since blob has no timestamp)
         db: Database connection
+
+    Returns:
+        key_id on success, None on failure
     """
     log.debug(f"group_key.project() projecting key_id={key_id}, seen_by={recorded_by}")
 
@@ -81,7 +91,7 @@ def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     blob = store.get(key_id, db)
     if not blob:
         log.warning(f"group_key.project() blob not found for key_id={key_id}")
-        return
+        return None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
@@ -101,13 +111,8 @@ def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         )
     )
 
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (key_id, recorded_by)
-    )
-
     log.info(f"group_key.project() projected key_id={key_id} into group_keys table")
+    return key_id
 
 
 def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:

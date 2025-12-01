@@ -1,4 +1,11 @@
 """Transit key event type (device-wide symmetric keys for sync routing)."""
+
+# Registry metadata
+EVENT_TYPE = 'transit_key'
+SHAREABLE = False  # Local-only - contains symmetric key material
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging
@@ -74,7 +81,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     return key_id
 
 
-def project(key_id: str, recorded_by: str, db: Any) -> None:
+def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project transit key event into transit_keys table."""
     log.warning(f"[TRANSIT_KEY_PROJECT] key_id={key_id[:20]}... recorded_by={recorded_by[:10]}...")
 
@@ -82,7 +89,7 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     blob = store.get(key_id, db)
     if not blob:
         log.warning(f"[TRANSIT_KEY_PROJECT] result=blob_not_found key_id={key_id[:20]}...")
-        return
+        return None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
@@ -102,6 +109,8 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     )
 
     log.info(f"transit_key.project() projected key_id={key_id} into transit_keys table")
+
+    return key_id
 
 
 def extract_id(blob: bytes) -> bytes:

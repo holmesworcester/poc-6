@@ -3,6 +3,13 @@
 Allows admins to update channel name or disappearing_time_ms after creation.
 Uses global_count for convergent update ordering (highest wins).
 """
+
+# Registry metadata
+EVENT_TYPE = 'channel_update'
+SHAREABLE = True  # Channel updates sync to all members
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

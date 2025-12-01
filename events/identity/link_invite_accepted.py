@@ -1,4 +1,11 @@
 """Link invite accepted event type (local-only, captures link acceptance)."""
+
+# Registry metadata
+EVENT_TYPE = 'link_invite_accepted'
+SHAREABLE = False  # Local-only - captures out-of-band link data
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging
@@ -47,8 +54,12 @@ def create(link_invite_id: str, link_prekey_id: str, link_private_key: bytes,
     return link_invite_accepted_id
 
 
-def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project link_invite_accepted: restore link link_invite data for event-sourcing."""
+def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project link_invite_accepted: restore link link_invite data for event-sourcing.
+
+    Returns:
+        link_invite_accepted_id on success, None on failure
+    """
     log.warning(f"[LINK_INVITE_ACCEPTED_PROJECT_ENTRY] id={link_invite_accepted_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
@@ -58,7 +69,7 @@ def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db
     blob = store.get(link_invite_accepted_id, unsafedb)
     if not blob:
         log.warning(f"link_invite_accepted.project() blob not found")
-        return
+        return None
 
     event_data = crypto.parse_json(blob)
 
@@ -71,7 +82,7 @@ def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db
     link_invite_blob = store.get(link_invite_id, unsafedb)
     if not link_invite_blob:
         log.warning(f"link_invite_accepted.project() link_invite blob not found: {link_invite_id}")
-        return
+        return None
 
     link_invite_event = crypto.parse_json(link_invite_blob)
 
@@ -126,3 +137,4 @@ def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db
     )
 
     log.info(f"link_invite_accepted.project() completed for {recorded_by}")
+    return link_invite_accepted_id

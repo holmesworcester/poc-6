@@ -1,8 +1,34 @@
-"""Recorded event management functions."""
+"""Recorded event management functions.
+
+ARCHITECTURE NOTE: Event Type Registry
+======================================
+This module no longer uses hardcoded LOCAL_ONLY_TYPES, EPHEMERAL_TYPES, or TABLE_MAP.
+Instead, each event module declares its own metadata via module-level constants:
+
+    EVENT_TYPE = 'message'
+    SHAREABLE = True
+    EPHEMERAL = False
+    PROJECTION_TABLE = ('messages', 'message_id')
+
+The registry (events/registry.py) auto-discovers these declarations and provides:
+    - is_shareable(event_type) - whether event syncs to other peers
+    - is_ephemeral(event_type) - whether to drop if deps missing
+    - get_projection_table(event_type) - table for created_at lookup
+    - get_project_fn(event_type) - the project() function to call
+
+Benefits:
+    - Adding new event type: just create module with metadata
+    - No more forgotten updates to LOCAL_ONLY_TYPES
+    - Metadata lives with the code it describes
+    - Easy to audit: grep -r "SHAREABLE = True" events/
+
+See docs/planning/event-registry-design.md for full design rationale.
+"""
 from typing import Any
 import json
 import logging
 
+from events import registry
 from events.group import group
 from events.content import message
 import store
@@ -10,57 +36,6 @@ import crypto
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
-
-
-def _get_authoritative_created_at(event_type: str, event_id: str, recorded_by: str, safedb: Any) -> int | None:
-    """Get authoritative created_at from projection table.
-
-    Maps each event type to its projection table and queries for the true created_at value
-    that was stored during projection. Returns None if event type doesn't project to a table
-    or the row wasn't found.
-
-    Args:
-        event_type: The event type (e.g., 'channel', 'group', 'message')
-        event_id: The event ID
-        recorded_by: The peer who recorded this event
-        safedb: Safe database connection
-
-    Returns:
-        The authoritative created_at timestamp, or None if not found
-    """
-    # Map event types to (table_name, id_column_name)
-    TABLE_MAP = {
-        'channel': ('channels', 'channel_id'),
-        'group': ('groups', 'group_id'),
-        'peer_shared': ('peers_shared', 'peer_shared_id'),
-        'user': ('users', 'user_id'),
-        'transit_prekey_shared': ('transit_prekeys_shared', 'transit_prekey_shared_id'),
-        'group_prekey_shared': ('group_prekeys_shared', 'group_prekey_shared_id'),
-        'group_key_shared': ('group_keys_shared', 'group_key_shared_id'),
-        'invite': ('invites', 'invite_id'),
-        'message': ('messages', 'message_id'),
-        'message_deletion': ('message_deletions', 'deletion_id'),
-        'address': ('addresses', 'address_id'),
-        'group_member': ('group_members', 'user_id'),
-        # Note: file_slice and message_attachment are NOT included here because:
-        # - file_slice: syncs separately, no created_at in projection table
-        # - message_attachment: syncs separately, no created_at in projection table
-    }
-
-    if event_type not in TABLE_MAP:
-        return None
-
-    table, id_col = TABLE_MAP[event_type]
-
-    try:
-        row = safedb.query_one(
-            f"SELECT created_at FROM {table} WHERE {id_col} = ? AND recorded_by = ?",
-            (event_id, recorded_by)
-        )
-        return row['created_at'] if row else None
-    except Exception as e:
-        log.debug(f"Failed to get authoritative created_at for {event_type} {event_id[:20]}...: {e}")
-        return None
 
 
 def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: str) -> bool:
@@ -359,17 +334,15 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if event_type == 'channel':
         log.error(f"[CHANNEL_AFTER_PARSE] type=channel, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
-    # Mark non-local-only events as shareable (centralized marking)
+    # Mark shareable events for sync (centralized marking via registry)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
-    LOCAL_ONLY_TYPES = {'peer', 'transit_key', 'group_key', 'transit_prekey', 'group_prekey', 'recorded', 'network_joined', 'invite_accepted', 'sync_connect', 'purge_expired'}
-    # Note: bootstrap_complete removed in Phase 3, network_created removed in Phase 5 (no longer created, but can still project for backward compat)
-    # Note: purge_expired is local-only because each peer independently purges their own expired events
+    # Note: 'recorded' type is always local-only (not in registry)
 
     should_mark_shareable = False
     if event_type:
-        # We know the type - check if it's shareable
-        should_mark_shareable = event_type not in LOCAL_ONLY_TYPES
+        # Use registry to check if shareable (defaults to False for unknown types)
+        should_mark_shareable = registry.is_shareable(event_type)
     elif missing_key_ids:
         # Encrypted blob we can't decrypt - but local events are never encrypted!
         # So this must be shareable
@@ -434,8 +407,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         if missing_deps:
             # Ephemeral events (transit-layer) are recurring/retryable
             # If deps are missing, drop them - sender will retry
-            EPHEMERAL_TYPES = {'sync_connect', 'sync_request', 'sync_response', 'purge_expired'}
-            if event_type in EPHEMERAL_TYPES:
+            # Use registry to check if event type is ephemeral
+            if registry.is_ephemeral(event_type):
                 log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
                 return [None, recorded_id]
 
@@ -468,109 +441,18 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
             return [None, recorded_id]
 
-    if event_type == 'message':
-        projected_id = message.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'message_deletion':
-        from events.content import message_deletion
-        projected_id = message_deletion.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'message_update':
-        from events.content import message_update
-        projected_id = message_update.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'message_reaction':
-        from events.content import message_reaction
-        projected_id = message_reaction.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'message_reaction_deletion':
-        from events.content import message_reaction
-        message_reaction.project_deletion(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'group':
-        projected_id = group.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'peer':
-        peer.project(ref_id, recorded_by, db)
-        projected_id = ref_id
-    elif event_type == 'transit_key':
-        from events.network import transit_key
-        transit_key.project(ref_id, recorded_by, db)
-        projected_id = ref_id
-    elif event_type == 'group_key':
-        from events.group import group_key
-        group_key.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'peer_shared':
-        from events.identity import peer_shared
-        projected_id = peer_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'channel':
-        log.error(f"[CHANNEL_PROJECT_DISPATCHER] Dispatching channel.project() for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
-        channel.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-        log.error(f"[CHANNEL_PROJECT_DISPATCHER] ✓ channel.project() completed for channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}...")
-    elif event_type == 'sync':
-        from events.network import sync
-        sync.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'sync_connect':
-        from events.network import sync_connect
-        sync_connect.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'invite':
-        from events.identity import invite
-        projected_id = invite.project(ref_id, recorded_by, recorded_at, db)
-    # Phase 5: invite_proof removed - proof IS the signature on user/peer_shared events
-    elif event_type == 'user':
-        from events.identity import user
-        projected_id = user.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'transit_prekey':
-        from events.network import transit_prekey
-        transit_prekey.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'transit_prekey_shared':
-        from events.network import transit_prekey_shared
-        projected_id = transit_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group_prekey':
-        from events.group import group_prekey
-        group_prekey.project(ref_id, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'group_prekey_shared':
-        from events.group import group_prekey_shared
-        projected_id = group_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group_key_shared':
-        from events.group import group_key_shared
-        projected_id = group_key_shared.project(ref_id, recorded_by, recorded_at, db)
-        if projected_id is None:
-            # Projection failed (can't decrypt - event not for us)
-            # Don't mark as valid, but it's still shareable
-            log.info(f"group_key_shared projection returned None (not for us), skipping valid marking")
-            return [None, recorded_id]
-    elif event_type == 'invite_accepted':
-        from events.identity import invite_accepted
-        log.warning(f"DISPATCHER: Calling invite_accepted.project() for ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
-        invite_accepted.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'group_member':
-        from events.group import group_member
-        projected_id = group_member.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network':
-        from events.identity import network
-        projected_id = network.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'admin':
-        from events.identity import admin
-        projected_id = admin.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network_created':
-        # Phase 5: network_created removed - kept for backward compat (old events can still project)
-        from events.identity import network_created
-        projected_id = network_created.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network_joined':
-        from events.identity import network_joined
-        projected_id = network_joined.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'bootstrap_complete':
-        from events.identity import bootstrap_complete
-        projected_id = bootstrap_complete.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'admin':
-        from events.identity import admin
-        projected_id = admin.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'address':
-        from events.identity import address
-        projected_id = address.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'file_slice':
+    # ==========================================================================
+    # PROJECTION DISPATCH - Uses event registry for auto-discovered projectors
+    # ==========================================================================
+    # All projectors return event_id on success, None on failure/not-for-us.
+    # None means "don't mark as valid" (handled uniformly below).
+    #
+    # Special cases (non-standard signatures):
+    # - file_slice, message_attachment: take event_data parameter (performance)
+    # ==========================================================================
+
+    # Special case: projectors that take event_data (avoid re-parsing for performance)
+    if event_type == 'file_slice':
         from events.content import file_slice
         file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
         projected_id = ref_id
@@ -578,12 +460,15 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         from events.content import message_attachment
         message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
         projected_id = ref_id
-    elif event_type == 'network_address':
-        from events.network import address as network_address
-        projected_id = network_address.project(ref_id, recorded_by, recorded_at, db)
-    elif event_type == 'network_intro':
-        from events.network import intro as network_intro
-        projected_id = network_intro.project(ref_id, recorded_by, recorded_at, db)
+
+    else:
+        # Standard case: use registry to get project function
+        project_fn = registry.get_project_fn(event_type)
+        if project_fn:
+            # All projectors return event_id on success, None on failure
+            projected_id = project_fn(ref_id, recorded_by, recorded_at, db)
+        else:
+            log.warning(f"[PROJECTION_DISPATCH] No projector found for event type: {event_type}")
 
     # Only mark event as valid if projection succeeded (projected_id is not None)
     # Events that fail projection (authorization, missing data) should NOT be marked valid

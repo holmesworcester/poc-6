@@ -4,6 +4,13 @@ When a message is deleted, its encryption key is marked for purging.
 This event type allows re-encrypting messages with a new "clean" key
 before the old key is discarded, ensuring forward secrecy.
 """
+
+# Registry metadata
+EVENT_TYPE = 'message_rekey'
+SHAREABLE = True  # Rekey events sync for forward secrecy
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

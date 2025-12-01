@@ -1,4 +1,11 @@
 """Group member event type (shareable, encrypted) - represents group membership."""
+
+# Registry metadata
+EVENT_TYPE = 'group_member'
+SHAREABLE = True  # Memberships sync for group access control
+EPHEMERAL = False
+PROJECTION_TABLE = ('group_members', 'user_id')
+
 from typing import Any
 import logging
 import crypto
