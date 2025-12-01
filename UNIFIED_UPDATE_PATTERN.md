@@ -9,7 +9,7 @@ The unified update pattern is a framework for implementing Last-Writer-Wins (LWW
 ### 1. Lamport Clocks (Global Counter)
 - **Purpose**: Provide globally comparable timestamps across all peers
 - **Implementation**: Per-peer counter that increments with each event created locally
-- **Storage**: `peer_gc_state` table tracks the highest `global_count` seen from each peer
+- **Storage**: `peer_global_counter` table tracks the highest `global_count` seen from each peer
 - **Update on Sync**: When receiving events from other peers, update tracking to prevent reuse after restart
 
 ### 2. Last-Writer-Wins (LWW) via Window Functions
@@ -95,7 +95,7 @@ SUBJECTIVE_TABLES = {
 }
 
 DEVICE_TABLES = {
-    'peer_gc_state',            # Device-wide Lamport clock tracking
+    'peer_global_counter',      # Device-wide Lamport clock tracking
     ...
 }
 ```
@@ -125,7 +125,7 @@ DEVICE_TABLES = {
 
 ### Lamport Clock Overhead
 - Single query + insert per create: O(1)
-- One extra row in `peer_gc_state` per peer
+- One extra row in `peer_global_counter` per peer
 
 ### Window Function Overhead
 - Window function evaluated at query time (lazy)
@@ -181,7 +181,7 @@ All will automatically get:
 
 All update types rely on shared utilities in `events/_shared/updates.py`:
 - `get_next_global_count()` - Get next Lamport clock value
-- `update_highest_gc_seen()` - Track seen clocks during sync
+- `update_highest_count_seen()` - Track seen clocks during sync
 - `get_winners()` - Query LWW winners via window functions
 
 This framework ensures consistency across all update types.

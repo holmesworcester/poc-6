@@ -27,17 +27,17 @@ def get_next_global_count(peer_id: str, db: Any) -> int:
 
     unsafedb = create_unsafe_db(db)
 
-    # Query current highest gc for this peer
+    # Query current highest count for this peer
     row = unsafedb.query_one(
-        "SELECT highest_gc FROM peer_gc_state WHERE peer_id = ?",
+        "SELECT highest_count FROM peer_global_counter WHERE peer_id = ?",
         (peer_id,)
     )
-    current = row['highest_gc'] if row else 0
+    current = row['highest_count'] if row else 0
     next_gc = current + 1
 
     # Persist the increment
     unsafedb.execute(
-        "INSERT OR REPLACE INTO peer_gc_state (peer_id, highest_gc) VALUES (?, ?)",
+        "INSERT OR REPLACE INTO peer_global_counter (peer_id, highest_count) VALUES (?, ?)",
         (peer_id, next_gc)
     )
     db.commit()
@@ -46,11 +46,11 @@ def get_next_global_count(peer_id: str, db: Any) -> int:
     return next_gc
 
 
-def update_highest_gc_seen(peer_id: str, gc: int, db: Any) -> None:
-    """Update highest gc seen from a peer during sync.
+def update_highest_count_seen(peer_id: str, gc: int, db: Any) -> None:
+    """Update highest global count seen from a peer during sync.
 
     When receiving events from sync, we update our tracking to ensure we never
-    reuse gc values even after restart. This maintains the Lamport clock invariant.
+    reuse global count values even after restart. This maintains the Lamport clock invariant.
 
     Args:
         peer_id: Peer ID that created the event
@@ -61,23 +61,23 @@ def update_highest_gc_seen(peer_id: str, gc: int, db: Any) -> None:
 
     unsafedb = create_unsafe_db(db)
 
-    # Query current highest gc for this peer
+    # Query current highest count for this peer
     row = unsafedb.query_one(
-        "SELECT highest_gc FROM peer_gc_state WHERE peer_id = ?",
+        "SELECT highest_count FROM peer_global_counter WHERE peer_id = ?",
         (peer_id,)
     )
-    current = row['highest_gc'] if row else 0
+    current = row['highest_count'] if row else 0
 
-    # Only update if we've seen a higher gc
+    # Only update if we've seen a higher count
     if gc > current:
         unsafedb.execute(
-            "INSERT OR REPLACE INTO peer_gc_state (peer_id, highest_gc) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO peer_global_counter (peer_id, highest_count) VALUES (?, ?)",
             (peer_id, gc)
         )
         db.commit()
-        log.debug(f"update_highest_gc_seen({peer_id[:8]}..., {gc}) updated to {gc}")
+        log.debug(f"update_highest_count_seen({peer_id[:8]}..., {gc}) updated to {gc}")
     else:
-        log.debug(f"update_highest_gc_seen({peer_id[:8]}..., {gc}) no update needed (current={current})")
+        log.debug(f"update_highest_count_seen({peer_id[:8]}..., {gc}) no update needed (current={current})")
 
 
 def get_winners(

@@ -76,7 +76,7 @@ DEVICE_TABLES = {
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
     'job_state',                   # Job execution state tracking (device-wide)
     'sync_connections',            # Established connections for sync (device-wide)
-    'peer_gc_state',               # Lamport clock state for each peer (device-wide)
+    'peer_global_counter',         # Lamport clock state for each peer (device-wide)
 }
 
 
