@@ -6,6 +6,12 @@ Core projection machinery:
   - apply_result(): result → DB writes
   - dispatch(): event_type → projector (replaces big switch in recorded.py)
   - check_deps(): semantic dependency checking (moved from recorded.py)
+
+Pure functional creation:
+  - BlobSpec: specification for a blob to store
+  - CreateResult: return type from pure create functions
+  - resolve_create_deps(): gather dependencies for creation
+  - store_create_result(): store all blobs from a create result
 """
 
 from dataclasses import dataclass, field
@@ -31,6 +37,53 @@ class ProjectorResult:
     # Each command has a "type" field and protocol-specific data
     # The wrapper calls the appropriate execute_command() handler
     commands: list[dict] = field(default_factory=list)
+
+
+# ============================================================================
+# PURE CREATE TYPES
+# ============================================================================
+
+@dataclass
+class BlobSpec:
+    """Specification for a blob to store.
+
+    Used by pure create functions to return multiple blobs (e.g., group_key + group).
+    Event IDs are computed via content-addressing: id = hash(blob).
+    """
+    blob: bytes
+    event_id: str
+    event_type: str
+    project: bool = True  # Whether to project after storing
+
+
+@dataclass
+class CreateResult:
+    """Result from a pure create function.
+
+    Pure create functions return blobs + computed IDs (no DB access).
+    The wrapper stores all blobs in a single transaction.
+
+    Example for group.create_pure() which creates group_key + group:
+        CreateResult(
+            blobs=[
+                BlobSpec(key_blob, key_id, 'group_key'),
+                BlobSpec(group_blob, group_id, 'group'),
+            ],
+            primary_id=group_id,
+        )
+    """
+    blobs: list[BlobSpec] = field(default_factory=list)
+    primary_id: str = ""  # Main event ID to return to caller
+
+
+def compute_event_id(blob: bytes) -> str:
+    """Compute event ID from blob (content-addressed).
+
+    Event IDs are BLAKE2b hashes of the blob content.
+    This allows computing IDs before storage.
+    """
+    import crypto
+    return crypto.b64encode(crypto.hash(blob))
 
 
 # ============================================================================
@@ -855,3 +908,126 @@ def project_event(event_type: str, event_id: str, recorded_by: str, recorded_at:
 
     apply_result(result, recorded_by, recorded_at, db)
     return result
+
+
+# ============================================================================
+# PURE CREATE FUNCTIONS
+# ============================================================================
+
+def resolve_create_deps(event_type: str, args: dict, peer_id: str, db: Any) -> dict:
+    """Resolve dependencies for a pure create function.
+
+    Gathers all data needed by create_pure() based on the DEPS spec.
+    Raises ValueError if validation fails or dependencies not found.
+
+    Args:
+        event_type: Type of event to create (e.g., 'message')
+        args: Arguments for creation (e.g., {'channel_id': '...'})
+        peer_id: Local peer ID creating the event
+        db: Database connection
+
+    Returns:
+        Dict of resolved dependencies for create_pure()
+    """
+    import crypto
+    from db import create_safe_db
+    from events.identity import peer
+    from events.group import group
+
+    _load_projectors()
+    module = _PROJECTORS.get(event_type)
+    if not module or not hasattr(module, 'DEPS'):
+        raise ValueError(f"No DEPS spec for event type: {event_type}")
+
+    deps_spec = module.DEPS
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    result = {}
+
+    # Process each dependency in the spec
+    for dep_name, dep_config in deps_spec.items():
+        if isinstance(dep_config, dict):
+            dep_type = dep_config.get('type')
+
+            if dep_type == 'local_peer_key':
+                # Get private key for signing
+                result['private_key'] = peer.get_private_key(peer_id, peer_id, db)
+
+            elif dep_type == 'group_key':
+                # Get group key for encryption
+                from_field = dep_config.get('from', '')
+                if '.' in from_field:
+                    # e.g., "channel.group_id" -> get group_id from channel result
+                    parts = from_field.split('.')
+                    group_id = result.get(parts[1])
+                else:
+                    group_id = args.get('group_id') or result.get('group_id')
+
+                if not group_id:
+                    raise ValueError(f"Cannot resolve group_key: group_id not found")
+
+                result['key_data'] = group.pick_key(group_id, peer_id, db)
+
+            elif 'table' in dep_config:
+                # Table lookup
+                table = dep_config['table']
+                key_field = dep_config['key_field']
+                fields = dep_config['fields']
+
+                # Get key value from args
+                key_value = args.get(key_field) or peer_id  # Default to peer_id for peer_self
+
+                # Build query
+                field_list = ', '.join(fields)
+                row = safedb.query_one(
+                    f"SELECT {field_list} FROM {table} WHERE {key_field} = ? AND recorded_by = ? LIMIT 1",
+                    (key_value, peer_id)
+                )
+
+                if not row:
+                    raise ValueError(f"Dependency not found: {table} for {key_field}={key_value}")
+
+                # Add each field to result
+                for field in fields:
+                    result[field] = row.get(field)
+
+                # Also store the key value
+                result[key_field] = key_value
+
+    return result
+
+
+def store_create_result(result: CreateResult, peer_id: str, t_ms: int, db: Any) -> str:
+    """Store all blobs from a CreateResult.
+
+    Stores each blob, creates recorded events, and projects them.
+    All operations happen in the caller's transaction.
+
+    Args:
+        result: CreateResult from a pure create function
+        peer_id: Local peer ID (for recorded_by)
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        The primary_id from the CreateResult
+    """
+    import store
+    from events.network import recorded
+    from db import create_unsafe_db
+
+    unsafedb = create_unsafe_db(db)
+
+    recorded_ids = []
+    for spec in result.blobs:
+        # Store the blob
+        store.blob(spec.blob, t_ms, True, unsafedb)
+
+        # Create recorded event
+        recorded_id = recorded.create(spec.event_id, peer_id, t_ms, db, return_dupes=True)
+        recorded_ids.append(recorded_id)
+
+    # Project all recorded events
+    if recorded_ids:
+        recorded.project_ids(recorded_ids, db)
+
+    return result.primary_id

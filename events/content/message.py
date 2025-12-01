@@ -16,6 +16,11 @@ DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, return_latest: bool = True) -> dict[str, Any]:
     """Create a message event, add it to the store, project it, and return the id and a list of recent messages.
 
+    Uses pure functional create pattern:
+    1. resolve_create_deps() gathers dependencies from DB
+    2. create_pure() builds blob (no DB access)
+    3. store_create_result() stores and projects
+
     Message TTL is determined by the channel's disappearing_time_ms setting:
     - If disappearing_time_ms is 0: message is permanent (ttl_ms = 0)
     - If disappearing_time_ms > 0: message expires at created_at + disappearing_time_ms
@@ -36,60 +41,23 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     Returns:
         {'id': message_id, 'latest': list of recent messages (or empty list if return_latest=False)}
     """
+    from projectors import resolve_create_deps, store_create_result
+    from projectors import message as msg_projector
+
     log.info(f"message.create() creating message in channel_id={channel_id}, content='{content[:50]}...'")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
+    # 1. Resolve dependencies (DB queries)
+    deps = resolve_create_deps("message", {"channel_id": channel_id}, peer_id, db)
 
-    # Query channel to get group_id and disappearing_time_ms
-    channel_row = safedb.query_one(
-        "SELECT group_id, disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
-        (channel_id, peer_id)
-    )
-    if not channel_row:
-        raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
-
-    group_id = channel_row['group_id']
-    disappearing_time_ms = channel_row.get('disappearing_time_ms', 0) or 0
-
-    # Look up our identity from peer_self (set when we created/linked our account)
-    # This is the canonical source for "what user am I?" - single lookup, no fallback chain
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row or not peer_self_row['peer_shared_id']:
-        raise ValueError(f"Peer {peer_id} not found in peer_self table")
-    if not peer_self_row['user_id']:
+    # Validate user identity is set
+    if not deps.get('user_id'):
         raise ValueError(f"User identity not set for peer {peer_id}. Must create or link account first.")
 
-    peer_shared_id = peer_self_row['peer_shared_id']
-    user_id = peer_self_row['user_id']
+    # 2. Pure create (no DB access)
+    result = msg_projector.create_pure(deps, content, t_ms)
 
-    # Build standardized event structure
-    event_data = {
-        'type': 'message',
-        'channel_id': channel_id,
-        'group_id': group_id,
-        'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
-        'author_id': user_id,  # User who authored the message content (for display)
-        'content': content,
-        'created_at': t_ms,
-        'disappearing_time_ms': disappearing_time_ms  # TTL setting at creation time (0 = permanent)
-    }
-
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get key_data for encryption (group.pick_key uses peer_id for access control)
-    key_data = group.pick_key(group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper and projection
-    event_id = store.event(blob, peer_id, t_ms, db)
+    # 3. Store and project
+    event_id = store_create_result(result, peer_id, t_ms, db)
 
     log.info(f"message.create() created message_id={event_id}")
 

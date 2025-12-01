@@ -3,11 +3,15 @@
 SPEC - declares encrypted, signer_type, dependencies, tables
 project() - pure function: dict -> ProjectorResult
 make_input(), make_event_data() - composable test builders
+
+DEPS - declares dependencies needed for creation
+create_pure() - pure function: deps -> CreateResult (no DB access)
 """
 
 from typing import TypedDict, NotRequired
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +57,83 @@ SPEC = {
     "dependencies": ["deletion:message_deletion?"],
     "tables": ["messages", "event_dependencies", "deleted_events"],
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # From channels table: need group_id and disappearing_time_ms
+    "channel": {
+        "table": "channels",
+        "key_field": "channel_id",
+        "fields": ["group_id", "disappearing_time_ms"],
+    },
+    # From peer_self table: need peer_shared_id and user_id
+    "peer_self": {
+        "table": "peer_self",
+        "key_field": "peer_id",
+        "fields": ["peer_shared_id", "user_id"],
+    },
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+    # Group key for encryption (looked up via group_id from channel)
+    "key_data": {"type": "group_key", "from": "channel.group_id"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class CreateDeps(TypedDict):
+    """Dependencies resolved for message creation."""
+    channel_id: str
+    group_id: str
+    disappearing_time_ms: int
+    peer_shared_id: str
+    user_id: str
+    private_key: bytes
+    key_data: dict  # {id, key, type} for crypto.wrap
+
+
+def create_pure(deps: CreateDeps, content: str, t_ms: int) -> CreateResult:
+    """Pure function to create a message event.
+
+    Args:
+        deps: Resolved dependencies (from resolve_create_deps)
+        content: Message content
+        t_ms: Timestamp in milliseconds
+
+    Returns:
+        CreateResult with blob and computed event_id
+    """
+    event_data = {
+        'type': 'message',
+        'channel_id': deps['channel_id'],
+        'group_id': deps['group_id'],
+        'signed_by': deps['peer_shared_id'],
+        'author_id': deps['user_id'],
+        'content': content,
+        'created_at': t_ms,
+        'disappearing_time_ms': deps['disappearing_time_ms'],
+    }
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+
+    # Wrap (canonicalize + encrypt)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, deps['key_data'], None)
+
+    # Compute event ID (content-addressed)
+    event_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=event_id, event_type='message')],
+        primary_id=event_id,
+    )
 
 
 # ============================================================================
