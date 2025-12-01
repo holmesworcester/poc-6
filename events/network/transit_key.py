@@ -79,30 +79,16 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
 
     Uses apply_result_device_wide since transit_keys is device-wide.
     """
-    from projectors import apply_result_device_wide
+    from projectors import resolve, apply_result_device_wide
     from projectors import transit_key as tk_projector
 
     log.warning(f"[TRANSIT_KEY_PROJECT] key_id={key_id[:20]}... recorded_by={recorded_by[:10]}...")
 
-    # Get blob from store
-    blob = store.get(key_id, db)
-    if not blob:
-        log.warning(f"[TRANSIT_KEY_PROJECT] result=blob_not_found key_id={key_id[:20]}...")
+    input_dict = resolve("transit_key", key_id, recorded_by, 0, db)
+    if not input_dict:
+        log.warning(f"[TRANSIT_KEY_PROJECT] result=resolve_failed key_id={key_id[:20]}...")
         return
 
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-
-    # Build input dict for pure projector
-    input_dict = {
-        "event_id": key_id,
-        "event_data": event_data,
-        "recorded_by": recorded_by,
-        "recorded_at": event_data.get('created_at', 0),
-        "dependencies": {},
-    }
-
-    # Call pure projector
     result = tk_projector.project(input_dict)
 
     if not result.valid:
@@ -110,8 +96,8 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
         return
 
     # Apply to device-wide table
-    log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... owner={event_data['signed_by'][:10]}... into_transit_keys_table")
-    apply_result_device_wide(result, event_data.get('created_at', 0), db)
+    log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... into_transit_keys_table")
+    apply_result_device_wide(result, input_dict["recorded_at"], db)
 
     log.info(f"transit_key.project() projected key_id={key_id} into transit_keys table")
 

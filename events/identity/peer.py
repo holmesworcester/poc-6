@@ -57,34 +57,18 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
 
     Uses apply_result_device_wide since local_peers is device-wide.
     """
-    from projectors import apply_result_device_wide
+    from projectors import resolve, apply_result_device_wide
     from projectors import peer as peer_projector
     from db import create_safe_db
 
     log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
 
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    blob = store.get(peer_id, unsafedb)
-    if not blob:
-        log.warning(f"peer.project() blob not found for peer_id={peer_id}")
+    # Use recorded_at=0 since peer events use created_at from blob
+    input_dict = resolve("peer", peer_id, recorded_by, 0, db)
+    if not input_dict:
+        log.warning(f"peer.project() resolve failed for peer_id={peer_id}")
         return
 
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-
-    # Build input dict for pure projector
-    input_dict = {
-        "event_id": peer_id,
-        "event_data": event_data,
-        "recorded_by": recorded_by,
-        "recorded_at": event_data.get('created_at', 0),
-        "dependencies": {},
-    }
-
-    # Call pure projector
     result = peer_projector.project(input_dict)
 
     if not result.valid:
@@ -92,9 +76,10 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
         return
 
     # Apply to device-wide table
-    apply_result_device_wide(result, event_data.get('created_at', 0), db)
+    apply_result_device_wide(result, input_dict["recorded_at"], db)
 
     # Mark as valid for this peer
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (peer_id, recorded_by)

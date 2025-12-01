@@ -72,30 +72,16 @@ def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     Uses apply_result since group_keys is subjective (has recorded_by).
     Note: created_at comes from recorded_at (deterministic blobs have no timestamp).
     """
-    from projectors import apply_result
+    from projectors import resolve, apply_result
     from projectors import group_key as gk_projector
 
     log.debug(f"group_key.project() projecting key_id={key_id}, seen_by={recorded_by}")
 
-    # Get blob from store
-    blob = store.get(key_id, db)
-    if not blob:
-        log.warning(f"group_key.project() blob not found for key_id={key_id}")
+    input_dict = resolve("group_key", key_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.warning(f"group_key.project() resolve failed for key_id={key_id}")
         return
 
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-
-    # Build input dict for pure projector
-    input_dict = {
-        "event_id": key_id,
-        "event_data": event_data,
-        "recorded_by": recorded_by,
-        "recorded_at": recorded_at,  # Used as created_at since blob has no timestamp
-        "dependencies": {},
-    }
-
-    # Call pure projector
     result = gk_projector.project(input_dict)
 
     if not result.valid:

@@ -89,32 +89,16 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
 
     Uses apply_result since group_prekeys is subjective (has recorded_by).
     """
-    from projectors import apply_result
+    from projectors import resolve, apply_result
     from projectors import group_prekey as gpk_projector
 
     log.info(f"group_prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    blob = store.get(prekey_id, db)
-    if not blob:
-        log.warning(f"group_prekey.project() blob not found for prekey_id={prekey_id}")
+    input_dict = resolve("group_prekey", prekey_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.warning(f"group_prekey.project() resolve failed for prekey_id={prekey_id}")
         return
 
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-
-    # Build input dict for pure projector
-    input_dict = {
-        "event_id": prekey_id,
-        "event_data": event_data,
-        "recorded_by": recorded_by,
-        "recorded_at": recorded_at,
-        "dependencies": {},
-    }
-
-    # Call pure projector
     result = gpk_projector.project(input_dict)
 
     if not result.valid:
@@ -125,6 +109,7 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
     apply_result(result, recorded_by, recorded_at, db)
 
     # Mark as valid for this peer
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (prekey_id, recorded_by)
