@@ -12,7 +12,7 @@ import crypto
 import store
 from events.group import group
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from db import create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +43,9 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Check: Does the peer event exist?
+    # Check: Does the peer_shared event exist?
     peer_event = safedb.query_one(
-        "SELECT peer_id FROM peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT peer_shared_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_target_id, peer_id)
     )
     if not peer_event:
@@ -145,9 +145,9 @@ def validate(event_id: str, recorded_by: str, db: Any) -> str | None:
         log.warning(f"peer_name_update.validate() missing peer_id field")
         return None
 
-    # Check: Does the peer event exist?
+    # Check: Does the peer_shared event exist?
     peer_event = safedb.query_one(
-        "SELECT peer_id FROM peers WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT peer_shared_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_target_id, recorded_by)
     )
 

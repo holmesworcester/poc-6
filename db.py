@@ -32,6 +32,7 @@ SUBJECTIVE_TABLES = {
     'transit_prekeys_shared',      # Transit prekeys shared (subjective)
     'users',
     'user_names',                  # Encrypted username updates (peer-scoped)
+    'peer_names',                  # Encrypted peer/device name updates (peer-scoped)
     'group_members',
     'admins',                      # Admin events for authorization chain (peer-scoped)
     'valid_events',

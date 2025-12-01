@@ -458,6 +458,41 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         # This shouldn't happen during bootstrap since we just created the key
         log.warning(f"new_network() key not available for username_update - unexpected during bootstrap")
 
+    # Create network_name_update if network_name provided
+    if network_name:
+        from events.identity import network_name_update
+        try:
+            network_name_update_id = network_name_update.create(
+                network_id=network_id,
+                name=network_name,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms + 82,
+                db=db
+            )
+            recorded_id = recorded.create(network_name_update_id, peer_id, t_ms + 83, db, return_dupes=True)
+            recorded.project_ids([recorded_id], db)
+            log.info(f"new_network() created network_name_update: {network_name_update_id[:20]}...")
+        except network_name_update.KeyNotAvailableError:
+            log.warning(f"new_network() key not available for network_name_update - unexpected during bootstrap")
+
+    # Create peer_name_update for the device name
+    from events.identity import peer_name_update
+    try:
+        peer_name_update_id = peer_name_update.create(
+            peer_target_id=peer_shared_id,
+            name=device_name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 84,
+            db=db
+        )
+        recorded_id = recorded.create(peer_name_update_id, peer_id, t_ms + 85, db, return_dupes=True)
+        recorded.project_ids([recorded_id], db)
+        log.info(f"new_network() created peer_name_update: {peer_name_update_id[:20]}...")
+    except peer_name_update.KeyNotAvailableError:
+        log.warning(f"new_network() key not available for peer_name_update - unexpected during bootstrap")
+
     # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence
     channel_id = channel.create(
@@ -833,6 +868,32 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
              'waiting_for_key', t_ms + 25, peer_id, t_ms + 25)
         )
         log.info(f"join() stored pending username for user {user_id[:20]}...")
+
+    # Try to create peer_name_update event for device name
+    from events.identity import peer_name_update
+    try:
+        peer_name_update_id = peer_name_update.create(
+            peer_target_id=peer_shared_id,
+            name=device_name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 26,
+            db=db
+        )
+        log.info(f"join() created peer_name_update: {peer_name_update_id[:20]}...")
+    except peer_name_update.KeyNotAvailableError:
+        # Key not available yet - store for later creation when group_key_shared arrives
+        log.info(f"join() key not available yet, storing device name intent in pending_name_updates")
+        import hashlib
+        pending_id = hashlib.sha256(f"{peer_shared_id}:peer_name:{t_ms + 26}".encode()).hexdigest()[:20]
+        safedb.execute(
+            """INSERT OR IGNORE INTO pending_name_updates
+               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pending_id, 'peer_name', peer_shared_id, device_name, peer_id, peer_shared_id,
+             'waiting_for_key', t_ms + 26, peer_id, t_ms + 26)
+        )
+        log.info(f"join() stored pending device name for peer {peer_shared_id[:20]}...")
 
     return {
         'peer_id': peer_id,
