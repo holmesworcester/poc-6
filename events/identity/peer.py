@@ -53,11 +53,17 @@ def create(t_ms: int, db: Any) -> str:
 
 
 def project(peer_id: str, recorded_by: str, db: Any) -> None:
-    """Project peer event into peers table (for local peers, both IDs are the same)."""
+    """Project peer event using pure projector.
+
+    Uses apply_result_device_wide since local_peers is device-wide.
+    """
+    from projectors import apply_result_device_wide
+    from projectors import peer as peer_projector
+    from db import create_safe_db
+
     log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
 
     unsafedb = create_unsafe_db(db)
-    from db import create_safe_db
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get blob from store
@@ -69,18 +75,24 @@ def project(peer_id: str, recorded_by: str, db: Any) -> None:
     # Parse JSON
     event_data = crypto.parse_json(blob)
 
-    # Insert into local_peers table (local-only, not shareable)
-    # Note: peer_id → peer_shared_id mapping is stored in peer_self table (subjective)
-    unsafedb.execute(
-        """INSERT OR IGNORE INTO local_peers (peer_id, public_key, private_key, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (
-            peer_id,
-            event_data['public_key'],
-            crypto.b64decode(event_data['private_key']),
-            event_data['created_at']
-        )
-    )
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": peer_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": event_data.get('created_at', 0),
+        "dependencies": {},
+    }
+
+    # Call pure projector
+    result = peer_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"peer.project() rejected: {result.reason}")
+        return
+
+    # Apply to device-wide table
+    apply_result_device_wide(result, event_data.get('created_at', 0), db)
 
     # Mark as valid for this peer
     safedb.execute(

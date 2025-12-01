@@ -50,12 +50,16 @@ def _load_projectors():
     from projectors import message, channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
     from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
     from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice, message_attachment
+    from projectors import peer as peer_projector
+    from projectors import transit_key as transit_key_projector
 
     _PROJECTORS["message"] = message
     _PROJECTORS["network_address"] = network_address
     _PROJECTORS["network_intro"] = network_intro
     _PROJECTORS["file_slice"] = file_slice
     _PROJECTORS["message_attachment"] = message_attachment
+    _PROJECTORS["peer"] = peer_projector
+    _PROJECTORS["transit_key"] = transit_key_projector
     _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
     _PROJECTORS["group_member"] = group_member

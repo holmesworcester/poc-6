@@ -75,7 +75,13 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
 
 
 def project(key_id: str, recorded_by: str, db: Any) -> None:
-    """Project transit key event into transit_keys table."""
+    """Project transit key event using pure projector.
+
+    Uses apply_result_device_wide since transit_keys is device-wide.
+    """
+    from projectors import apply_result_device_wide
+    from projectors import transit_key as tk_projector
+
     log.warning(f"[TRANSIT_KEY_PROJECT] key_id={key_id[:20]}... recorded_by={recorded_by[:10]}...")
 
     # Get blob from store
@@ -87,19 +93,25 @@ def project(key_id: str, recorded_by: str, db: Any) -> None:
     # Parse JSON
     event_data = crypto.parse_json(blob)
 
-    # Insert into transit_keys table (device-wide)
-    unsafedb = create_unsafe_db(db)
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": key_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": event_data.get('created_at', 0),
+        "dependencies": {},
+    }
+
+    # Call pure projector
+    result = tk_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"[TRANSIT_KEY_PROJECT] rejected: {result.reason}")
+        return
+
+    # Apply to device-wide table
     log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... owner={event_data['signed_by'][:10]}... into_transit_keys_table")
-    unsafedb.execute(
-        """INSERT OR IGNORE INTO transit_keys (key_id, key, owner_peer_id, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (
-            key_id,
-            crypto.b64decode(event_data['key']),
-            event_data['signed_by'],
-            event_data['created_at']
-        )
-    )
+    apply_result_device_wide(result, event_data.get('created_at', 0), db)
 
     log.info(f"transit_key.project() projected key_id={key_id} into transit_keys table")
 
