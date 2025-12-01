@@ -191,89 +191,75 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"username_update.project() blob not found")
         return None
 
-    # Parse event
+    # Unwrap event (decrypt)
     try:
-        event_data = crypto.parse_json(blob)
+        unwrapped, missing_keys = crypto.unwrap(blob, recorded_by, db)
+        if not unwrapped:
+            if missing_keys:
+                # Key not available yet - store in pending table
+                log.info(f"username_update.project() key not available yet (missing: {missing_keys})")
+                import hashlib
+                pending_id = hashlib.sha256(f"{event_id}:{recorded_by}".encode()).hexdigest()[:20]
+                key_id = missing_keys[0] if missing_keys else None
+
+                safedb.execute(
+                    """INSERT OR IGNORE INTO pending_name_decrypts
+                       (id, type, entity_id, event_id, encrypted_blob, key_id, status, created_at, recorded_by, recorded_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pending_id, 'username', None, event_id, blob, key_id,
+                     'waiting_for_key', recorded_at, recorded_by, recorded_at)
+                )
+                return None
+            log.warning(f"username_update.project() unwrap failed")
+            return None
+        event_data = crypto.parse_json(unwrapped)
     except Exception as e:
-        log.warning(f"username_update.project() failed to parse event: {e}")
+        log.warning(f"username_update.project() failed to unwrap/parse event: {e}")
         return None
 
-    # Extract fields
+    # Extract fields - name is already plaintext after unwrap
     user_id = event_data.get('user_id')
-    encrypted_name = event_data.get('name')
+    name = event_data.get('name')
     key_id = event_data.get('key_id')
     global_count = event_data.get('global_count', 0)
 
-    if not user_id or not encrypted_name:
+    if not user_id or not name:
         log.warning(f"username_update.project() missing required fields")
         return None
 
-    # Try to decrypt the name
-    try:
-        decrypted_name = crypto.decrypt_to_local(encrypted_name, db)
+    # Store the decrypted name with LWW logic
+    log.info(f"username_update.project() storing username for {user_id[:20]}...: {name}")
 
-        if decrypted_name is not None:
-            # We have the key, store decrypted name with LWW logic
-            log.info(f"username_update.project() decrypted username for {user_id[:20]}...: {decrypted_name}")
+    # Check if entry already exists
+    existing = safedb.query_one(
+        "SELECT global_count FROM user_names WHERE user_id = ? AND recorded_by = ?",
+        (user_id, recorded_by)
+    )
 
-            # Check if entry already exists
-            existing = safedb.query_one(
-                "SELECT global_count FROM user_names WHERE user_id = ? AND recorded_by = ?",
-                (user_id, recorded_by)
-            )
-
-            if existing is None:
-                # No existing entry - insert new
-                safedb.execute(
-                    """INSERT INTO user_names
-                       (user_id, name, event_id, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (user_id, decrypted_name, event_id, global_count, key_id,
-                     event_data.get('created_at'), event_data.get('signed_by'),
-                     recorded_by, recorded_at)
-                )
-            elif existing['global_count'] < global_count:
-                # Existing entry has lower count - update with LWW
-                safedb.execute(
-                    """UPDATE user_names
-                       SET name = ?, event_id = ?, global_count = ?, key_id = ?,
-                           created_at = ?, signed_by = ?, recorded_at = ?
-                       WHERE user_id = ? AND recorded_by = ?""",
-                    (decrypted_name, event_id, global_count, key_id,
-                     event_data.get('created_at'), event_data.get('signed_by'),
-                     recorded_at, user_id, recorded_by)
-                )
-            # else: existing has higher or equal count - skip (LWW)
-
-            log.info(f"username_update.project() stored decrypted username")
-        else:
-            # Key not available yet - store encrypted blob in pending table
-            log.info(f"username_update.project() key not available yet, storing in pending table")
-            import hashlib
-            pending_id = hashlib.sha256(f"{event_id}:{recorded_by}".encode()).hexdigest()[:20]
-
-            safedb.execute(
-                """INSERT OR IGNORE INTO pending_name_decrypts
-                   (id, type, entity_id, event_id, encrypted_blob, key_id, status, created_at, recorded_by, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (pending_id, 'username', user_id, event_id, encrypted_name, key_id,
-                 'waiting_for_key', event_data.get('created_at'), recorded_by, recorded_at)
-            )
-            log.info(f"username_update.project() stored in pending_name_decrypts")
-
-    except Exception as e:
-        log.warning(f"username_update.project() decryption error: {e}")
-        # Even if decryption fails, store the encrypted blob
-        import hashlib
-        pending_id = hashlib.sha256(f"{event_id}:{recorded_by}".encode()).hexdigest()[:20]
-
+    if existing is None:
+        # No existing entry - insert new
         safedb.execute(
-            """INSERT OR IGNORE INTO pending_name_decrypts
-               (id, type, entity_id, event_id, encrypted_blob, key_id, status, created_at, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pending_id, 'username', user_id, event_id, encrypted_name, key_id,
-             'waiting_for_key', event_data.get('created_at'), recorded_by, recorded_at)
+            """INSERT INTO user_names
+               (user_id, name, event_id, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, name, event_id, global_count, key_id,
+             event_data.get('created_at'), event_data.get('signed_by'),
+             recorded_by, recorded_at)
         )
+    elif existing['global_count'] < global_count:
+        # Existing entry has lower count - update with LWW
+        safedb.execute(
+            """UPDATE user_names
+               SET name = ?, event_id = ?, global_count = ?, key_id = ?,
+                   created_at = ?, signed_by = ?, recorded_at = ?
+               WHERE user_id = ? AND recorded_by = ?""",
+            (name, event_id, global_count, key_id,
+             event_data.get('created_at'), event_data.get('signed_by'),
+             recorded_at, user_id, recorded_by)
+        )
+    # else: existing has higher or equal count - skip (LWW)
+
+    log.info(f"username_update.project() stored username")
 
     # Mark event as valid
     safedb.execute(
