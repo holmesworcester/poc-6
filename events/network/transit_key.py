@@ -1,5 +1,16 @@
-"""Transit key event type (device-wide symmetric keys for sync routing)."""
-from typing import Any
+"""Transit key event type (device-wide symmetric keys for sync routing).
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(peer_id, t_ms, db) -> str
+    create_with_material(key_material, peer_id, t_ms, db) -> str
+    project_event(key_id, recorded_by, db) -> None
+    get_key(key_id, recorded_by, db) -> dict
+    get_peer_ids_for_key(key_id, db) -> list[str]
+"""
+from typing import Any, TypedDict
 import json
 import logging
 import crypto
@@ -10,6 +21,93 @@ log = logging.getLogger(__name__)
 
 ID_SIZE = 16  # bytes (128 bits) - BLAKE2b hash size
 
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class TransitKeyEventData(TypedDict):
+    type: str
+    key: str  # base64 symmetric key
+    signed_by: str  # owner peer_id
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result.
+
+    Outputs transit_keys row. Use apply_result_device_wide() to write.
+    """
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]  # key_id
+    event_data = input_dict["event_data"]
+
+    key_b64 = event_data.get("key")
+    signed_by = event_data.get("signed_by")  # owner peer_id
+    created_at = event_data.get("created_at")
+
+    if not all([key_b64, signed_by, created_at is not None]):
+        return ProjectorResult(valid=False, reason="missing required fields")
+
+    # Decode key (stored as bytes in DB)
+    key = crypto.b64decode(key_b64)
+
+    # Output: transit_keys row (device-wide table)
+    row = {
+        "key_id": event_id,
+        "key": key,
+        "owner_peer_id": signed_by,
+        "created_at": created_at,
+    }
+
+    return ProjectorResult(
+        valid=True,
+        tables={"transit_keys": [row]},
+    )
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    key: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",  # 32 bytes base64
+    signed_by: str = "peer_123",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "transit_key",
+        "key": key,
+        "signed_by": signed_by,
+        "created_at": created_at,
+    }
+
+
+def make_input(
+    event_id: str = "key_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_123",
+    recorded_at: int = 1000001,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 def create(peer_id: str, t_ms: int, db: Any) -> str:
     """Create an ephemeral transit key for sync responses (not stored in event log).
@@ -79,8 +177,7 @@ def project_event(key_id: str, recorded_by: str, db: Any) -> None:
 
     Uses apply_result_device_wide since transit_keys is device-wide.
     """
-    from projectors import resolve, apply_result_device_wide
-    from projectors import transit_key as tk_projector
+    from projection import resolve, apply_result_device_wide
 
     log.warning(f"[TRANSIT_KEY_PROJECT] key_id={key_id[:20]}... recorded_by={recorded_by[:10]}...")
 
@@ -89,7 +186,7 @@ def project_event(key_id: str, recorded_by: str, db: Any) -> None:
         log.warning(f"[TRANSIT_KEY_PROJECT] result=resolve_failed key_id={key_id[:20]}...")
         return
 
-    result = tk_projector.project(input_dict)
+    result = project(input_dict)
 
     if not result.valid:
         log.warning(f"[TRANSIT_KEY_PROJECT] rejected: {result.reason}")
@@ -99,7 +196,7 @@ def project_event(key_id: str, recorded_by: str, db: Any) -> None:
     log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... into_transit_keys_table")
     apply_result_device_wide(result, input_dict["recorded_at"], db)
 
-    log.info(f"transit_key.project() projected key_id={key_id} into transit_keys table")
+    log.info(f"transit_key.project_event() projected key_id={key_id} into transit_keys table")
 
 
 def extract_id(blob: bytes) -> bytes:
