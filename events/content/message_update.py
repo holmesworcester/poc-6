@@ -9,7 +9,7 @@ import crypto
 import store
 from events.group import group as group_module
 from events.identity import peer
-from events._shared import updates
+import global_counter
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ def create(
         raise ValueError("Message content cannot be empty")
 
     # Get global count from framework (Lamport clock)
-    global_count = updates.get_next_global_count(peer_id, db)
+    global_count = global_counter.get_next_global_count(peer_id, db)
 
     # Build update event
     event_data = {
@@ -229,7 +229,7 @@ def get(message_id: str, recorded_by: str, db: Any) -> dict | None:
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Use get_winners() from framework (update_id is the primary key, not event_id)
-    result = updates.get_winners(
+    result = global_counter.get_winners(
         'message_updates',
         'message_id',
         {'message_id': [message_id], 'recorded_by': recorded_by},

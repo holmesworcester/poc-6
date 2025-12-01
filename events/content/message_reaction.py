@@ -8,7 +8,7 @@ from typing import Any
 import logging
 import crypto
 import store
-from events._shared import updates
+import global_counter
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     reactor_user_id = peer_self_row['user_id']
 
     # Get global count from framework (Lamport clock)
-    global_count = updates.get_next_global_count(peer_id, db)
+    global_count = global_counter.get_next_global_count(peer_id, db)
 
     # Create reaction event with global_count for deterministic ordering
     event_data = {
