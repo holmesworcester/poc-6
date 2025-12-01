@@ -1072,6 +1072,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "show":
             display_state(session)
 
+        elif cmd == "show-ui":
+            display_state(session)
+
         elif cmd == "list-accounts":
             cmd_list_accounts(session)
 
@@ -1165,6 +1168,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  remove-reaction <message_num> <emoji>")
             print("  time")
             print("  show")
+            print("  show-ui")
             print("  quit")
 
         else:
