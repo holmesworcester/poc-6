@@ -508,7 +508,12 @@ def cmd_select_channel(session: CLISession, channel_num: int):
 
 
 def cmd_create_channel(session: CLISession, name: str):
-    """Create a new channel."""
+    """Create a new channel.
+
+    Note: Duplicate channel names are allowed by design. Channels are identified
+    by their unique IDs, not names. The CLI uses numbered selection (select-channel 1)
+    rather than name-based selection to handle this correctly.
+    """
     account = session.get_selected_account()
 
     if not account.network_id:
