@@ -45,6 +45,7 @@ def create(
     )
 
     # Create event blob (plaintext JSON)
+    # TODO: This event should be signed even if not encrypted
     event_data = {
         'type': 'network_intro',
         'initiator_peer_id': initiator_peer_id,

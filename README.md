@@ -81,6 +81,7 @@ docs/
 2. **API-only access**: CLI uses only event module functions, never raw SQL
 3. **Deterministic testing**: All timestamps are explicit parameters
 4. **Single source of truth**: Events are canonical; projections are derived
+5. **Signed events**: All shared events should be signed, except for file_slice
 
 ## Status
 
