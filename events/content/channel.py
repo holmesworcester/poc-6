@@ -1,4 +1,11 @@
 """Channel event type (shareable, encrypted)."""
+
+# Registry metadata
+EVENT_TYPE = 'channel'
+SHAREABLE = True  # Channels sync to all members
+EPHEMERAL = False
+PROJECTION_TABLE = ('channels', 'channel_id')
+
 from typing import Any
 import json
 import logging
@@ -275,7 +282,7 @@ def _get_admin_user_ids(recorded_by: str, db: Any) -> list[str]:
     return [row['user_id'] for row in admin_rows]
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project channel event into channels table and shareable_events table."""
     log.warning(f"[CHANNEL_PROJECT_START] channel.project() CALLED for channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}... recorded_at={recorded_at}")
 
@@ -313,7 +320,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"channel.project() signature verification FAILED for channel_id={event_id}")
-        return  # Reject unsigned or invalid signature
+        return None  # Reject unsigned or invalid signature
 
     # Verify admin authorization via admin_grant chain
     # Channels require admin_grant unless they're bootstrap channels (no admin_grant field)
@@ -327,7 +334,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         )
         if not peer_row or not peer_row['user_id']:
             log.warning(f"channel.project() signer user not found for {signed_by[:20]}...")
-            return  # Dependency not ready
+            return None  # Dependency not ready
 
         signer_user_id = peer_row['user_id']
 
@@ -338,10 +345,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         )
         if not grant_row:
             log.warning(f"channel.project() admin_grant {admin_grant[:20]}... not found - dependency not ready")
-            return  # Dependency not ready
+            return None  # Dependency not ready
         if grant_row['user_id'] != signer_user_id:
             log.warning(f"channel.project() admin_grant {admin_grant[:20]}... does not authorize signer {signer_user_id[:20]}...")
-            return  # Invalid authorization
+            return None  # Invalid authorization
 
         log.info(f"channel.project() admin authorization verified for channel {event_id[:20]}...")
 
@@ -384,6 +391,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         log.warning(f"[CHANNEL_INSERT_FAILED] ✗ Row NOT found after insert! channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}...")
         # This is a major bug - the insert failed silently
         assert False, f"[CHANNEL_ASSERT] Insert failed for channel {event_id[:20]}... recorded_by={recorded_by[:20]}..."
+
+    return event_id
 
 
 def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:

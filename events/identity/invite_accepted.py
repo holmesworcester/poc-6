@@ -1,4 +1,11 @@
 """Invite accepted event type (local-only, captures invite acceptance)."""
+
+# Registry metadata
+EVENT_TYPE = 'invite_accepted'
+SHAREABLE = False  # Local-only - captures out-of-band invite data
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging

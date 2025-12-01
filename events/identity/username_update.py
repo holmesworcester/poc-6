@@ -1,4 +1,11 @@
 """Username update event type (encrypted name update for users)."""
+
+# Registry metadata
+EVENT_TYPE = 'username_update'
+SHAREABLE = True  # Username updates sync across network
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

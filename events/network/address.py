@@ -8,6 +8,13 @@ Usage:
   - Alice creates address event announcing this observation
   - Charlie receives Alice's observation and learns Bob's endpoint
 """
+
+# Registry metadata
+EVENT_TYPE = 'network_address'
+SHAREABLE = True  # Address observations sync for peer discovery
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any, Optional
 import json
 import logging

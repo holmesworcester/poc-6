@@ -4,6 +4,13 @@ Slices are NOT group-wrapped (access control via file descriptor event).
 Slices are NOT signed (root_hash detects tampering).
 Slices ARE transit-wrapped during sync (for routing).
 """
+
+# Registry metadata
+EVENT_TYPE = 'file_slice'
+SHAREABLE = True  # File slices sync to message recipients
+EPHEMERAL = False
+PROJECTION_TABLE = None  # No created_at lookup needed
+
 from typing import Any
 import logging
 import crypto

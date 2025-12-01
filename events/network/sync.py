@@ -1,4 +1,11 @@
 """Sync implementation with bloom-based window protocol."""
+
+# Registry metadata
+EVENT_TYPE = 'sync'
+SHAREABLE = True  # Sync events exchange between peers
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any, Iterator
 from events.network import recorded, transit_key, transit_prekey, sync_window
 from events.identity import peer

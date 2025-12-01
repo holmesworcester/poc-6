@@ -255,7 +255,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... invite_id={invite_id[:10] if invite_id else 'None'}...")
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project sync_connect event: validate and store connection info.
 
     Validates both peer signature and optional invite signature,
@@ -276,7 +276,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     blob = store.get(event_id, unsafedb)
     if not blob:
         log.warning(f"sync_connect.project: blob not found")
-        return
+        return None
 
     event_data = crypto.parse_json(blob)
 
@@ -294,7 +294,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         )
         if removed_check:
             log.info(f"sync_connect.project(): rejecting connection from removed peer {peer_shared_id[:20]}...")
-            return
+            return None
 
     invite_id = event_data.get('invite_id')
     invite_signature_b64 = event_data.get('invite_signature')
@@ -319,10 +319,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
                     invite_authenticated = True
                 else:
                     log.warning(f"sync_connect.project: invite signature verification failed")
-                    return
+                    return None
             except Exception as e:
                 log.warning(f"sync_connect.project: invite signature check failed: {e}")
-                return
+                return None
 
     # If no invite auth, fall back to peer signature verification
     if not invite_authenticated:
@@ -331,7 +331,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
             log.debug(f"sync_connect.project: ✓ peer signature verified")
         except Exception as e:
             log.warning(f"sync_connect.project: peer signature verification failed: {e}")
-            return
+            return None
 
     # Extract connection info (peer_shared_id already extracted above for removal check)
     response_transit_key_id = event_data.get('response_transit_key_id')
@@ -342,7 +342,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
 
     if not all([peer_shared_id, response_transit_key_id, response_transit_key]):
         log.warning(f"sync_connect.project: missing required fields")
-        return
+        return None
 
     # Upsert into sync_connections table (device-wide, no recorded_by)
     unsafedb.execute("""
@@ -361,13 +361,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         300000  # 5 minutes default TTL
     ))
 
-    # Mark as valid
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (event_id, recorded_by)
-    )
-
     log.warning(f"[SYNC_CONNECT_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... invite_auth={invite_authenticated} STORING_IN_SYNC_CONNECTIONS")
+
+    return event_id
 
 
 def purge_expired(t_ms: int, db: Any) -> None:

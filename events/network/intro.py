@@ -10,6 +10,13 @@ Usage:
   - Bob and Charlie trigger hole punch: both send packets to each other
   - NAT mappings are established, allowing direct communication
 """
+
+# Registry metadata
+EVENT_TYPE = 'network_intro'
+SHAREABLE = True  # Intros sync for NAT traversal
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any, Optional, List
 import json
 import logging

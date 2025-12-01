@@ -1,4 +1,11 @@
 """Peer removed event type - marks a peer as removed from syncing."""
+
+# Registry metadata
+EVENT_TYPE = 'peer_removed'
+SHAREABLE = True  # Peer removal syncs to stop syncing with removed peer
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto
@@ -64,16 +71,14 @@ def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Store as signed plaintext (no inner encryption)
+    # store.event() creates recorded wrapper and triggers projection
     blob = crypto.canonicalize_json(signed_event)
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
-
-    # Project to database state
-    project(event_id, signed_event, recorded_by=removed_by_local_peer_id, db=db)
 
     return event_id
 
 
-def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project peer_removed event to state.
 
     Mark peer as removed so their sync requests are ignored.
@@ -83,10 +88,21 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
 
     Args:
         event_id: Event ID
-        event_data: Event data dictionary
         recorded_by: Peer perspective for key rotation (if this is the last peer)
+        recorded_at: When the event was recorded
         db: Database connection
+
+    Returns:
+        event_id if successful, None otherwise
     """
+    # Fetch and parse event data from store
+    blob = store.get(event_id, db)
+    if not blob:
+        log.warning(f"peer_removed.project() blob not found for {event_id[:20]}...")
+        return None
+
+    event_data = crypto.parse_json(blob)
+
     unsafe_db = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -95,7 +111,7 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
     removed_by = event_data.get('removed_by')
 
     if not removed_peer_shared_id:
-        return
+        return None
 
     # Insert into removed_peers table (device-wide, no recorded_by)
     unsafe_db.execute(
@@ -127,6 +143,8 @@ def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
         removed_user_id = peer_row['user_id']
         log.info(f"peer_removed.project() removed_peer {removed_peer_shared_id[:20]}... belongs to user {removed_user_id[:20]}..., rotating group keys")
         _rotate_keys_for_removed_peer_user(removed_user_id, recorded_by, removed_at, db)
+
+    return event_id
 
 
 def _rotate_keys_for_removed_peer_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:

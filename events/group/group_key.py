@@ -1,4 +1,11 @@
 """Group key event type (subjective symmetric keys for network/group content encryption)."""
+
+# Registry metadata
+EVENT_TYPE = 'group_key'
+SHAREABLE = False  # Local-only - contains symmetric key material
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging

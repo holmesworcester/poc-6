@@ -1,4 +1,11 @@
 """Peer shared event type (shareable public identity)."""
+
+# Registry metadata
+EVENT_TYPE = 'peer_shared'
+SHAREABLE = True  # Public identity syncs across network
+EPHEMERAL = False
+PROJECTION_TABLE = ('peers_shared', 'peer_shared_id')
+
 from typing import Any
 import json
 import logging

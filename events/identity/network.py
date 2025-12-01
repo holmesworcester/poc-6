@@ -1,4 +1,11 @@
 """Network event type - self-signed root of trust for a network."""
+
+# Registry metadata
+EVENT_TYPE = 'network'
+SHAREABLE = True  # Network root of trust syncs to all peers
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

@@ -1,4 +1,11 @@
 """Group event type (shareable, encrypted)."""
+
+# Registry metadata
+EVENT_TYPE = 'group'
+SHAREABLE = True  # Groups sync for access control
+EPHEMERAL = False
+PROJECTION_TABLE = ('groups', 'group_id')
+
 from typing import Any
 import json
 import logging

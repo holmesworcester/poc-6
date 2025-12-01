@@ -1,4 +1,11 @@
 """Bootstrap complete event type - marks when a joiner receives first sync request from network."""
+
+# Registry metadata
+EVENT_TYPE = 'bootstrap_complete'
+SHAREABLE = True  # Syncs to confirm bootstrap state
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

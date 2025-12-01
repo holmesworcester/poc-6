@@ -1,4 +1,11 @@
 """Group prekey event type (subjective prekey for sealing group keys to members)."""
+
+# Registry metadata
+EVENT_TYPE = 'group_prekey'
+SHAREABLE = False  # Local-only - contains private key material
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging

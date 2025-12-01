@@ -1,4 +1,11 @@
 """Peer name update event type (encrypted name update for device names)."""
+
+# Registry metadata
+EVENT_TYPE = 'peer_name_update'
+SHAREABLE = True  # Device name updates sync across network
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

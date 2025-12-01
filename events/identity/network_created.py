@@ -1,4 +1,11 @@
 """Network created event type - marks peer as network creator (self-bootstrapped)."""
+
+# Registry metadata
+EVENT_TYPE = 'network_created'
+SHAREABLE = True  # Syncs for backward compatibility
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto

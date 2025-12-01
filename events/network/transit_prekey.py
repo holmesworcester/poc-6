@@ -1,4 +1,11 @@
 """Transit prekey event type (device-wide prekey keypair for receiving sync requests)."""
+
+# Registry metadata
+EVENT_TYPE = 'transit_prekey'
+SHAREABLE = False  # Local-only - contains private key material
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import json
 import logging

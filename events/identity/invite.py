@@ -1,4 +1,11 @@
 """Invite event type (shareable, encrypted)."""
+
+# Registry metadata
+EVENT_TYPE = 'invite'
+SHAREABLE = True  # Invites sync to enable network membership
+EPHEMERAL = False
+PROJECTION_TABLE = ('invites', 'invite_id')
+
 from typing import Any
 import secrets
 import json

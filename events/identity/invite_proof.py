@@ -6,6 +6,13 @@ making invite validation consistent across all join/link scenarios.
 
 Replaces the embedded invite_signature fields in user and link events.
 """
+
+# Registry metadata
+EVENT_TYPE = 'invite_proof'
+SHAREABLE = True  # Proofs sync to verify invite acceptance
+EPHEMERAL = False
+PROJECTION_TABLE = None
+
 from typing import Any
 import logging
 import crypto
