@@ -49,11 +49,12 @@ def _load_projectors():
     # Pure functional projectors (have SPEC + project(input_dict))
     from projectors import message, channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
     from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
-    from projectors import group_key_shared, message_deletion, network_address, network_intro
+    from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice
 
     _PROJECTORS["message"] = message
     _PROJECTORS["network_address"] = network_address
     _PROJECTORS["network_intro"] = network_intro
+    _PROJECTORS["file_slice"] = file_slice
     _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
     _PROJECTORS["group_member"] = group_member
@@ -689,6 +690,36 @@ def apply_result(result: ProjectorResult, recorded_by: str, recorded_at: int, db
             (event_id, recorded_by, recorded_at)
         )
         log.info(f"apply_result(): marked event {event_id[:20]}... as deleted")
+
+    return True
+
+
+def apply_result_device_wide(result: ProjectorResult, recorded_at: int, db: Any) -> bool:
+    """Apply a projector result to DEVICE-WIDE tables.
+
+    Use this for tables that are shared across all peers on this device
+    (e.g., sync_connections). These tables don't have recorded_by scoping.
+
+    IMPORTANT: Only use for tables that are intentionally device-wide.
+    Most projections should use apply_result() for subjective tables.
+    """
+    if result.blocked or not result.valid:
+        return False
+
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+
+    # Apply table writes (no recorded_by scoping)
+    for table_name, rows in result.tables.items():
+        for row in rows:
+            columns = list(row.keys())
+            placeholders = ', '.join(['?' for _ in columns])
+            column_list = ', '.join(columns)
+            values = [row[c] for c in columns]
+
+            # Use INSERT OR REPLACE for device-wide tables (upsert semantics)
+            sql = f"INSERT OR REPLACE INTO {table_name} ({column_list}) VALUES ({placeholders})"
+            unsafedb.execute(sql, tuple(values))
 
     return True
 

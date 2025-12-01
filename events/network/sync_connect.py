@@ -256,10 +256,10 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project sync_connect event: validate and store connection info.
+    """Project sync_connect event using pure projector.
 
-    Validates both peer signature and optional invite signature,
-    then stores connection in sync_connections table.
+    Wrapper fetches dependencies, pure projector does signature verification.
+    Uses apply_result_device_wide for sync_connections (device-wide table).
 
     Args:
         event_id: The sync_connect event ID
@@ -267,6 +267,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
         recorded_at: When received
         db: Database connection
     """
+    from projectors import apply_result_device_wide
+    from projectors import sync_connect as sc_projector
+
     log.debug(f"sync_connect.project: event_id={event_id[:20]}... recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
@@ -280,11 +283,6 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
 
     event_data = crypto.parse_json(blob)
 
-    # Authentication strategy:
-    # 1. If invite_signature present: verify invite signature (proves link ownership)
-    # 2. Otherwise: verify peer signature (requires peer_shared to be valid)
-    # This allows linkers to connect before their peer_shared is synced to inviter
-
     # ENFORCEMENT: Reject connections from removed peers
     peer_shared_id = event_data.get('signed_by')
     if peer_shared_id:
@@ -296,78 +294,55 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
             log.info(f"sync_connect.project(): rejecting connection from removed peer {peer_shared_id[:20]}...")
             return
 
+    # Fetch dependencies for pure projector
     invite_id = event_data.get('invite_id')
-    invite_signature_b64 = event_data.get('invite_signature')
-    invite_authenticated = False
 
-    # Try invite signature first (for linkers connecting to inviter)
-    if invite_id and invite_signature_b64:
-        # Get invite public key
+    # Dependency: invite_event (optional, for invite signature verification)
+    invite_event = None
+    if invite_id:
         invite_blob = store.get(invite_id, unsafedb)
         if invite_blob:
-            try:
-                invite_event = crypto.parse_json(invite_blob)
-                invite_public_key = crypto.b64decode(invite_event.get('invite_pubkey', ''))
+            invite_event = crypto.parse_json(invite_blob)
 
-                # Verify signature over the signed_connect structure (without invite_signature field)
-                connect_without_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
-                sig_data = json.dumps(connect_without_sig, sort_keys=True).encode()
-                invite_signature = crypto.b64decode(invite_signature_b64)
+    # Dependency: peer_shared_public_key (for peer signature verification)
+    peer_shared_public_key = None
+    if peer_shared_id:
+        peer_row = safedb.query_one(
+            "SELECT public_key FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (peer_shared_id, recorded_by)
+        )
+        if peer_row:
+            peer_shared_public_key = peer_row['public_key']
 
-                if crypto.verify(sig_data, invite_signature, invite_public_key):
-                    log.info(f"sync_connect.project: ✓ invite signature verified for {invite_id[:20]}...")
-                    invite_authenticated = True
-                else:
-                    log.warning(f"sync_connect.project: invite signature verification failed")
-                    return
-            except Exception as e:
-                log.warning(f"sync_connect.project: invite signature check failed: {e}")
-                return
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": event_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {
+            "peer_shared_public_key": peer_shared_public_key,
+            "invite_event": invite_event,
+        },
+    }
 
-    # If no invite auth, fall back to peer signature verification
-    if not invite_authenticated:
-        try:
-            crypto.verify_signed_by_peer_shared(event_data, recorded_by, db)
-            log.debug(f"sync_connect.project: ✓ peer signature verified")
-        except Exception as e:
-            log.warning(f"sync_connect.project: peer signature verification failed: {e}")
-            return
+    # Call pure projector (does signature verification)
+    result = sc_projector.project(input_dict)
 
-    # Extract connection info (peer_shared_id already extracted above for removal check)
-    response_transit_key_id = event_data.get('response_transit_key_id')
-    response_transit_key = crypto.b64decode(event_data.get('response_transit_key', ''))
-    address = event_data.get('address')
-    port = event_data.get('port')
-    invite_id = event_data.get('invite_id')
-
-    if not all([peer_shared_id, response_transit_key_id, response_transit_key]):
-        log.warning(f"sync_connect.project: missing required fields")
+    if not result.valid:
+        log.warning(f"sync_connect.project: rejected: {result.reason}")
         return
 
-    # Upsert into sync_connections table (device-wide, no recorded_by)
-    unsafedb.execute("""
-        INSERT OR REPLACE INTO sync_connections
-        (peer_shared_id, response_transit_key_id, response_transit_key,
-         address, port, invite_id, last_seen_ms, ttl_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        peer_shared_id,
-        response_transit_key_id,
-        response_transit_key,
-        address,
-        port,
-        invite_id,
-        recorded_at,
-        300000  # 5 minutes default TTL
-    ))
+    # Apply to device-wide table
+    apply_result_device_wide(result, recorded_at, db)
 
-    # Mark as valid
+    # Mark as valid (subjective)
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (event_id, recorded_by)
     )
 
-    log.warning(f"[SYNC_CONNECT_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... invite_auth={invite_authenticated} STORING_IN_SYNC_CONNECTIONS")
+    log.warning(f"[SYNC_CONNECT_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... STORING_IN_SYNC_CONNECTIONS")
 
 
 def purge_expired(t_ms: int, db: Any) -> None:

@@ -66,7 +66,10 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
 
 def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
             recorded_at: int, db: Any) -> None:
-    """Project file_slice event into file_slices table.
+    """Project file_slice event using pure projector.
+
+    Note: file_slice receives event_data directly from dispatch (already parsed),
+    unlike most projectors that use resolve() to unwrap.
 
     Args:
         event_id: Event ID
@@ -75,41 +78,32 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
         recorded_at: Timestamp when recorded
         db: Database connection
     """
+    from projectors import apply_result
+    from projectors import file_slice as fs_projector
+
     log.debug(f"file_slice.project() event_id={event_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
-    file_id = event_data.get('file_id')
-    slice_number = event_data.get('slice_number')
-    nonce_b64 = event_data.get('nonce')
-    ciphertext_b64 = event_data.get('ciphertext')
-    poly_tag_b64 = event_data.get('poly_tag')
+    # Build input dict directly (event_data already parsed by caller)
+    input_dict = {
+        "event_id": event_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
 
-    if not all([file_id, slice_number is not None, nonce_b64, ciphertext_b64, poly_tag_b64]):
-        log.warning(f"file_slice.project() missing fields in event_data: {list(event_data.keys())}")
+    # Call pure projector
+    result = fs_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"file_slice.project() rejected: {result.reason}")
         return
 
-    # Decode from base64
-    nonce = crypto.b64decode(nonce_b64)
-    ciphertext = crypto.b64decode(ciphertext_b64)
-    poly_tag = crypto.b64decode(poly_tag_b64)
+    # Apply result: insert into tables
+    apply_result(result, recorded_by, recorded_at, db)
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Insert or ignore (now includes event_id for sync_file)
-    safedb.execute(
-        """INSERT OR IGNORE INTO file_slices
-           (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
-    )
-
-    # Record dependency: slice depends on file (for cascading deletion)
-    safedb.execute(
-        """INSERT OR IGNORE INTO event_dependencies
-           (child_event_id, parent_event_id, recorded_by, dependency_type)
-           VALUES (?, ?, ?, ?)""",
-        (event_id, file_id, recorded_by, 'file')
-    )
-
+    file_id = event_data.get('file_id', '')
+    slice_number = event_data.get('slice_number', 0)
     log.debug(f"file_slice.project() projected slice {file_id[:20]}.../{slice_number}")
 
 
