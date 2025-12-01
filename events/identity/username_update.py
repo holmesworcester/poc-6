@@ -5,6 +5,7 @@ import crypto
 import store
 from events.group import group
 from events.identity import peer
+from events._shared import updates
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ def create(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int
     if not key_id:
         raise KeyNotAvailableError("Key ID not found in group key data")
 
+    # Get next global count from framework (Lamport clock)
+    global_count = updates.get_next_global_count(peer_id, db)
+
     # Build username_update event
     # Note: We don't store user_id as field name since design doc uses descriptive field names
     event_data = {
@@ -80,7 +84,7 @@ def create(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int
         'user_id': user_id,  # Identifies which user this name is for
         'name': name,  # Will be encrypted
         'key_id': key_id,  # Track which key was used
-        'global_count': 0,  # For LWW (last-writer-wins)
+        'global_count': global_count,  # From framework counter (Lamport clock)
         'signed_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -161,8 +165,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     1. Get the event blob and decrypt it
     2. Extract user_id and name
     3. Try to decrypt the name
-    4. If decryption succeeds: store in user_names table
+    4. If decryption succeeds: store in user_names table (with convergence)
     5. If decryption fails (key missing): store encrypted blob in pending_name_decrypts table
+
+    Convergence rule: Highest global_count wins. If equal, highest event_id wins (deterministic tiebreaker).
 
     Args:
         event_id: The username_update event ID
@@ -205,18 +211,20 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         decrypted_name = crypto.decrypt_to_local(encrypted_name, db)
 
         if decrypted_name is not None:
-            # We have the key, store decrypted name
+            # We have the key, store the update record (unconditionally)
             log.info(f"username_update.project() decrypted username for {user_id[:20]}...: {decrypted_name}")
+
+            # Insert the update into the table - INSERT OR IGNORE ensures idempotency
             safedb.execute(
-                """INSERT OR REPLACE INTO user_names
-                   (user_id, name, event_id, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   WHERE global_count < ? OR user_id NOT IN (SELECT user_id FROM user_names)""",
-                (user_id, decrypted_name, event_id, global_count, key_id,
+                """INSERT OR IGNORE INTO user_names
+                   (user_id, event_id, name, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, event_id, decrypted_name, global_count, key_id,
                  event_data.get('created_at'), event_data.get('signed_by'),
-                 recorded_by, recorded_at, global_count)
+                 recorded_by, recorded_at)
             )
-            log.info(f"username_update.project() stored decrypted username")
+
+            log.debug(f"username_update.project() stored update for {user_id[:20]}... with gc={global_count}")
         else:
             # Key not available yet - store encrypted blob in pending table
             log.info(f"username_update.project() key not available yet, storing in pending table")

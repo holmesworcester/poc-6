@@ -338,13 +338,23 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Query group_members table with user names joined
-    # Prefer encrypted username from user_names table if available, else fall back to plaintext from users table
+    # Use window function to get the winning username (highest global_count, then highest event_id)
+    # Fall back to plaintext from users table if no encrypted username available
     return safedb.query(
-        """SELECT gm.user_id, COALESCE(un.name, u.name) as name, gm.added_by, gm.created_at
+        """WITH winning_names AS (
+             SELECT user_id, name,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY user_id
+                        ORDER BY global_count DESC, event_id DESC
+                    ) as rn
+             FROM user_names
+             WHERE recorded_by = ?
+           )
+           SELECT gm.user_id, COALESCE(wn.name, u.name) as name, gm.added_by, gm.created_at
            FROM group_members gm
            JOIN users u ON gm.user_id = u.user_id AND gm.recorded_by = u.recorded_by
-           LEFT JOIN user_names un ON gm.user_id = un.user_id AND gm.recorded_by = un.recorded_by
+           LEFT JOIN winning_names wn ON gm.user_id = wn.user_id AND wn.rn = 1
            WHERE gm.group_id = ? AND gm.recorded_by = ?
            ORDER BY gm.created_at ASC""",
-        (group_id, recorded_by)
+        (recorded_by, group_id, recorded_by)
     )

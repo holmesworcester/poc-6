@@ -108,7 +108,9 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer, including attachments and author names.
 
     Returns message dicts with 'attachments' field containing list of attached files
-    and 'author_name' field from the users table:
+    and 'author_name' field from the users table. Shows current message content after
+    applying any winning updates.
+
     [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...]}, ...]
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -121,8 +123,17 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
         (channel_id, recorded_by)
     )
 
-    # Enrich each message with attachments
+    # Enrich each message with attachments and apply any winning updates
+    from events.content import message_update
     for msg in messages:
+        # Apply any winning message update if it exists
+        winning_update = message_update.get(msg['message_id'], recorded_by, db)
+        if winning_update:
+            msg['content'] = winning_update['new_content']
+            msg['edited_at'] = winning_update['created_at']
+        else:
+            msg['edited_at'] = 0
+
         attachments = safedb.query(
             """SELECT ma.file_id, ma.filename, ma.mime_type, ma.blob_bytes
                FROM message_attachments ma

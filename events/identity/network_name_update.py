@@ -5,6 +5,7 @@ import crypto
 import store
 from events.group import group
 from events.identity import peer
+from events._shared import updates
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -72,13 +73,16 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
     if not key_id:
         raise KeyNotAvailableError("Key ID not found in group key data")
 
+    # Get next global count from framework (Lamport clock)
+    global_count = updates.get_next_global_count(peer_id, db)
+
     # Build network_name_update event
     event_data = {
         'type': 'network_name_update',
         'network_id': network_id,  # Identifies which network this name is for
         'name': name,  # Will be encrypted
         'key_id': key_id,  # Track which key was used
-        'global_count': 0,  # For LWW (last-writer-wins)
+        'global_count': global_count,  # From framework counter (Lamport clock)
         'signed_by': peer_shared_id,
         'created_at': t_ms
     }
@@ -158,8 +162,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     1. Get the event blob and decrypt it
     2. Extract network_id and name
     3. Try to decrypt the name
-    4. If decryption succeeds: store in network_names table
+    4. If decryption succeeds: store in network_names table (with convergence)
     5. If decryption fails (key missing): store encrypted blob in pending_name_decrypts table
+
+    Convergence rule: Highest global_count wins. If equal, highest event_id wins (deterministic tiebreaker).
 
     Args:
         event_id: The network_name_update event ID
@@ -202,18 +208,20 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         decrypted_name = crypto.decrypt_to_local(encrypted_name, db)
 
         if decrypted_name is not None:
-            # We have the key, store decrypted name
+            # We have the key, store the update record (unconditionally)
             log.info(f"network_name_update.project() decrypted network name for {network_id[:20]}...: {decrypted_name}")
+
+            # Insert the update into the table - INSERT OR IGNORE ensures idempotency
             safedb.execute(
-                """INSERT OR REPLACE INTO network_names
-                   (network_id, name, event_id, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   WHERE global_count < ? OR network_id NOT IN (SELECT network_id FROM network_names)""",
-                (network_id, decrypted_name, event_id, global_count, key_id,
+                """INSERT OR IGNORE INTO network_names
+                   (network_id, event_id, name, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (network_id, event_id, decrypted_name, global_count, key_id,
                  event_data.get('created_at'), event_data.get('signed_by'),
-                 recorded_by, recorded_at, global_count)
+                 recorded_by, recorded_at)
             )
-            log.info(f"network_name_update.project() stored decrypted network name")
+
+            log.debug(f"network_name_update.project() stored update for {network_id[:20]}... with gc={global_count}")
         else:
             # Key not available yet - store encrypted blob in pending table
             log.info(f"network_name_update.project() key not available yet, storing in pending table")

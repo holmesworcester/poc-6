@@ -60,6 +60,9 @@ SUBJECTIVE_TABLES = {
     'removed_users',               # Removed users tracking (peer-scoped)
     'invite_accepteds',            # Invite acceptance metadata (peer-scoped)
     'channel_updates',             # Channel updates (peer-scoped)
+    'message_reactions',           # Message reactions (peer-scoped)
+    'message_reaction_deletions',  # Message reaction deletions (peer-scoped)
+    'message_updates',             # Message updates/edits (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
@@ -73,6 +76,7 @@ DEVICE_TABLES = {
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
     'job_state',                   # Job execution state tracking (device-wide)
     'sync_connections',            # Established connections for sync (device-wide)
+    'peer_gc_state',               # Global counter (Lamport clock) per peer for update events
 }
 
 
