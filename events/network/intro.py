@@ -63,7 +63,7 @@ def create(
 
 
 def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
-    """Project intro event into pending_intros table.
+    """Project network_intro event using pure projector.
 
     Args:
         intro_id: Event ID of the intro event
@@ -74,68 +74,38 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
     Returns:
         intro_id if successful, None otherwise
     """
+    from projectors import resolve, apply_result
+    from projectors import network_intro as ni_projector
+
     log.debug(
         f"intro.project() intro_id={intro_id[:20]}..., "
         f"recorded_by={recorded_by[:20]}..."
     )
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    from db import create_unsafe_db
-    unsafedb = create_unsafe_db(db)
-    blob = store.get(intro_id, unsafedb)
-    if not blob:
-        log.warning(f"intro.project() blob not found for intro_id={intro_id}")
+    # Resolve: parse JSON, gather dependencies (none for this type)
+    input_dict = resolve("network_intro", intro_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.warning(f"intro.project() resolve failed for intro_id={intro_id[:20]}...")
         return None
 
-    # Parse JSON
-    try:
-        event_data = json.loads(blob.decode())
-    except Exception as e:
-        log.warning(f"intro.project() failed to parse event data: {e}")
+    # Call pure projector
+    result = ni_projector.project(input_dict)
+
+    if result.blocked:
+        log.info(f"intro.project() blocked: {result.missing_deps}")
         return None
 
-    # Validate event structure
-    if event_data.get('type') != 'network_intro':
-        log.warning(f"intro.project() wrong type: {event_data.get('type')}")
+    if not result.valid:
+        log.warning(f"intro.project() rejected: {result.reason}")
         return None
 
-    initiator_peer_id = event_data.get('initiator_peer_id')
-    peer1_id = event_data.get('peer1_id')
-    peer2_id = event_data.get('peer2_id')
-    created_at = event_data.get('created_at')
+    # Apply result: insert into tables
+    apply_result(result, recorded_by, recorded_at, db)
 
-    if not all([initiator_peer_id, peer1_id, peer2_id, created_at]):
-        log.warning(f"intro.project() missing required fields")
-        return None
-
-    # Insert into pending_intros table
-    safedb.execute(
-        """INSERT OR REPLACE INTO pending_intros
-           (intro_id, initiator_peer_id, peer1_id, peer2_id, created_at, recorded_by, recorded_at, processed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            intro_id,
-            initiator_peer_id,
-            peer1_id,
-            peer2_id,
-            created_at,
-            recorded_by,
-            recorded_at,
-            False
-        )
-    )
-
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (intro_id, recorded_by)
-    )
-
+    event_data = input_dict["event_data"]
     log.info(
-        f"intro.project() inserted: {initiator_peer_id[:20]}... introducing "
-        f"{peer1_id[:20]}... and {peer2_id[:20]}..."
+        f"intro.project() inserted: {event_data.get('initiator_peer_id', '')[:20]}... introducing "
+        f"{event_data.get('peer1_id', '')[:20]}... and {event_data.get('peer2_id', '')[:20]}..."
     )
 
     return intro_id

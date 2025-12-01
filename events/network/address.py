@@ -64,7 +64,7 @@ def create(
 
 
 def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
-    """Project address event into network_addresses table.
+    """Project network_address event using pure projector.
 
     Args:
         address_id: Event ID of the address event
@@ -75,69 +75,38 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
     Returns:
         address_id if successful, None otherwise
     """
+    from projectors import resolve, apply_result
+    from projectors import network_address as na_projector
+
     log.debug(
         f"address.project() address_id={address_id[:20]}..., "
         f"recorded_by={recorded_by[:20]}..."
     )
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    from db import create_unsafe_db
-    unsafedb = create_unsafe_db(db)
-    blob = store.get(address_id, unsafedb)
-    if not blob:
-        log.warning(f"address.project() blob not found for address_id={address_id}")
+    # Resolve: parse JSON, gather dependencies (none for this type)
+    input_dict = resolve("network_address", address_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.warning(f"address.project() resolve failed for address_id={address_id[:20]}...")
         return None
 
-    # Parse JSON
-    try:
-        event_data = json.loads(blob.decode())
-    except Exception as e:
-        log.warning(f"address.project() failed to parse event data: {e}")
+    # Call pure projector
+    result = na_projector.project(input_dict)
+
+    if result.blocked:
+        log.info(f"address.project() blocked: {result.missing_deps}")
         return None
 
-    # Validate event structure
-    if event_data.get('type') != 'network_address':
-        log.warning(f"address.project() wrong type: {event_data.get('type')}")
+    if not result.valid:
+        log.warning(f"address.project() rejected: {result.reason}")
         return None
 
-    observed_peer_id = event_data.get('observed_peer_id')
-    observed_by_peer_id = event_data.get('observed_by_peer_id')
-    ip = event_data.get('ip')
-    port = event_data.get('port')
-    created_at = event_data.get('created_at')
+    # Apply result: insert into tables
+    apply_result(result, recorded_by, recorded_at, db)
 
-    if not all([observed_peer_id, observed_by_peer_id, ip, port, created_at]):
-        log.warning(f"address.project() missing required fields")
-        return None
-
-    # Insert into network_addresses table
-    safedb.execute(
-        """INSERT OR REPLACE INTO network_addresses
-           (address_id, observed_peer_id, observed_by_peer_id, ip, port, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            address_id,
-            observed_peer_id,
-            observed_by_peer_id,
-            ip,
-            port,
-            created_at,
-            recorded_by,
-            recorded_at
-        )
-    )
-
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (address_id, recorded_by)
-    )
-
+    event_data = input_dict["event_data"]
     log.info(
-        f"address.project() inserted: {observed_by_peer_id[:20]}... → "
-        f"{observed_peer_id[:20]}... at {ip}:{port}"
+        f"address.project() inserted: {event_data.get('observed_by_peer_id', '')[:20]}... → "
+        f"{event_data.get('observed_peer_id', '')[:20]}... at {event_data.get('ip')}:{event_data.get('port')}"
     )
 
     return address_id
