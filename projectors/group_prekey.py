@@ -10,8 +10,10 @@ Uses apply_result since group_prekeys is subjective (has recorded_by).
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import json
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,61 @@ SPEC = {
     "dependencies": [],
     "tables": ["group_prekeys"],  # Subjective table (has recorded_by)
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Group prekeys only need generated key material
+    "key_material": {"type": "generated_keypair"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class GroupPrekeyCreateDeps(TypedDict):
+    """Dependencies for group_prekey creation."""
+    peer_id: str  # Owner of this prekey
+    private_key: bytes  # Generated keypair private
+    public_key: bytes  # Generated keypair public
+
+
+def create_pure(
+    deps: GroupPrekeyCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a group_prekey event.
+
+    Group prekeys are local-only events that store both public and private
+    keys for receiving sealed group keys.
+
+    Args:
+        deps: Resolved dependencies (includes generated keypair)
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with prekey blob, also returns private_key for caller
+    """
+    event_data = {
+        'type': 'group_prekey',
+        'public_key': crypto.b64encode(deps['public_key']),
+        'private_key': crypto.b64encode(deps['private_key']),
+        'signed_by': deps['peer_id'],  # Local peer who created this prekey
+        'created_at': t_ms,
+    }
+
+    # Local-only: plain JSON, no signing/encryption
+    blob = json.dumps(event_data).encode()
+    prekey_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=prekey_id, event_type='group_prekey')],
+        primary_id=prekey_id,
+    )
 
 
 # ============================================================================

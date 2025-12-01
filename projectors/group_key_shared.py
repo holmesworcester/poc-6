@@ -6,8 +6,9 @@ This projector only handles the pure computation after those checks pass.
 """
 
 from typing import TypedDict
-from projectors.project import ProjectorResult
+from projectors.project import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,78 @@ SPEC = {
     "tables": ["group_keys_shared"],
 }
 
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+    # peer_shared_id from peer_self
+    "peer_self": {"table": "peer_self", "key_field": "peer_id", "fields": ["peer_shared_id"]},
+    # Symmetric key to share (from group_key)
+    "key": {"table": "group_keys", "key_field": "key_id", "fields": ["symmetric_key"]},
+    # Recipient prekey for sealing (provided by caller - can be peer or invite prekey)
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class GroupKeySharedCreateDeps(TypedDict):
+    """Dependencies for group_key_shared creation."""
+    peer_shared_id: str
+    private_key: bytes
+    key_id: str
+    symmetric_key: bytes  # The key material to share
+    recipient_prekey: dict  # {id: bytes, public_key: bytes, type: 'asymmetric'}
+
+
+def create_pure(
+    deps: GroupKeySharedCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a group_key_shared event.
+
+    Group_key_shared events seal a symmetric key to a recipient's prekey
+    using asymmetric encryption. The recipient can decrypt with their
+    private key to recover the symmetric key.
+
+    Args:
+        deps: Resolved dependencies including recipient prekey
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with sealed blob
+    """
+    # Build inner event
+    inner_event_data = {
+        'type': 'group_key_shared',
+        'key_id': deps['key_id'],  # Reference to the key being shared
+        'symmetric_key': crypto.b64encode(deps['symmetric_key']),  # The actual key material
+        'signed_by': deps['peer_shared_id'],
+        'created_at': t_ms,
+    }
+
+    # Sign the inner event
+    signed_inner_event = crypto.sign_event(inner_event_data, deps['private_key'])
+
+    # Wrap (asymmetric encrypt) to recipient's prekey
+    canonical = crypto.canonicalize_json(signed_inner_event)
+    wrapped_blob = crypto.wrap(canonical, deps['recipient_prekey'], None)
+    key_shared_id = compute_event_id(wrapped_blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=wrapped_blob, event_id=key_shared_id, event_type='group_key_shared')],
+        primary_id=key_shared_id,
+    )
+
+
+# ============================================================================
+# PROJECTOR - pure function: dict -> ProjectorResult
+# ============================================================================
 
 def project(input_dict: GroupKeySharedInput) -> ProjectorResult:
     """Pure projection: dict -> result with derived group_key event.

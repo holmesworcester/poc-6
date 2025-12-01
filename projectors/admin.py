@@ -10,8 +10,9 @@ Admin events have polymorphic signing:
 """
 
 from typing import TypedDict, NotRequired
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,70 @@ SPEC = {
     "dependencies": ["signer_user:linked_peer?", "admin_grant:admin_grant?"],
     "tables": ["admins"],
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # All deps are passed as args (user_id, network_id, signer info)
+    # No table lookups needed
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class AdminCreateDeps(TypedDict):
+    """Dependencies for admin creation (all passed as args)."""
+    user_id: str
+    network_id: str
+    signed_by: str  # network_id for bootstrap, peer_shared_id for ongoing
+    signer_private_key: bytes
+    admin_grant: NotRequired[str]  # Prior admin_id for chain (None for bootstrap)
+
+
+def create_pure(
+    deps: AdminCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create an admin event.
+
+    Admin events are plaintext (not encrypted) and signed by either:
+    - network_id (bootstrap): First admin grant
+    - peer_shared_id (ongoing): Subsequent admin grants with admin_grant chain
+
+    Args:
+        deps: Resolved dependencies (all passed as args)
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with admin blob
+    """
+    event_data = {
+        'type': 'admin',
+        'user_id': deps['user_id'],
+        'network_id': deps['network_id'],
+        'signed_by': deps['signed_by'],
+        'created_at': t_ms,
+    }
+
+    if deps.get('admin_grant'):
+        event_data['admin_grant'] = deps['admin_grant']
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['signer_private_key'])
+
+    # Canonicalize (no encryption - admin events are plaintext)
+    blob = crypto.canonicalize_json(signed_event)
+    admin_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=admin_id, event_type='admin')],
+        primary_id=admin_id,
+    )
 
 
 # ============================================================================

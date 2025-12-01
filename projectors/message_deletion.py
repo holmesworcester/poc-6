@@ -11,8 +11,9 @@ The projector only handles authorization. The framework handles:
 """
 
 from typing import TypedDict, NotRequired
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,72 @@ SPEC = {
     "dependencies": ["message:message_event"],  # Blocking dep for authorization (name:type)
     "tables": [],  # No type-specific table - uses generic deleted_events
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+    # peer_shared_id from peer_self
+    "peer_self": {"table": "peer_self", "key_field": "peer_id", "fields": ["peer_shared_id"]},
+    # message info for group_id (to get encryption key)
+    "message": {"table": "messages", "key_field": "message_id", "fields": ["group_id"]},
+    # Group key for encryption
+    "key_data": {"type": "group_key", "from": "message.group_id"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class MessageDeletionCreateDeps(TypedDict):
+    """Dependencies resolved for message_deletion creation."""
+    peer_shared_id: str
+    private_key: bytes
+    key_data: dict  # {id, key, type} for crypto.wrap
+    message_id: str
+    group_id: str
+
+
+def create_pure(
+    deps: MessageDeletionCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a message_deletion event.
+
+    Message deletions are encrypted to the same group as the message
+    to ensure only group members can see the deletion.
+
+    Args:
+        deps: Resolved dependencies
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with deletion blob
+    """
+    event_data = {
+        'type': 'message_deletion',
+        'message_id': deps['message_id'],
+        'signed_by': deps['peer_shared_id'],
+        'created_at': t_ms,
+    }
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+
+    # Wrap (canonicalize + encrypt)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, deps['key_data'], None)
+    deletion_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=deletion_id, event_type='message_deletion')],
+        primary_id=deletion_id,
+    )
 
 
 # ============================================================================

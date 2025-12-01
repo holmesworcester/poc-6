@@ -9,8 +9,10 @@ Uses apply_result_device_wide since local_peers is device-wide.
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import json
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,59 @@ SPEC = {
     "dependencies": [],
     "tables": ["local_peers"],  # Device-wide table
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Peer only needs generated keypair
+    "key_material": {"type": "generated_keypair"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class PeerCreateDeps(TypedDict):
+    """Dependencies for peer creation."""
+    private_key: bytes  # Generated keypair private
+    public_key: bytes  # Generated keypair public
+
+
+def create_pure(
+    deps: PeerCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a peer event.
+
+    Peers are local-only identity keypairs. They store both public and
+    private keys for signing operations.
+
+    Args:
+        deps: Resolved dependencies (includes generated keypair)
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with peer blob
+    """
+    event_data = {
+        'type': 'peer',
+        'public_key': crypto.b64encode(deps['public_key']),
+        'private_key': crypto.b64encode(deps['private_key']),
+        'created_at': t_ms,
+    }
+
+    # Local-only: plain JSON, no signing/encryption
+    blob = json.dumps(event_data).encode()
+    peer_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=peer_id, event_type='peer')],
+        primary_id=peer_id,
+    )
 
 
 # ============================================================================
