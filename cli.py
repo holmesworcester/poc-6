@@ -85,7 +85,7 @@ import schema
 import tick
 
 # Import event functions (this is our API)
-from events.identity import user, peer, invite, network, user_removed
+from events.identity import user, peer, invite, network, user_removed, peer_shared
 from events.content import channel, message, message_deletion, message_reaction, message_update
 from events.group import group_member, group_key, group_prekey, group
 
@@ -328,16 +328,16 @@ def display_main(session: CLISession):
 # COMMANDS
 # ============================================================================
 
-def cmd_new_network(session: CLISession, network_name: str, username: str, device: str):
+def cmd_new_network(session: CLISession, network_name: str, username: str, devicename: str):
     """Create a new network and first account."""
     # Canonicalize: lowercase for consistent storage and display
-    device = device.lower()
-    result = user.new_network(name=username, t_ms=session.current_time_ms, db=session.db, device_name=device, network_name=network_name)
+    devicename = devicename.lower()
+    result = user.new_network(name=username, t_ms=session.current_time_ms, db=session.db, device_name=devicename, network_name=network_name)
 
     # Create account context
     account = AccountContext(
         user_name=username.lower(),
-        device_name=device.lower(),
+        device_name=devicename,
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
     )
@@ -522,14 +522,171 @@ def cmd_create_invite(session: CLISession):
     session.last_invite_link = invite_link
 
     print(f"✓ created invite #{invite_num}")
-    print(f"  use: new-peer --username <username> --device <device> --invite {invite_num}")
+    print(f"  use: join --username <name> --devicename <device> --invite {invite_num}")
     print()
 
 
-def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: str):
-    """Create a new peer and join a network via invite link or number."""
+def cmd_create_link_invite(session: CLISession):
+    """Create a device linking invite for the current user (admin only).
+
+    This creates a link that allows adding another device to the currently
+    selected user's account. The user_id is embedded in the invite.
+    """
+    account = session.get_selected_account()
+
+    if not account.network_id:
+        print("✗ no network joined")
+        print("  hint: use 'switch' to select an account that has joined a network")
+        return
+
+    if not account.user_id:
+        print("✗ no user_id for current account")
+        return
+
+    try:
+        invite_id, invite_link, invite_data = invite.create(
+            peer_id=account.peer_id,
+            t_ms=session.current_time_ms,
+            db=session.db,
+            mode='peer',
+            user_id=account.user_id
+        )
+    except ValueError as e:
+        if "not an admin" in str(e).lower() or "admin" in str(e).lower():
+            print("✗ only admins can create device linking invites")
+        else:
+            print(f"✗ {e}")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Store in invites list for convenient reference
+    session.add_invite(invite_link, f"{account.user_name} (link)")
+    invite_num = len(session.invites)
+
+    print(f"✓ created device link invite #{invite_num} for user: {account.user_name}")
+    print(f"  use: link-device --devicename <device> --invite {invite_num}")
+    print()
+
+
+def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
+    """Link a new device to an existing user via link invite.
+
+    Unlike 'join', this does NOT create a new user. The user_id comes from
+    the invite itself (embedded by the admin who created it).
+    """
     # Canonicalize: lowercase for consistent storage and display
-    device = device.lower()
+    devicename = devicename.lower()
+
+    # Resolve invite reference (number or full link)
+    invite_link = invite_ref
+    if invite_ref.isdigit():
+        invite_num = int(invite_ref)
+        resolved_link = session.get_invite_by_number(invite_num)
+        if not resolved_link:
+            print(f"✗ invite #{invite_num} not found")
+            return
+        invite_link = resolved_link
+        print(f"  using invite #{invite_num}")
+
+    # Validate this is a device linking invite (quiet://link/...)
+    if not invite_link.startswith('quiet://link/'):
+        print("✗ this is not a device linking invite")
+        print("  hint: use 'join' for network join invites (quiet://invite/...)")
+        print("  hint: use 'link-device' for device linking invites (quiet://link/...)")
+        return
+
+    # Create the peer first
+    peer_id = peer.create(t_ms=session.current_time_ms, db=session.db)
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Accept the invite - this parses the link and extracts user_id
+    try:
+        accepted = invite.accept(peer_id, invite_link, t_ms=session.current_time_ms, db=session.db)
+    except ValueError as e:
+        print(f"✗ failed to accept invite: {e}")
+        return
+
+    if accepted['mode'] != 'peer':
+        print("✗ this is not a device linking invite")
+        print("  hint: use 'join' for network join invites")
+        return
+
+    user_id = accepted.get('user_id')
+    if not user_id:
+        print("✗ invite does not contain user_id")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Complete the peer linking via peer_shared.join()
+    result = peer_shared.join(
+        peer_id=peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=user_id,
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=session.current_time_ms,
+        db=session.db,
+        device_name=devicename
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Get username from the user table for display
+    # We need to query this since we don't have the username directly
+    from db import create_safe_db
+    safedb = create_safe_db(session.db, recorded_by=peer_id)
+    user_row = safedb.query_one(
+        "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, peer_id)
+    )
+    username = user_row['name'] if user_row else "unknown"
+
+    # Create account context
+    account = AccountContext(
+        user_name=username.lower(),
+        device_name=devicename,
+        peer_id=result['peer_id'],
+        peer_shared_id=result['peer_shared_id']
+    )
+    account.user_id = user_id
+    # Get network_id from networks table
+    network_row = safedb.query_one(
+        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (peer_id,)
+    )
+    account.network_id = network_row['network_id'] if network_row else None
+
+    session.add_account(account)
+    session.selected_account = account.full_name
+
+    # Auto-select first channel if available
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    if channels:
+        session.selected_channel_id = channels[0]['channel_id']
+
+    account_num = list(session.accounts.keys()).index(account.full_name) + 1
+
+    print(f"✓ linked device to existing user: {username}")
+    print(f"✓ selected account #{account_num}: {account.full_name}")
+    if channels:
+        print(f"✓ selected channel #1: #{channels[0]['name']}")
+    print()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_join(session: CLISession, username: str, devicename: str, invite_ref: str):
+    """Join a network as a NEW user via invite link or number."""
+    # Canonicalize: lowercase for consistent storage and display
+    devicename = devicename.lower()
     # Resolve invite reference (number or full link)
     invite_link = invite_ref
     if invite_ref.isdigit():
@@ -547,14 +704,14 @@ def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: st
     session.db.commit()
     session.current_time_ms += 100
 
-    # Join the network
+    # Join the network as a new user
     result = user.join(
         peer_id=peer_id,
         invite_link=invite_link,
         name=username,
         t_ms=session.current_time_ms,
         db=session.db,
-        device_name=device
+        device_name=devicename
     )
 
     session.db.commit()
@@ -563,7 +720,7 @@ def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: st
     # Create account context
     account = AccountContext(
         user_name=username.lower(),
-        device_name=device.lower(),
+        device_name=devicename,
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
     )
@@ -580,7 +737,7 @@ def cmd_new_peer(session: CLISession, username: str, device: str, invite_ref: st
 
     account_num = list(session.accounts.keys()).index(account.full_name) + 1
 
-    print(f"✓ created peer and joined network as {username.lower()}")
+    print(f"✓ joined network as new user: {username.lower()}")
     print(f"✓ selected account #{account_num}: {account.full_name}")
     if channels:
         print(f"✓ selected channel #1: #{channels[0]['name']}")
@@ -1004,12 +1161,12 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--name", required=True)
             parser.add_argument("--username", required=True)
-            parser.add_argument("--device", required=True)
+            parser.add_argument("--devicename", required=True)
             try:
                 args = parser.parse_args(parts[1:])
-                cmd_new_network(session, args.name, args.username, args.device)
+                cmd_new_network(session, args.name, args.username, args.devicename)
             except SystemExit:
-                print("usage: new-network --name <name> --username <username> --device <device>")
+                print("usage: new-network --name <name> --username <username> --devicename <device>")
 
         elif cmd == "switch":
             if len(parts) < 2:
@@ -1064,16 +1221,29 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "create-invite":
             cmd_create_invite(session)
 
-        elif cmd == "new-peer":
+        elif cmd == "create-link-invite":
+            cmd_create_link_invite(session)
+
+        elif cmd == "join":
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--username", required=True)
-            parser.add_argument("--device", required=True)
+            parser.add_argument("--devicename", required=True)
             parser.add_argument("--invite", required=True)
             try:
                 args = parser.parse_args(parts[1:])
-                cmd_new_peer(session, args.username, args.device, args.invite)
+                cmd_join(session, args.username, args.devicename, args.invite)
             except SystemExit:
-                print("usage: new-peer --username <username> --device <device> --invite <link>")
+                print("usage: join --username <username> --devicename <device> --invite <n|link>")
+
+        elif cmd == "link-device":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--devicename", required=True)
+            parser.add_argument("--invite", required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_link_device(session, args.devicename, args.invite)
+            except SystemExit:
+                print("usage: link-device --devicename <device> --invite <n|link>")
 
         elif cmd == "show":
             display_state(session)
@@ -1153,29 +1323,49 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "help":
             print("available commands:")
-            print("  new-network --name <name> --username <username> --device <device>")
-            print("  new-peer --username <username> --device <device> --invite <n|link>")
-            print("  switch <n>")
-            print("  send <message>")
-            print("  sync --ticks <n>")
-            print("  set-auto-tick <n>")
-            print("  select-channel <n>")
-            print("  create-channel <name>")
-            print("  create-invite")
-            print("  list-accounts")
-            print("  list-channels")
-            print("  list-users")
-            print("  keys [--summary]")
-            print("  delete-message <n>")
-            print("  edit-message <message_num> <new_content>")
-            print("  purge-keys")
-            print("  remove-user <n>")
-            print("  show-group-keys")
-            print("  add-reaction <message_num> <emoji>")
-            print("  remove-reaction <message_num> <emoji>")
-            print("  time")
-            print("  show")
-            print("  quit")
+            print()
+            print("  Network setup:")
+            print("    new-network --name <name> --username <username> --devicename <device>")
+            print()
+            print("  Joining/linking:")
+            print("    create-invite                  Create invite for new user to join network")
+            print("    join --username <name> --devicename <device> --invite <n|link>")
+            print("                                   Join network as NEW user")
+            print("    create-link-invite             Create device link invite for current user")
+            print("    link-device --devicename <device> --invite <n|link>")
+            print("                                   Link device to EXISTING user (no username needed)")
+            print()
+            print("  Account management:")
+            print("    switch <n>")
+            print("    list-accounts")
+            print("    list-users")
+            print()
+            print("  Channels:")
+            print("    select-channel <n>")
+            print("    create-channel <name>")
+            print("    list-channels")
+            print()
+            print("  Messaging:")
+            print("    send <message>")
+            print("    delete-message <n>")
+            print("    edit-message <n> <new_content>")
+            print("    add-reaction <n> <emoji>")
+            print("    remove-reaction <n> <emoji>")
+            print()
+            print("  Admin:")
+            print("    remove-user <n>")
+            print()
+            print("  Keys/sync:")
+            print("    keys [--summary]")
+            print("    show-group-keys")
+            print("    purge-keys")
+            print("    sync --ticks <n>")
+            print("    set-auto-tick <n>")
+            print()
+            print("  Other:")
+            print("    show")
+            print("    time")
+            print("    quit")
 
         else:
             print(f"unknown command: {cmd}")
