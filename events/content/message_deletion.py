@@ -1,492 +1,459 @@
 """Message deletion event type.
 
-Analogous to blocking/unblocking: deletion events act as a permanent block on message projection.
-If a deletion exists for a message, the message projection is skipped (like a blocked event).
+Pure functions:
+    create(deps, t_ms) -> CreateResult
+    project(input_dict) -> ProjectorResult
 
-Forward Secrecy: When messages are deleted, their encryption keys are marked for purging.
-Batch rekeying operations move all content to new "clean" keys before old keys are destroyed.
+API functions:
+    delete(peer_id, message_id, t_ms, db) -> str
+    project_event(deletion_id, recorded_by, recorded_at, db) -> str | None
+    validate(message_id, deleted_by, recorded_by, db) -> bool
+
+Forward Secrecy:
+    run_message_purge_cycle(peer_id, t_ms, db) -> dict
+    run_message_purge_cycle_for_all_peers(t_ms, db) -> dict
 """
-from typing import Any
+from typing import Any, TypedDict
 import logging
 import crypto
 import store
 from db import create_safe_db, create_unsafe_db
+from events.identity import peer
+from events.group import group
 
 log = logging.getLogger(__name__)
 
 
-def _cascade_delete_from_valid_events(
-    event_id: str,
-    recorded_by: str,
-    safedb: Any,
-    _visited: set = None
-) -> int:
-    """Recursively delete event and all dependents from valid_events.
+# ============================================================================
+# TYPES
+# ============================================================================
 
-    When an event is deleted, this ensures all dependent events are also removed
-    from valid_events to maintain convergence. Regardless of event ordering,
-    the final valid_events table will be the same.
+class MessageDeletionEventData(TypedDict):
+    type: str
+    message_id: str
+    signed_by: str
+    created_at: int
+
+
+class CreateDeps(TypedDict):
+    """Dependencies resolved for message_deletion creation."""
+    peer_shared_id: str
+    private_key: bytes
+    key_data: dict
+    message_id: str
+    group_id: str
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def create(deps: CreateDeps, t_ms: int):
+    """Pure function to create a message_deletion event.
 
     Args:
-        event_id: The event being deleted
-        recorded_by: Peer scope (SafeDB is already scoped to this peer)
-        safedb: SafeDB instance
-        _visited: Internal cycle detection set (prevents infinite recursion)
+        deps: Resolved dependencies
+        t_ms: Timestamp
 
     Returns:
-        Total number of events deleted from valid_events (including recursively deleted dependents)
+        CreateResult with deletion blob
     """
-    if _visited is None:
-        _visited = set()
+    from projection import CreateResult, BlobSpec, compute_event_id
 
-    # Cycle detection
-    if event_id in _visited:
-        return 0
+    event_data = {
+        'type': 'message_deletion',
+        'message_id': deps['message_id'],
+        'signed_by': deps['peer_shared_id'],
+        'created_at': t_ms,
+    }
 
-    _visited.add(event_id)
-    deleted_count = 0
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, deps['key_data'], None)
+    deletion_id = compute_event_id(blob)
 
-    # Find all children (events that depend on this one)
-    children = safedb.query(
-        """SELECT DISTINCT child_event_id
-           FROM event_dependencies
-           WHERE parent_event_id = ? AND recorded_by = ?""",
-        (event_id, recorded_by)
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=deletion_id, event_type='message_deletion')],
+        primary_id=deletion_id,
     )
 
-    # Recursively delete children first (depth-first traversal)
-    for child in children:
-        deleted_count += _cascade_delete_from_valid_events(
-            child['child_event_id'],
-            recorded_by,
-            safedb,
-            _visited
-        )
 
-    # Delete this event from valid_events
-    safedb.execute(
-        "DELETE FROM valid_events WHERE event_id = ? AND recorded_by = ?",
-        (event_id, recorded_by)
+def project(input_dict: dict):
+    """Pure projection: dict -> result.
+
+    Authorization: deleter must be author OR admin.
+    Output: deleted_events=[message_id] - framework handles cascade.
+    """
+    from projection import ProjectorResult
+
+    event_data = input_dict["event_data"]
+    deps = input_dict.get("dependencies", {})
+
+    message_id = event_data.get("message_id")
+    deleted_by = event_data.get("signed_by")
+
+    if not message_id or not deleted_by:
+        return ProjectorResult(valid=False, reason="missing message_id or signed_by")
+
+    # Get message for authorization
+    message = deps.get("message")
+    if not message:
+        return ProjectorResult(blocked=True, missing_deps=["message"])
+
+    # Authorization: deleted_by must be author OR admin
+    message_author = message.get("author_id")
+    is_author = (deleted_by == message_author)
+    is_admin = deps.get("is_admin", False)
+
+    if not is_author and not is_admin:
+        log.warning(f"message_deletion: not authorized. deleted_by={deleted_by[:20]}...")
+        return ProjectorResult(valid=False, reason="not authorized to delete")
+
+    return ProjectorResult(
+        valid=True,
+        deleted_events=[message_id],
     )
 
-    log.debug(f"_cascade_delete_from_valid_events() deleted {event_id[:20]}... and {deleted_count} dependents for peer {recorded_by[:20]}...")
 
-    return deleted_count + 1
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
 
+def make_event_data(
+    message_id: str = "msg_123",
+    signed_by: str = "peer_123",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "message_deletion",
+        "message_id": message_id,
+        "signed_by": signed_by,
+        "created_at": created_at,
+    }
+
+
+def make_message_dep(
+    message_id: str = "msg_123",
+    author_id: str = "peer_123",
+    group_id: str = "grp_123",
+    channel_id: str = "ch_123",
+) -> dict:
+    """Build message dependency for testing."""
+    return {
+        "message_id": message_id,
+        "author_id": author_id,
+        "group_id": group_id,
+        "channel_id": channel_id,
+    }
+
+
+def make_input(
+    event_id: str = "del_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    message_event: dict | None = None,
+    is_admin: bool = False,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {
+            "message": message_event,
+            "is_admin": is_admin,
+        },
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 def validate(message_id: str, deleted_by: str, recorded_by: str, db: Any) -> bool:
     """Validate that deleted_by has authorization to delete the message.
 
     Authorization rules:
-    1. deleted_by is the message author (self-deletion), OR
-    2. deleted_by is an admin in the network
-
-    Args:
-        message_id: Message event ID to check
-        deleted_by: peer_shared_id attempting deletion
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        True if authorized, False otherwise
+    1. deleted_by is the message author, OR
+    2. deleted_by is an admin
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get message to check authorship (if it exists)
+    # Check if deleted_by is the message author
     message_row = safedb.query_one(
         "SELECT author_id, group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
         (message_id, recorded_by)
     )
 
-    # Check if deleted_by is the message author (only if message exists)
     if message_row:
-        message_author_id = message_row['author_id']
-        if deleted_by == message_author_id:
+        if deleted_by == message_row['author_id']:
             return True
 
-    # If not author (or message doesn't exist yet), check if deleted_by is an admin
-    # Use centralized is_admin() function which handles both normal admins and first_peer
+    # Check if deleted_by is an admin
     from events.identity import invite
     return invite.is_admin(deleted_by, recorded_by, db)
 
 
-def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
-    """Create a message_deletion event to delete a message.
-
-    Validates that the deleter is either:
-    1. The message author (self-deletion), OR
-    2. An admin in the message's group (admin deletion)
+def delete(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
+    """Delete a message.
 
     Args:
-        peer_id: Local peer ID creating the deletion
-        message_id: Message event ID to delete
+        peer_id: Local peer ID
+        message_id: Message to delete
         t_ms: Timestamp
         db: Database connection
 
     Returns:
-        deletion_id: The stored deletion event ID
+        deletion_id
 
     Raises:
-        ValueError: If message not found or deleter lacks permission
+        ValueError: If not authorized
     """
-    log.info(f"message_deletion.create() deleting message_id={message_id[:20]}... by peer={peer_id[:20]}...")
+    from projection import store_create_result
+
+    log.info(f"message_deletion.delete() message_id={message_id[:20]}...")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Get message to validate it exists and get group_id
+    # Get message info
     message_row = safedb.query_one(
-        "SELECT author_id, group_id, channel_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT author_id, group_id FROM messages WHERE message_id = ? AND recorded_by = ?",
         (message_id, peer_id)
     )
     if not message_row:
-        raise ValueError(f"Message {message_id} not found for peer {peer_id}")
+        raise ValueError(f"Message {message_id} not found")
 
-    message_group_id = message_row['group_id']
-
-    # Get deleter's peer_shared_id
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Get peer info
+    peer_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
         (peer_id, peer_id)
     )
-    if not peer_self_row or not peer_self_row['peer_shared_id']:
-        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
+    if not peer_row:
+        raise ValueError(f"Peer {peer_id} not found")
 
-    deleter_peer_shared_id = peer_self_row['peer_shared_id']
+    # Authorization check
+    if not validate(message_id, peer_row['peer_shared_id'], peer_id, db):
+        raise ValueError(f"Not authorized to delete message {message_id}")
 
-    # Authorization check using shared validate() function
-    if not validate(message_id, deleter_peer_shared_id, peer_id, db):
-        raise ValueError(
-            f"Peer {peer_id} cannot delete message {message_id}: "
-            f"not the author and not an admin"
-        )
-
-    log.info(f"message_deletion.create() authorization passed")
-
-    # Create deletion event
-    event_data = {
-        'type': 'message_deletion',
+    # Resolve dependencies
+    deps = {
+        'peer_shared_id': peer_row['peer_shared_id'],
+        'private_key': peer.get_private_key(peer_id, peer_id, db),
+        'key_data': group.pick_key(message_row['group_id'], peer_id, db),
         'message_id': message_id,
-        'signed_by': deleter_peer_shared_id,
-        'created_at': t_ms
+        'group_id': message_row['group_id'],
     }
 
-    # Sign the event
-    from events.identity import peer
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
+    # Pure create
+    result = create(deps, t_ms)
 
-    # Get group key for encryption (message was in this group, so deletion should be too)
-    from events.group import group
-    key_data = group.pick_key(message_group_id, peer_id, db)
+    # Store and project
+    deletion_id = store_create_result(result, peer_id, t_ms, db)
 
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event (no commit - caller owns transaction)
-    deletion_id = store.event(blob, peer_id, t_ms, db)
-
-    log.info(f"message_deletion.create() created deletion_id={deletion_id[:20]}...")
+    log.info(f"message_deletion.delete() created deletion_id={deletion_id[:20]}...")
     return deletion_id
 
 
-def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project message_deletion event using pure projector.
+def project_event(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project a message_deletion event.
 
-    The pure projector handles authorization. The framework handles:
-    - Recording to deleted_events (via apply_result)
-    - Cascade deletion from valid_events (via cleanup_deleted_events at end of transaction)
-    - Cleaning projected data tables (via cleanup_deleted_events)
-
-    This wrapper handles type-specific side effects:
+    Handles:
+    - Signature verification
+    - Authorization check via pure project()
     - Forward secrecy key purging
     - Blob deletion from store
-
-    Args:
-        deletion_id: Deletion event ID
-        recorded_by: Peer who recorded this event
-        recorded_at: When this peer recorded it
-        db: Database connection
-
-    Returns:
-        deletion_id if successful, None if blocked/rejected
     """
-    from projectors import resolve, apply_result
-    from projectors import message_deletion as md_projector
+    from projection import apply_result, cleanup_deleted_events
+    from events.identity import peer_shared
 
-    log.info(f"message_deletion.project() deletion_id={deletion_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    log.info(f"message_deletion.project_event() deletion_id={deletion_id[:20]}...")
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
 
-    # Resolve: unwrap, verify signature, gather dependencies
-    input_dict = resolve("message_deletion", deletion_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        log.info(f"message_deletion.project() resolve failed for deletion_id={deletion_id[:20]}...")
+    # 1. Get and decrypt blob
+    blob = store.get(deletion_id, unsafedb)
+    if not blob:
         return None
 
-    # Check if deleter is admin (add to deps for pure projector)
-    event_data = input_dict["event_data"]
-    deleted_by = event_data.get("signed_by")
-    from events.identity import invite
-    is_admin = invite.is_admin(deleted_by, recorded_by, db) if deleted_by else False
-    input_dict["dependencies"]["is_admin"] = is_admin
+    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
+    if not unwrapped:
+        return None
 
-    # Call pure projector for authorization
-    result = md_projector.project(input_dict)
+    event_data = crypto.parse_json(unwrapped)
+
+    # 2. Verify peer_shared signature
+    signed_by = event_data.get("signed_by")
+    if signed_by:
+        try:
+            public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+            if not crypto.verify_event(event_data, public_key):
+                log.warning(f"Invalid signature for message_deletion {deletion_id}")
+                return None
+        except (ValueError, KeyError):
+            return None
+
+    # 3. Resolve message dependency
+    message_id = event_data.get("message_id")
+    message = None
+    if message_id:
+        message_row = safedb.query_one(
+            "SELECT author_id, group_id, channel_id FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (message_id, recorded_by)
+        )
+        if message_row:
+            message = {
+                "message_id": message_id,
+                "author_id": message_row["author_id"],
+                "group_id": message_row["group_id"],
+                "channel_id": message_row["channel_id"],
+            }
+
+    # 4. Check admin status
+    from events.identity import invite
+    is_admin = invite.is_admin(signed_by, recorded_by, db) if signed_by else False
+
+    # 5. Build input and call pure projector
+    input_dict = {
+        "event_id": deletion_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {
+            "message": message,
+            "is_admin": is_admin,
+        },
+    }
+
+    result = project(input_dict)
 
     if result.blocked:
-        log.info(f"message_deletion.project() blocked: {result.missing_deps}")
+        log.info(f"message_deletion.project_event() blocked: {result.missing_deps}")
         return None
 
     if not result.valid:
-        log.warning(f"message_deletion.project() rejected: {result.reason}")
+        log.warning(f"message_deletion.project_event() rejected: {result.reason}")
         return None
 
-    # Apply result: records to deleted_events
-    # Cascade handled by cleanup_deleted_events() at end of transaction
+    # Apply result
     apply_result(result, recorded_by, recorded_at, db)
 
-    # Type-specific side effect: Forward secrecy key purging
-    message_id = event_data.get("message_id")
-    message_blob = store.get(message_id, unsafedb)
-    if message_blob:
-        try:
-            # Extract key_id from blob (first 16 bytes)
-            key_id_bytes = message_blob[:crypto.ID_SIZE]
-            key_id_b64 = crypto.b64encode(key_id_bytes)
+    # Forward secrecy: mark key for purging
+    if message_id:
+        message_blob = store.get(message_id, unsafedb)
+        if message_blob:
+            try:
+                key_id_bytes = message_blob[:crypto.ID_SIZE]
+                key_id_b64 = crypto.b64encode(key_id_bytes)
+                safedb.execute(
+                    "INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by) VALUES (?, ?, ?)",
+                    (key_id_b64, recorded_at, recorded_by)
+                )
+            except Exception as e:
+                log.warning(f"Failed to mark key for purging: {e}")
 
-            # Mark this key for purging (for forward secrecy)
-            safedb.execute(
-                """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
-                   VALUES (?, ?, ?)""",
-                (key_id_b64, recorded_at, recorded_by)
-            )
-            log.info(f"message_deletion.project() marked key {key_id_b64[:20]}... for purging (forward secrecy)")
-        except Exception as e:
-            log.warning(f"message_deletion.project() failed to mark key for purging: {e}")
-            # Continue anyway - forward secrecy is best-effort
+    # Delete message blob
+    if message_id:
+        unsafedb.execute("DELETE FROM store WHERE id = ?", (message_id,))
+        safedb.execute(
+            "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+            (message_id, recorded_by)
+        )
 
-    # Type-specific side effect: Delete blob from store
-    unsafedb.execute(
-        "DELETE FROM store WHERE id = ?",
-        (message_id,)
-    )
-    log.info(f"message_deletion.project() deleted message blob {message_id[:20]}... from store")
-
-    # Remove from shareable_events (cleanup could handle this too, but keeping here for now)
-    safedb.execute(
-        "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-        (message_id, recorded_by)
-    )
-
-    # Run cleanup to cascade delete from valid_events and clean projected data
-    # This is the framework-level cleanup that handles all deletion types
-    from projectors import cleanup_deleted_events
+    # Cascade cleanup
     cleanup_deleted_events(recorded_by, db)
 
-    log.info(f"message_deletion.project() completed deletion_id={deletion_id[:20]}...")
+    log.info(f"message_deletion.project_event() completed deletion_id={deletion_id[:20]}...")
     return deletion_id
 
 
+# ============================================================================
+# FORWARD SECRECY
+# ============================================================================
+
 def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
-    """Execute forward secrecy purge cycle for messages with deleted content.
-
-    After messages are deleted, their encryption keys are marked for purging.
-    This batch operation:
-    1. Finds all messages encrypted with keys in keys_to_purge
-    2. Re-encrypts each message with a new "clean" key using message_rekey events
-    3. Deletes old keys from group_keys table
-    4. Clears keys_to_purge entries
-
-    Args:
-        peer_id: Local peer ID running the purge
-        t_ms: Timestamp
-        db: Database connection
-
-    Returns:
-        Dict with stats: {
-            'messages_rekeyed': int,
-            'keys_purged': int,
-            'errors': list[str]
-        }
-    """
-    log.info(f"message_deletion.run_message_purge_cycle() starting for peer={peer_id[:20]}...")
+    """Execute forward secrecy purge cycle for messages with deleted content."""
+    log.info(f"message_deletion.run_message_purge_cycle() peer={peer_id[:20]}...")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
-    unsafedb = create_unsafe_db(db)
 
-    stats = {
-        'messages_rekeyed': 0,
-        'keys_purged': 0,
-        'errors': []
-    }
+    stats = {'messages_rekeyed': 0, 'keys_purged': 0, 'errors': []}
 
-    # Find all keys marked for purging
     purge_keys = safedb.query(
         "SELECT key_id FROM keys_to_purge WHERE recorded_by = ? ORDER BY marked_at ASC",
         (peer_id,)
     )
 
     if not purge_keys:
-        log.info(f"message_deletion.run_message_purge_cycle() no keys marked for purging")
         return stats
 
-    log.info(f"message_deletion.run_message_purge_cycle() found {len(purge_keys)} keys to purge")
-
-    # Import here to avoid circular dependency (message_rekey imports message_deletion)
     from events.content import message_rekey
     from events.group import group_key
 
-    # For each key marked for purging, rekey all messages that used it
     for purge_key_row in purge_keys:
         purge_key_id = purge_key_row['key_id']
-        log.info(f"message_deletion.run_message_purge_cycle() processing key_id={purge_key_id[:20]}...")
 
-        # Find all messages encrypted with this key
-        # Use key_id column for efficient O(1) lookup instead of O(n) blob scanning
-        messages_using_purge_key_rows = safedb.query(
+        messages_rows = safedb.query(
             """SELECT message_id FROM messages
                WHERE recorded_by = ? AND key_id = ?
                AND message_id NOT IN (SELECT event_id FROM deleted_events WHERE recorded_by = ?)""",
             (peer_id, purge_key_id, peer_id)
         )
-        messages_using_purge_key = [row['message_id'] for row in messages_using_purge_key_rows]
+        messages = [r['message_id'] for r in messages_rows]
 
-        if not messages_using_purge_key:
-            log.info(f"message_deletion.run_message_purge_cycle() no messages found using key {purge_key_id[:20]}...")
-            # Still purge the key even if no messages use it
-            safedb.execute(
-                "DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-                (purge_key_id, peer_id)
-            )
-            safedb.execute(
-                "DELETE FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?",
-                (purge_key_id, peer_id)
-            )
+        if not messages:
+            safedb.execute("DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?", (purge_key_id, peer_id))
+            safedb.execute("DELETE FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?", (purge_key_id, peer_id))
             stats['keys_purged'] += 1
             continue
 
-        log.info(f"message_deletion.run_message_purge_cycle() found {len(messages_using_purge_key)} messages using key {purge_key_id[:20]}...")
-
-        # Get a clean key to rekey these messages with
         try:
-            # Need group_id - extract from one of the messages
             msg_row = safedb.query_one(
                 "SELECT group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-                (messages_using_purge_key[0], peer_id)
+                (messages[0], peer_id)
             )
             if not msg_row:
-                error = f"Could not find group_id for message {messages_using_purge_key[0][:20]}..."
-                log.warning(f"message_deletion.run_message_purge_cycle() {error}")
-                stats['errors'].append(error)
                 continue
 
-            group_id = msg_row['group_id']
-            clean_key_id = group_key.get_or_create_clean_key(group_id, peer_id, t_ms, db)
-            log.info(f"message_deletion.run_message_purge_cycle() using clean key {clean_key_id[:20]}... for rekeying")
+            clean_key_id = group_key.get_or_create_clean_key(msg_row['group_id'], peer_id, t_ms, db)
         except Exception as e:
-            error = f"Failed to get clean key: {e}"
-            log.error(f"message_deletion.run_message_purge_cycle() {error}")
-            stats['errors'].append(error)
+            stats['errors'].append(str(e))
             continue
 
-        # Rekey each message
-        for message_id in messages_using_purge_key:
+        for message_id in messages:
             try:
                 rekey_id = message_rekey.create(message_id, clean_key_id, peer_id, t_ms, db)
-                # Immediately project the rekey
                 message_rekey.project(rekey_id, peer_id, t_ms, db)
-                log.info(f"message_deletion.run_message_purge_cycle() rekeyed message {message_id[:20]}...")
                 stats['messages_rekeyed'] += 1
             except Exception as e:
-                error = f"Failed to rekey message {message_id[:20]}...: {e}"
-                log.warning(f"message_deletion.run_message_purge_cycle() {error}")
-                stats['errors'].append(error)
-                continue
+                stats['errors'].append(str(e))
 
-        # Purge the old key
-        safedb.execute(
-            "DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-            (purge_key_id, peer_id)
-        )
-        safedb.execute(
-            "DELETE FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?",
-            (purge_key_id, peer_id)
-        )
-        log.info(f"message_deletion.run_message_purge_cycle() purged key {purge_key_id[:20]}...")
+        safedb.execute("DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?", (purge_key_id, peer_id))
+        safedb.execute("DELETE FROM keys_to_purge WHERE key_id = ? AND recorded_by = ?", (purge_key_id, peer_id))
         stats['keys_purged'] += 1
 
-    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged")
     return stats
 
 
 def run_message_purge_cycle_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
-    """Run message purge cycle for all local peers in the database.
-
-    This is the recurring job that should be called periodically to perform
-    forward secrecy rekeying and key purging. It:
-    1. Gets all local peers
-    2. For each peer, runs run_message_purge_cycle to rekey and purge
-
-    Args:
-        t_ms: Current time in milliseconds
-        db: Database connection (caller must commit)
-
-    Returns:
-        Dict with aggregated stats: {
-            'peers_processed': int,
-            'total_messages_rekeyed': int,
-            'total_keys_purged': int,
-            'errors': list[str]
-        }
-
-    Error Handling:
-        - If an error occurs for one peer, it is logged and added to the
-          'errors' list, but processing continues for other peers
-        - Each peer's changes are committed by the caller, so partial failures
-          leave some peers purged and others unchanged
-        - Per-message errors during rekeying are collected in the peer's stats
-          and aggregated into the total errors list
-    """
-    log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() t_ms={t_ms}")
-
+    """Run message purge cycle for all local peers."""
     unsafedb = create_unsafe_db(db)
 
-    stats = {
-        'peers_processed': 0,
-        'total_messages_rekeyed': 0,
-        'total_keys_purged': 0,
-        'errors': []
-    }
+    stats = {'peers_processed': 0, 'total_messages_rekeyed': 0, 'total_keys_purged': 0, 'errors': []}
 
-    # Get all local peers
-    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
 
-    if not local_peer_rows:
-        log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() no local peers found")
-        return stats
-
-    log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() found {len(local_peer_rows)} local peers")
-
-    for peer_row in local_peer_rows:
-        peer_id = peer_row['peer_id']
+    for peer_row in local_peers:
         try:
-            # Run purge cycle for this peer
-            peer_stats = run_message_purge_cycle(peer_id, t_ms, db)
-
+            peer_stats = run_message_purge_cycle(peer_row['peer_id'], t_ms, db)
             stats['peers_processed'] += 1
             stats['total_messages_rekeyed'] += peer_stats['messages_rekeyed']
             stats['total_keys_purged'] += peer_stats['keys_purged']
             stats['errors'].extend(peer_stats['errors'])
-
-            log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() peer {peer_id[:20]}...: {peer_stats['messages_rekeyed']} rekeyed, {peer_stats['keys_purged']} purged")
-
         except Exception as e:
-            error = f"Error processing peer {peer_id[:20]}...: {e}"
-            log.error(f"message_deletion.run_message_purge_cycle_for_all_peers() {error}")
-            stats['errors'].append(error)
-            continue
+            stats['errors'].append(str(e))
 
-    log.info(f"message_deletion.run_message_purge_cycle_for_all_peers() complete: {stats['peers_processed']} peers, {stats['total_messages_rekeyed']} messages rekeyed, {stats['total_keys_purged']} keys purged")
     return stats

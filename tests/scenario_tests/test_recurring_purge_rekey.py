@@ -66,7 +66,7 @@ def test_tick_runs_message_rekey_and_purge():
 
     # Delete message 2 (this marks the shared key for purging)
     print("\n=== Alice deletes message 2 ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id_2,
         t_ms=4000,
@@ -263,7 +263,7 @@ def test_end_to_end_forward_secrecy_with_tick():
 
     # Delete the message
     print("\n=== Alice deletes the sensitive message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,

@@ -131,8 +131,8 @@ def test_alice_and_bob_see_messages_disappear_together():
     db.commit()
 
     # Project channel for both
-    channel.project(channel_id, alice['peer_id'], 3000, db)
-    channel.project(channel_id, bob['peer_id'], 3500, db)
+    channel.project_event(channel_id, alice['peer_id'], 3000, db)
+    channel.project_event(channel_id, bob['peer_id'], 3500, db)
     db.commit()
 
     # Alice sends a message

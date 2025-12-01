@@ -5,8 +5,9 @@ Run with: python -m projectors.tests
 """
 
 from projectors import ProjectorResult
-from projectors import channel, group_member, user
-from events.content import message
+from events.content import message, channel
+from events.group import group_member
+from events.identity import user
 
 
 # ============================================================================

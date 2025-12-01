@@ -1,5 +1,13 @@
-"""User event type (shareable, encrypted) - represents network membership."""
-from typing import Any
+"""User event type (shareable, encrypted) - represents network membership.
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(peer_id, peer_shared_id, name, t_ms, db, ...) -> tuple
+    project_event(user_id, recorded_by, recorded_at, db) -> str | None
+"""
+from typing import Any, TypedDict, NotRequired
 
 # Registry metadata
 EVENT_TYPE = 'user'
@@ -15,6 +23,166 @@ from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class UserEventData(TypedDict):
+    type: str
+    invite_id: str
+    signed_by: str
+    name: str
+    user_pubkey: str
+    created_at: int
+    network_id: NotRequired[str]
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result. No database access."""
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+    deps = input_dict.get("dependencies", {})
+
+    # Validate structure
+    invite_id = event_data.get("invite_id")
+    signed_by = event_data.get("signed_by")
+
+    if not invite_id:
+        return ProjectorResult(valid=False, reason="Missing invite_id")
+
+    if signed_by != invite_id:
+        return ProjectorResult(valid=False, reason=f"signed_by doesn't match invite_id")
+
+    # Check invite dependency
+    invite = deps.get("invite")
+    if not invite:
+        return ProjectorResult(blocked=True, missing_deps=["invite"])
+
+    # Check signature
+    if not input_dict.get("signature_valid"):
+        return ProjectorResult(valid=False, reason="Signature verification failed")
+
+    # Get network_id from event or invite
+    network_id = event_data.get("network_id")
+    if not network_id:
+        network_id = invite["event_data"].get("network_id")
+
+    # Build output tables
+    users_row = {
+        "user_id": event_id,
+        "name": event_data.get("name", ""),
+        "network_id": network_id,
+        "created_at": event_data.get("created_at", 0),
+        "user_pubkey": event_data.get("user_pubkey", ""),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+    valid_events_row = {
+        "event_id": event_id,
+        "recorded_by": recorded_by,
+    }
+
+    tables = {
+        "users": [users_row],
+        "valid_events": [valid_events_row],
+    }
+
+    # Auto-add to invite's group if present
+    group_id = invite["event_data"].get("group_id")
+    if group_id:
+        inviter = invite["event_data"].get("inviter_peer_shared_id", signed_by)
+        tables["group_members"] = [{
+            "member_id": event_id,
+            "group_id": group_id,
+            "user_id": event_id,
+            "added_by": inviter,
+            "created_at": event_data.get("created_at", 0),
+            "recorded_by": recorded_by,
+            "recorded_at": recorded_at,
+        }]
+
+    return ProjectorResult(valid=True, tables=tables)
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    invite_id: str = "inv_123",
+    name: str = "Test User",
+    user_pubkey: str = "pubkey_123",
+    created_at: int = 1000000,
+    network_id: str | None = None,
+) -> dict:
+    """Build event_data for testing."""
+    data = {
+        "type": "user",
+        "invite_id": invite_id,
+        "signed_by": invite_id,  # User events signed by invite
+        "name": name,
+        "user_pubkey": user_pubkey,
+        "created_at": created_at,
+    }
+    if network_id:
+        data["network_id"] = network_id
+    return data
+
+
+def make_invite_dep(
+    invite_id: str = "inv_123",
+    group_id: str = "grp_123",
+    network_id: str | None = "net_123",
+    inviter_peer_shared_id: str = "peer_inviter",
+) -> dict:
+    """Build invite dependency for testing."""
+    return {
+        "event_id": invite_id,
+        "event_data": {
+            "type": "invite",
+            "invite_pubkey": "pubkey_xyz",
+            "group_id": group_id,
+            "network_id": network_id,
+            "inviter_peer_shared_id": inviter_peer_shared_id,
+        },
+    }
+
+
+def make_input(
+    event_id: str = "user_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    signature_valid: bool = True,
+    invite: dict | None = None,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "signature_valid": signature_valid,
+        "dependencies": {
+            "invite": invite if invite is not None else make_invite_dep(),
+        },
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
@@ -110,13 +278,13 @@ def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
     return user_id, None, None, user_private_key
 
 
-def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project user event into users table.
 
     Phase 2: User events are verified using invite_pubkey (not peer_shared pubkey).
     The user_pubkey from the event body is stored for signing first peer invite.
     """
-    log.warning(f"[USER_PROJECT_ENTRY] user.project() called: user_id={user_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    log.warning(f"[USER_PROJECT_ENTRY] user.project_event() called: user_id={user_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     # Get blob from store
     blob = store.get(user_id, db)

@@ -59,7 +59,7 @@ def test_delete_message_marks_key_for_purging():
 
     # Delete the message
     print("\n=== Alice deletes her message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,
@@ -128,7 +128,7 @@ def test_delete_and_rekey_message():
 
     # Delete message 2
     print("\n=== Alice deletes message 2 ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=msg2_id,
         t_ms=3000,
@@ -235,7 +235,7 @@ def test_forward_secrecy_multi_peer():
 
     # Alice deletes the message
     print("\n=== Alice deletes message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=6000,
@@ -515,7 +515,7 @@ def test_new_user_joins_after_rekey():
     print("✓ Message stored in event log")
 
     print("\n=== t=3000: Alice deletes message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,
@@ -645,7 +645,7 @@ def test_new_user_with_preexisting_invite_after_rekey():
     print("✓ Message stored in event log")
 
     print("\n=== t=3000: Alice deletes message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,
@@ -749,7 +749,7 @@ def test_deterministic_rekeying():
 
     print("\n=== Delete first two messages to mark keys for purging ===")
     for msg_id in msg_ids[:2]:
-        message_deletion.create(
+        message_deletion.delete(
             peer_id=alice['peer_id'],
             message_id=msg_id,
             t_ms=3000,
@@ -832,7 +832,7 @@ def test_rekey_no_duplicates():
     db.commit()
 
     print("\n=== Delete and rekey at different times ===")
-    message_deletion.create(
+    message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,

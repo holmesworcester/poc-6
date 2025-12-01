@@ -1,5 +1,15 @@
-"""Group member event type (shareable, encrypted) - represents group membership."""
-from typing import Any
+"""Group member event type (shareable, encrypted) - represents group membership.
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(group_id, user_id, peer_id, peer_shared_id, t_ms, db, ...) -> str
+    project_event(member_id, recorded_by, recorded_at, db) -> str | None
+    is_member(user_id, group_id, recorded_by, db) -> bool
+    list_members(group_id, recorded_by, db) -> list
+"""
+from typing import Any, TypedDict, NotRequired
 import logging
 import crypto
 import store
@@ -9,6 +19,157 @@ from db import create_safe_db, create_unsafe_db
 import queues
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class GroupMemberEventData(TypedDict):
+    type: str
+    group_id: str
+    user_id: str
+    added_by: str
+    signed_by: str
+    created_at: int
+    admin_grant: NotRequired[str]
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result. No database access."""
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+    deps = input_dict.get("dependencies", {})
+
+    # Check group exists
+    if not deps.get("group"):
+        return ProjectorResult(blocked=True, missing_deps=["group"])
+
+    # Check user exists
+    if not deps.get("user"):
+        return ProjectorResult(blocked=True, missing_deps=["user"])
+
+    # Authorization check
+    admin_grant_id = event_data.get("admin_grant")
+    added_by = event_data.get("added_by")
+    group_data = deps["group"]["event_data"]
+
+    if admin_grant_id:
+        # Explicit admin_grant - verify it authorizes the adder
+        adder_user = deps.get("adder_user")
+        if not adder_user:
+            return ProjectorResult(blocked=True, missing_deps=["adder_user"])
+
+        admin_grant = deps.get("admin_grant")
+        if not admin_grant:
+            return ProjectorResult(blocked=True, missing_deps=["admin_grant"])
+
+        if admin_grant["user_id"] != adder_user["user_id"]:
+            return ProjectorResult(
+                valid=False,
+                reason=f"admin_grant does not authorize adder {adder_user['user_id']}"
+            )
+    else:
+        # Legacy: adder must be group creator
+        if added_by and added_by != group_data.get("signed_by"):
+            return ProjectorResult(
+                valid=False,
+                reason=f"adder {added_by} is not group creator and no admin_grant provided"
+            )
+
+    member_row = {
+        "member_id": event_id,
+        "group_id": event_data["group_id"],
+        "user_id": event_data["user_id"],
+        "added_by": added_by,
+        "created_at": event_data["created_at"],
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+    return ProjectorResult(valid=True, tables={"group_members": [member_row]})
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    group_id: str = "grp_123",
+    user_id: str = "user_123",
+    added_by: str = "peer_123",
+    created_at: int = 1000000,
+    admin_grant: str | None = None,
+) -> dict:
+    """Build event_data for testing."""
+    data = {
+        "type": "group_member",
+        "group_id": group_id,
+        "user_id": user_id,
+        "added_by": added_by,
+        "signed_by": added_by,
+        "created_at": created_at,
+    }
+    if admin_grant:
+        data["admin_grant"] = admin_grant
+    return data
+
+
+def make_group_dep(
+    group_id: str = "grp_123",
+    signed_by: str = "peer_123",
+) -> dict:
+    """Build group dependency for testing."""
+    return {
+        "event_id": group_id,
+        "event_data": {"type": "group", "signed_by": signed_by},
+    }
+
+
+def make_user_dep(user_id: str = "user_123") -> dict:
+    """Build user dependency for testing."""
+    return {
+        "event_id": user_id,
+        "event_data": {"type": "user", "name": "Test User"},
+    }
+
+
+def make_input(
+    event_id: str = "member_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    group: dict | None = None,
+    user: dict | None = None,
+    adder_user: dict | None = None,
+    admin_grant: dict | None = None,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {
+            "group": group if group is not None else make_group_dep(),
+            "user": user if user is not None else make_user_dep(),
+            "adder_user": adder_user,
+            "admin_grant": admin_grant,
+        },
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
@@ -182,9 +343,9 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     return member_id
 
 
-def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group_member event into group_members table."""
-    log.debug(f"group_member.project() projecting member_id={member_id}, seen_by={recorded_by}")
+    log.debug(f"group_member.project_event() projecting member_id={member_id}, seen_by={recorded_by}")
 
     # Use SafeDB for peer-scoped queries
     safedb = create_safe_db(db, recorded_by=recorded_by)

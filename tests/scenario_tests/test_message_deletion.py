@@ -60,7 +60,7 @@ def test_message_deletion_self():
 
     # Alice deletes the message
     print("\n=== Alice deletes her own message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=3000,
@@ -171,7 +171,7 @@ def test_message_deletion_admin():
 
     # Bob (admin) deletes Alice's message
     print("\n=== Bob (admin) deletes Alice's message ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=bob['peer_id'],
         message_id=message_id,
         t_ms=8000,
@@ -276,7 +276,7 @@ def test_message_deletion_unauthorized():
     # Charlie (non-admin) tries to delete Alice's message
     print("\n=== Charlie (non-admin) tries to delete Alice's message ===")
     try:
-        message_deletion.create(
+        message_deletion.delete(
             peer_id=charlie['peer_id'],
             message_id=message_id,
             t_ms=11000,
@@ -329,7 +329,7 @@ def test_message_deletion_ordering():
 
     # Alice immediately deletes it (before syncing to Bob)
     print("\n=== Alice deletes message (before syncing) ===")
-    deletion_id = message_deletion.create(
+    deletion_id = message_deletion.delete(
         peer_id=alice['peer_id'],
         message_id=message_id,
         t_ms=4100,

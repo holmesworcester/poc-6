@@ -185,7 +185,7 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'message_deletion':
         from events.content import message_deletion
-        return message_deletion.project(ref_id, recorded_by, recorded_at, db)
+        return message_deletion.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'group':
         from events.group import group
@@ -212,7 +212,7 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'channel':
         from events.content import channel
-        channel.project(ref_id, recorded_by, recorded_at, db)
+        channel.project_event(ref_id, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'sync':
@@ -231,7 +231,7 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'user':
         from events.identity import user
-        return user.project(ref_id, recorded_by, recorded_at, db)
+        return user.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'transit_prekey':
         from events.network import transit_prekey
@@ -261,7 +261,7 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'group_member':
         from events.group import group_member
-        return group_member.project(ref_id, recorded_by, recorded_at, db)
+        return group_member.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'network':
         from events.identity import network
