@@ -182,69 +182,63 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     # For invite-based peer_shared (device linking): Seed group keys for all groups this user belongs to
     # This ensures new devices get keys for existing groups created after the invite
     # Keys must be sealed to the SAME invite prekey that the device will use to decrypt them
-    if user_id and owner_peer_id != recorded_by:
+    if user_id and owner_peer_id != recorded_by and invite_id:
         # Only seed if this is a peer_shared from another device (not our own)
+        # and it has an invite_id (invite-based linking)
         log.info(f"peer_shared.project() seeding group keys for user {user_id[:20]}... new device {peer_shared_id[:20]}...")
 
-        # Find the active mode='peer' invite for this user (device linking invite)
-        invite_rows = safedb.query(
-            """SELECT invite_id FROM invites
-               WHERE mode = 'peer' AND user_id = ? AND recorded_by = ?
-               ORDER BY created_at DESC LIMIT 1""",
-            (user_id, recorded_by)
+        # IMPORTANT: Use the invite_id from the peer_shared event itself, NOT a time-based query.
+        # The peer_shared event contains the exact invite_id that the new device used to join.
+        # Using ORDER BY created_at DESC would select the wrong invite if multiple exist.
+        # The invite_id variable was already extracted from event_data above (line 91).
+        log.info(f"peer_shared.project() using invite_id from event: {invite_id[:20]}...")
+
+        # Get our own peer_shared_id to sign the sealed keys
+        our_peer_shared_id = None
+        our_peer_row = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+            (recorded_by, recorded_by)
         )
+        if our_peer_row:
+            our_peer_shared_id = our_peer_row['peer_shared_id']
 
-        if not invite_rows:
-            log.warning(f"peer_shared.project() no active device link invite found for user {user_id[:20]}..., skipping key seeding")
+        if not our_peer_shared_id:
+            log.warning(f"peer_shared.project() couldn't find our peer_shared_id, skipping device link seeding")
         else:
-            invite_id = invite_rows[0]['invite_id']
-
-            # Get our own peer_shared_id to sign the sealed keys
-            our_peer_shared_id = None
-            our_peer_row = safedb.query_one(
-                "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-                (recorded_by, recorded_by)
+            # Query all groups this user is a member of
+            group_rows = safedb.query(
+                """SELECT DISTINCT g.group_id, g.key_id
+                   FROM group_members gm
+                   JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
+                   WHERE gm.user_id = ? AND gm.recorded_by = ?
+                   ORDER BY g.group_id""",
+                (user_id, recorded_by)
             )
-            if our_peer_row:
-                our_peer_shared_id = our_peer_row['peer_shared_id']
 
-            if not our_peer_shared_id:
-                log.warning(f"peer_shared.project() couldn't find our peer_shared_id, skipping device link seeding")
-            else:
-                # Query all groups this user is a member of
-                group_rows = safedb.query(
-                    """SELECT DISTINCT g.group_id, g.key_id
-                       FROM group_members gm
-                       JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
-                       WHERE gm.user_id = ? AND gm.recorded_by = ?
-                       ORDER BY g.group_id""",
-                    (user_id, recorded_by)
-                )
+            log.info(f"peer_shared.project() found {len(group_rows)} groups for user {user_id[:20]}...")
 
-                log.info(f"peer_shared.project() found {len(group_rows)} groups for user {user_id[:20]}...")
+            # For each group, create group_key_shared sealed to the invite prekey
+            from events.group import group_key_shared
+            key_share_ts = recorded_at + 1000  # Space out timestamps
+            for group_row in group_rows:
+                group_id = group_row['group_id']
+                key_id = group_row['key_id']
 
-                # For each group, create group_key_shared sealed to the invite prekey
-                from events.group import group_key_shared
-                key_share_ts = recorded_at + 1000  # Space out timestamps
-                for group_row in group_rows:
-                    group_id = group_row['group_id']
-                    key_id = group_row['key_id']
-
-                    try:
-                        # Seal to the invite prekey (same mechanism as invite.create)
-                        # This allows the new device to decrypt with invite_private_key
-                        group_key_shared.create_for_invite(
-                            key_id=key_id,
-                            peer_id=recorded_by,  # Current peer creates the seal
-                            peer_shared_id=our_peer_shared_id,  # Our peer_shared signs it
-                            invite_id=invite_id,  # Seal to this invite's prekey
-                            t_ms=key_share_ts,
-                            db=db
-                        )
-                        log.info(f"peer_shared.project() sealed group key {key_id[:20]}... to invite prekey for new device {peer_shared_id[:20]}...")
-                        key_share_ts += 1
-                    except Exception as e:
-                        log.warning(f"peer_shared.project() failed to seal group {group_id[:20]}... to invite prekey: {e}")
+                try:
+                    # Seal to the invite prekey (same mechanism as invite.create)
+                    # This allows the new device to decrypt with invite_private_key
+                    group_key_shared.create_for_invite(
+                        key_id=key_id,
+                        peer_id=recorded_by,  # Current peer creates the seal
+                        peer_shared_id=our_peer_shared_id,  # Our peer_shared signs it
+                        invite_id=invite_id,  # Seal to this invite's prekey
+                        t_ms=key_share_ts,
+                        db=db
+                    )
+                    log.info(f"peer_shared.project() sealed group key {key_id[:20]}... to invite prekey for new device {peer_shared_id[:20]}...")
+                    key_share_ts += 1
+                except Exception as e:
+                    log.warning(f"peer_shared.project() failed to seal group {group_id[:20]}... to invite prekey: {e}")
 
     return peer_shared_id
 
