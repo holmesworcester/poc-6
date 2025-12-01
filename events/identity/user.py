@@ -438,9 +438,25 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     )
     log.info(f"new_network() created network-signed all_users group: {all_users_group_id[:20]}...")
 
-    # Note: Username and network name updates are created during user.join() when other users join,
-    # not during new_network() bootstrap, to ensure deterministic behavior during convergence testing.
-    # The bootstrapper can update their own username via a follow-up call to user.join() if needed.
+    # Create username_update for the network creator now that the group key is available
+    # This ensures the creator has a username before they can send messages
+    from events.identity import username_update
+    try:
+        username_update_id = username_update.create(
+            user_id=user_id,
+            name=name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 80,
+            db=db
+        )
+        # Project the username_update immediately
+        recorded_id = recorded.create(username_update_id, peer_id, t_ms + 81, db, return_dupes=True)
+        recorded.project_ids([recorded_id], db)
+        log.info(f"new_network() created username_update: {username_update_id[:20]}...")
+    except username_update.KeyNotAvailableError:
+        # This shouldn't happen during bootstrap since we just created the key
+        log.warning(f"new_network() key not available for username_update - unexpected during bootstrap")
 
     # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence

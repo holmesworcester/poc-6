@@ -361,11 +361,15 @@ def _get_projectable_event_ids(db: Any) -> list[str]:
 
 
 def _get_projection_tables(db: Any) -> list[str]:
-    """Query sqlite_master for all tables except store, incoming_blobs, ephemeral state, and test fixtures."""
+    """Query sqlite_master for all tables except store, incoming_blobs, ephemeral state, workflow state, and test fixtures."""
     rows = db.query("""
         SELECT name FROM sqlite_master
         WHERE type='table'
-        AND name NOT IN ('store', 'incoming_blobs', 'sync_connections', 'sqlite_sequence', 'pre_keys', 'transit_keys', 'job_state')
+        AND name NOT IN (
+            'store', 'incoming_blobs', 'sync_connections', 'sqlite_sequence',
+            'pre_keys', 'transit_keys', 'job_state',
+            'pending_name_updates', 'pending_name_decrypts'
+        )
         AND name NOT LIKE '%_ephemeral'
         ORDER BY name
     """)
