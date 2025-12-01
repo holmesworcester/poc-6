@@ -424,9 +424,17 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                 )
                 log.info(f"retry_pending_name_updates() successfully created and projected peer_name_update for {entity_id[:20]}...")
 
+        except username_update.KeyNotAvailableError as e:
+            # Key or group not available yet - keep waiting (don't mark as failed)
+            # This will be retried on next group_key_shared or group projection
+            log.info(f"retry_pending_name_updates() key/group not ready yet for {item['type']}: {e}")
+        except network_name_update.KeyNotAvailableError as e:
+            log.info(f"retry_pending_name_updates() key/group not ready yet for {item['type']}: {e}")
+        except peer_name_update.KeyNotAvailableError as e:
+            log.info(f"retry_pending_name_updates() key/group not ready yet for {item['type']}: {e}")
         except Exception as e:
-            # Mark as failed but continue with other items
-            log.warning(f"retry_pending_name_updates() error for {item['type']}: {e}")
+            # Unexpected error - mark as failed
+            log.warning(f"retry_pending_name_updates() unexpected error for {item['type']}: {e}")
             safedb.execute(
                 "UPDATE pending_name_updates SET status='failed', error=? WHERE id=? AND recorded_by=?",
                 (str(e), item['id'], recorded_by)
