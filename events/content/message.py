@@ -105,11 +105,11 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
 
 
 def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List messages in a channel for a specific peer, including attachments and author names.
+    """List messages in a channel for a specific peer, including attachments, author names, and reactions.
 
-    Returns message dicts with 'attachments' field containing list of attached files
-    and 'author_name' field from the users table:
-    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...]}, ...]
+    Returns message dicts with 'attachments' field containing list of attached files,
+    'author_name' field from the users table, and 'reactions' field from message_reactions:
+    [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...], 'reactions': [...]}, ...]
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
@@ -121,7 +121,7 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
         (channel_id, recorded_by)
     )
 
-    # Enrich each message with attachments
+    # Enrich each message with attachments and reactions
     for msg in messages:
         attachments = safedb.query(
             """SELECT ma.file_id, ma.filename, ma.mime_type, ma.blob_bytes
@@ -131,6 +131,11 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
             (msg['message_id'], recorded_by)
         )
         msg['attachments'] = attachments if attachments else []
+
+        # Get reactions for this message
+        from events.content import message_reaction
+        reactions = message_reaction.list_reactions(msg['message_id'], recorded_by, db)
+        msg['reactions'] = reactions if reactions else []
 
     return messages
 
