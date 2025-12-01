@@ -327,3 +327,30 @@ create-link-invite
     # Should show success and hint
     assert "created device link invite" in result.stdout
     assert "link-device --devicename" in result.stdout
+
+
+def test_non_admin_can_create_link_invite():
+    """Test that non-admin users can create link invites for themselves."""
+    commands = """
+new-network --name "Test Network" --username alice --devicename desktop
+create-invite
+join --username bob --devicename phone --invite 1
+switch 2
+create-link-invite
+link-device --devicename tablet --invite 2
+list-accounts
+"""
+    result = run_cli(commands)
+
+    assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+    # Bob (non-admin) should be able to create a link invite
+    assert "created device link invite" in result.stdout, \
+        "Non-admin should be able to create link invite for themselves"
+
+    # Bob should now have two devices
+    assert "bob (phone)" in result.stdout, "bob phone should be displayed"
+    assert "bob (tablet)" in result.stdout, "bob tablet should be displayed"
+
+    # Success message should show bob
+    assert "linked device to existing user: bob" in result.stdout
