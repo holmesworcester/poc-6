@@ -159,18 +159,21 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     return prekey_id
 
 
-def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project transit prekey event into transit_prekeys table with owner_peer_id."""
+def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project transit prekey event into transit_prekeys table with owner_peer_id.
+
+    Returns:
+        prekey_id on success, None on failure
+    """
     log.info(f"transit_prekey.project() prekey_id={prekey_id[:30]}..., seen_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get blob from store
     blob = store.get(prekey_id, unsafedb)
     if not blob:
         log.warning(f"transit_prekey.project() blob not found for prekey_id={prekey_id}")
-        return
+        return None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
@@ -187,18 +190,7 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
          crypto.b64decode(event_data['private_key']), created_at, ttl_ms)
     )
 
-    # Mark as valid for this peer
-    log.warning(f"[VALID_EVENT] Marking transit_prekey {prekey_id[:20]}... as valid for peer {recorded_by[:20]}...")
-
-    # Check if blob is in store before marking as valid
-    in_store = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (prekey_id,))
-    if not in_store:
-        log.error(f"[VALID_EVENT_BUG] ❌ Marking transit_prekey {prekey_id[:20]}... as valid but blob NOT in store!")
-
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (prekey_id, recorded_by)
-    )
+    return prekey_id
 
 
 def get_transit_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:

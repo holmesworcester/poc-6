@@ -91,8 +91,12 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return prekey_id, prekey_private
 
 
-def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project group prekey event into group_prekeys table with recorded_by scoping."""
+def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project group prekey event into group_prekeys table with recorded_by scoping.
+
+    Returns:
+        prekey_id on success, None on failure
+    """
     log.info(f"group_prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -101,7 +105,7 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
     blob = store.get(prekey_id, db)
     if not blob:
         log.warning(f"group_prekey.project() blob not found for prekey_id={prekey_id}")
-        return
+        return None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
@@ -118,11 +122,7 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
          crypto.b64decode(event_data['private_key']), created_at, ttl_ms, recorded_by)
     )
 
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (prekey_id, recorded_by)
-    )
+    return prekey_id
 
 
 def get_group_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:

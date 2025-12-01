@@ -82,6 +82,14 @@ def project(peer_id: str, recorded_by: str, recorded_at: int, db: Any) -> str:
         )
     )
 
+    # Mark as valid immediately (before returning) to ensure other events
+    # see this peer as valid during dependency checking. This is critical
+    # for convergence - the timing of when events become valid matters.
+    safedb.execute(
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (peer_id, recorded_by)
+    )
+
     log.info(f"peer.project() projected peer_id={peer_id} into peers table")
 
     return peer_id
