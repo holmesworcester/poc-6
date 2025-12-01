@@ -57,7 +57,7 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any
     return transit_prekey_shared_id
 
 
-def project(transit_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(transit_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project transit_prekey_shared into transit_prekeys_shared table."""
     from projectors import resolve, apply_result
     from projectors import transit_prekey_shared as tpks_projector

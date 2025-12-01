@@ -209,7 +209,7 @@ def create_for_link_invite(key_id: str, peer_id: str, peer_shared_id: str,
     return key_shared_id
 
 
-def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project key_shared event into group_keys_shared table and create derived group_key.
 
     Uses pure projector for computation, keeps unwrap/signature verification here.

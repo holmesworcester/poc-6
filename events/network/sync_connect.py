@@ -255,7 +255,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... invite_id={invite_id[:10] if invite_id else 'None'}...")
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project sync_connect event using pure projector.
 
     Wrapper fetches dependencies, pure projector does signature verification.

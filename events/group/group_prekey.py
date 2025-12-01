@@ -84,7 +84,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return prekey_id, prekey_private
 
 
-def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project_event(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project group prekey event using pure projector.
 
     Uses apply_result since group_prekeys is subjective (has recorded_by).
@@ -219,7 +219,7 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
                 # Project each prekey
                 for i, prekey_id in enumerate(prekey_ids):
-                    project(prekey_id, peer_id, t_ms + i, db)
+                    project_event(prekey_id, peer_id, t_ms + i, db)
 
                 stats['peers_replenished'] += 1
                 stats['total_prekeys_generated'] += len(prekey_ids)

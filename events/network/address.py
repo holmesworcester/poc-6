@@ -63,7 +63,7 @@ def create(
     return address_id
 
 
-def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
+def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
     """Project network_address event using pure projector.
 
     Args:

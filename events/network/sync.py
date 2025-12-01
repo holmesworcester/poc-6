@@ -278,10 +278,10 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
 
     # Type-specific projection dispatch
     if event_type == 'sync':
-        project(event_id, recorded_by, t_ms, db, sync_data=event_data)
+        project_event(event_id, recorded_by, t_ms, db, sync_data=event_data)
     elif event_type == 'sync_file':
         from events.network import sync_file
-        sync_file.project(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
+        sync_file.project_event(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
 
     # Mark ephemeral event as valid (for sync protocol tracking)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -693,7 +693,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     mark_window_synced(from_peer_id, to_peer_shared_id, window_id, t_ms, db)
 
 
-def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_data: dict | None = None) -> None:
+def project_event(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_data: dict | None = None) -> None:
     """Handle sync request by sending bloom-filtered response.
 
     Uses pure projector for validation, then executes commands for protocol logic.

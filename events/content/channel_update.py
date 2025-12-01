@@ -182,7 +182,7 @@ def validate(update_id: str, recorded_by: str, db: Any) -> bool:
     return True
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a channel update event into the database.
 
     Applies the highest global_count update to the channel. When multiple updates

@@ -64,7 +64,7 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
     return slice_event_id
 
 
-def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
+def project_event(event_id: str, event_data: dict[str, Any], recorded_by: str,
             recorded_at: int, db: Any) -> None:
     """Project file_slice event using pure projector.
 

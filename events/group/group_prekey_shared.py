@@ -94,7 +94,7 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
 
 
 
-def project(group_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(group_prekey_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group_prekey_shared event into group_prekeys_shared table."""
     from projectors import resolve, apply_result
     from projectors import group_prekey_shared as gpks_projector

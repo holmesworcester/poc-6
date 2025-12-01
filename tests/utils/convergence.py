@@ -450,7 +450,7 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
                                 print(f"  [{i+1}/{len(event_ids)}] Projecting {event_id[:12]}... (recorded→encrypted)")
         except:
             pass
-        recorded.project(event_id, db)
+        recorded.project_event(event_id, db)
 
     # NOTE: We don't do additional blocked.process() passes here because:
     # 1. Events blocked on encryption keys will keep getting re-blocked even if deps are valid
@@ -555,7 +555,7 @@ def _project_with_repetitions(event_ids: list[str], repetitions: list[int], db: 
 
     for event_id, count in zip(event_ids, repetitions):
         for _ in range(count):
-            recorded.project(event_id, db)
+            recorded.project_event(event_id, db)
 
     db.commit()
 

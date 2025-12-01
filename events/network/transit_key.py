@@ -74,7 +74,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     return key_id
 
 
-def project(key_id: str, recorded_by: str, db: Any) -> None:
+def project_event(key_id: str, recorded_by: str, db: Any) -> None:
     """Project transit key event using pure projector.
 
     Uses apply_result_device_wide since transit_keys is device-wide.

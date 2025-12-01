@@ -66,7 +66,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     return key_id
 
 
-def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project_event(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project group key event using pure projector.
 
     Uses apply_result since group_keys is subjective (has recorded_by).

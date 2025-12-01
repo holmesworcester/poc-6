@@ -49,7 +49,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     return bootstrap_complete_id
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project bootstrap_complete event into bootstrap_completers table."""
     from projectors import resolve, apply_result
     from projectors import bootstrap_complete as bc_projector

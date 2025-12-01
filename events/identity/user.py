@@ -549,7 +549,7 @@ def new_network(name: str, t_ms: int, db: Any) -> dict[str, Any]:
     log.info(f"new_network() created peer invite: {peer_invite_id[:20]}... signed by user_id")
 
     # Project the peer invite so it's in invites table
-    invite.project(peer_invite_id, peer_id, t_ms + 41, db)
+    invite.project_event(peer_invite_id, peer_id, t_ms + 41, db)
 
     # Delegate to peer_shared.join() - the canonical peer-joining operation
     # (reused by both user.join() and user.new_network())
@@ -851,7 +851,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
     # Now project invite (after peer_shared, so creator's public key is available for validation)
     # Skip admin check for out-of-band invites - the joiner trusts the invite link they received
     from events.identity import invite
-    invite.project(invite_id, peer_id, t_ms, db, skip_admin_check=True)
+    invite.project_event(invite_id, peer_id, t_ms, db, skip_admin_check=True)
     log.info(f"join() projected invite: {invite_id[:20]}...")
 
     # Extract secrets from invite link (all b64 encoded)
@@ -912,7 +912,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any) -> dict[
     log.info(f"join() created peer invite: {peer_invite_id[:20]}... signed by user_id")
 
     # Project the peer invite so it's in invites table
-    invite.project(peer_invite_id, peer_id, t_ms + 11, db)
+    invite.project_event(peer_invite_id, peer_id, t_ms + 11, db)
 
     # 6. Delegate to peer_shared.join() for peer_shared creation and transit keys
     # This is the canonical operation reused for both first peer and device linking

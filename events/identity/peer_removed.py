@@ -68,12 +68,12 @@ def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
 
     # Project to database state
-    project(event_id, signed_event, recorded_by=removed_by_local_peer_id, db=db)
+    project_event(event_id, signed_event, recorded_by=removed_by_local_peer_id, db=db)
 
     return event_id
 
 
-def project(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
+def project_event(event_id: str, event_data: dict, recorded_by: str, db: Any) -> None:
     """Project peer_removed event to state.
 
     Mark peer as removed so their sync requests are ignored.

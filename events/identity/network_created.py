@@ -8,7 +8,7 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project network_created event using pure projector.
 
     Uses apply_result since network_creators is subjective (has recorded_by).

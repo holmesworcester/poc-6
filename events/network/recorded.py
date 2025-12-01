@@ -74,7 +74,7 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
     projected_ids = []
     for recorded_id in recorded_ids:
         try:
-            result = project(recorded_id, db, _recursion_depth)
+            result = project_event(recorded_id, db, _recursion_depth)
             projected_ids.append(result)
         except Exception as e:
             log.error(f"[PROJECT_IDS_EXCEPTION] ❌ EXCEPTION projecting recorded_id={recorded_id[:20]}... depth={_recursion_depth}: {str(e)[:200]}")
@@ -85,7 +85,7 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
     return projected_ids
 
 
-def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial') -> list[str | None]:
+def project_event(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial') -> list[str | None]:
     """Project recorded event with two-phase dependency checking.
 
     Phase 1: Check encryption keys (block if missing).

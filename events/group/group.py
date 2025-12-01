@@ -72,7 +72,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     return (group_id, key_id)
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group event into groups table.
 
     Uses pure functional projector from projectors.group.

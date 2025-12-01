@@ -90,7 +90,7 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
     return rekey_id
 
 
-def project(rekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(rekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project message_rekey event - replace original message blob with rekeyed version.
 
     Args:

@@ -159,7 +159,7 @@ def test_tick_runs_purge_expired():
     # Create a group prekey with a short TTL (expires at t=10000)
     print("\n=== Alice creates group prekey with short TTL ===")
     prekey_id, prekey_private = group_prekey.create(peer_id=alice['peer_id'], t_ms=2000, db=db)
-    group_prekey.project(prekey_id, recorded_by=alice['peer_id'], recorded_at=2000, db=db)
+    group_prekey.project_event(prekey_id, recorded_by=alice['peer_id'], recorded_at=2000, db=db)
     db.commit()
 
     print(f"Group prekey created: {prekey_id[:20]}...")

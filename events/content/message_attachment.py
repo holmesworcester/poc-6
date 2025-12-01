@@ -508,7 +508,7 @@ def create_from_data_uri(peer_id: str, message_id: str, data_uri: str,
     )
 
 
-def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
+def project_event(event_id: str, event_data: dict[str, Any], recorded_by: str,
             recorded_at: int, db: Any) -> None:
     """Project message_attachment event using pure projector.
 

@@ -57,7 +57,7 @@ def create(peer_id: str, t_ms: int, db: Any,
     return peer_shared_id
 
 
-def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project peer_shared event into peers_shared table (including user_id if invite-based).
 
     Uses pure functional projector from projectors.peer_shared.

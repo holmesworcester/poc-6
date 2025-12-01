@@ -426,7 +426,7 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
         for message_id in messages:
             try:
                 rekey_id = message_rekey.create(message_id, clean_key_id, peer_id, t_ms, db)
-                message_rekey.project(rekey_id, peer_id, t_ms, db)
+                message_rekey.project_event(rekey_id, peer_id, t_ms, db)
                 stats['messages_rekeyed'] += 1
             except Exception as e:
                 stats['errors'].append(str(e))

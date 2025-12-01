@@ -96,7 +96,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Create recorded wrapper where peer sees itself
     from events.network import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
-    recorded.project(recorded_id, db)
+    recorded.project_event(recorded_id, db)
 
     log.info(f"transit_prekey.create() projected prekey_id={prekey_id}, ttl_ms={ttl_ms}")
     return prekey_id, prekey_private
@@ -146,13 +146,13 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     # Create recorded wrapper where peer sees itself
     from events.network import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
-    recorded.project(recorded_id, db)
+    recorded.project_event(recorded_id, db)
 
     log.info(f"transit_prekey.create_with_material() projected prekey_id={prekey_id}, ttl_ms={ttl_ms}")
     return prekey_id
 
 
-def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project_event(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project transit prekey event using pure projector.
 
     Uses apply_result_device_wide since transit_prekeys is device-wide.
@@ -299,7 +299,7 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
                 # Project each prekey
                 for i, prekey_id in enumerate(prekey_ids):
-                    project(prekey_id, peer_id, t_ms + i, db)
+                    project_event(prekey_id, peer_id, t_ms + i, db)
 
                 stats['peers_replenished'] += 1
                 stats['total_prekeys_generated'] += len(prekey_ids)

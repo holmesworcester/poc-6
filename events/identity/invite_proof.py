@@ -104,7 +104,7 @@ def create(invite_id: str, mode: str, joiner_peer_shared_id: str,
     return invite_proof_id
 
 
-def project(invite_proof_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(invite_proof_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project invite_proof event: validate and apply to tables.
 
     Args:

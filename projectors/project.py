@@ -185,30 +185,30 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'message_deletion':
         from events.content import message_deletion
-        return message_deletion.project(ref_id, recorded_by, recorded_at, db)
+        return message_deletion.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'group':
         from events.group import group
-        return group.project(ref_id, recorded_by, recorded_at, db)
+        return group.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'peer':
         from events.identity import peer
-        peer.project(ref_id, recorded_by, db)
+        peer.project_event(ref_id, recorded_by, db)
         return ref_id
 
     elif event_type == 'transit_key':
         from events.network import transit_key
-        transit_key.project(ref_id, recorded_by, db)
+        transit_key.project_event(ref_id, recorded_by, db)
         return ref_id
 
     elif event_type == 'group_key':
         from events.group import group_key
-        group_key.project(ref_id, recorded_by, recorded_at, db)
+        group_key.project_event(ref_id, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'peer_shared':
         from events.identity import peer_shared
-        return peer_shared.project(ref_id, recorded_by, recorded_at, db)
+        return peer_shared.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'channel':
         from events.content import channel
@@ -217,17 +217,17 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'sync':
         from events.network import sync
-        sync.project(ref_id, recorded_by, recorded_at, db)
+        sync.project_event(ref_id, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'sync_connect':
         from events.network import sync_connect
-        sync_connect.project(ref_id, recorded_by, recorded_at, db)
+        sync_connect.project_event(ref_id, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'invite':
         from events.identity import invite
-        return invite.project(ref_id, recorded_by, recorded_at, db)
+        return invite.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'user':
         from events.identity import user
@@ -235,29 +235,29 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'transit_prekey':
         from events.network import transit_prekey
-        transit_prekey.project(ref_id, recorded_by, recorded_at, db)
+        transit_prekey.project_event(ref_id, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'transit_prekey_shared':
         from events.network import transit_prekey_shared
-        return transit_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
+        return transit_prekey_shared.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'group_prekey':
         from events.group import group_prekey
-        group_prekey.project(ref_id, recorded_by, recorded_at, db)
+        group_prekey.project_event(ref_id, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'group_prekey_shared':
         from events.group import group_prekey_shared
-        return group_prekey_shared.project(ref_id, recorded_by, recorded_at, db)
+        return group_prekey_shared.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'group_key_shared':
         from events.group import group_key_shared
-        return group_key_shared.project(ref_id, recorded_by, recorded_at, db)
+        return group_key_shared.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'invite_accepted':
         from events.identity import invite_accepted
-        return invite_accepted.project(ref_id, recorded_by, recorded_at, db)
+        return invite_accepted.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'group_member':
         from events.group import group_member
@@ -265,45 +265,45 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     elif event_type == 'network':
         from events.identity import network
-        return network.project(ref_id, recorded_by, recorded_at, db)
+        return network.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'admin':
         from events.identity import admin
-        return admin.project(ref_id, recorded_by, recorded_at, db)
+        return admin.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'network_created':
         from events.identity import network_created
-        return network_created.project(ref_id, recorded_by, recorded_at, db)
+        return network_created.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'network_joined':
         from events.identity import network_joined
-        return network_joined.project(ref_id, recorded_by, recorded_at, db)
+        return network_joined.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'bootstrap_complete':
         from events.identity import bootstrap_complete
-        return bootstrap_complete.project(ref_id, recorded_by, recorded_at, db)
+        return bootstrap_complete.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'address':
         from events.identity import address
-        return address.project(ref_id, recorded_by, recorded_at, db)
+        return address.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'file_slice':
         from events.content import file_slice
-        file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
+        file_slice.project_event(ref_id, event_data, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'message_attachment':
         from events.content import message_attachment
-        message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
+        message_attachment.project_event(ref_id, event_data, recorded_by, recorded_at, db)
         return ref_id
 
     elif event_type == 'network_address':
         from events.network import address as network_address
-        return network_address.project(ref_id, recorded_by, recorded_at, db)
+        return network_address.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'network_intro':
         from events.network import intro as network_intro
-        return network_intro.project(ref_id, recorded_by, recorded_at, db)
+        return network_intro.project_event(ref_id, recorded_by, recorded_at, db)
 
     # Unknown event type
     log.warning(f"dispatch(): unknown event type: {event_type}")

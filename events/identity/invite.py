@@ -429,7 +429,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     return (invite_id, invite_link, invite_link_data)
 
 
-def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
+def project_event(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
             skip_admin_check: bool = False) -> str | None:
     """Project invite event into invites table.
 
@@ -700,12 +700,12 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
         pass
 
     from events.identity import peer_shared as peer_shared_module
-    peer_shared_module.project(inviter_peer_shared_id, peer_id, t_ms, db)
+    peer_shared_module.project_event(inviter_peer_shared_id, peer_id, t_ms, db)
     log.info(f"invite.accept() projected inviter's peer_shared {inviter_peer_shared_id[:20]}...")
 
     # Step 3: Project invite event to invites table
     # Now that inviter's peer_shared is available, signature can be verified
-    project(invite_id, peer_id, t_ms, db, skip_admin_check=True)
+    project_event(invite_id, peer_id, t_ms, db, skip_admin_check=True)
     log.info(f"invite.accept() projected invite to invites table")
 
     # Step 4: Create invite_accepted event (event-sources invite secrets for GKS)
@@ -721,7 +721,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     log.info(f"invite.accept() created invite_accepted_id={invite_accepted_id[:20]}...")
 
     # Step 5: Project invite_accepted (projects secrets to group_prekeys, projects invite_accepteds table)
-    invite_accepted_module.project(invite_accepted_id, peer_id, t_ms + 1, db)
+    invite_accepted_module.project_event(invite_accepted_id, peer_id, t_ms + 1, db)
     log.info(f"invite.accept() projected invite_accepted")
 
     # For mode='peer', also store existing_user_blob if present (for offline bootstrap)

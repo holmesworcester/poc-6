@@ -221,7 +221,7 @@ def test_channel_ttl_update_affects_new_messages():
         db=db,
         new_disappearing_time_ms=2000
     )
-    channel_update.project(update_id, alice['peer_id'], 5000, db)
+    channel_update.project_event(update_id, alice['peer_id'], 5000, db)
     db.commit()
     print("✓ Channel updated")
 

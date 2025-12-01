@@ -47,7 +47,7 @@ def create(link_invite_id: str, link_prekey_id: str, link_private_key: bytes,
     return link_invite_accepted_id
 
 
-def project(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
+def project_event(link_invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     """Project link_invite_accepted: restore link link_invite data for event-sourcing."""
     log.warning(f"[LINK_INVITE_ACCEPTED_PROJECT_ENTRY] id={link_invite_accepted_id[:20]}..., recorded_by={recorded_by[:20]}...")
 

@@ -65,7 +65,7 @@ def create(
     return admin_id
 
 
-def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project admin event into admins table.
 
     Validates:

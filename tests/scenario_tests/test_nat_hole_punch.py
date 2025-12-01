@@ -85,7 +85,7 @@ def test_nat_hole_punch_simple():
         db=db
     )
     # Project the address event for all peers
-    address_module.project(address_id, alice['peer_id'], 3250, db)
+    address_module.project_event(address_id, alice['peer_id'], 3250, db)
     db.commit()
     print(f"✓ Alice created address event for Bob: {address_id[:20]}...")
 
@@ -134,8 +134,8 @@ def test_nat_hole_punch_simple():
     # Phase 7: Project intros for Bob and Charlie
     print("\n=== Phase 7: Project intros for hole punch ===")
     # Manually project the intro for Bob and Charlie to simulate receiving it via sync
-    result_bob = intro_module.project(intro_id, bob['peer_id'], 3700, db)
-    result_charlie = intro_module.project(intro_id, charlie['peer_id'], 3700, db)
+    result_bob = intro_module.project_event(intro_id, bob['peer_id'], 3700, db)
+    result_charlie = intro_module.project_event(intro_id, charlie['peer_id'], 3700, db)
     db.commit()
     assert result_bob == intro_id, f"Bob projection should succeed"
     assert result_charlie == intro_id, f"Charlie projection should succeed"

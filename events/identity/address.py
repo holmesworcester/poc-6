@@ -51,7 +51,7 @@ def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db:
     return address_id
 
 
-def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project address event into addresses table."""
     from projectors import resolve
     from projectors import address as addr_projector

@@ -417,7 +417,7 @@ def send_request(file_id: str, to_peer: str, from_peer_id: str, t_ms: int, db: A
     log.info(f"sync_file.send_request() created sync_file event {sync_file_event_id[:20]}...")
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_file_data: dict[str, Any] | None = None) -> None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_file_data: dict[str, Any] | None = None) -> None:
     """Project sync_file event (handle request, send response with slices).
 
     Args:

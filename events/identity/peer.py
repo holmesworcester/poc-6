@@ -47,12 +47,12 @@ def create(t_ms: int, db: Any) -> str:
     # Then create recorded wrapper where peer sees itself
     from events.network import recorded
     recorded_id = recorded.create(peer_id, peer_id, t_ms, db, return_dupes=False)
-    recorded.project(recorded_id, db)
+    recorded.project_event(recorded_id, db)
 
     return peer_id
 
 
-def project(peer_id: str, recorded_by: str, db: Any) -> None:
+def project_event(peer_id: str, recorded_by: str, db: Any) -> None:
     """Project peer event using pure projector.
 
     Uses apply_result_device_wide since local_peers is device-wide.

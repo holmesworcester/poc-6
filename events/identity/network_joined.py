@@ -51,7 +51,7 @@ def create(peer_id: str, peer_shared_id: str, inviter_peer_shared_id: str,
     return network_joined_id
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project network_joined event into network_joiners table."""
     from projectors import resolve, apply_result
     from projectors import network_joined as nj_projector

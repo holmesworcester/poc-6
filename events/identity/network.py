@@ -52,7 +52,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return network_id, network_private_key
 
 
-def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project self-signed network event into networks table.
 
     Uses pure functional projector from projectors.network.

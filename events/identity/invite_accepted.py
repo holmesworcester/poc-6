@@ -47,7 +47,7 @@ def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
     return invite_accepted_id
 
 
-def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project_event(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project invite_accepted: restore ALL invite link data for event-sourcing.
 
     This restores the invite_transit_key from the invite link and enables

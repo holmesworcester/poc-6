@@ -59,13 +59,13 @@ def event(event_blob: bytes, recorded_by: str, t_ms: int, db: Any) -> str:
         log.debug(f"store.event() blob stored with event_id={event_id}")
 
     # Create and store a recorded event for the blob
-    # Note: recorded.create() and recorded.project() will create their own safe/unsafe as needed
+    # Note: recorded.create() and recorded.project_event() will create their own safe/unsafe as needed
     recorded_id = recorded.create(event_id, recorded_by, t_ms, db, return_dupes=False)
     if not _batch_mode:
         log.debug(f"store.event() recorded event created: recorded_id={recorded_id}")
 
     # Project the recorded event (which will dispatch to the referenced event's projector)
-    recorded.project(recorded_id, db)
+    recorded.project_event(recorded_id, db)
     if not _batch_mode:
         log.info(f"store.event() completed projection for event_id={event_id}")
 
