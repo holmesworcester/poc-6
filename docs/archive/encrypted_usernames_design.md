@@ -1,6 +1,22 @@
 # Encrypted Usernames Design
 
-**Status: Ready for Review & Implementation**
+**Status: SUPERSEDED - Not Implemented**
+
+**Date Superseded:** 2025-12-01
+
+**Superseded By:** `/docs/planning/encrypted-usernames-identity-architecture-plan.md`
+
+**Reason:** This document described a "hard dependency" model where user events depend on username events. The actual implementation uses a "names as updates" model where:
+- User events are source of truth (never blocked)
+- Username updates are separate decorating events
+- No hard dependency from user to username
+- Device names are immutable (not updateable)
+
+This document is retained for historical reference only.
+
+---
+
+# Original Document (Archived)
 
 ## Executive Summary
 

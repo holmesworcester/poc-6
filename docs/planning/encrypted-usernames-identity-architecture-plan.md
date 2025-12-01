@@ -1,6 +1,6 @@
 # Encrypted Usernames: Names as Updates Architecture
 
-**Status: Approved Architecture - Ready for Implementation**
+**Status: Approved Architecture - Implementation Complete (Updated 2025-12-01)**
 
 ## Executive Summary
 
@@ -145,8 +145,41 @@ def project_username_update(event, db):
 
 ---
 
-### 3. Message Event (Depends on Username)
+### 3. Message Event (Username Dependency - Future Enhancement)
+
+**Current Implementation Status:** Messages do NOT currently enforce username dependency. This is acceptable for MVP.
+
 ```python
+# CURRENT: Messages reference user_id but don't require username_update dependency
+message_event = {
+    'type': 'message',
+    'from_user_id': user_id,
+    'body': body,  # encrypted to group
+    # NOTE: No depends_on field currently enforced
+    'created_at': t_ms,
+    'signed_by': peer_shared_id,
+}
+
+# CURRENT: Validation only checks that user exists
+def validate_message(event, db):
+    user = get_user(event['from_user_id'], db)
+    if not user:
+        return BLOCKED
+    return VALID
+```
+
+**Why This Works for MVP:**
+1. Join flow ensures username_update is created immediately after user creation
+2. Normal case: Username is decrypted before first message is sent
+3. Edge case: If username not yet decrypted, message still valid (user exists)
+4. UI can show placeholder ("User_abc123") until username arrives
+
+**Future Enhancement (Not Yet Implemented):**
+
+To ensure all messages have identified senders, validation could be enhanced to require username dependency:
+
+```python
+# FUTURE: Message with username dependency enforcement
 message_event = {
     'type': 'message',
     'from_user_id': user_id,
@@ -156,7 +189,7 @@ message_event = {
     'signed_by': peer_shared_id,
 }
 
-# Validation: Message blocked until sender has valid username
+# FUTURE: Validation blocks until sender has valid username
 def validate_message(event, db):
     # Sender must exist
     user = get_user(event['from_user_id'], db)
@@ -180,11 +213,13 @@ def validate_message(event, db):
     return VALID
 ```
 
-**Key properties**:
+**Future Enhancement Properties:**
 - Messages REQUIRE identified sender
 - Sender must have username before message is visible
 - Even if sender's name unreadable (key issue), message is blocked
 - Ensures all visible messages have identified authors
+
+**Decision:** Username dependency enforcement is deferred to post-MVP. Current behavior is acceptable for initial deployment.
 
 ---
 
@@ -368,29 +403,42 @@ Alice Device 2:
 
 ---
 
-## Peer Device Names (Same Pattern)
+## Peer Device Names (Immutable Pattern)
 
-### Peer Event (Source of Truth)
+**Note:** Device names use a different pattern than usernames. They are immutable.
+
+### Peer Event (Source of Truth - Includes Device Name)
 ```python
 peer_shared_event = {
     'type': 'peer_shared',
     'user_id': user_id,
     'peer_id': peer_id,
+    'device_name': device_name,  # Immutable - set at creation time
     'created_at': t_ms,
     'signed_by': invite_id,
 }
 ```
 
-### Peer Name Update (Decoration)
-```python
-peer_name_update = {
-    'type': 'peer_name_update',
-    'peer_id': peer_id,
-    'name': name,  # e.g., "iPhone", "Laptop"
-    'created_at': t_ms,
-    'signed_by': peer_id,
-}
-```
+**Key Difference:** Unlike usernames, device names are:
+- Set once at peer_shared creation time
+- Stored directly in the peer_shared event (not as a separate update event)
+- Stored in `peers_shared.device_name` column
+- Cannot be updated after creation (immutable)
+- Not encrypted (part of public peer identity)
+
+**Rationale:** Device names are identity metadata ("iPhone", "Desktop"), not user-facing display names. They are set during device setup and rarely need to change. This simpler model avoids the complexity of device name update events, LWW resolution, and sync conflicts.
+
+### No peer_name_update Event
+
+**Important:** The `peer_name_update` event type was documented in earlier designs but is **not implemented** and is **not planned** for future implementation. Device names remain immutable as part of peer_shared events.
+
+If mutable device names are needed in the future, the implementation would need to:
+1. Add a new `peer_name_update` event type
+2. Follow the same pattern as `username_update` (encrypted, LWW via global_count)
+3. Store updates in a separate `peer_names` table
+4. Handle key rotation and pending decrypts
+
+**Current Status:** Not needed for MVP. Device name immutability is working well in practice.
 
 ---
 
@@ -736,23 +784,13 @@ def network_name_update.create(network_id, name, peer_id, peer_shared_id, t_ms, 
     }
     # ... store and return ...
 
-def peer_name_update.create(peer_id, name, signed_by, t_ms, db):
-    # ... get key ...
-
-    event = {
-        'type': 'peer_name_update',
-        'peer_id': peer_id,  # ← Identifies which peer this name is for
-        'name': encrypt_to_group(name, latest_key['key_id']),
-        'key_id': latest_key['key_id'],
-        'created_at': t_ms,
-        'signed_by': signed_by,
-    }
-    # ... store and return ...
+# NOTE: peer_name_update does NOT exist - device names are immutable
+# Device names are set in peer_shared.create() and cannot be changed
 ```
 
 ### Validation Logic
 
-Validation checks that the entity (user/network/peer) exists:
+Validation checks that the entity (user/network) exists:
 
 ```python
 def validate_username_update(event, db):
@@ -779,17 +817,8 @@ def validate_network_name_update(event, db):
 
     return VALID
 
-def validate_peer_name_update(event, db):
-    # Check: Does the peer event exist that we're updating?
-    peer_event = get_event(event['peer_id'], db)
-
-    if not peer_event:
-        return BLOCKED  # Wait for peer event to arrive
-
-    if peer_event['type'] != 'peer_shared':
-        return INVALID
-
-    return VALID
+# NOTE: No validate_peer_name_update - device names are immutable
+# Device name validation happens at peer_shared creation time only
 ```
 
 **How it works**:
@@ -860,60 +889,66 @@ Network state: Bob exists (user event) from T0, name visible by T4
 - create() → user event, always valid
 - Does NOT create username_update
 
-# events/username_update.py (NEW)
+# events/username_update.py (IMPLEMENTED)
 - create() → username_update event with user_id field set
 - Raises KeyNotAvailableError if group key not available
 
-# events/network_name_update.py (NEW)
+# events/network_name_update.py (IMPLEMENTED)
 - create() → network_name_update event with network_id field set
 - Raises KeyNotAvailableError if group key not available
 
-# events/peer_name_update.py (NEW)
-- create() → peer_name_update event with peer_id field set
-- Raises KeyNotAvailableError if group key not available
+# events/peer_shared.py (IMPLEMENTED - includes device_name)
+- create() → peer_shared event with immutable device_name field
+- No peer_name_update event - device names cannot be changed
 ```
 
 ### Phase 2: Schema
 ```sql
-- Remove name from users table
-- Create user_names table (with optional encrypted_blob for key-missing cases)
-- Create network_names table (similar structure)
-- Create peer_names table (similar structure)
-- Create pending_username_decrypts table (for queued decryptions when key arrives later)
+- Remove name from users table (IMPLEMENTED)
+- Create user_names table (IMPLEMENTED - with optional encrypted_blob for key-missing cases)
+- Create network_names table (IMPLEMENTED - similar structure)
+- Add device_name to peers_shared table (IMPLEMENTED - immutable field)
+- Create pending_name_decrypts table (IMPLEMENTED - for queued decryptions when key arrives later)
 ```
+
+**Note:** No separate peer_names table needed - device names stored directly in peers_shared.
 
 ### Phase 3: Validation
 ```python
-# Validate username_update:
+# Validate username_update: (IMPLEMENTED)
 # - Check: Does the user event (with event_id = user_id) exist?
 # - If missing: BLOCKED
 # - If exists and type is 'user': VALID
 # - If exists but wrong type: INVALID
 
-# Same pattern for network_name_update and peer_name_update
+# Same pattern for network_name_update (IMPLEMENTED)
+
+# NOTE: No peer_name_update validation - device names are immutable
+# Device name validation happens at peer_shared creation time only
 ```
 
 ### Phase 4: Projection
 ```python
-# User projection: always succeeds
+# User projection: always succeeds (IMPLEMENTED)
 
-# Username_update projection:
+# Username_update projection: (IMPLEMENTED)
 # - IF validation returned VALID (user event exists):
 #   - Try to decrypt name with current group key
 #   - If successful: store in user_names table
-#   - If key missing: store encrypted blob in pending_username_decrypts table
+#   - If key missing: store encrypted blob in pending_name_decrypts table
 # - IF validation returned BLOCKED (user event doesn't exist):
 #   - Skip projection (projector will retry when user event arrives)
 
-# Network_name_update projection: (same pattern as username_update)
+# Network_name_update projection: (IMPLEMENTED - same pattern as username_update)
 
-# Peer_name_update projection: (same pattern as username_update)
+# Peer_shared projection: (IMPLEMENTED - device_name stored directly)
+# - Device name stored in peers_shared.device_name column
+# - No separate projection needed for device names
 
-# Message projection:
-# - Message must have depends_on=[username_event_id]
-# - Check: Does the username_update event exist?
-# - If missing: BLOCKED
-# - If exists: VALID (but message still blocked if name can't be decrypted)
+# Message projection: (CURRENT BEHAVIOR - no username dependency)
+# - Message validation checks user exists
+# - No depends_on field currently required
+# - Future enhancement: Add username dependency validation
 ```
 
 ### Phase 5: Deterministic Trigger on Key Arrival
@@ -951,12 +986,7 @@ def retry_pending_name_updates(db):
                     item['peer_id'], item['peer_shared_id'],
                     time_ms(), db
                 )
-            elif item['type'] == 'peer_name':
-                peer_name_update.create(
-                    item['entity_id'], item['name'],
-                    item['peer_id'], item['signed_by'],
-                    time_ms(), db
-                )
+            # NOTE: No peer_name case - device names are immutable
 
             # Mark as created
             db.execute("""
@@ -1016,20 +1046,20 @@ def update_network_name(network_id, new_name, peer_id, peer_shared_id, t_ms, db)
         # Deterministic trigger will handle it when group_key_shared arrives
 ```
 
-**For Peer Names (Device-initiated):**
+**Note on Device Names:**
+Device names are NOT updateable. They are set once at peer_shared creation:
+
 ```python
-def update_peer_name(peer_id, new_name, signed_by, t_ms, db):
-    try:
-        peer_name_update.create(peer_id, new_name, signed_by, t_ms, db)
-        # Success! Event created, will be validated and projected
-    except KeyNotAvailableError:
-        # Key not available yet - store for later creation
-        db.execute("""
-            INSERT INTO pending_name_updates
-            (type, entity_id, name, signed_by, status, ...)
-            VALUES ('peer_name', ?, ?, ?, 'waiting_for_key', ...)
-        """, [peer_id, new_name, signed_by])
-        # Deterministic trigger will handle it when group_key_shared arrives
+# Device names are immutable - set at peer_shared creation only
+peer_shared_id = peer_shared.create(
+    peer_id=peer_id,
+    t_ms=t_ms,
+    db=db,
+    invite_id=invite_id,
+    invite_private_key=invite_private_key,
+    device_name="iPhone"  # Set once, cannot be changed
+)
+# No update_peer_name function exists - device names are immutable
 ```
 
 ### Phase 6: Query Layer
@@ -1217,4 +1247,27 @@ This architecture has been validated against:
 - Concurrent joins
 - Linked device updates
 
-**No further architectural changes are expected.** Proceed to implementation.
+**Implementation Status: COMPLETE**
+
+This architecture has been fully implemented with the following notes:
+
+### Implemented Features:
+1. ✅ Usernames as updates (username_update events)
+2. ✅ Network names as updates (network_name_update events)
+3. ✅ Device names as immutable fields (stored in peer_shared events)
+4. ✅ Pending name decrypts table for key-missing scenarios
+5. ✅ Retry logic when group keys arrive
+6. ✅ LWW (last-writer-wins) for username and network name updates
+
+### Deviations from Original Design:
+1. **Device names are immutable** - Not updateable via peer_name_update events (as documented in earlier versions). This is a simpler and more appropriate design for device identity metadata.
+2. **Messages don't enforce username dependency** - Messages currently reference user_id but don't require depends_on=[username_update_id]. This is acceptable for MVP and can be added as a future enhancement if needed.
+
+### Current Behavior:
+- Users join with username created immediately (via username_update)
+- Device names set once at peer_shared creation time
+- Network names updateable by admins
+- All names encrypted to all_members group
+- Key rotation safe (names queue in pending table if key missing)
+
+**No further architectural changes are expected.** Implementation is complete and working as designed.
