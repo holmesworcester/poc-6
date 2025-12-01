@@ -373,10 +373,22 @@ Key implementation detail: The event module keeps the `unwrap_event()` and signa
 verification (these have special requirements), then calls the pure projector for just
 the computation.
 
-### message_deletion: 🔄 REDESIGNING
+### message_deletion: ✅ IMPLEMENTED
 
-The original "pre-block" approach (deletion projects before message, checks auth later)
-has issues. See new analysis below.
+Implemented using a different approach than originally planned. Instead of the complex
+"same-transaction enhancement" with `find_blocked_deletion_for()`, we use:
+
+1. **Generic `deleted_events` table** - Framework manages deletion tracking
+2. **`cleanup_deleted_events()` at end of transaction** - Cascades deletions and cleans data
+3. **Pure projector just does authorization** - Outputs `deleted_events=[message_id]`
+
+The "same-transaction" behavior happens automatically:
+- Message projects → `notify_event_valid(message_id)` → deletion unblocks
+- Deletion projects immediately (recursive call in same stack)
+- `cleanup_deleted_events()` runs before transaction commits
+- Message never visible externally
+
+See `docs/deletion-framework-design.md` for full design rationale.
 
 ---
 
@@ -509,22 +521,23 @@ where `message_id == ref_id`.
    - Verified key blocking works through normal event blocking
    - Removed manual queue notification (automatic via recorded.py)
 
+3. **Implement message_deletion**
+   - Added `deleted_events` field to ProjectorResult
+   - Added `message_event` dependency type to `_resolve_dependency()`
+   - Created `cleanup_deleted_events()` with `DATA_TABLES` registry
+   - Pure projector handles authorization, outputs `deleted_events=[message_id]`
+   - Same-transaction behavior via cleanup before commit (no special enhancement needed)
+
 ### Remaining
 
-3. **Implement message_deletion base model**
-   - Add `message_event` dependency type to `_resolve_dependency()`
-   - Create pure projector with blocking dependency on message
-   - Authorization check in projector (message info available)
-
-4. **Implement same-transaction enhancement**
-   - Add `find_blocked_deletion_for()` helper
-   - Modify `recorded.project()` to check for pending deletions after message projection
-   - Process deletions in same transaction
-
-5. **Test thoroughly**
-   - Test message_deletion authorization (author, admin, rejected)
-   - Test deletion ordering (deletion arrives before/after message)
-   - Test same-transaction behavior (no visible flash)
+4. **Convert remaining event types to pure projectors**
+   - sync_connect - updates sync state table
+   - sync - generates response, updates outgoing queue
+   - file_slice - content slice handling
+   - message_attachment - attachment metadata
+   - network_address - network discovery
+   - network_intro - network introduction
+   - Local-only types (peer, transit_key, group_key, prekeys, network_created)
 
 ---
 
