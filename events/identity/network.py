@@ -168,7 +168,7 @@ def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
 def get_public_key(network_id: str, recorded_by: str, db: Any) -> bytes:
     """Get network public key for signature verification.
 
-    Phase 4: Used to verify signed_by=network_id on bootstrap invites.
+    Used to verify signed_by=network_id on bootstrap invites.
 
     Args:
         network_id: Network ID
