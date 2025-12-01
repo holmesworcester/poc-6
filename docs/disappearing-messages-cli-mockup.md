@@ -311,64 +311,99 @@ Add to help text.
 
 ### Phase 5: Tests
 
-#### 5.1 CLI Tests (`tests/cli/test_disappearing_messages_cli.py`)
+#### 5.1 Scenario Tests (`tests/scenario_tests/test_disappearing_messages_cli_support.py`)
+
+API-level tests for logic. Some already exist in `test_disappearing_messages_realistic.py`; add any missing:
 
 ```python
-def test_set_disappearing_days():
-    """Admin can set disappearing messages by days."""
+def test_channel_update_sets_disappearing_time(fresh_db):
+    """channel_update.create() sets disappearing_time_ms on channel."""
+    db = fresh_db
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+
+    channel_id = channel.create(
+        name='test', peer_id=alice['peer_id'],
+        peer_shared_id=alice['peer_shared_id'], t_ms=2000, db=db
+    )
+
+    # Update to 7 days
+    channel_update.create(
+        channel_id=channel_id, peer_id=alice['peer_id'],
+        peer_shared_id=alice['peer_shared_id'], t_ms=3000, db=db,
+        new_disappearing_time_ms=7 * 24 * 60 * 60 * 1000
+    )
+    db.commit()
+
+    channels = channel.list_channels(alice['peer_id'], db)
+    test_ch = next(c for c in channels if c['channel_id'] == channel_id)
+    assert test_ch['disappearing_time_ms'] == 7 * 24 * 60 * 60 * 1000
+
+
+def test_channel_update_turn_off_disappearing(fresh_db):
+    """Setting disappearing_time_ms to 0 turns it off."""
+    # Create channel with TTL, then set to 0
+    ...
+
+
+def test_non_admin_cannot_update_channel(fresh_db):
+    """Non-admin user cannot call channel_update.create()."""
+    # Alice creates network, Bob joins (non-admin)
+    # Bob tries channel_update.create() -> raises ValueError
+    ...
+
+
+def test_message_gets_ttl_from_channel(fresh_db):
+    """Messages in disappearing channel have ttl_ms set."""
+    # Create channel with disappearing_time_ms
+    # Send message
+    # Verify message.list() returns ttl_ms = created_at + disappearing_time_ms
+    ...
+
+
+def test_message_list_returns_ttl_ms(fresh_db):
+    """message.list() includes ttl_ms field."""
+    # Verify the field is present and correct
+    ...
+
+
+def test_channel_list_returns_disappearing_time_ms(fresh_db):
+    """channel.list_channels() includes disappearing_time_ms field."""
+    # Verify the field is present and correct
+    ...
+```
+
+#### 5.2 CLI Tests (`tests/cli/test_disappearing_messages_cli.py`)
+
+Minimal tests focused on **presentation only** (logic covered by scenario tests):
+
+```python
+def test_set_disappearing_output_format():
+    """Verify set-disappearing shows correct confirmation message."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 create-channel test-channel
 select-channel 2
 set-disappearing --days 7
-list-channels
 """
     result = run_cli(commands)
-    assert result.returncode == 0
     assert "Set disappearing messages to 7d for #test-channel (affects new messages only)" in result.stdout
-    assert "(disappearing: 7d)" in result.stdout
 
 
-def test_set_disappearing_time():
-    """Admin can set disappearing messages by milliseconds."""
-    commands = """
-new-network --name "Test" --username alice --device desktop
-create-channel test-channel
-select-channel 2
-set-disappearing --time 3600000
-list-channels
-"""
-    result = run_cli(commands)
-    assert result.returncode == 0
-    assert "Set disappearing messages to 1h for #test-channel (affects new messages only)" in result.stdout
-    assert "(disappearing: 1h)" in result.stdout
-
-
-def test_set_disappearing_off():
-    """Admin can turn off disappearing messages."""
+def test_set_disappearing_off_output_format():
+    """Verify turning off shows correct message."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 create-channel test-channel
 select-channel 2
 set-disappearing --days 7
 set-disappearing --off
-list-channels
 """
     result = run_cli(commands)
-    assert result.returncode == 0
     assert "Turned off disappearing messages for #test-channel (affects new messages only)" in result.stdout
-    # Channel should not show "(disappearing: ...)" anymore
 
 
-def test_set_disappearing_non_admin_error():
-    """Non-admin gets error when trying to set disappearing messages."""
-    # This test needs two peers - Alice (admin) and Bob (non-admin)
-    # Bob tries to set disappearing messages and gets error
-    ...
-
-
-def test_set_disappearing_no_channel_error():
-    """Error when no channel selected."""
+def test_set_disappearing_error_no_channel():
+    """Verify error message when no channel selected."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 set-disappearing --days 7
@@ -377,37 +412,48 @@ set-disappearing --days 7
     assert "No channel selected" in result.stdout
 
 
-def test_fast_forward_deletes_expired_messages():
-    """Fast-forward causes expired messages to be deleted."""
+def test_set_disappearing_error_not_admin():
+    """Verify error message for non-admin."""
+    # Setup with Bob as non-admin, verify error message format
+    ...
+
+
+def test_channel_list_shows_disappearing():
+    """Verify channel list displays (disappearing: Xd) format."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-create-channel ephemeral
+create-channel test-channel
 select-channel 2
-set-disappearing --days 1
-send Hello world
-show
-fast-forward --days 2
-show
+set-disappearing --days 7
+list-channels
 """
     result = run_cli(commands)
-    assert result.returncode == 0
-    # First show should have "Hello world"
-    # After fast-forward, should have "(no messages)"
+    assert "(disappearing: 7d)" in result.stdout
 
 
-def test_message_shows_expiration_time():
-    """Messages show 'expires in Xd Yh' when disappearing enabled."""
+def test_message_shows_expires_in():
+    """Verify message display includes (expires in: Xd Yh) format."""
     commands = """
 new-network --name "Test" --username alice --device desktop
 create-channel ephemeral
 select-channel 2
 set-disappearing --days 7
-send This will disappear
+send Test message
 show
 """
     result = run_cli(commands)
-    assert result.returncode == 0
     assert "expires in:" in result.stdout
+
+
+def test_fast_forward_output_format():
+    """Verify fast-forward shows time and state."""
+    commands = """
+new-network --name "Test" --username alice --device desktop
+fast-forward --days 3
+"""
+    result = run_cli(commands)
+    assert "Fast-forwarded 3 days" in result.stdout
+    assert "current time:" in result.stdout
 ```
 
 ---
@@ -417,7 +463,8 @@ show
 | File | Changes |
 |------|---------|
 | `cli.py` | Add `format_duration_short()`, `format_expires_in()`, `cmd_set_disappearing()`, `cmd_fast_forward()`, update `display_main()`, update channel display, update `execute_command()`, update help |
-| `tests/cli/test_disappearing_messages_cli.py` | **NEW** - CLI tests |
+| `tests/scenario_tests/test_disappearing_messages_cli_support.py` | **NEW** - API-level logic tests (or add to existing `test_disappearing_messages_realistic.py`) |
+| `tests/cli/test_disappearing_messages_cli.py` | **NEW** - Minimal presentation-only CLI tests |
 
 ---
 
