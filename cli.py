@@ -505,6 +505,10 @@ def cmd_switch(session: CLISession, account_num: int):
 
 def cmd_send(session: CLISession, msg: str):
     """Send a message to the currently selected channel."""
+    if not msg or not msg.strip():
+        print("✗ message cannot be empty or whitespace-only")
+        return
+
     account = session.get_selected_account()
 
     if not session.selected_channel_id:
@@ -579,6 +583,10 @@ def cmd_select_channel(session: CLISession, channel_num: int):
 
 def cmd_create_channel(session: CLISession, name: str):
     """Create a new channel."""
+    if not name or not name.strip():
+        print("✗ channel name cannot be empty or whitespace-only")
+        return
+
     account = session.get_selected_account()
 
     if not account.network_id:
@@ -1050,6 +1058,10 @@ def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: 
 
 def cmd_fast_forward(session: CLISession, days: int):
     """Fast-forward simulation time by days."""
+    if days < 0:
+        print("error: days must be non-negative")
+        return
+
     ms = days * 24 * 60 * 60 * 1000
     session.current_time_ms += ms
 
@@ -1324,6 +1336,10 @@ def cmd_remove_user(session: CLISession, user_num: int):
 
 def cmd_add_reaction(session: CLISession, message_num: int, emoji: str):
     """Add a reaction (emoji) to a message."""
+    if not emoji or not emoji.strip():
+        print("✗ reaction cannot be empty or whitespace-only")
+        return
+
     account = session.get_selected_account()
 
     if not session.selected_channel_id:
@@ -1520,6 +1536,15 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("usage: tick <n>")
 
+        elif cmd == "sync":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--ticks", type=int, required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_tick(session, args.ticks)
+            except SystemExit:
+                print("usage: sync --ticks <n>")
+
         elif cmd == "set-auto-tick":
             if len(parts) < 2:
                 print("usage: set-auto-tick <n>")
@@ -1572,8 +1597,11 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: link-device --devicename <device> --invite <n|link>")
 
-        elif cmd == "show-ui":
+        elif cmd == "show-ui" or cmd == "show":
             display_state(session)
+
+        elif cmd == "show-group-keys":
+            cmd_show_group_keys(session)
 
         elif cmd == "list-accounts":
             cmd_list_accounts(session)
@@ -1725,6 +1753,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    keys [--summary]")
             print("    show-group-keys")
             print("    purge-keys")
+            print("    tick <n>")
             print("    sync --ticks <n>")
             print("    set-auto-tick <n>")
             print()
