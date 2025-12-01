@@ -650,6 +650,29 @@ def cmd_list_users(session: CLISession):
         print(f"  {i}. {username}")
 
 
+def cmd_list_messages(session: CLISession):
+    """List messages in the selected channel."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("error: no channel selected")
+        return
+
+    messages = message.list(session.selected_channel_id, account.peer_id, session.db)
+    if not messages:
+        print("no messages")
+        return
+
+    for i, msg in enumerate(messages, 1):
+        author_name = msg.get('author_name', '???')
+        content = msg.get('content', '')
+        print(f"  {i}. {author_name}: {content}")
+
+
 def cmd_time(session: CLISession):
     """Show current simulation time."""
     print(f"{session.current_time_ms}ms")
@@ -1084,6 +1107,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "list-users":
             cmd_list_users(session)
 
+        elif cmd == "list-messages":
+            cmd_list_messages(session)
+
         elif cmd == "keys":
             summary = "--summary" in parts
             cmd_keys(session, summary=summary)
@@ -1159,6 +1185,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  list-accounts")
             print("  list-channels")
             print("  list-users")
+            print("  list-messages")
             print("  keys [--summary]")
             print("  delete-message <n>")
             print("  edit-message <message_num> <new_content>")
