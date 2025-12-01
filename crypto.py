@@ -13,7 +13,7 @@ import nacl.utils
 def parse_json(data: bytes) -> dict[str, Any]:
     """Parse JSON from bytes."""
     return json.loads(data.decode('utf-8'))
-from nacl.public import SealedBox
+from nacl.public import SealedBox, Box, PrivateKey, PublicKey
 
 import store
 
@@ -83,19 +83,54 @@ def decrypt(ciphertext: bytes, key: bytes, nonce: bytes) -> bytes:
 
 
 def seal(plaintext: bytes, public_key: bytes) -> bytes:
-    """Seal a message to a public key (anonymous sender)."""
+    """Deterministically seal a message to a public key.
+
+    In a content-addressed system, identical content produces identical event IDs,
+    so random nonces provide no security benefit (identical ciphertext = same event,
+    deduplicated). We derive the ephemeral keypair deterministically from the inputs
+    to enable reproducible event creation.
+
+    Output format is SealedBox-compatible: ephemeral_public_key || Box(plaintext)
+    """
     # Convert Ed25519 to X25519 for encryption
     verify_key = nacl.signing.VerifyKey(public_key)
-    public = verify_key.to_curve25519_public_key()
-    return SealedBox(public).encrypt(plaintext)
+    recipient_curve = verify_key.to_curve25519_public_key()
+
+    # Derive ephemeral keypair deterministically from recipient + plaintext
+    # This ensures: same recipient + same plaintext → same ciphertext → same event_id
+    seed = hash(bytes(recipient_curve) + plaintext, size=32)  # PrivateKey needs 32 bytes
+    ephemeral_private = PrivateKey(seed)
+    ephemeral_public = ephemeral_private.public_key
+
+    # Encrypt with Box (ephemeral → recipient)
+    box = Box(ephemeral_private, recipient_curve)
+    # Derive nonce deterministically from plaintext
+    nonce = hash(plaintext, size=NONCE_SIZE)
+    encrypted = box.encrypt(plaintext, nonce)
+    # Box.encrypt returns nonce + ciphertext, extract just ciphertext
+    ciphertext = encrypted[NONCE_SIZE:]
+
+    # SealedBox format: ephemeral_public || nonce || ciphertext
+    return bytes(ephemeral_public) + nonce + ciphertext
 
 
-def unseal(ciphertext: bytes, private_key: bytes) -> bytes:
-    """Unseal a message with a private key."""
-    # Convert Ed25519 to X25519 for encryption
+def unseal(sealed_data: bytes, private_key: bytes) -> bytes:
+    """Unseal a deterministically sealed message with a private key.
+
+    Expects format: ephemeral_public (32) || nonce (24) || ciphertext
+    """
+    # Convert Ed25519 to X25519 for decryption
     signing_key = nacl.signing.SigningKey(private_key)
-    private = signing_key.to_curve25519_private_key()
-    return SealedBox(private).decrypt(ciphertext)
+    recipient_private = signing_key.to_curve25519_private_key()
+
+    # Parse sealed format: ephemeral_public || nonce || ciphertext
+    ephemeral_public = PublicKey(sealed_data[:32])
+    nonce = sealed_data[32:32 + NONCE_SIZE]
+    ciphertext = sealed_data[32 + NONCE_SIZE:]
+
+    # Decrypt with Box
+    box = Box(recipient_private, ephemeral_public)
+    return box.decrypt(ciphertext, nonce)
 
 
 def b64encode(data: bytes) -> str:
@@ -651,7 +686,7 @@ def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
         encrypted_data = nonce + ciphertext
         log.debug(f"crypto.wrap() symmetric encrypt SUCCESS, encrypted_size={len(encrypted_data)}B")
     elif key_type == 'asymmetric':
-        # Asymmetric sealing (inherently non-deterministic, but used for one-time messages)
+        # Asymmetric sealing with deterministic ephemeral keypair (content-addressed compatible)
         public_key = key_data['public_key']
         encrypted_data = seal(plaintext_bytes, public_key)
         log.debug(f"crypto.wrap() asymmetric seal SUCCESS, encrypted_size={len(encrypted_data)}B")

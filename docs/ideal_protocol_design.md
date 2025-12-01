@@ -396,6 +396,28 @@ hint64(k,n)     = **TODO: UPDATE THIS** crypto_auth_hmacsha256(n, k)[0..1]      
 
 `created_at` and `ttl` live outside this encryption layer so that peers can support lazy loading (see: [Sync](#Sync)). (Because active peers can infer this timestamp from "received at", the metadata leak is insignificant and outweighed by the benefits.)
 
+### Deterministic Encryption
+
+Because events are content-addressed (`event_id = hash(blob)`), we use **deterministic encryption** throughout. Nonces are derived from content rather than randomly generated.
+
+**Why this is secure**: In content-addressed systems, identical ciphertext produces identical event IDs, which are deduplicated. The "attack" that random nonces prevent (detecting identical plaintexts) is impossible because identical content IS the same event. See [DETERMINISTIC_CRYPTO.md](DETERMINISTIC_CRYPTO.md) for detailed analysis.
+
+For symmetric encryption:
+```
+nonce = HASH(key_id || plaintext)[:24]
+ciphertext = XChaCha20-Poly1305(plaintext, key, nonce)
+```
+
+For asymmetric sealing (`group_key_shared`):
+```
+ephemeral_seed = HASH(recipient_public_key || plaintext)[:32]
+ephemeral_private = derive_key(ephemeral_seed)
+nonce = HASH(plaintext)[:24]
+ciphertext = Box(ephemeral_private, recipient_public_key, plaintext, nonce)
+```
+
+This enables pure functional event creation (`create_pure(deps) → blob`) where same inputs always produce same outputs.
+
 Senders can re-use previously sent secrets until a new `remove-user` or `remove-peer` event, at which point do not they must use a new secret. 
 
 Peers in a group do not know when a `group_key_shared` event includes another peer, but they cannot be sure. For this reason, peers might only trust the `group_key_shared` events they created themselves. In sufficiently small groups they can afford to rely on this exclusively (this is the "sender keys" approach) while in large groups with frequent membership changes it would be impractical to do so. In any case, we only accept `group_key_shared` events from our own user (for device linking) or admins, since only admins are allowed to add and remove users. 
