@@ -52,17 +52,17 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
         log.warning(f"network_name_update.create() network not found: {network_id[:20]}...")
         raise ValueError(f"Network {network_id} not found")
 
-    # Get all_members group
-    all_members_group = safedb.query_one(
-        "SELECT group_id FROM groups WHERE name = 'all_members' AND recorded_by = ? LIMIT 1",
+    # Get main group (all_members) - use is_main flag since name varies
+    main_group = safedb.query_one(
+        "SELECT group_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
         (peer_id,)
     )
-    if not all_members_group:
-        # all_members group not available yet (will come from sync)
-        log.info(f"network_name_update.create() all_members group not found yet")
-        raise KeyNotAvailableError("all_members group not available yet - will be created on sync")
+    if not main_group:
+        # Main group not available yet (will come from sync)
+        log.info(f"network_name_update.create() main group not found yet")
+        raise KeyNotAvailableError("Main group not available yet - will be created on sync")
 
-    group_id = all_members_group['group_id']
+    group_id = main_group['group_id']
 
     # Get the latest known key for all_members
     try:
@@ -74,10 +74,11 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
     if not key_data:
         raise KeyNotAvailableError("No group key available for all_members group")
 
-    # Extract key_id from key_data
-    key_id = key_data.get('key_id')
-    if not key_id:
+    # Extract key_id from key_data - key_data has {'id': bytes, 'key': bytes}
+    key_id_bytes = key_data.get('id')
+    if not key_id_bytes:
         raise KeyNotAvailableError("Key ID not found in group key data")
+    key_id = crypto.b64encode(key_id_bytes)
 
     # Build network_name_update event
     event_data = {
@@ -187,68 +188,75 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"network_name_update.project() blob not found")
         return None
 
-    # Parse event
+    # Unwrap event (decrypt)
     try:
-        event_data = crypto.parse_json(blob)
+        unwrapped, missing_keys = crypto.unwrap(blob, recorded_by, db)
+        if not unwrapped:
+            if missing_keys:
+                # Key not available yet - store in pending table
+                log.info(f"network_name_update.project() key not available yet (missing: {missing_keys})")
+                import hashlib
+                pending_id = hashlib.sha256(f"{event_id}:{recorded_by}".encode()).hexdigest()[:20]
+                key_id = missing_keys[0] if missing_keys else None
+
+                safedb.execute(
+                    """INSERT OR IGNORE INTO pending_name_decrypts
+                       (id, type, entity_id, event_id, encrypted_blob, key_id, status, created_at, recorded_by, recorded_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (pending_id, 'network_name', None, event_id, blob, key_id,
+                     'waiting_for_key', recorded_at, recorded_by, recorded_at)
+                )
+                return None
+            log.warning(f"network_name_update.project() unwrap failed")
+            return None
+        event_data = crypto.parse_json(unwrapped)
     except Exception as e:
-        log.warning(f"network_name_update.project() failed to parse event: {e}")
+        log.warning(f"network_name_update.project() failed to unwrap/parse event: {e}")
         return None
 
-    # Extract fields
+    # Extract fields - name is already plaintext after unwrap
     network_id = event_data.get('network_id')
-    encrypted_name = event_data.get('name')
+    name = event_data.get('name')
     key_id = event_data.get('key_id')
     global_count = event_data.get('global_count', 0)
 
-    if not network_id or not encrypted_name:
+    if not network_id or not name:
         log.warning(f"network_name_update.project() missing required fields")
         return None
 
-    # Try to decrypt the name
-    try:
-        decrypted_name = crypto.decrypt_to_local(encrypted_name, db)
+    # Store the decrypted name with LWW logic
+    log.info(f"network_name_update.project() storing network name for {network_id[:20]}...: {name}")
 
-        if decrypted_name is not None:
-            # We have the key, store decrypted name
-            log.info(f"network_name_update.project() decrypted network name for {network_id[:20]}...: {decrypted_name}")
-            safedb.execute(
-                """INSERT OR REPLACE INTO network_names
-                   (network_id, name, event_id, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   WHERE global_count < ? OR network_id NOT IN (SELECT network_id FROM network_names)""",
-                (network_id, decrypted_name, event_id, global_count, key_id,
-                 event_data.get('created_at'), event_data.get('signed_by'),
-                 recorded_by, recorded_at, global_count)
-            )
-            log.info(f"network_name_update.project() stored decrypted network name")
-        else:
-            # Key not available yet - store encrypted blob in pending table
-            log.info(f"network_name_update.project() key not available yet, storing in pending table")
-            import hashlib
-            pending_id = hashlib.sha256(f"{event_id}:{recorded_by}".encode()).hexdigest()[:20]
+    # Check if entry already exists
+    existing = safedb.query_one(
+        "SELECT global_count FROM network_names WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
 
-            safedb.execute(
-                """INSERT OR IGNORE INTO pending_name_decrypts
-                   (id, type, entity_id, event_id, encrypted_blob, key_id, status, created_at, recorded_by, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (pending_id, 'network_name', network_id, event_id, encrypted_name, key_id,
-                 'waiting_for_key', event_data.get('created_at'), recorded_by, recorded_at)
-            )
-            log.info(f"network_name_update.project() stored in pending_name_decrypts")
-
-    except Exception as e:
-        log.warning(f"network_name_update.project() decryption error: {e}")
-        # Even if decryption fails, store the encrypted blob
-        import hashlib
-        pending_id = hashlib.sha256(f"{event_id}:{recorded_by}".encode()).hexdigest()[:20]
-
+    if existing is None:
+        # No existing entry - insert new
         safedb.execute(
-            """INSERT OR IGNORE INTO pending_name_decrypts
-               (id, type, entity_id, event_id, encrypted_blob, key_id, status, created_at, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (pending_id, 'network_name', network_id, event_id, encrypted_name, key_id,
-             'waiting_for_key', event_data.get('created_at'), recorded_by, recorded_at)
+            """INSERT INTO network_names
+               (network_id, name, event_id, global_count, key_id, created_at, signed_by, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (network_id, name, event_id, global_count, key_id,
+             event_data.get('created_at'), event_data.get('signed_by'),
+             recorded_by, recorded_at)
         )
+    elif existing['global_count'] < global_count:
+        # Existing entry has lower count - update with LWW
+        safedb.execute(
+            """UPDATE network_names
+               SET name = ?, event_id = ?, global_count = ?, key_id = ?,
+                   created_at = ?, signed_by = ?, recorded_at = ?
+               WHERE network_id = ? AND recorded_by = ?""",
+            (name, event_id, global_count, key_id,
+             event_data.get('created_at'), event_data.get('signed_by'),
+             recorded_at, network_id, recorded_by)
+        )
+    # else: existing has higher or equal count - skip (LWW)
+
+    log.info(f"network_name_update.project() stored network name")
 
     # Mark event as valid
     safedb.execute(

@@ -72,6 +72,15 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     peer_shared_id = peer_self_row['peer_shared_id']
     user_id = peer_self_row['user_id']
 
+    # Check that user has a username set before allowing message creation
+    # This ensures the author's name can be displayed with their message
+    username_row = safedb.query_one(
+        "SELECT event_id FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, peer_id)
+    )
+    if not username_row:
+        raise ValueError(f"No username found for user {user_id}. Username must be set before sending messages.")
+
     # Build standardized event structure
     event_data = {
         'type': 'message',

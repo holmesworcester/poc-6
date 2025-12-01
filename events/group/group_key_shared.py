@@ -353,7 +353,8 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
 
     log.info(f"retry_pending_name_updates() found {len(pending_items)} pending items")
 
-    from events.identity import username_update, network_name_update
+    from events.identity import username_update, network_name_update, peer_name_update
+    from events.network import recorded
 
     for item in pending_items:
         try:
@@ -367,7 +368,7 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
 
             # Try to create the name update event
             if item_type == 'username':
-                username_update.create(
+                update_id = username_update.create(
                     user_id=entity_id,
                     name=name,
                     peer_id=peer_id,
@@ -375,15 +376,18 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                     t_ms=item['created_at'],
                     db=db
                 )
-                # Mark as created and delete from pending
+                # Project immediately so name is available in user_names table
+                recorded_id = recorded.create(update_id, peer_id, item['created_at'] + 1, db, return_dupes=True)
+                recorded.project_ids([recorded_id], db)
+                # Delete from pending
                 safedb.execute(
                     "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
                     (item['id'], recorded_by)
                 )
-                log.info(f"retry_pending_name_updates() successfully created username_update for {entity_id[:20]}...")
+                log.info(f"retry_pending_name_updates() successfully created and projected username_update for {entity_id[:20]}...")
 
             elif item_type == 'network_name':
-                network_name_update.create(
+                update_id = network_name_update.create(
                     network_id=entity_id,
                     name=name,
                     peer_id=peer_id,
@@ -391,16 +395,46 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                     t_ms=item['created_at'],
                     db=db
                 )
-                # Mark as created and delete from pending
+                # Project immediately so name is available in network_names table
+                recorded_id = recorded.create(update_id, peer_id, item['created_at'] + 1, db, return_dupes=True)
+                recorded.project_ids([recorded_id], db)
+                # Delete from pending
                 safedb.execute(
                     "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
                     (item['id'], recorded_by)
                 )
-                log.info(f"retry_pending_name_updates() successfully created network_name_update for {entity_id[:20]}...")
+                log.info(f"retry_pending_name_updates() successfully created and projected network_name_update for {entity_id[:20]}...")
 
+            elif item_type == 'peer_name':
+                update_id = peer_name_update.create(
+                    peer_target_id=entity_id,
+                    name=name,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=item['created_at'],
+                    db=db
+                )
+                # Project immediately so name is available in peer_names table
+                recorded_id = recorded.create(update_id, peer_id, item['created_at'] + 1, db, return_dupes=True)
+                recorded.project_ids([recorded_id], db)
+                # Delete from pending
+                safedb.execute(
+                    "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
+                    (item['id'], recorded_by)
+                )
+                log.info(f"retry_pending_name_updates() successfully created and projected peer_name_update for {entity_id[:20]}...")
+
+        except username_update.KeyNotAvailableError as e:
+            # Key or group not available yet - keep waiting (don't mark as failed)
+            # This will be retried on next group_key_shared or group projection
+            log.info(f"retry_pending_name_updates() key/group not ready yet for {item['type']}: {e}")
+        except network_name_update.KeyNotAvailableError as e:
+            log.info(f"retry_pending_name_updates() key/group not ready yet for {item['type']}: {e}")
+        except peer_name_update.KeyNotAvailableError as e:
+            log.info(f"retry_pending_name_updates() key/group not ready yet for {item['type']}: {e}")
         except Exception as e:
-            # Mark as failed but continue with other items
-            log.warning(f"retry_pending_name_updates() error for {item['type']}: {e}")
+            # Unexpected error - mark as failed
+            log.warning(f"retry_pending_name_updates() unexpected error for {item['type']}: {e}")
             safedb.execute(
                 "UPDATE pending_name_updates SET status='failed', error=? WHERE id=? AND recorded_by=?",
                 (str(e), item['id'], recorded_by)

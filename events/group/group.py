@@ -161,6 +161,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     if network_id:
         log.info(f"group.project() stored group {event_id[:20]}... in network {network_id[:20]}...")
 
+    # DETERMINISTIC TRIGGER: Retry pending name updates now that group is available
+    # This handles the case where group_key_shared arrived before the group event
+    from events.group.group_key_shared import retry_pending_name_updates
+    retry_pending_name_updates(recorded_by, db)
+
     return event_id
 
 
