@@ -671,13 +671,23 @@ def cmd_keys(session: CLISession, summary: bool = False):
     # Get prekeys
     prekeys = group_prekey.list(account.peer_id, session.current_time_ms, session.db)
 
+    # Get channel -> key mappings
+    channels_list = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channel_keys = []
+    for ch in channels_list:
+        current_key_info = group.get_current_key(ch['group_id'], account.peer_id, session.db)
+        channel_keys.append({
+            'name': ch['name'],
+            'key_id': current_key_info['key_id'] if current_key_info else None
+        })
+
     if summary:
-        display_keys_summary(account, keys, prekeys)
+        display_keys_summary(account, keys, prekeys, channel_keys)
     else:
-        display_keys_full(account, keys, prekeys)
+        display_keys_full(account, keys, prekeys, channel_keys)
 
 
-def display_keys_full(account: AccountContext, keys: list, prekeys: list):
+def display_keys_full(account: AccountContext, keys: list, prekeys: list, channel_keys: list):
     """Display full key state."""
     print(f"KEYS ({account.full_name}):")
 
@@ -702,8 +712,17 @@ def display_keys_full(account: AccountContext, keys: list, prekeys: list):
             key_count = pk['group_key_count']
             print(f"    {i}. prekey_{prekey_id_short} - {status} ({key_count} group_keys)")
 
+    print()
+    print("  channels:")
+    if not channel_keys:
+        print("    (no channels)")
+    else:
+        for i, ck in enumerate(channel_keys, 1):
+            key_id_short = ck['key_id'][:10] if ck['key_id'] else "(none)"
+            print(f"    {i}. #{ck['name']:16} key_{key_id_short}")
 
-def display_keys_summary(account: AccountContext, keys: list, prekeys: list):
+
+def display_keys_summary(account: AccountContext, keys: list, prekeys: list, channel_keys: list):
     """Display summary key state."""
     print(f"KEYS ({account.full_name}):")
 
@@ -715,6 +734,7 @@ def display_keys_summary(account: AccountContext, keys: list, prekeys: list):
 
     print(f"  group_keys: {active_keys} active, {pending_keys} pending_purge")
     print(f"  prekeys: {active_prekeys} active, {pending_prekeys} pending_purge")
+    print(f"  channels: {len(channel_keys)}")
 
 
 def cmd_delete_message(session: CLISession, message_num: int):
@@ -950,32 +970,6 @@ def cmd_remove_reaction(session: CLISession, message_num: int, emoji: str):
     display_state(session)
 
 
-def cmd_show_group_keys(session: CLISession):
-    """Show current encryption keys for all groups/channels."""
-    account = session.get_selected_account()
-
-    # Get all channels
-    channels_list = channel.list_channels(recorded_by=account.peer_id, db=session.db)
-
-    if not channels_list:
-        print("(no channels)")
-        return
-
-    print(f"GROUP KEYS ({account.full_name}):")
-    for i, ch in enumerate(channels_list, 1):
-        channel_name = ch['name']
-        group_id = ch['group_id']
-
-        # Get the current key for this group
-        current_key_info = group.get_current_key(group_id, account.peer_id, session.db)
-        if current_key_info:
-            key_id = current_key_info['key_id']
-            key_id_short = key_id[:16] if key_id else "???"
-            print(f"  {i}. #{channel_name:16} key_id={key_id_short}...")
-        else:
-            print(f"  {i}. #{channel_name:16} key_id=(none)")
-
-
 
 # ============================================================================
 # COMMAND EXECUTION
@@ -1123,9 +1117,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: user number must be an integer")
 
-        elif cmd == "show-group-keys":
-            cmd_show_group_keys(session)
-
         elif cmd == "add-reaction":
             if len(parts) < 3:
                 print("usage: add-reaction <message_num> <emoji>")
@@ -1170,7 +1161,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  edit-message <message_num> <new_content>")
             print("  purge-keys")
             print("  remove-user <n>")
-            print("  show-group-keys")
             print("  add-reaction <message_num> <emoji>")
             print("  remove-reaction <message_num> <emoji>")
             print("  time")
