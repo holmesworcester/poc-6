@@ -696,6 +696,8 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_data: dict | None = None) -> None:
     """Handle sync request by sending bloom-filtered response.
 
+    Uses pure projector for validation, then executes commands for protocol logic.
+
     Can be called either:
     - With sync_data=None (loads from store) - for recorded sync events
     - With sync_data dict (from ephemeral processing) - for directly handled sync events
@@ -707,6 +709,7 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, syn
         db: Database connection
         sync_data: Optional parsed sync request data. If None, loads from store.
     """
+    from projectors import sync as sync_projector
 
     if sync_data is None:
         # Load from store (non-ephemeral case)
@@ -717,7 +720,30 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, syn
             return
         sync_data = crypto.parse_json(sync_blob)
 
-    _project_sync_event(sync_event_id, sync_data, recorded_by, recorded_at, db)
+    # Verify signature (for ephemeral events, must do this before pure projector)
+    if not crypto.verify_signed_by_peer_shared(sync_data, recorded_by, db):
+        log.warning(f"sync.project() signature verification failed")
+        return
+
+    # Build input dict for pure projector (ephemeral events aren't stored)
+    input_dict = {
+        "event_id": sync_event_id,
+        "event_data": sync_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+    # Run pure projector (validates and emits commands)
+    result = sync_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"sync.project() rejected: {result.reason}")
+        return
+
+    # Execute commands emitted by projector
+    for command in result.commands:
+        sync_projector.execute_command(command, recorded_by, recorded_at, db)
 
 
 def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, recorded_at: int, db: Any) -> None:

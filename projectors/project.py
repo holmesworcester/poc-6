@@ -27,6 +27,10 @@ class ProjectorResult:
     derived_events: list[dict] = field(default_factory=list)
     # Events to mark as deleted (framework handles cascade + data cleanup)
     deleted_events: list[str] = field(default_factory=list)
+    # Commands to execute (projector decides WHAT, handler executes HOW)
+    # Each command has a "type" field and protocol-specific data
+    # The wrapper calls the appropriate execute_command() handler
+    commands: list[dict] = field(default_factory=list)
 
 
 # ============================================================================
@@ -56,6 +60,7 @@ def _load_projectors():
     from projectors import group_prekey as group_prekey_projector
     from projectors import transit_prekey as transit_prekey_projector
     from projectors import network_created as network_created_projector
+    from projectors import sync as sync_projector
 
     _PROJECTORS["message"] = message
     _PROJECTORS["network_address"] = network_address
@@ -84,6 +89,7 @@ def _load_projectors():
     _PROJECTORS["address"] = address
     _PROJECTORS["group_prekey_shared"] = group_prekey_shared
     _PROJECTORS["group_key_shared"] = group_key_shared
+    _PROJECTORS["sync"] = sync_projector
 
 
 def get_spec(event_type: str) -> dict | None:
