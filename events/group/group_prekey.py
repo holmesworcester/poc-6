@@ -85,7 +85,13 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 
 
 def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project group prekey event into group_prekeys table with recorded_by scoping."""
+    """Project group prekey event using pure projector.
+
+    Uses apply_result since group_prekeys is subjective (has recorded_by).
+    """
+    from projectors import apply_result
+    from projectors import group_prekey as gpk_projector
+
     log.info(f"group_prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -98,18 +104,25 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
-    owner_peer_id = event_data['signed_by']
-    created_at = event_data['created_at']
 
-    # Calculate TTL: absolute time when this prekey expires
-    ttl_ms = created_at + GROUP_PREKEY_TTL_MS
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": prekey_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
 
-    # Insert into group_prekeys table with recorded_by (subjective)
-    safedb.execute(
-        "INSERT OR IGNORE INTO group_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
-         crypto.b64decode(event_data['private_key']), created_at, ttl_ms, recorded_by)
-    )
+    # Call pure projector
+    result = gpk_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"group_prekey.project() rejected: {result.reason}")
+        return
+
+    # Apply to subjective table
+    apply_result(result, recorded_by, recorded_at, db)
 
     # Mark as valid for this peer
     safedb.execute(

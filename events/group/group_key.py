@@ -67,14 +67,14 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
 
 
 def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project group key event into group_keys table and mark valid for owning peer.
+    """Project group key event using pure projector.
 
-    Args:
-        key_id: The group_key event ID
-        recorded_by: Peer projecting this event
-        recorded_at: Timestamp to use for created_at (since blob has no timestamp)
-        db: Database connection
+    Uses apply_result since group_keys is subjective (has recorded_by).
+    Note: created_at comes from recorded_at (deterministic blobs have no timestamp).
     """
+    from projectors import apply_result
+    from projectors import group_key as gk_projector
+
     log.debug(f"group_key.project() projecting key_id={key_id}, seen_by={recorded_by}")
 
     # Get blob from store
@@ -86,22 +86,27 @@ def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
     # Parse JSON
     event_data = crypto.parse_json(blob)
 
-    # Insert into group_keys table (subjective)
-    # Note: created_at comes from recorded_at, NOT the blob (deterministic blobs have no timestamp)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    log.debug(f"group_key.project() inserting key_id={key_id} into group_keys table")
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_keys (key_id, key, created_at, recorded_by)
-           VALUES (?, ?, ?, ?)""",
-        (
-            key_id,
-            crypto.b64decode(event_data['key']),
-            recorded_at,  # Use recorded_at since blob has no timestamp
-            recorded_by
-        )
-    )
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": key_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,  # Used as created_at since blob has no timestamp
+        "dependencies": {},
+    }
+
+    # Call pure projector
+    result = gk_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"group_key.project() rejected: {result.reason}")
+        return
+
+    # Apply to subjective table
+    apply_result(result, recorded_by, recorded_at, db)
 
     # Mark as valid for this peer
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (key_id, recorded_by)
