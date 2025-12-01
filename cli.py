@@ -86,7 +86,8 @@ import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed
-from events.content import channel, message, message_deletion, message_reaction, message_update
+from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update
+import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 
 
@@ -176,6 +177,45 @@ class CLISession:
 # STATE DISPLAY FUNCTIONS (using event module query functions only)
 # ============================================================================
 
+# ============================================================================
+# FORMATTING UTILITIES
+# ============================================================================
+
+def format_duration_short(ms: int) -> str:
+    """Format milliseconds as short duration: 7d, 12h, 30m"""
+    if ms <= 0:
+        return ""
+    days = ms // (24 * 60 * 60 * 1000)
+    if days >= 1:
+        return f"{days}d"
+    hours = ms // (60 * 60 * 1000)
+    if hours >= 1:
+        return f"{hours}h"
+    minutes = ms // (60 * 1000)
+    if minutes >= 1:
+        return f"{minutes}m"
+    return "<1m"
+
+
+def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
+    """Format time remaining until expiration: 'expires in: 6d 23h'"""
+    remaining = expires_at_ms - current_time_ms
+    if remaining <= 0:
+        return "(expired)"
+    days = remaining // (24 * 60 * 60 * 1000)
+    hours = (remaining % (24 * 60 * 60 * 1000)) // (60 * 60 * 1000)
+    if days > 0:
+        return f"(expires in: {days}d {hours}h)"
+    minutes = (remaining % (60 * 60 * 1000)) // (60 * 1000)
+    if hours > 0:
+        return f"(expires in: {hours}h {minutes}m)"
+    return f"(expires in: {minutes}m)"
+
+
+# ============================================================================
+# DISPLAY FUNCTIONS
+# ============================================================================
+
 def display_state(session: CLISession):
     """Display the complete state with all sections."""
     display_accounts(session)
@@ -259,7 +299,12 @@ def display_sidebar(session: CLISession):
     if channels:
         for i, ch in enumerate(channels, 1):
             selected = "*" if ch['channel_id'] == session.selected_channel_id else " "
-            print(f"    {i}. {selected} #{ch['name']}")
+            disappearing = ch.get('disappearing_time_ms', 0)
+            if disappearing > 0:
+                disappearing_str = f" (disappearing: {format_duration_short(disappearing)})"
+            else:
+                disappearing_str = ""
+            print(f"    {i}. {selected} #{ch['name']}{disappearing_str}")
     else:
         print("    (no channels)")
 
@@ -305,13 +350,19 @@ def display_main(session: CLISession):
         timestamp = msg.get('created_at', 0)
         content = msg.get('content', '')
         edited_at = msg.get('edited_at', 0)
+        ttl_ms = msg.get('ttl_ms', 0)
 
         # Show edit indicator if message was edited
         edit_indicator = ""
         if edited_at:
             edit_indicator = f" (edited at {edited_at}ms)"
 
-        print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}")
+        # Show expiration if message has TTL
+        expires_indicator = ""
+        if ttl_ms > 0:
+            expires_indicator = f" {format_expires_in(ttl_ms, session.current_time_ms)}"
+
+        print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}{expires_indicator}")
 
         # Display reactions if any
         reactions = msg.get('reactions', [])
@@ -617,7 +668,12 @@ def cmd_list_channels(session: CLISession):
 
     for i, ch in enumerate(channels, 1):
         selected = "*" if ch['channel_id'] == session.selected_channel_id else " "
-        print(f"  {i}. {selected} #{ch['name']}")
+        disappearing = ch.get('disappearing_time_ms', 0)
+        if disappearing > 0:
+            disappearing_str = f" (disappearing: {format_duration_short(disappearing)})"
+        else:
+            disappearing_str = ""
+        print(f"  {i}. {selected} #{ch['name']}{disappearing_str}")
 
 
 def cmd_list_users(session: CLISession):
@@ -676,6 +732,69 @@ def cmd_list_messages(session: CLISession):
 def cmd_time(session: CLISession):
     """Show current simulation time."""
     print(f"{session.current_time_ms}ms")
+
+
+def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: int | None = None, off: bool = False):
+    """Set disappearing messages time for selected channel."""
+    if not session.selected_channel_id:
+        print("Error: No channel selected. Use 'select-channel <n>' first.")
+        return
+
+    account = session.get_selected_account()
+
+    # Check admin
+    if not invite.is_admin(account.peer_shared_id, account.peer_id, session.db):
+        print("Error: Only admins can change disappearing messages settings")
+        return
+
+    # Calculate TTL
+    if off:
+        ttl_ms = 0
+    elif days:
+        ttl_ms = days * 24 * 60 * 60 * 1000
+    else:
+        ttl_ms = time_ms
+
+    # Get channel name for display
+    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channel_name = next((ch['name'] for ch in channels if ch['channel_id'] == session.selected_channel_id), '???')
+
+    try:
+        channel_update.create(
+            channel_id=session.selected_channel_id,
+            peer_id=account.peer_id,
+            peer_shared_id=account.peer_shared_id,
+            t_ms=session.current_time_ms,
+            db=session.db,
+            new_disappearing_time_ms=ttl_ms
+        )
+        session.db.commit()
+        session.current_time_ms += 100
+
+        if ttl_ms == 0:
+            print(f"Turned off disappearing messages for #{channel_name} (affects new messages only)")
+        else:
+            print(f"Set disappearing messages to {format_duration_short(ttl_ms)} for #{channel_name} (affects new messages only)")
+        print()
+
+        session.run_auto_tick()
+        display_state(session)
+    except ValueError as e:
+        print(f"Error: {e}")
+
+
+def cmd_fast_forward(session: CLISession, days: int):
+    """Fast-forward simulation time by days."""
+    ms = days * 24 * 60 * 60 * 1000
+    session.current_time_ms += ms
+
+    # Run purge to delete expired messages
+    purge_expired.run_purge_expired_for_all_peers(session.current_time_ms, session.db)
+    session.db.commit()
+
+    print(f"Fast-forwarded {days} day{'s' if days != 1 else ''} (current time: {session.current_time_ms}ms)")
+    print()
+    display_state(session)
 
 
 def cmd_quit(session: CLISession):
@@ -1168,6 +1287,29 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "time":
             cmd_time(session)
 
+        elif cmd == "set-disappearing":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--days", type=int)
+            parser.add_argument("--time", type=int)
+            parser.add_argument("--off", action="store_true")
+            try:
+                args = parser.parse_args(parts[1:])
+                if not args.days and not args.time and not args.off:
+                    print("usage: set-disappearing --days <n> | --time <ms> | --off")
+                else:
+                    cmd_set_disappearing(session, days=args.days, time_ms=args.time, off=args.off)
+            except SystemExit:
+                print("usage: set-disappearing --days <n> | --time <ms> | --off")
+
+        elif cmd == "fast-forward":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--days", type=int, required=True)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_fast_forward(session, args.days)
+            except SystemExit:
+                print("usage: fast-forward --days <n>")
+
         elif cmd == "help":
             print("available commands:")
             print("  new-network --name <name> --username <username> --device <device>")
@@ -1191,6 +1333,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  add-reaction <message_num> <emoji>")
             print("  remove-reaction <message_num> <emoji>")
             print("  time")
+            print("  set-disappearing --days <n> | --time <ms> | --off")
+            print("  fast-forward --days <n>")
+            print("  show")
             print("  show-ui")
             print("  quit")
 
