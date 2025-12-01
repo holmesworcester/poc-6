@@ -1,4 +1,0 @@
--- Peer name updates: encrypted name updates for device names
--- Currently device names are stored as plaintext in the peers_shared table
--- This schema is reserved for future enhanced support if encrypted device names are needed
--- For now, use the device_name field in peers_shared.sql

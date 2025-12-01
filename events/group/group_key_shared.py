@@ -320,7 +320,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
         recorded.project_ids(unblocked_ids, db)
 
     # DETERMINISTIC TRIGGER: Retry pending name updates now that key is available
-    # This handles username_update, network_name_update, peer_name_update creation
+    # This handles username_update and network_name_update creation
     # when the group key needed for encryption wasn't available before
     retry_pending_name_updates(recorded_by, db)
 
@@ -353,7 +353,7 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
 
     log.info(f"retry_pending_name_updates() found {len(pending_items)} pending items")
 
-    from events.identity import username_update, network_name_update, peer_name_update
+    from events.identity import username_update, network_name_update
     from events.identity import user, network, peer_shared
 
     for item in pending_items:
@@ -398,21 +398,6 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                     (item['id'], recorded_by)
                 )
                 log.info(f"retry_pending_name_updates() successfully created network_name_update for {entity_id[:20]}...")
-
-            elif item_type == 'peer_name':
-                peer_name_update.create(
-                    peer_id=entity_id,
-                    name=name,
-                    signed_by=peer_shared_id,
-                    t_ms=item['created_at'],
-                    db=db
-                )
-                # Mark as created and delete from pending
-                safedb.execute(
-                    "DELETE FROM pending_name_updates WHERE id=? AND recorded_by=?",
-                    (item['id'], recorded_by)
-                )
-                log.info(f"retry_pending_name_updates() successfully created peer_name_update for {entity_id[:20]}...")
 
         except Exception as e:
             # Mark as failed but continue with other items
