@@ -195,11 +195,10 @@ def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
 def verify_signed_by_peer_shared(event_data: dict[str, Any], recorded_by: str, db: Any) -> bool:
     """Verify event signature using peer_shared public key from event data.
 
-    Looks for signer ID in event_data['signed_by'] (or 'created_by' for legacy),
-    retrieves their public key from peers_shared table, and verifies signature.
+    Retrieves public key from peers_shared table using signed_by field and verifies signature.
 
     Args:
-        event_data: Event data dict with signature
+        event_data: Event data dict with signature and signed_by field
         recorded_by: Peer ID whose perspective to use for peer_shared lookup
         db: Database connection
 
@@ -207,8 +206,7 @@ def verify_signed_by_peer_shared(event_data: dict[str, Any], recorded_by: str, d
         True if signature is valid
         False if signature invalid OR peer_shared not projected yet OR missing fields
     """
-    # Find signer's peer_shared_id from event data (prefer signed_by, fall back to created_by)
-    signer_peer_shared_id = event_data.get('signed_by') or event_data.get('created_by')
+    signer_peer_shared_id = event_data.get('signed_by')
     if not signer_peer_shared_id:
         return False
 

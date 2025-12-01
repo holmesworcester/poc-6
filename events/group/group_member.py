@@ -267,12 +267,9 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             log.warning(f"group_member.project() adder user not found for {added_by[:20]}...")
             return None
     else:
-        # Legacy group_member without admin_grant - fall back to validate() check
-        # This maintains backward compatibility with events created before admin_grant was added
-        if not validate(event_data['group_id'], added_by, recorded_by, db):
-            log.warning(f"group_member.project() authorization FAILED: {added_by} cannot add members (only admins can add members)")
-            return None
-        log.info(f"group_member.project() legacy validation passed (no admin_grant)")
+        # All group_member events should have admin_grant
+        log.warning(f"group_member.project() missing admin_grant - invalid event")
+        return None
 
     # Insert into group_members table
     safedb.execute(

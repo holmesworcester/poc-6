@@ -193,7 +193,7 @@ def get_public_key(network_id: str, recorded_by: str, db: Any) -> bytes:
 
     network_pubkey = network['network_pubkey']
     if not network_pubkey:
-        raise ValueError(f"Network {network_id} has no network_pubkey (legacy event)")
+        raise ValueError(f"Network {network_id} has no network_pubkey")
 
     return crypto.b64decode(network_pubkey)
 

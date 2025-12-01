@@ -550,7 +550,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         'user_id': user_id,
         'invite_id': invite_id,
         'admin_grant_id': admin_grant_id,
-        # Backward compatibility - group_id and key_id reference all_users group
+        # Convenience aliases for all_users group
         'group_id': all_users_group_id,
         'key_id': all_users_key_id,
     }
