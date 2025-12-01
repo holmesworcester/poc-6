@@ -153,10 +153,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     from events.identity import network as network_module
     all_users_group_id = network_module.get_all_users_group_id(network_id, peer_id, db)
 
-    # Check if inviter is an admin (only admins can create invites)
-    if not is_admin(peer_shared_id, peer_id, db):
-        raise ValueError(f"Only admins can create invites. Peer {peer_id} is not an admin.")
-
     # Get inviter's user_id from peers_shared (user→peer relationship stored there)
     peer_row = safedb.query_one(
         "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
@@ -166,6 +162,17 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
 
     inviter_user_id = peer_row['user_id']
+
+    # Authorization check depends on mode:
+    # - mode='user' (network join invites): requires admin
+    # - mode='peer' (device linking): any user can create for their OWN user_id
+    if mode == 'user':
+        if not is_admin(peer_shared_id, peer_id, db):
+            raise ValueError(f"Only admins can create network join invites. Peer {peer_id} is not an admin.")
+    elif mode == 'peer':
+        # Security: users can only create device link invites for themselves
+        if user_id != inviter_user_id:
+            raise ValueError(f"Cannot create device link invite for another user. You can only link your own devices.")
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
