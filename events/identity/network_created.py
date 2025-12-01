@@ -9,10 +9,13 @@ log = logging.getLogger(__name__)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project network_created event into network_creators table.
+    """Project network_created event using pure projector.
 
-    Marks this peer as network creator.
+    Uses apply_result since network_creators is subjective (has recorded_by).
     """
+    from projectors import apply_result
+    from projectors import network_created as nc_projector
+
     unsafedb = create_unsafe_db(db)
 
     # Get blob from store
@@ -24,24 +27,26 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Parse JSON (signed plaintext)
     event_data = crypto.parse_json(blob)
 
-    peer_id = event_data.get('peer_id')
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": event_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
 
-    if not peer_id:
-        log.warning(f"network_created.project() missing peer_id")
+    # Call pure projector
+    result = nc_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"network_created.project() rejected: {result.reason}")
         return None
 
-    # Only project if this is our own network_created event
-    if recorded_by != peer_id:
-        log.debug(f"network_created.project() skipping foreign network_created event")
-        return event_id
-
-    # Mark this peer as network creator (subjective table, use safedb)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        """INSERT OR IGNORE INTO network_creators (peer_id, recorded_by) VALUES (?, ?)""",
-        (peer_id, recorded_by)
-    )
-
-    log.info(f"network_created.project() marked {peer_id[:20]}... as network creator")
+    # Apply to subjective table (if any output)
+    if result.tables:
+        apply_result(result, recorded_by, recorded_at, db)
+        peer_id = event_data.get('peer_id')
+        log.info(f"network_created.project() marked {peer_id[:20]}... as network creator")
 
     return event_id

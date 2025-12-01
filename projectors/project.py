@@ -54,6 +54,8 @@ def _load_projectors():
     from projectors import transit_key as transit_key_projector
     from projectors import group_key as group_key_projector
     from projectors import group_prekey as group_prekey_projector
+    from projectors import transit_prekey as transit_prekey_projector
+    from projectors import network_created as network_created_projector
 
     _PROJECTORS["message"] = message
     _PROJECTORS["network_address"] = network_address
@@ -64,6 +66,8 @@ def _load_projectors():
     _PROJECTORS["transit_key"] = transit_key_projector
     _PROJECTORS["group_key"] = group_key_projector
     _PROJECTORS["group_prekey"] = group_prekey_projector
+    _PROJECTORS["transit_prekey"] = transit_prekey_projector
+    _PROJECTORS["network_created"] = network_created_projector
     _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
     _PROJECTORS["group_member"] = group_member

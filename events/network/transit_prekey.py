@@ -153,7 +153,13 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
 
 
 def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project transit prekey event into transit_prekeys table with owner_peer_id."""
+    """Project transit prekey event using pure projector.
+
+    Uses apply_result_device_wide since transit_prekeys is device-wide.
+    """
+    from projectors import apply_result_device_wide
+    from projectors import transit_prekey as tp_projector
+
     log.info(f"transit_prekey.project() prekey_id={prekey_id[:30]}..., seen_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
@@ -167,27 +173,28 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None
 
     # Parse JSON
     event_data = crypto.parse_json(blob)
-    owner_peer_id = event_data['signed_by']
-    created_at = event_data['created_at']
 
-    # Calculate TTL: absolute time when this prekey expires
-    ttl_ms = created_at + TRANSIT_PREKEY_TTL_MS
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": prekey_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
 
-    # Insert into transit_prekeys table with owner (device-wide)
-    unsafedb.execute(
-        "INSERT OR IGNORE INTO transit_prekeys (transit_prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms) VALUES (?, ?, ?, ?, ?, ?)",
-        (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
-         crypto.b64decode(event_data['private_key']), created_at, ttl_ms)
-    )
+    # Call pure projector
+    result = tp_projector.project(input_dict)
+
+    if not result.valid:
+        log.warning(f"transit_prekey.project() rejected: {result.reason}")
+        return
+
+    # Apply to device-wide table
+    apply_result_device_wide(result, recorded_at, db)
 
     # Mark as valid for this peer
     log.warning(f"[VALID_EVENT] Marking transit_prekey {prekey_id[:20]}... as valid for peer {recorded_by[:20]}...")
-
-    # Check if blob is in store before marking as valid
-    in_store = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (prekey_id,))
-    if not in_store:
-        log.error(f"[VALID_EVENT_BUG] ❌ Marking transit_prekey {prekey_id[:20]}... as valid but blob NOT in store!")
-
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (prekey_id, recorded_by)
