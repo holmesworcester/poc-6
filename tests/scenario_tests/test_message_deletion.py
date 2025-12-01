@@ -77,15 +77,9 @@ def test_message_deletion_self():
     assert msg_check_after is None, "Message should be deleted"
     print("✓ Message removed from database")
 
-    # Verify deletion record exists
-    deletion_check = safedb.query_one(
-        "SELECT 1 FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
-        (message_id, alice['peer_id'])
-    )
-    assert deletion_check is not None, "Deletion record should exist"
-    print("✓ Deletion record persisted")
-
     # Verify event is marked as deleted in deleted_events
+    # (Note: We don't use a separate message_deletions table - the deletion
+    # event blob is the audit trail, and deleted_events tracks what's deleted)
     deleted_events_check = safedb.query_one(
         "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
         (message_id, alice['peer_id'])

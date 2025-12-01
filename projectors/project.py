@@ -25,6 +25,8 @@ class ProjectorResult:
     missing_deps: list[str] = field(default_factory=list)
     # Events to create as side effect of projection (e.g., group_key from group_key_shared)
     derived_events: list[dict] = field(default_factory=list)
+    # Events to mark as deleted (framework handles cascade + data cleanup)
+    deleted_events: list[str] = field(default_factory=list)
 
 
 # ============================================================================
@@ -47,9 +49,10 @@ def _load_projectors():
     # Pure functional projectors (have SPEC + project(input_dict))
     from projectors import message, channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
     from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
-    from projectors import group_key_shared
+    from projectors import group_key_shared, message_deletion
 
     _PROJECTORS["message"] = message
+    _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
     _PROJECTORS["group_member"] = group_member
     _PROJECTORS["user"] = user
@@ -613,6 +616,23 @@ def _resolve_dependency(dep_spec: str, event_id: str, event_data: dict, recorded
                     "event_data": crypto.parse_json(invite_blob),
                 }
 
+    elif dep_type == "message_event":
+        # Look up message for deletion authorization
+        # Returns author_id, group_id so we can check if deleter is author/admin
+        message_id = event_data.get("message_id")
+        if message_id:
+            row = safedb.query_one(
+                "SELECT author_id, group_id, channel_id FROM messages WHERE message_id = ? AND recorded_by = ?",
+                (message_id, recorded_by)
+            )
+            if row:
+                result = {
+                    "message_id": message_id,
+                    "author_id": row["author_id"],
+                    "group_id": row["group_id"],
+                    "channel_id": row["channel_id"],
+                }
+
     return name, result
 
 
@@ -660,7 +680,104 @@ def apply_result(result: ProjectorResult, recorded_by: str, recorded_at: int, db
         else:
             log.warning(f"apply_result(): unknown derived event type: {event_type}")
 
+    # Record deleted events (cascade handled by cleanup_deleted_events at end of transaction)
+    for event_id in result.deleted_events:
+        safedb.execute(
+            "INSERT OR IGNORE INTO deleted_events (event_id, recorded_by, deleted_at) VALUES (?, ?, ?)",
+            (event_id, recorded_by, recorded_at)
+        )
+        log.info(f"apply_result(): marked event {event_id[:20]}... as deleted")
+
     return True
+
+
+# ============================================================================
+# DELETION CLEANUP - cascade and data table cleanup
+# ============================================================================
+
+# Registry: table name → event_id column name
+# Used to clean projected data when events are deleted
+DATA_TABLES = {
+    'messages': 'message_id',
+    'channels': 'channel_id',
+    'users': 'user_id',
+    'admins': 'admin_id',
+    'groups': 'group_id',
+    'group_members': 'group_member_id',
+    'invites': 'invite_id',
+    'peers_shared': 'peer_shared_id',
+    # Add more tables as needed
+}
+
+
+def cleanup_deleted_events(recorded_by: str, db: Any) -> int:
+    """Enforce invariant: deleted events and orphaned dependents removed.
+
+    Call this at end of transaction, after all projections complete.
+    Handles:
+    - Directly deleted events (in deleted_events table)
+    - Cascade to dependents (parent no longer valid)
+    - Subsequent dependencies that arrive later (same mechanism)
+    - Projected data in DATA_TABLES
+
+    Returns total count of events removed from valid_events.
+    """
+    from db import create_safe_db
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    total_removed = 0
+
+    # Phase 1: Cascade loop - remove from valid_events
+    changed = True
+    while changed:
+        removed = 0
+
+        # 1. Remove directly deleted from valid_events
+        safedb.execute("""
+            DELETE FROM valid_events
+            WHERE event_id IN (SELECT event_id FROM deleted_events WHERE recorded_by = ?)
+            AND recorded_by = ?
+        """, (recorded_by, recorded_by))
+        removed += safedb.changes()
+
+        # 2. Remove orphaned dependents (parent not in valid_events)
+        # This catches: existing reactions, AND future reactions that arrive later
+        safedb.execute("""
+            DELETE FROM valid_events
+            WHERE recorded_by = ?
+            AND event_id IN (
+                SELECT ed.child_event_id
+                FROM event_dependencies ed
+                LEFT JOIN valid_events ve
+                    ON ed.parent_event_id = ve.event_id
+                    AND ve.recorded_by = ed.recorded_by
+                WHERE ed.recorded_by = ?
+                AND ve.event_id IS NULL
+            )
+        """, (recorded_by, recorded_by))
+        removed += safedb.changes()
+
+        total_removed += removed
+        changed = removed > 0
+
+    # Phase 2: Clean projected data from DATA_TABLES
+    for table, event_col in DATA_TABLES.items():
+        try:
+            safedb.execute(f"""
+                DELETE FROM {table}
+                WHERE recorded_by = ?
+                AND {event_col} NOT IN (
+                    SELECT event_id FROM valid_events WHERE recorded_by = ?
+                )
+            """, (recorded_by, recorded_by))
+        except Exception as e:
+            # Table might not exist or have different schema - log and continue
+            log.debug(f"cleanup_deleted_events(): skipping {table}: {e}")
+
+    if total_removed > 0:
+        log.info(f"cleanup_deleted_events(): removed {total_removed} events from valid_events for peer {recorded_by[:20]}...")
+
+    return total_removed
 
 
 # ============================================================================

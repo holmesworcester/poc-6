@@ -113,7 +113,10 @@ class Database:
 
     def changes(self) -> int:
         """Return number of rows affected by last execute()."""
-        return self._conn.total_changes
+        # Use SELECT changes() to get rows affected by most recent statement
+        # (not total_changes which is cumulative since connection open)
+        cursor = self._conn.execute("SELECT changes()")
+        return cursor.fetchone()[0]
 
 
 class ScopingViolation(Exception):

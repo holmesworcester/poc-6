@@ -356,30 +356,175 @@ Add new dependency types to `_resolve_dependency()`:
 
 ---
 
+## Implementation Status
+
+### group_key_shared: ✅ IMPLEMENTED
+
+Both insights validated:
+
+1. **derived_events works** - Pure projector returns `derived_events` list, `apply_result()`
+   creates the group_key via `create_with_material()`.
+
+2. **Key blocking = event blocking validated** - When `apply_result()` creates the derived
+   group_key, `store.event()` → `recorded.project()` → `notify_event_valid(key_id, ...)`
+   triggers automatically. No manual queue handling needed in the projector wrapper.
+
+Key implementation detail: The event module keeps the `unwrap_event()` and signature
+verification (these have special requirements), then calls the pure projector for just
+the computation.
+
+### message_deletion: 🔄 REDESIGNING
+
+The original "pre-block" approach (deletion projects before message, checks auth later)
+has issues. See new analysis below.
+
+---
+
+## Revised Analysis: message_deletion Ordering
+
+### The Problem
+
+When a deletion event arrives before the message it deletes:
+1. We can't verify authorization (don't know if deleter is author/admin)
+2. If we accept the deletion anyway, and later the message arrives, we need to
+   check if the deletion was valid
+3. If the message projects before the deletion is validated, users see a "flash"
+   of the message before it appears deleted
+
+### Options Explored
+
+#### Option 1: Message projector checks "am I deleted?"
+```python
+def project(input_dict):
+    if is_deleted(message_id, recorded_by, db):  # DB query
+        return ProjectorResult(valid=True, tables={})
+```
+- **Pros**: Simple
+- **Cons**: Not a pure projector (DB query inside)
+
+#### Option 2: Framework passes deletion info as dependency
+```python
+SPEC = {"dependencies": ["deletion:pending_deletion?"]}
+def project(input_dict):
+    if input_dict["dependencies"].get("deletion"):
+        return ProjectorResult(valid=True, tables={})
+```
+- **Pros**: Projector stays pure
+- **Cons**: Deletion must project first, doesn't truly depend on message
+
+#### Option 3: Deletion depends on message, process in same transaction
+- Deletion blocks until message exists (normal dependency)
+- When message projects, check for unblocked deletions targeting it
+- Process deletion in same transaction → message never visible if deleted
+- **Pros**: Correct dependency semantics, no flash
+- **Cons**: Complex transaction handling
+
+#### Option 4: recorded.py intercepts deleted messages
+- Deletion projects immediately to `deleted_events`
+- `recorded.project()` checks `deleted_events` before dispatching to message projector
+- **Pros**: Framework-level, projector stays pure
+- **Cons**: Deletion doesn't depend on message
+
+### Chosen Approach: Option 3 (Two-Layer)
+
+**Key insight**: Separate the base model from the UX enhancement.
+
+**Base model** (simple, correct):
+- Deletion depends on the deleted event (message_id is a blocking dependency)
+- Normal blocking/unblocking via `valid_events`
+- When message projects → deletion unblocks → deletion projects
+- Semantically correct, possible visible flash
+
+**Enhancement** (better UX):
+- When projecting message M, detect "did this unblock a deletion for M?"
+- If yes, process the deletion in the same transaction
+- Message is never visible in non-deleted state
+
+This is clean because:
+1. The dependency model stays pure and simple
+2. The enhancement is an optimization layer, not a semantic change
+3. Without the enhancement, everything still works (just suboptimal UX)
+
+### Implementation Plan
+
+#### Phase 1: Base Model
+1. Deletion SPEC declares `message_id` as a blocking dependency
+2. Deletion blocks until message is valid
+3. When message becomes valid, deletion unblocks and projects normally
+4. Authorization check happens in deletion projector (message info available as dep)
+
+```python
+# projectors/message_deletion.py
+SPEC = {
+    "encrypted": True,
+    "signer_type": "peer_shared",
+    "dependencies": [
+        "message:message_event",      # BLOCKING - wait for message
+        "signer_user:linked_peer",    # Get deleter's user_id
+    ],
+    "tables": ["message_deletions", "deleted_events"],
+}
+
+def project(input_dict) -> ProjectorResult:
+    message_info = input_dict["dependencies"]["message"]
+    signer_user = input_dict["dependencies"]["signer_user"]
+
+    # Authorization: is signer the author or an admin?
+    is_author = (signer_user["user_id"] == message_info["author_id"])
+    is_admin = check_admin(signer_user["user_id"], message_info["group_id"])
+
+    if not is_author and not is_admin:
+        return ProjectorResult(valid=False, reason="Not authorized")
+
+    return ProjectorResult(valid=True, tables={...})
+```
+
+#### Phase 2: Same-Transaction Enhancement
+```python
+# In recorded.project(), after projecting message
+if event_type == 'message':
+    # Check: did we unblock a deletion targeting this message?
+    pending_deletion = find_blocked_deletion_for(ref_id, recorded_by, db)
+    if pending_deletion:
+        # Process deletion in same transaction
+        dispatch('message_deletion', pending_deletion, recorded_by, recorded_at, db)
+        # Message is now deleted before tx commits
+```
+
+The `find_blocked_deletion_for()` queries the blocked queue for deletion events
+where `message_id == ref_id`.
+
+---
+
 ## Implementation Steps
 
+### Completed ✅
+
 1. **Add `derived_events` to ProjectorResult**
-   - Update dataclass in `project.py`
-   - Update `apply_result()` to create derived events
+   - Updated dataclass in `project.py`
+   - Updated `apply_result()` to create derived events
 
 2. **Convert group_key_shared**
-   - Create pure projector with `derived_events` output
-   - Verify key blocking works through normal event blocking
+   - Created pure projector with `derived_events` output
+   - Verified key blocking works through normal event blocking
+   - Removed manual queue notification (automatic via recorded.py)
 
-3. **Add message_lookup dependency type**
-   - Add to `_resolve_dependency()` in `project.py`
+### Remaining
 
-4. **Add admin_for_message dependency type**
-   - Add to `_resolve_dependency()` in `project.py`
+3. **Implement message_deletion base model**
+   - Add `message_event` dependency type to `_resolve_dependency()`
+   - Create pure projector with blocking dependency on message
+   - Authorization check in projector (message info available)
 
-5. **Convert message_deletion**
-   - Create pure projector using new dependency types
-   - Handle pre-block case (message not yet projected)
+4. **Implement same-transaction enhancement**
+   - Add `find_blocked_deletion_for()` helper
+   - Modify `recorded.project()` to check for pending deletions after message projection
+   - Process deletions in same transaction
 
-6. **Test thoroughly**
-   - Test group_key_shared unblocking
+5. **Test thoroughly**
    - Test message_deletion authorization (author, admin, rejected)
-   - Test message_deletion pre-block case
+   - Test deletion ordering (deletion arrives before/after message)
+   - Test same-transaction behavior (no visible flash)
 
 ---
 
@@ -390,3 +535,5 @@ Add new dependency types to `_resolve_dependency()`:
 3. **Testability** - Can unit test with mock dependencies
 4. **Clarity** - Authorization logic is explicit in the pure function
 5. **Blocking guarantees** - Unblocked = valid, no need to re-check
+6. **Correct dependency semantics** - Deletion truly depends on message
+7. **UX enhancement is separate** - Base model works without same-transaction optimization

@@ -9,6 +9,7 @@ The framework (in project.py) handles:
   apply_result() - writes to database with INSERT OR IGNORE
   dispatch() - event_type -> projector
   check_deps() - semantic dependency checking
+  cleanup_deleted_events() - cascade deletion at end of transaction
 """
 
 from projectors.project import (
@@ -20,6 +21,8 @@ from projectors.project import (
     check_deps,
     is_foreign_local_dep,
     get_spec,
+    cleanup_deleted_events,
+    DATA_TABLES,
 )
 
 __all__ = [
@@ -31,4 +34,6 @@ __all__ = [
     'check_deps',
     'is_foreign_local_dep',
     'get_spec',
+    'cleanup_deleted_events',
+    'DATA_TABLES',
 ]

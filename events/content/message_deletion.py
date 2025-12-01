@@ -191,14 +191,16 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
 
 
 def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project message_deletion event.
+    """Project message_deletion event using pure projector.
 
-    Analogous to unblocking: when a deletion is projected, it acts like adding a permanent block.
-    The message is removed from the messages table, the blob is deleted from store,
-    and future message projections are skipped (via deleted_events table).
+    The pure projector handles authorization. The framework handles:
+    - Recording to deleted_events (via apply_result)
+    - Cascade deletion from valid_events (via cleanup_deleted_events at end of transaction)
+    - Cleaning projected data tables (via cleanup_deleted_events)
 
-    For forward secrecy: marks the encryption key for purging so it can be rekeyed
-    and later destroyed.
+    This wrapper handles type-specific side effects:
+    - Forward secrecy key purging
+    - Blob deletion from store
 
     Args:
         deletion_id: Deletion event ID
@@ -207,59 +209,46 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
         db: Database connection
 
     Returns:
-        deletion_id if successful, None if blocked
+        deletion_id if successful, None if blocked/rejected
     """
+    from projectors import resolve, apply_result
+    from projectors import message_deletion as md_projector
+
     log.info(f"message_deletion.project() deletion_id={deletion_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
 
-    # Get blob from store
-    blob = store.get(deletion_id, unsafedb)
-    if not blob:
-        log.warning(f"message_deletion.project() blob not found for deletion_id={deletion_id}")
+    # Resolve: unwrap, verify signature, gather dependencies
+    input_dict = resolve("message_deletion", deletion_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.info(f"message_deletion.project() resolve failed for deletion_id={deletion_id[:20]}...")
         return None
 
-    # Unwrap (decrypt)
-    plaintext, missing_key_ids = crypto.unwrap_event(blob, recorded_by, db)
-    if not plaintext or missing_key_ids:
-        # Encrypted but we don't have the key yet - will be blocked by recorded.project()
-        log.info(f"message_deletion.project() cannot decrypt deletion {deletion_id[:20]}... - missing key")
+    # Check if deleter is admin (add to deps for pure projector)
+    event_data = input_dict["event_data"]
+    deleted_by = event_data.get("signed_by")
+    from events.identity import invite
+    is_admin = invite.is_admin(deleted_by, recorded_by, db) if deleted_by else False
+    input_dict["dependencies"]["is_admin"] = is_admin
+
+    # Call pure projector for authorization
+    result = md_projector.project(input_dict)
+
+    if result.blocked:
+        log.info(f"message_deletion.project() blocked: {result.missing_deps}")
         return None
 
-    # Parse event
-    event_data = crypto.parse_json(plaintext)
-    message_id = event_data['message_id']
-    deleted_by = event_data['signed_by']
-    created_at = event_data['created_at']
+    if not result.valid:
+        log.warning(f"message_deletion.project() rejected: {result.reason}")
+        return None
 
-    log.info(f"message_deletion.project() deleting message_id={message_id[:20]}... deleted_by={deleted_by[:20]}...")
+    # Apply result: records to deleted_events
+    # Cascade handled by cleanup_deleted_events() at end of transaction
+    apply_result(result, recorded_by, recorded_at, db)
 
-    # Check if message exists for authorization validation
-    message_row = safedb.query_one(
-        "SELECT author_id, group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-        (message_id, recorded_by)
-    )
-
-    # If message exists, validate authorization strictly
-    if message_row:
-        if not validate(message_id, deleted_by, recorded_by, db):
-            log.warning(f"message_deletion.project() authorization FAILED: {deleted_by[:20]}... cannot delete message {message_id[:20]}...")
-            return None
-    else:
-        # Message doesn't exist yet - accept deletion as a "pre-block"
-        # Authorization will be validated if/when message arrives and tries to project
-        log.info(f"message_deletion.project() message not found yet - accepting deletion as pre-block")
-
-    # Insert deletion record (idempotent with PRIMARY KEY on message_id, recorded_by)
-    safedb.execute(
-        """INSERT OR IGNORE INTO message_deletions
-           (deletion_id, message_id, deleted_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (deletion_id, message_id, deleted_by, created_at, recorded_by, recorded_at)
-    )
-
-    # Get message blob to extract the key_id it was encrypted with
+    # Type-specific side effect: Forward secrecy key purging
+    message_id = event_data.get("message_id")
     message_blob = store.get(message_id, unsafedb)
     if message_blob:
         try:
@@ -278,39 +267,25 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
             log.warning(f"message_deletion.project() failed to mark key for purging: {e}")
             # Continue anyway - forward secrecy is best-effort
 
-    # Delete the message if it exists (analogous to unblocking - but we remove instead of project)
-    safedb.execute(
-        "DELETE FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, recorded_by)
-    )
-    log.info(f"message_deletion.project() deleted message {message_id[:20]}... from messages table (may have already been deleted or not yet arrived)")
-
-    # Mark message as deleted in deleted_events table to prevent future projection
-    safedb.execute(
-        """INSERT OR IGNORE INTO deleted_events (event_id, recorded_by, deleted_at)
-           VALUES (?, ?, ?)""",
-        (message_id, recorded_by, recorded_at)
-    )
-    log.info(f"message_deletion.project() marked message {message_id[:20]}... as deleted in deleted_events")
-
-    # Cascade delete from valid_events to ensure convergence
-    deleted_count = _cascade_delete_from_valid_events(message_id, recorded_by, safedb)
-    log.info(f"message_deletion.project() cascaded deletion of {deleted_count} events from valid_events (message + dependents)")
-
-    # Remove from shareable_events if it was marked shareable
-    safedb.execute(
-        "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-        (message_id, recorded_by)
-    )
-
-    # Delete blob from store to clean up storage
+    # Type-specific side effect: Delete blob from store
     unsafedb.execute(
         "DELETE FROM store WHERE id = ?",
         (message_id,)
     )
     log.info(f"message_deletion.project() deleted message blob {message_id[:20]}... from store")
 
-    # Return deletion_id to mark as valid
+    # Remove from shareable_events (cleanup could handle this too, but keeping here for now)
+    safedb.execute(
+        "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+        (message_id, recorded_by)
+    )
+
+    # Run cleanup to cascade delete from valid_events and clean projected data
+    # This is the framework-level cleanup that handles all deletion types
+    from projectors import cleanup_deleted_events
+    cleanup_deleted_events(recorded_by, db)
+
+    log.info(f"message_deletion.project() completed deletion_id={deletion_id[:20]}...")
     return deletion_id
 
 
