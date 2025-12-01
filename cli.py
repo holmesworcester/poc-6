@@ -638,30 +638,44 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
     session.db.commit()
     session.current_time_ms += 100
 
-    # Get username from the user table for display
-    # We need to query this since we don't have the username directly
-    from db import create_safe_db
-    safedb = create_safe_db(session.db, recorded_by=peer_id)
-    user_row = safedb.query_one(
-        "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, peer_id)
-    )
-    username = user_row['name'] if user_row else "unknown"
+    # Get username and network_id from an existing account with the same user_id
+    # (since link-device links to an existing user, there should be another device already)
+    username = None
+    network_id = None
+    for existing_account in session.accounts.values():
+        if existing_account.user_id == user_id:
+            username = existing_account.user_name
+            network_id = existing_account.network_id
+            break
+
+    # Fallback: try to get from database (might work after sync)
+    if not username:
+        from db import create_safe_db
+        safedb = create_safe_db(session.db, recorded_by=peer_id)
+        user_row = safedb.query_one(
+            "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+            (user_id, peer_id)
+        )
+        username = user_row['name'] if user_row else "unknown"
+
+    if not network_id:
+        from db import create_safe_db
+        safedb = create_safe_db(session.db, recorded_by=peer_id)
+        network_row = safedb.query_one(
+            "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+            (peer_id,)
+        )
+        network_id = network_row['network_id'] if network_row else None
 
     # Create account context
     account = AccountContext(
-        user_name=username.lower(),
+        user_name=username.lower() if username else "unknown",
         device_name=devicename,
         peer_id=result['peer_id'],
         peer_shared_id=result['peer_shared_id']
     )
     account.user_id = user_id
-    # Get network_id from networks table
-    network_row = safedb.query_one(
-        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (peer_id,)
-    )
-    account.network_id = network_row['network_id'] if network_row else None
+    account.network_id = network_id
 
     session.add_account(account)
     session.selected_account = account.full_name

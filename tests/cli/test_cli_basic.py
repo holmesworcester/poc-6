@@ -196,3 +196,134 @@ show
 
     # Should see auto-tick indicator
     assert "auto-syncing" in result.stdout or "⟳" in result.stdout
+
+
+def test_link_device_basic():
+    """Test linking a second device to an existing user."""
+    commands = """
+new-network --name "Test Network" --username alice --devicename desktop
+create-link-invite
+link-device --devicename laptop --invite 1
+list-accounts
+"""
+    result = run_cli(commands)
+
+    assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+    # Should have two accounts for alice
+    assert "alice (desktop)" in result.stdout, "alice desktop should be displayed"
+    assert "alice (laptop)" in result.stdout, "alice laptop should be displayed"
+
+    # Both should have the same user_id prefix (they're the same user)
+    # Extract user IDs from output
+    import re
+    user_ids = re.findall(r'user_([a-zA-Z0-9]+)', result.stdout)
+    # Should have multiple references to same user_id for alice's devices
+    assert len(user_ids) >= 2, "Should have multiple user_id references"
+
+    # Success message should show correct user
+    assert "linked device to existing user: alice" in result.stdout
+
+
+def test_link_device_with_messaging():
+    """Test that linked devices can send/receive messages."""
+    commands = """
+new-network --name "Test Network" --username alice --devicename desktop
+create-link-invite
+link-device --devicename laptop --invite 1
+switch 1
+send Hello from desktop
+switch 2
+send Hello from laptop
+sync --ticks 50
+switch 1
+show
+"""
+    result = run_cli(commands)
+
+    assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+    # Both messages should appear in MAIN section
+    main_section = extract_main_section(result.stdout)
+    assert "Hello from desktop" in main_section, \
+        f"Desktop message not found. MAIN: {repr(main_section)}"
+    assert "Hello from laptop" in main_section, \
+        f"Laptop message not found. MAIN: {repr(main_section)}"
+
+
+def test_join_and_link_device_together():
+    """Test both join (new user) and link-device (existing user) in same session."""
+    commands = """
+new-network --name "Test Network" --username alice --devicename desktop
+create-invite
+join --username bob --devicename phone --invite 1
+switch 1
+create-link-invite
+link-device --devicename laptop --invite 2
+list-accounts
+"""
+    result = run_cli(commands)
+
+    assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+    # Should have 3 accounts
+    assert "alice (desktop)" in result.stdout
+    assert "bob (phone)" in result.stdout
+    assert "alice (laptop)" in result.stdout
+
+    # Extract user IDs - alice's devices should share user_id
+    # The accounts display shows user_XXXXX format
+    lines = result.stdout.split('\n')
+    alice_desktop_user = None
+    alice_laptop_user = None
+    bob_user = None
+
+    for line in lines:
+        if "alice (desktop)" in line:
+            match = re.search(r'user_([a-zA-Z0-9]+)', line)
+            if match:
+                alice_desktop_user = match.group(1)
+        elif "alice (laptop)" in line:
+            match = re.search(r'user_([a-zA-Z0-9]+)', line)
+            if match:
+                alice_laptop_user = match.group(1)
+        elif "bob (phone)" in line:
+            match = re.search(r'user_([a-zA-Z0-9]+)', line)
+            if match:
+                bob_user = match.group(1)
+
+    # Alice's devices should have same user_id
+    assert alice_desktop_user == alice_laptop_user, \
+        f"Alice's devices should share user_id: desktop={alice_desktop_user}, laptop={alice_laptop_user}"
+
+    # Bob should have different user_id
+    assert bob_user != alice_desktop_user, \
+        f"Bob should have different user_id than Alice: bob={bob_user}, alice={alice_desktop_user}"
+
+
+def test_link_device_wrong_invite_type():
+    """Test that link-device rejects network join invites."""
+    commands = """
+new-network --name "Test Network" --username alice --devicename desktop
+create-invite
+link-device --devicename laptop --invite 1
+"""
+    result = run_cli(commands)
+
+    # Should fail gracefully with helpful message
+    assert "not a device linking invite" in result.stdout.lower() or "quiet://invite" in result.stdout
+
+
+def test_create_link_invite_hint():
+    """Test that create-link-invite shows correct usage hint."""
+    commands = """
+new-network --name "Test Network" --username alice --devicename desktop
+create-link-invite
+"""
+    result = run_cli(commands)
+
+    assert result.returncode == 0, f"CLI failed: {result.stderr}"
+
+    # Should show success and hint
+    assert "created device link invite" in result.stdout
+    assert "link-device --devicename" in result.stdout
