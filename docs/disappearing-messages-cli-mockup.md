@@ -2,10 +2,11 @@
 
 ## Status
 
-**Backend**: Already implemented
+**Backend**: Already implemented (no changes needed)
 - `channel_update.create()` - Update channel's disappearing_time_ms (admin-only)
 - `channel.create()` - Supports disappearing_time_ms parameter
-- `message.list()` - Returns messages with ttl_ms
+- `channel.list_channels()` - Already returns `disappearing_time_ms` field
+- `message.list()` - Already returns `ttl_ms` field (absolute expiration time, 0 = never)
 - `purge_expired.run_purge_expired_for_all_peers()` - Deletes expired messages
 - Scenario tests in `tests/scenario_tests/test_disappearing_messages_realistic.py`
 
