@@ -1092,9 +1092,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: new-peer --username <username> --device <device> --invite <link>")
 
-        elif cmd == "show":
-            display_state(session)
-
         elif cmd == "show-ui":
             display_state(session)
 
@@ -1194,7 +1191,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  add-reaction <message_num> <emoji>")
             print("  remove-reaction <message_num> <emoji>")
             print("  time")
-            print("  show")
             print("  show-ui")
             print("  quit")
 

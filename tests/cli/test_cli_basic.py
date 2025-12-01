@@ -39,7 +39,7 @@ def test_single_user_messaging():
     commands = """
 new-network --name "Alice's Network" --username alice --device desktop
 send hello world
-show
+show-ui
 """
     result = run_cli(commands)
 
@@ -70,7 +70,7 @@ switch 2
 send hi from bob
 tick 10
 switch 1
-show
+show-ui
 """
     result = run_cli(commands)
 
@@ -90,7 +90,7 @@ def test_usernames_display_correctly():
 new-network --name "Alice's Network" --username alice --device desktop
 create-invite
 new-peer --username bob --device phone --invite 1
-show
+show-ui
 """
     result = run_cli(commands)
 
@@ -154,7 +154,7 @@ new-network --name "Alice's Network" --username alice --device desktop
 create-channel random
 select-channel 2
 send test message
-show
+show-ui
 """
     result = run_cli(commands)
 
@@ -180,7 +180,7 @@ send from alice
 switch 2
 send from bob
 switch 1
-show
+show-ui
 """
     result = run_cli(commands)
 
