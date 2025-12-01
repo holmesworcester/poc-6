@@ -9,8 +9,9 @@ file level (in message_attachment). This is intentional for performance.
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,66 @@ SPEC = {
     "dependencies": [],  # No blocking dependencies
     "tables": ["file_slices", "event_dependencies"],
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # File slices have no deps - all data passed by caller
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class FileSliceCreateDeps(TypedDict):
+    """Dependencies for file_slice creation (all passed by caller)."""
+    file_id: str
+    slice_number: int
+    nonce: bytes
+    ciphertext: bytes
+    poly_tag: bytes
+    signed_by: str  # peer_shared_id for sync tracking
+
+
+def create_pure(
+    deps: FileSliceCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a file_slice event.
+
+    File slices are NOT signed (integrity via root_hash at file level).
+    File slices are NOT group-wrapped (access control via message_attachment).
+
+    Args:
+        deps: All slice data (passed by caller, typically message_attachment)
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with slice blob
+    """
+    event_data = {
+        'type': 'file_slice',
+        'file_id': deps['file_id'],
+        'slice_number': deps['slice_number'],
+        'nonce': crypto.b64encode(deps['nonce']),
+        'ciphertext': crypto.b64encode(deps['ciphertext']),
+        'poly_tag': crypto.b64encode(deps['poly_tag']),
+        'signed_by': deps['signed_by'],
+        'created_at': t_ms,
+    }
+
+    # Plain JSON, no signing, no encryption
+    blob = crypto.canonicalize_json(event_data)
+    slice_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=slice_id, event_type='file_slice')],
+        primary_id=slice_id,
+    )
 
 
 # ============================================================================

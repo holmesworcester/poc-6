@@ -4,8 +4,9 @@ Local-only event marking successful bootstrap with inviter.
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,68 @@ SPEC = {
     "tables": ["network_joiners"],
 }
 
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class NetworkJoinedCreateDeps(TypedDict):
+    """Dependencies for network_joined creation."""
+    peer_id: str
+    peer_shared_id: str
+    private_key: bytes
+    inviter_peer_shared_id: str
+
+
+def create_pure(
+    deps: NetworkJoinedCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a network_joined event.
+
+    Marks successful bootstrap with inviter.
+
+    Args:
+        deps: Resolved dependencies
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with network_joined blob
+    """
+    event_data = {
+        'type': 'network_joined',
+        'peer_id': deps['peer_id'],
+        'signed_by': deps['peer_shared_id'],
+        'inviter_peer_shared_id': deps['inviter_peer_shared_id'],
+        'created_at': t_ms,
+    }
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+
+    # Canonicalize (plaintext, no encryption)
+    blob = crypto.canonicalize_json(signed_event)
+    network_joined_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=network_joined_id, event_type='network_joined')],
+        primary_id=network_joined_id,
+    )
+
+
+# ============================================================================
+# PROJECTOR - pure function: dict -> ProjectorResult
+# ============================================================================
 
 def project(input_dict: NetworkJoinedInput) -> ProjectorResult:
     """Pure projection: dict -> result."""

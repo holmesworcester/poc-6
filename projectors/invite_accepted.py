@@ -9,8 +9,10 @@ It stores the invite proof keypair for GKS decryption.
 """
 
 from typing import TypedDict, NotRequired
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import json
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +58,62 @@ SPEC = {
     "dependencies": ["invite:invite"],  # Need invite for public key
     "tables": ["group_prekeys", "invite_accepteds", "valid_events"],
 }
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # All data passed from invite link (out-of-band)
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class InviteAcceptedCreateDeps(TypedDict):
+    """Dependencies for invite_accepted creation (all from invite link)."""
+    invite_id: str
+    invite_prekey_id: str  # Deterministic prekey ID
+    invite_private_key: bytes  # Private key for GKS decryption
+    peer_id: str  # Local peer accepting
+
+
+def create_pure(
+    deps: InviteAcceptedCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create an invite_accepted event.
+
+    Local-only event capturing invite acceptance with all out-of-band
+    data from the invite link for event-sourcing (reprojection).
+
+    Args:
+        deps: All invite link data
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with invite_accepted blob
+    """
+    event_data = {
+        'type': 'invite_accepted',
+        'invite_id': deps['invite_id'],
+        'invite_prekey_id': deps['invite_prekey_id'],
+        'invite_private_key': crypto.b64encode(deps['invite_private_key']),
+        'signed_by': deps['peer_id'],
+        'created_at': t_ms,
+    }
+
+    # Local-only: plain JSON, no signing
+    blob = json.dumps(event_data).encode()
+    invite_accepted_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=invite_accepted_id, event_type='invite_accepted')],
+        primary_id=invite_accepted_id,
+    )
 
 
 # ============================================================================
