@@ -49,12 +49,13 @@ def _load_projectors():
     # Pure functional projectors (have SPEC + project(input_dict))
     from projectors import message, channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
     from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
-    from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice
+    from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice, message_attachment
 
     _PROJECTORS["message"] = message
     _PROJECTORS["network_address"] = network_address
     _PROJECTORS["network_intro"] = network_intro
     _PROJECTORS["file_slice"] = file_slice
+    _PROJECTORS["message_attachment"] = message_attachment
     _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
     _PROJECTORS["group_member"] = group_member

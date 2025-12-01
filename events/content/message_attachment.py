@@ -510,10 +510,9 @@ def create_from_data_uri(peer_id: str, message_id: str, data_uri: str,
 
 def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
             recorded_at: int, db: Any) -> None:
-    """Project message_attachment event into message_attachments table.
+    """Project message_attachment event using pure projector.
 
-    Now includes file descriptor fields (enc_key, root_hash, etc.)
-    VALIDATION: Only the message creator can attach files to their message.
+    Wrapper fetches dependencies, pure projector validates and outputs table data.
 
     Args:
         event_id: Event ID
@@ -522,70 +521,52 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
         recorded_at: Timestamp when recorded
         db: Database connection
     """
+    from projectors import apply_result
+    from projectors import message_attachment as ma_projector
+
     log.debug(f"message_attachment.project() event_id={event_id[:20]}..., "
               f"recorded_by={recorded_by[:20]}...")
 
-    message_id = event_data.get('message_id')
-    file_id = event_data.get('file_id')
-    filename = event_data.get('filename')
-    mime_type = event_data.get('mime_type')
-    signed_by = event_data.get('signed_by')
-
-    # File descriptor fields (now in this event)
-    blob_bytes = event_data.get('blob_bytes')
-    nonce_prefix_b64 = event_data.get('nonce_prefix')
-    enc_key_b64 = event_data.get('enc_key')
-    root_hash_b64 = event_data.get('root_hash')
-    total_slices = event_data.get('total_slices')
-
-    if not all([message_id, file_id, signed_by, blob_bytes is not None,
-                nonce_prefix_b64, enc_key_b64, root_hash_b64, total_slices is not None]):
-        log.warning(f"message_attachment.project() missing required fields: {list(event_data.keys())}")
-        return
-
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Validate: attachment creator must match message creator
-    # NOTE: message_id is a dependency, so the message should already be projected
-    # Compare signed_by (peer_shared_id) - the device that signed both events must match
-    message_row = safedb.query_one(
-        "SELECT signed_by FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-        (message_id, recorded_by)
-    )
+    # Fetch dependency: message signed_by (for validation)
+    message_id = event_data.get('message_id')
+    message_signed_by = None
+    if message_id:
+        message_row = safedb.query_one(
+            "SELECT signed_by FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+            (message_id, recorded_by)
+        )
+        if message_row:
+            message_signed_by = message_row['signed_by']
 
-    if not message_row:
-        log.error(f"message_attachment.project() BUG: message not found (should be blocked by deps): {message_id[:20]}...")
+    # Build input dict for pure projector
+    input_dict = {
+        "event_id": event_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {
+            "message_signed_by": message_signed_by,
+        },
+    }
+
+    # Call pure projector
+    result = ma_projector.project(input_dict)
+
+    if result.blocked:
+        log.debug(f"message_attachment.project() blocked: {result.reason}")
         return
 
-    if message_row['signed_by'] != signed_by:
-        log.warning(f"message_attachment.project() VALIDATION FAILED: attachment signed_by={signed_by[:20]}... "
-                   f"does not match message signed_by={message_row['signed_by'][:20]}...")
+    if not result.valid:
+        log.warning(f"message_attachment.project() rejected: {result.reason}")
         return
 
-    # Decode file descriptor fields
-    nonce_prefix = crypto.b64decode(nonce_prefix_b64)
-    enc_key = crypto.b64decode(enc_key_b64)
-    root_hash = crypto.b64decode(root_hash_b64)
+    # Apply result
+    apply_result(result, recorded_by, recorded_at, db)
 
-    # Insert or ignore (now includes file descriptor fields)
-    safedb.execute(
-        """INSERT OR IGNORE INTO message_attachments
-           (message_id, file_id, filename, mime_type, blob_bytes, nonce_prefix,
-            enc_key, root_hash, total_slices, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, file_id, filename, mime_type, blob_bytes, nonce_prefix,
-         enc_key, root_hash, total_slices, recorded_by, recorded_at)
-    )
-
-    # Record dependency for cascading deletion
-    # attachment depends on message (attachment is a child of message)
-    safedb.execute(
-        """INSERT OR IGNORE INTO event_dependencies
-           (child_event_id, parent_event_id, recorded_by, dependency_type)
-           VALUES (?, ?, ?, ?)""",
-        (event_id, message_id, recorded_by, 'message')
-    )
-
+    file_id = event_data.get('file_id', '')
+    total_slices = event_data.get('total_slices', 0)
     log.debug(f"message_attachment.project() projected attachment "
               f"message={message_id[:20]}... file={file_id[:20]}... slices={total_slices}")
 
