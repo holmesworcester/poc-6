@@ -82,14 +82,17 @@ def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
 
     # NOW: Alice removes Bob
     print("\n=== Alice removes Bob (user removal) ===")
-    bob_removed_event_id = user_removed.create(
+    bob_removed_result = user_removed.create(
         removed_user_id=bob['user_id'],
         removed_by_peer_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
         t_ms=5000,
         db=db
     )
+    bob_removed_event_id = bob_removed_result['event_id']
     print(f"Created user_removed event: {bob_removed_event_id[:20]}...")
+    print(f"Removed user: {bob_removed_result['removed_user_name']}")
+    print(f"Remaining members: {[m['name'] for m in bob_removed_result['members']]}")
     db.commit()
 
     # Verify Bob is marked as removed in database (from Alice's perspective)
@@ -590,6 +593,179 @@ def test_removed_peer_cannot_sync_messages(fresh_db):
     print("\n✅ Removed peer cannot sync messages test passed!")
 
 
+def test_removed_user_cannot_send_messages(fresh_db):
+    """Test that a removed user cannot send messages (local enforcement).
+
+    This tests that message.create() rejects messages from removed users,
+    even before sync would reject them. This is important for:
+    - Immediate feedback to the removed user
+    - Preventing unnecessary event creation
+    - CLI/UI can show appropriate error message
+    """
+    db = fresh_db
+
+    print("\n=== Setup: Create network with Alice and Bob ===")
+
+    # Alice creates network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    print(f"Alice created network, peer_id: {alice['peer_id'][:20]}...")
+
+    # Bob joins
+    bob_invite_id, bob_invite_link, _ = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=1500,
+        db=db
+    )
+    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    db.commit()
+
+    # Sync to converge
+    print("\n=== Initial sync ===")
+    from tests.utils import tick_helper
+    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+
+    # Bob sends a message successfully before removal
+    print("\n=== Bob sends message before removal (should succeed) ===")
+    bob_msg = message.create(
+        peer_id=bob['peer_id'],
+        channel_id=bob['channel_id'],
+        content='Hello from Bob before removal',
+        t_ms=4000,
+        db=db
+    )
+    print(f"✓ Bob sent message: {bob_msg['id'][:20]}...")
+    db.commit()
+
+    # Alice removes Bob
+    print("\n=== Alice removes Bob ===")
+    user_removed.create(
+        removed_user_id=bob['user_id'],
+        removed_by_peer_id=alice['peer_shared_id'],
+        removed_by_local_peer_id=alice['peer_id'],
+        t_ms=5000,
+        db=db
+    )
+    db.commit()
+
+    # Sync to propagate removal
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+
+    # Bob tries to send a message after removal (should fail)
+    print("\n=== Bob tries to send message after removal (should fail) ===")
+    try:
+        message.create(
+            peer_id=bob['peer_id'],
+            channel_id=bob['channel_id'],
+            content='Bob tries to send after removal',
+            t_ms=7000,
+            db=db
+        )
+        assert False, "Bob should NOT be able to send messages after removal"
+    except ValueError as e:
+        print(f"✓ Bob correctly blocked: {e}")
+        assert "removed" in str(e).lower(), f"Error should mention removal: {e}"
+
+    print("\n✅ Removed user cannot send messages test passed!")
+
+
+def test_removed_user_not_in_user_list(fresh_db):
+    """Test that a removed user does not appear in the user list.
+
+    This tests that group_member.list_members() filters out removed users,
+    ensuring the UI shows only active users.
+    """
+    db = fresh_db
+    from events.group import group_member
+    from events.identity import network
+
+    print("\n=== Setup: Create network with Alice, Bob, and Charlie ===")
+
+    # Alice creates network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    print(f"Alice created network")
+
+    # Bob joins
+    bob_invite_id, bob_invite_link, _ = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=1500,
+        db=db
+    )
+    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    print(f"Bob joined network")
+
+    # Charlie joins
+    charlie_invite_id, charlie_invite_link, _ = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=2500,
+        db=db
+    )
+    charlie_peer_id = peer.create(t_ms=3000, db=db)
+    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
+    print(f"Charlie joined network")
+
+    db.commit()
+
+    # Sync to converge
+    print("\n=== Initial sync ===")
+    from tests.utils import tick_helper
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+
+    # Get the all_users group
+    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+
+    # Check initial user list (Alice's view)
+    print("\n=== Check user list before removal ===")
+    members_before = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+    member_names_before = [m['name'] for m in members_before]
+    print(f"Members before removal: {member_names_before}")
+
+    assert 'Alice' in member_names_before, "Alice should be in member list"
+    assert 'Bob' in member_names_before, "Bob should be in member list"
+    assert 'Charlie' in member_names_before, "Charlie should be in member list"
+    assert len(members_before) == 3, f"Should have 3 members, got {len(members_before)}"
+    print("✓ All 3 users in member list")
+
+    # Alice removes Bob
+    print("\n=== Alice removes Bob ===")
+    user_removed.create(
+        removed_user_id=bob['user_id'],
+        removed_by_peer_id=alice['peer_shared_id'],
+        removed_by_local_peer_id=alice['peer_id'],
+        t_ms=5000,
+        db=db
+    )
+    db.commit()
+
+    # Check user list after removal (Alice's view)
+    print("\n=== Check user list after removal ===")
+    members_after = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+    member_names_after = [m['name'] for m in members_after]
+    print(f"Members after removal: {member_names_after}")
+
+    assert 'Alice' in member_names_after, "Alice should still be in member list"
+    assert 'Bob' not in member_names_after, "Bob should NOT be in member list after removal"
+    assert 'Charlie' in member_names_after, "Charlie should still be in member list"
+    assert len(members_after) == 2, f"Should have 2 members after removal, got {len(members_after)}"
+    print("✓ Bob correctly removed from member list")
+
+    # Sync to propagate removal to Charlie
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+
+    # Check user list from Charlie's view
+    print("\n=== Check user list from Charlie's view ===")
+    charlie_all_users_group_id = network.get_all_users_group_id(charlie['network_id'], charlie['peer_id'], db)
+    members_charlie_view = group_member.list_members(charlie_all_users_group_id, charlie['peer_id'], db)
+    member_names_charlie = [m['name'] for m in members_charlie_view]
+    print(f"Members (Charlie's view): {member_names_charlie}")
+
+    assert 'Bob' not in member_names_charlie, "Bob should NOT be in member list from Charlie's view"
+    print("✓ Bob removed from Charlie's view too")
+
+    print("\n✅ Removed user not in user list test passed!")
+
+
 # Test coverage summary for removal enforcement:
 #
 # ✓ test_removed_peer_cannot_sync_messages (REALISTIC SCENARIO TEST)
@@ -598,3 +774,11 @@ def test_removed_peer_cannot_sync_messages(fresh_db):
 #   - Verifies observable behavior (message delivery blocked after removal)
 #   - Proves: Removed peer cannot sync messages with network
 #   - This is the primary test showing removal enforcement works from user perspective
+#
+# ✓ test_removed_user_cannot_send_messages (LOCAL ENFORCEMENT TEST)
+#   - Tests that message.create() rejects messages from removed users
+#   - Proves: Removed user gets immediate feedback when trying to send
+#
+# ✓ test_removed_user_not_in_user_list (UI ENFORCEMENT TEST)
+#   - Tests that list_members() filters out removed users
+#   - Proves: Removed user doesn't appear in user lists

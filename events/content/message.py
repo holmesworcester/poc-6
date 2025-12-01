@@ -72,6 +72,14 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     peer_shared_id = peer_self_row['peer_shared_id']
     user_id = peer_self_row['user_id']
 
+    # Check if user has been removed from the network
+    removal_row = safedb.query_one(
+        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, peer_id)
+    )
+    if removal_row:
+        raise ValueError(f"User {user_id} has been removed from the network and cannot send messages.")
+
     # Check that user has a username set before allowing message creation
     # This ensures the author's name can be displayed with their message
     username_row = safedb.query_one(

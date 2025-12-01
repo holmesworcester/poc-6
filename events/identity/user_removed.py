@@ -53,7 +53,7 @@ def validate(removed_user_id: str, removed_by_peer_id: str, recorded_by: str, db
     return invite.is_admin(removed_by_peer_id, recorded_by, db)
 
 
-def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_id: str, t_ms: int, db: Any) -> str:
+def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Create a user_removed event.
 
     Args:
@@ -64,8 +64,23 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
         db: Database connection
 
     Returns:
-        event_id of the created user_removed event
+        dict with:
+        - event_id: ID of the created user_removed event
+        - removed_user_name: Name of the removed user (for display)
+        - members: Updated list of group members (excluding the removed user)
     """
+    safedb = create_safe_db(db, recorded_by=removed_by_local_peer_id)
+
+    # Get removed user's name for the return value (before removal)
+    user_row = safedb.query_one(
+        """SELECT COALESCE(un.name, u.name) as name
+           FROM users u
+           LEFT JOIN user_names un ON u.user_id = un.user_id AND u.recorded_by = un.recorded_by
+           WHERE u.user_id = ? AND u.recorded_by = ? LIMIT 1""",
+        (removed_user_id, removed_by_local_peer_id)
+    )
+    removed_user_name = user_row['name'] if user_row else '???'
+
     # Validate authorization
     if not validate(removed_user_id, removed_by_peer_id, removed_by_local_peer_id, db):
         raise ValueError("Not authorized to remove this user")
@@ -88,7 +103,28 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
     blob = crypto.canonicalize_json(signed_event)
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
 
-    return event_id
+    # Get updated member list after removal (for immediate UI feedback)
+    from events.identity import network
+    from events.group import group_member
+
+    # Get network_id to find all_users group
+    network_row = safedb.query_one(
+        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (removed_by_local_peer_id,)
+    )
+    members = []
+    if network_row:
+        all_users_group_id = network.get_all_users_group_id(
+            network_row['network_id'], removed_by_local_peer_id, db
+        )
+        if all_users_group_id:
+            members = group_member.list_members(all_users_group_id, removed_by_local_peer_id, db)
+
+    return {
+        'event_id': event_id,
+        'removed_user_name': removed_user_name,
+        'members': members
+    }
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
