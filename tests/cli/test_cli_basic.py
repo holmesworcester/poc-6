@@ -68,7 +68,7 @@ switch 1
 send hello from alice
 switch 2
 send hi from bob
-sync --ticks 10
+tick 10
 switch 1
 show
 """

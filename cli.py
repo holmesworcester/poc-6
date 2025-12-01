@@ -408,14 +408,14 @@ def cmd_send(session: CLISession, msg: str):
     display_state(session)
 
 
-def cmd_sync(session: CLISession, ticks: int):
-    """Run manual sync ticks."""
-    print(f"⟳ syncing {ticks} ticks...")
+def cmd_tick(session: CLISession, count: int):
+    """Run manual ticks to advance simulation time."""
+    print(f"⟳ ticking {count}...")
     start_t = session.current_time_ms
-    for _ in range(ticks):
+    for _ in range(count):
         session.current_time_ms += 100
         tick.tick(t_ms=session.current_time_ms, db=session.db)
-    print(f"✓ synced (t={start_t}ms -> {session.current_time_ms}ms)")
+    print(f"✓ ticked (t={start_t}ms -> {session.current_time_ms}ms)")
     print()
 
     display_state(session)
@@ -1021,14 +1021,14 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 msg = " ".join(parts[1:]).strip('"')
                 cmd_send(session, msg)
 
-        elif cmd == "sync":
-            parser = argparse.ArgumentParser(add_help=False)
-            parser.add_argument("--ticks", type=int, required=True)
-            try:
-                args = parser.parse_args(parts[1:])
-                cmd_sync(session, args.ticks)
-            except SystemExit:
-                print("usage: sync --ticks <n>")
+        elif cmd == "tick":
+            if len(parts) < 2:
+                print("usage: tick <n>")
+            else:
+                try:
+                    cmd_tick(session, int(parts[1]))
+                except ValueError:
+                    print("usage: tick <n>")
 
         elif cmd == "set-auto-tick":
             if len(parts) < 2:
@@ -1148,7 +1148,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  new-peer --username <username> --device <device> --invite <n|link>")
             print("  switch <n>")
             print("  send <message>")
-            print("  sync --ticks <n>")
+            print("  tick <n>")
             print("  set-auto-tick <n>")
             print("  select-channel <n>")
             print("  create-channel <name>")
