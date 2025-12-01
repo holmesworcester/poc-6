@@ -278,6 +278,33 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
             log.warning(f"message_deletion.project() failed to mark key for purging: {e}")
             # Continue anyway - forward secrecy is best-effort
 
+    # Delete reactions before deleting message (cascade - respect foreign key constraint)
+    try:
+        # Get reaction IDs before deleting
+        reactions = safedb.query(
+            "SELECT reaction_id FROM message_reactions WHERE message_id = ? AND recorded_by = ?",
+            (message_id, recorded_by)
+        )
+        reaction_ids = [r['reaction_id'] for r in reactions]
+
+        # Delete reaction dependencies
+        for reaction_id in reaction_ids:
+            safedb.execute(
+                "DELETE FROM event_dependencies WHERE child_event_id = ? AND recorded_by = ?",
+                (reaction_id, recorded_by)
+            )
+
+        safedb.execute(
+            "DELETE FROM message_reactions WHERE message_id = ? AND recorded_by = ?",
+            (message_id, recorded_by)
+        )
+        safedb.execute(
+            "DELETE FROM message_reaction_deletions WHERE reaction_id IN (SELECT reaction_id FROM message_reactions WHERE message_id = ? AND recorded_by = ?) AND recorded_by = ?",
+            (message_id, recorded_by, recorded_by)
+        )
+    except Exception as e:
+        log.debug(f"message_deletion.project() cascade delete of reactions failed (may not exist): {e}")
+
     # Delete the message if it exists (analogous to unblocking - but we remove instead of project)
     safedb.execute(
         "DELETE FROM messages WHERE message_id = ? AND recorded_by = ?",
