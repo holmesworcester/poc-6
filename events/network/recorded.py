@@ -574,6 +574,22 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     elif event_type == 'network_intro':
         from events.network import intro as network_intro
         projected_id = network_intro.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'message_update':
+        from events.content import message_update
+        projected_id = message_update.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'message_reaction':
+        from events.content import message_reaction
+        projected_id = message_reaction.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'message_reaction_deletion':
+        from events.content import message_reaction_deletion
+        message_reaction_deletion.project(ref_id, recorded_by, recorded_at, db)
+        projected_id = ref_id
+    elif event_type == 'username_update':
+        from events.identity import username_update
+        projected_id = username_update.project(ref_id, recorded_by, recorded_at, db)
+    elif event_type == 'network_name_update':
+        from events.identity import network_name_update
+        projected_id = network_name_update.project(ref_id, recorded_by, recorded_at, db)
 
     # Only mark event as valid if projection succeeded (projected_id is not None)
     # Events that fail projection (authorization, missing data) should NOT be marked valid

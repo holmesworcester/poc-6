@@ -10,6 +10,12 @@ from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
+# Event type registration
+EVENT_TYPE = 'username_update'
+SHAREABLE = True
+EPHEMERAL = False
+PROJECTION_TABLE = ('user_names', 'event_id')
+
 
 def create(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int,
            db: Any) -> str:
