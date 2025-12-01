@@ -4,8 +4,9 @@ Shareable public transit prekey for sync routing.
 """
 
 from typing import TypedDict
-from projectors import ProjectorResult
+from projectors import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
+import crypto
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,71 @@ SPEC = {
     "tables": ["transit_prekeys_shared"],
 }
 
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    # Private key for signing
+    "private_key": {"type": "local_peer_key"},
+    # Public key from local transit_prekey (passed by caller)
+}
+
+
+# ============================================================================
+# CREATE - pure function: deps -> CreateResult
+# ============================================================================
+
+class TransitPrekeySharedCreateDeps(TypedDict):
+    """Dependencies for transit_prekey_shared creation."""
+    peer_shared_id: str
+    private_key: bytes
+    prekey_id: str  # Local transit_prekey ID
+    public_key_b64: str  # Public key from local prekey (base64)
+
+
+def create_pure(
+    deps: TransitPrekeySharedCreateDeps,
+    t_ms: int,
+) -> CreateResult:
+    """Pure function to create a transit_prekey_shared event.
+
+    Transit prekey shared events publish a transit prekey's public key
+    so other peers can send sealed sync requests.
+
+    Args:
+        deps: Resolved dependencies
+        t_ms: Timestamp
+
+    Returns:
+        CreateResult with prekey_shared blob
+    """
+    event_data = {
+        'type': 'transit_prekey_shared',
+        'transit_prekey_id': deps['prekey_id'],
+        'peer_id': deps['peer_shared_id'],
+        'public_key': deps['public_key_b64'],
+        'signed_by': deps['peer_shared_id'],
+        'created_at': t_ms,
+    }
+
+    # Sign the event
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+
+    # Canonicalize (plaintext, no encryption)
+    blob = crypto.canonicalize_json(signed_event)
+    prekey_shared_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=prekey_shared_id, event_type='transit_prekey_shared')],
+        primary_id=prekey_shared_id,
+    )
+
+
+# ============================================================================
+# PROJECTOR - pure function: dict -> ProjectorResult
+# ============================================================================
 
 def project(input_dict: TransitPrekeySharedInput) -> ProjectorResult:
     """Pure projection: dict -> result."""
