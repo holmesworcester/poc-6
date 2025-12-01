@@ -42,8 +42,6 @@ SUBJECTIVE_TABLES = {
     'invites',
     'networks',                    # Networks are subjective (peer-scoped)
     'network_names',               # Encrypted network name updates (peer-scoped)
-    'network_creators',            # Peers who created a network (peer-scoped)
-    'network_joiners',             # Peers who joined a network (peer-scoped)
     'file_slices',                 # File slice storage (peer-scoped)
     'message_attachments',         # Message-file links (peer-scoped)
     'file_sync_wanted',            # Files wanted for active syncing (peer-scoped)
