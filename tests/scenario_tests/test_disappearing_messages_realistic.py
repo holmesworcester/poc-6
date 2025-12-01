@@ -148,8 +148,8 @@ def test_alice_and_bob_see_messages_disappear_together():
     db.commit()
 
     # Project message for both
-    message.project(message_id, alice['peer_id'], 4000, db)
-    message.project(message_id, bob['peer_id'], 4500, db)
+    message.project_event(message_id, alice['peer_id'], 4000, db)
+    message.project_event(message_id, bob['peer_id'], 4500, db)
     db.commit()
 
     # Both see the message

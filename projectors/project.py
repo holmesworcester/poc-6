@@ -104,7 +104,10 @@ def _load_projectors():
     _LOADED = True
 
     # Pure functional projectors (have SPEC + project(input_dict))
-    from projectors import message, channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
+    # Consolidated modules (in events/)
+    from events.content import message
+    # Still in projectors/ (to be consolidated)
+    from projectors import channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
     from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
     from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice, message_attachment
     from projectors import peer as peer_projector
@@ -178,7 +181,7 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     if event_type == 'message':
         from events.content import message
-        return message.project(ref_id, recorded_by, recorded_at, db)
+        return message.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'message_deletion':
         from events.content import message_deletion
