@@ -1,5 +1,15 @@
-"""Sync implementation with bloom-based window protocol."""
-from typing import Any, Iterator
+"""Sync implementation with bloom-based window protocol.
+
+Pure functions:
+    project(input_dict) -> ProjectorResult (with commands)
+
+API functions:
+    create(...) -> str
+    send_request(...) -> None
+    project_event(...) -> None
+    plus bloom filter and window functions
+"""
+from typing import Any, Iterator, TypedDict, NotRequired
 from events.network import recorded, transit_key, transit_prekey
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
@@ -11,6 +21,135 @@ import struct
 import logging
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class SyncEventData(TypedDict):
+    type: str
+    peer_id: str
+    signed_by: str
+    window_id: int
+    window_min: NotRequired[int]
+    window_max: NotRequired[int]
+    bloom: str  # base64 encoded bloom filter
+    response_transit_key_id: str
+    response_transit_key: str  # base64 encoded symmetric key
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Validate sync request and emit command for execution.
+
+    The pure projector:
+    - Validates required fields
+    - Signature already verified by resolve() based on SPEC
+
+    The command handler (execute_command) will:
+    - Query candidate events in window
+    - Apply bloom filter comparison
+    - Queue missing events
+    """
+    from projection import ProjectorResult
+
+    event_data = input_dict["event_data"]
+
+    # Extract fields
+    requester_peer_id = event_data.get("peer_id")
+    requester_peer_shared_id = event_data.get("signed_by")
+    window_id = event_data.get("window_id")
+    window_min = event_data.get("window_min")
+    window_max = event_data.get("window_max")
+    bloom_b64 = event_data.get("bloom")
+    response_transit_key_id = event_data.get("response_transit_key_id")
+    response_transit_key_b64 = event_data.get("response_transit_key")
+
+    # Validate required fields
+    if not all([
+        requester_peer_id,
+        requester_peer_shared_id,
+        window_id is not None,
+        bloom_b64,
+        response_transit_key_id,
+        response_transit_key_b64,
+    ]):
+        return ProjectorResult(valid=False, reason="missing required fields")
+
+    # Emit command for handler to execute
+    return ProjectorResult(
+        valid=True,
+        commands=[{
+            "type": "process_sync_request",
+            "requester_peer_id": requester_peer_id,
+            "requester_peer_shared_id": requester_peer_shared_id,
+            "window_id": window_id,
+            "window_min": window_min,
+            "window_max": window_max,
+            "bloom": bloom_b64,
+            "response_transit_key_id": response_transit_key_id,
+            "response_transit_key": response_transit_key_b64,
+        }]
+    )
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    peer_id: str = "peer_123",
+    signed_by: str = "peer_shared_123",
+    window_id: int = 0,
+    window_min: int | None = None,
+    window_max: int | None = None,
+    bloom: str = "AAAA",
+    response_transit_key_id: str = "key_123",
+    response_transit_key: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    data = {
+        "type": "sync",
+        "peer_id": peer_id,
+        "signed_by": signed_by,
+        "window_id": window_id,
+        "bloom": bloom,
+        "response_transit_key_id": response_transit_key_id,
+        "response_transit_key": response_transit_key,
+        "created_at": created_at,
+    }
+    if window_min is not None:
+        data["window_min"] = window_min
+    if window_max is not None:
+        data["window_max"] = window_max
+    return data
+
+
+def make_input(
+    event_id: str = "sync_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
 
 # Bloom filter parameters
 BLOOM_SIZE_BITS = 512  # 512 bits = 64 bytes
