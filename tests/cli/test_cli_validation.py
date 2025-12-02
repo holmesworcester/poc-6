@@ -105,7 +105,7 @@ quit
 new-network --name Test --username alice --devicename desktop
 new-channel duplicate
 new-channel duplicate
-list-channels
+channels
 quit
 """
         result = run_cli(commands)

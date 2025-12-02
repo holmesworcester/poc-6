@@ -107,13 +107,13 @@ status
 
 
 def test_list_commands():
-    """Test list-accounts, list-channels, list-users, and time commands."""
+    """Test accounts, channels, users, and time commands."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
 new-channel testing
-list-accounts
-list-channels
-list-users
+accounts
+channels
+users
 time
 """
     result = run_cli(commands)
@@ -122,23 +122,23 @@ time
 
     output = result.stdout
 
-    # Find list-accounts output (should come after "> list-accounts")
-    assert "> list-accounts" in output, "list-accounts command not found in output"
+    # Find accounts output (should come after "> accounts")
+    assert "> accounts" in output, "accounts command not found in output"
     # Should show alice with full account name format
-    assert "alice (desktop)" in output, "alice account not shown in list-accounts"
+    assert "alice (desktop)" in output, "alice account not shown in accounts"
 
-    # Find list-channels output (should come after "> list-channels")
-    assert "> list-channels" in output, "list-channels command not found in output"
+    # Find channels output (should come after "> channels")
+    assert "> channels" in output, "channels command not found in output"
     # Should show both channels
-    lines_after_list_channels = output.split("> list-channels")[1].split(">")[0]
-    assert "general" in lines_after_list_channels, "general channel not shown in list-channels"
-    assert "testing" in lines_after_list_channels, "testing channel not shown in list-channels"
+    lines_after_list_channels = output.split("> channels")[1].split(">")[0]
+    assert "general" in lines_after_list_channels, "general channel not shown in channels"
+    assert "testing" in lines_after_list_channels, "testing channel not shown in channels"
 
-    # Find list-users output (should come after "> list-users")
-    assert "> list-users" in output, "list-users command not found in output"
+    # Find users output (should come after "> users")
+    assert "> users" in output, "users command not found in output"
     # Should show alice as a user
-    lines_after_list_users = output.split("> list-users")[1].split(">")[0]
-    assert "alice" in lines_after_list_users, "alice not shown in list-users"
+    lines_after_list_users = output.split("> users")[1].split(">")[0]
+    assert "alice" in lines_after_list_users, "alice not shown in users"
 
     # Find time output (should come after "> time")
     assert "> time" in output, "time command not found in output"
@@ -204,7 +204,7 @@ def test_link_device_basic():
 new-network --name "Test Network" --username alice --devicename desktop
 link
 accept-link --devicename laptop --invite 1
-list-accounts
+accounts
 """
     result = run_cli(commands)
 
@@ -260,7 +260,7 @@ accept-invite --username bob --devicename phone --invite 1
 switch 1
 link
 accept-link --devicename laptop --invite 2
-list-accounts
+accounts
 """
     result = run_cli(commands)
 
@@ -338,7 +338,7 @@ accept-invite --username bob --devicename phone --invite 1
 switch 2
 link
 accept-link --devicename tablet --invite 2
-list-accounts
+accounts
 """
     result = run_cli(commands)
 
@@ -427,8 +427,8 @@ def test_all_help_commands_execute_without_crash():
     """Test that every command in help can be executed without crashing (may error but shouldn't crash)."""
     # Commands that need setup first
     commands_needing_setup = [
-        'send', 'channel', 'new-channel', 'list-channels', 'list-messages',
-        'delete', 'edit', 'react', 'unreact', 'list-reactions',
+        'send', 'channel', 'new-channel', 'channels', 'messages',
+        'delete', 'edit', 'react', 'unreact', 'reactions',
         'invite', 'link', 'keys', 'purge-keys',
         'ban', 'disappear', 'status'
     ]
@@ -442,8 +442,8 @@ def test_all_help_commands_execute_without_crash():
 
         # These need a network first but can be tested with just setup
         ('new-network --name Test --username alice --devicename desktop', None),
-        ('list-accounts', None),
-        ('list-users', None),
+        ('accounts', None),
+        ('users', None),
         ('switch 1', None),
         ('tick 1', None),
         ('set-auto-tick 10', None),
@@ -452,16 +452,16 @@ def test_all_help_commands_execute_without_crash():
         ('keys', None),
         ('keys --summary', None),
         ('purge-keys', None),
-        ('list-channels', None),
+        ('channels', None),
         ('new-channel testchan', None),
         ('channel 1', None),
         ('send "test message"', None),
-        ('list-messages', None),
+        ('messages', None),
         ('edit 1 "edited"', None),
         ('delete 1', 'not found'),  # Will fail gracefully after edit
         ('react 1 thumbsup', 'not found'),  # Message was deleted
         ('unreact 1 thumbsup', 'not found'),
-        ('list-reactions 1', 'not found'),
+        ('reactions 1', 'not found'),
         ('disappear --days 1', None),
         ('disappear --off', None),
         ('invite', None),

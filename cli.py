@@ -1567,16 +1567,16 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "status":
             display_state(session)
 
-        elif cmd == "list-accounts":
+        elif cmd == "accounts":
             cmd_list_accounts(session)
 
-        elif cmd == "list-channels":
+        elif cmd == "channels":
             cmd_list_channels(session)
 
-        elif cmd == "list-users":
+        elif cmd == "users":
             cmd_list_users(session)
 
-        elif cmd == "list-messages":
+        elif cmd == "messages":
             cmd_list_messages(session)
 
         elif cmd == "keys":
@@ -1637,9 +1637,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: message number must be an integer")
 
-        elif cmd == "list-reactions":
+        elif cmd == "reactions":
             if len(parts) < 2:
-                print("usage: list-reactions <message_num>")
+                print("usage: reactions <message_num>")
             else:
                 try:
                     message_num = int(parts[1])
@@ -1692,22 +1692,22 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Account management:")
             print("    switch <n>")
-            print("    list-accounts")
-            print("    list-users")
+            print("    accounts")
+            print("    users")
             print()
             print("  Channels:")
             print("    channel <n>")
             print("    new-channel <name>")
-            print("    list-channels")
+            print("    channels")
             print()
             print("  Messaging:")
             print("    send <message>")
-            print("    list-messages")
+            print("    messages")
             print("    delete <n>")
             print("    edit <n> <new_content>")
             print("    react <n> <emoji>")
             print("    unreact <n> <emoji>")
-            print("    list-reactions <n>")
+            print("    reactions <n>")
             print("    disappear --days <n> | --time <ms> | --off")
             print()
             print("  Admin:")

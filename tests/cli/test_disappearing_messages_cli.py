@@ -87,13 +87,13 @@ new-network --name "Test" --username alice --device desktop
 new-channel ephemeral
 channel 1
 disappear --days 7
-list-channels
+channels
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
 
-    # Find the list-channels output - channel 1 is ephemeral (most recently created)
-    lines_after_list = result.stdout.split("> list-channels")[1].split(">")[0]
+    # Find the channels output - channel 1 is ephemeral (most recently created)
+    lines_after_list = result.stdout.split("> channels")[1].split(">")[0]
     assert "(disappearing: 7d)" in lines_after_list
 
 
@@ -101,13 +101,13 @@ def test_channel_list_no_disappearing_for_permanent():
     """Verify permanent channels don't show disappearing indicator."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-list-channels
+channels
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
 
-    # Find the list-channels output
-    lines_after_list = result.stdout.split("> list-channels")[1].split(">")[0]
+    # Find the channels output
+    lines_after_list = result.stdout.split("> channels")[1].split(">")[0]
     # #general should NOT have disappearing indicator
     assert "#general" in lines_after_list
     # Should not have (disappearing: ...) for general
