@@ -72,12 +72,15 @@ Events (content‑addressed)
 - `user`: user identity record; deterministically establishes the user created by a user invite.
   - Fields:
     - `invite_id`: id of the corresponding `invite(mode=user)`.
-    - Note: no explicit `pubkey` field here; `user_pubkey` is derived from the invite during projection (`users.user_pubkey = invites_user.invite_pubkey`).
-    - Optional metadata: none (store profile data separately; keep user minimal).
+    - `user_pubkey`: the user's OWN fresh keypair (NOT derived from invite_pubkey). This separation is critical: a single invite can create many users, each with unique identity and keypair.
+    - `name`: display name for the user.
+    - `created_at`: timestamp.
+    - `network_id` (optional): extracted from invite, included if present.
   - Signing: `signed_by = invite_id` (signature over canonical user body, excluding the signature field).
   - Dependencies: list `invite(invite_id)` as a DAG dependency.
   - Verification (projector): load `inv_u = invites_user[invite_id]`; verify the event signature with `inv_u.invite_pubkey` over the canonicalized user body.
-  - Projection: INSERT OR IGNORE `users(user_id=invite_id, user_pubkey=inv_u.invite_pubkey, ...)` and mark valid.
+  - Projection: INSERT OR IGNORE `users(user_id=id(user_event), user_pubkey=user_event.user_pubkey, ...)` and mark valid.
+  - Note: `user_id = id(user_event)` (content hash), NOT `invite_id`. One invite can create multiple users.
 - `admin`: signed_by. Grant of admin to `user_id` for `network_id`.
   - Fields: `user_id` (subject), `created_at`.
   - Bootstrap: signed_by=`network_id` to grant the first admin (before retiring the network signing key).
@@ -93,7 +96,7 @@ Events (content‑addressed)
 Uniform DAGs
 
 - Create User (no peer yet):
-  - `invite(mode=user)` (signed_by network/admin) → `user (signed_by=invite_id)` → `users(user_id = invite_id)`
+  - `invite(mode=user)` (signed_by network/admin) → `user (signed_by=invite_id)` → `users(user_id = id(user_event))`
 - Link Peer (first and later identical):
   - `invite(mode=peer)` (signed_by authorized signer) → `peer_shared (signed_by=invite_id)` (signature by the peer invite key over the entire peer_shared body verifies) → `linked_peers(user_id, PX)`
 
@@ -171,8 +174,8 @@ event: invite(user)
   depends_on: network (bootstrap) | peer_shared(signer), admin_grant (ongoing)
 
 event: user
-  fields: invite_id, [optional metadata]
-  signed_by: invite_id (verify with invite(user).user_pubkey)
+  fields: invite_id, user_pubkey (fresh keypair), name, created_at, network_id?
+  signed_by: invite_id (verify with invite(user).invite_pubkey)
   depends_on: invite(user)
 
 event: invite(peer)
@@ -195,13 +198,13 @@ event: admin
 - Network creation and first user:
   - `network`: establishes `network_id` and `network_pubkey`.
   - `invite(mode=user)`: payload `network_id`, `invite_id`, `user_pubkey`, `created_at`; signed_by=`network_id` (bootstrap). Projection persists `invites_user(...)`.
-- `user` (establish identity): fields include `invite_id`. Event is signed by the invite key (`signed_by = invite_id`, signature over canonical user body). Projector depends on `invite(mode=user)`, verifies the signature with `user_pubkey` from `invites_user`, and inserts `users(user_id=invite_id, user_pubkey)`.
+- `user` (establish identity): fields include `invite_id`, `user_pubkey` (fresh keypair), `name`, `created_at`, and optional `network_id`. Event is signed by the invite key (`signed_by = invite_id`, signature over canonical user body). Projector depends on `invite(mode=user)`, verifies the signature with `invite_pubkey` from `invites_user`, and inserts `users(user_id=id(user_event), user_pubkey=user_event.user_pubkey)`.
   - `admin` (bootstrap): signed_by=`network_id` to grant admin to the newly created `user_id` before retiring the network signing key.
   - Hygiene: after issuing the first peer invite, keep `user_private_key` off‑device or discard.
 
 - Inviting subsequent users (same flow, different signer):
   - `invite(mode=user)`: signed_by a `peer_shared_id` belonging to a current admin user; otherwise identical fields/behavior.
-  - `user`: same verification and projection; creates `users(user_id=invite_id, user_pubkey)`.
+  - `user`: same verification and projection; creates `users(user_id=id(user_event), user_pubkey=user_event.user_pubkey)`.
   - `admin` (optional): grant admin via a peer of an existing admin user as policy requires.
 
 - Linking peers to a user (first and later are identical):
@@ -340,8 +343,9 @@ Minimal Projector Rules (sketch)
   1) Ensure `invite(mode=user)` exists (declared DAG dependency).
   2) Load `inv_u = invites_user[invite_id]`.
   3) Verify signature: check `Verify(sig, canonical(user_body), inv_u.invite_pubkey) == true` (where `signed_by = invite_id` and `user_body` excludes only the signature field).
-  4) INSERT OR IGNORE `users(user_id=invite_id, user_pubkey=inv_u.invite_pubkey, ...)` and mark valid.
+  4) INSERT OR IGNORE `users(user_id=id(user_event), user_pubkey=user_event.user_pubkey, ...)` and mark valid.
   5) Mark the event valid and unblock dependents.
+  - Note: `user_pubkey` is the joiner's fresh keypair from the user event body, NOT `invite_pubkey`. One invite can create multiple users, each with unique identity.
 - `admin.project` (explicit steps):
   1) Verify signature:
      - If signed_by=`network_id`: verify with `network_pubkey`.
