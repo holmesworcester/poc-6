@@ -90,10 +90,11 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         raise ValueError(f"No username found for user {user_id}. Username must be set before sending messages.")
 
     # Build standardized event structure
+    # Note: group_id is NOT included - it's derived from channel_id at projection time
+    # This saves ~36 bytes in the event, allowing more space for content
     event_data = {
         'type': 'message',
         'channel_id': channel_id,
-        'group_id': group_id,
         'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
         'author_id': user_id,  # User who authored the message content (for display)
         'content': content,
@@ -211,10 +212,20 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Extract fields from event
     message_id = event_id
     channel_id = event_data.get('channel_id')
-    group_id = event_data.get('group_id')
     author_id = event_data.get('author_id')  # user_id (person who authored the content)
     content = event_data.get('content', '')
     created_at = event_data.get('created_at')
+
+    # Derive group_id from channel_id (not stored in event to save space)
+    # Channel must exist (checked by recorded.check_deps via channel_id dependency)
+    channel_row = safedb.query_one(
+        "SELECT group_id FROM channels WHERE channel_id = ? AND recorded_by = ?",
+        (channel_id, recorded_by)
+    )
+    if not channel_row:
+        log.warning(f"message.project() channel {channel_id[:20]}... not found - blocking")
+        return None
+    group_id = channel_row['group_id']
 
     # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
     # before projection begins, so we don't need to check here.
