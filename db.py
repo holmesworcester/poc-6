@@ -85,6 +85,9 @@ class Database:
         # Enable WAL mode for better concurrency and performance
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # Enable secure delete to overwrite deleted data (per threat model requirement)
+        # This ensures deleted rows are zeroed out, not just marked free
+        self._conn.execute("PRAGMA secure_delete = ON")
 
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute query and return all rows as list of dicts."""

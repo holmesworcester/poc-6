@@ -368,6 +368,7 @@ def list_reactions(message_id: str, recorded_by: str, db: Any) -> list[dict[str,
 
     # Get winning reactions for the message with reactor names
     # Window function ensures we only get the latest reaction per (message_id, reactor_id, emoji)
+    # Prefer encrypted username from user_names, fall back to users.name (legacy/empty)
     reactions = safedb.query(
         """WITH winning_reactions AS (
              SELECT message_id, reactor_id, emoji, recorded_by,
@@ -378,9 +379,10 @@ def list_reactions(message_id: str, recorded_by: str, db: Any) -> list[dict[str,
              FROM message_reactions
              WHERE message_id = ? AND recorded_by = ?
            )
-           SELECT wr.emoji, wr.reactor_id, u.name as reactor_name
+           SELECT wr.emoji, wr.reactor_id, COALESCE(un.name, u.name) as reactor_name
            FROM winning_reactions wr
            LEFT JOIN users u ON wr.reactor_id = u.user_id AND wr.recorded_by = u.recorded_by
+           LEFT JOIN user_names un ON wr.reactor_id = un.user_id AND wr.recorded_by = un.recorded_by
            WHERE wr.rn = 1
            ORDER BY wr.emoji ASC""",
         (message_id, recorded_by)
