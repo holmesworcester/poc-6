@@ -1564,7 +1564,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: link-device --devicename <device> --invite <n|link>")
 
-        elif cmd == "show-ui" or cmd == "show":
+        elif cmd == "show-ui":
             display_state(session)
 
         elif cmd == "list-accounts":
@@ -1721,7 +1721,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    set-auto-tick <n>")
             print()
             print("  Other:")
-            print("    show")
             print("    show-ui")
             print("    time")
             print("    toggle-log                     Toggle event log display ON/OFF")

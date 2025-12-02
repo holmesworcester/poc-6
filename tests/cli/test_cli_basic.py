@@ -449,7 +449,6 @@ def test_all_help_commands_execute_without_crash():
         ('set-auto-tick 10', None),
         ('fast-forward --days 1', None),
         ('show-ui', None),
-        ('show', None),
         ('keys', None),
         ('keys --summary', None),
         ('purge-keys', None),
