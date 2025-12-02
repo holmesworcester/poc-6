@@ -407,6 +407,51 @@ def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
+def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+    """List all channels with their current group keys.
+
+    Returns channel info plus the current key_id from the associated group,
+    avoiding N+1 queries when displaying key state.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        List of dicts with channel_id, name, group_id, key_id, etc.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query(
+        """SELECT c.channel_id, c.name, c.group_id, c.signed_by, c.created_at,
+                  c.disappearing_time_ms, g.key_id
+           FROM channels c
+           LEFT JOIN groups g ON c.group_id = g.group_id AND c.recorded_by = g.recorded_by
+           WHERE c.recorded_by = ?
+           ORDER BY c.created_at DESC""",
+        (recorded_by,)
+    )
+
+
+def get_by_id(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get a single channel by ID.
+
+    Args:
+        channel_id: Channel ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Channel dict with channel_id, name, group_id, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
+           FROM channels
+           WHERE channel_id = ? AND recorded_by = ?""",
+        (channel_id, recorded_by)
+    )
+
+
 def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
     """Add a member to a private channel (admin-only).
 

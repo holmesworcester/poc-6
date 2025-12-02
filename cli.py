@@ -253,16 +253,14 @@ def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
 # EVENT LOG HELPERS
 # ============================================================================
 
+
 def get_channel_name(session: CLISession, channel_id: str) -> str:
     """Get channel name for event log display."""
     if not session.selected_account:
-        return "???"
+        return "#???"
     account = session.get_selected_account()
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
-    for ch in channels:
-        if ch['channel_id'] == channel_id:
-            return f"#" + ch['name']
-    return "???"
+    ch = channel.get_by_id(channel_id, account.peer_id, session.db)
+    return f"#{ch['name']}" if ch else "#???"
 
 
 def get_message_preview(content: str, max_len: int = 22) -> str:
@@ -1097,15 +1095,9 @@ def cmd_keys(session: CLISession, summary: bool = False):
     # Get prekeys
     prekeys = group_prekey.list(account.peer_id, session.current_time_ms, session.db)
 
-    # Get channel -> key mappings
-    channels_list = channel.list_channels(recorded_by=account.peer_id, db=session.db)
-    channel_keys = []
-    for ch in channels_list:
-        current_key_info = group.get_current_key(ch['group_id'], account.peer_id, session.db)
-        channel_keys.append({
-            'name': ch['name'],
-            'key_id': current_key_info['key_id'] if current_key_info else None
-        })
+    # Get channel -> key mappings (single query with JOIN)
+    channels_with_keys = channel.list_channels_with_keys(recorded_by=account.peer_id, db=session.db)
+    channel_keys = [{'name': ch['name'], 'key_id': ch['key_id']} for ch in channels_with_keys]
 
     if summary:
         display_keys_summary(account, keys, prekeys, channel_keys)
@@ -1453,8 +1445,8 @@ def cmd_show_group_keys(session: CLISession):
     """Show current encryption keys for all groups/channels."""
     account = session.get_selected_account()
 
-    # Get all channels
-    channels_list = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    # Get all channels with their keys (single query with JOIN)
+    channels_list = channel.list_channels_with_keys(recorded_by=account.peer_id, db=session.db)
 
     if not channels_list:
         print("(no channels)")
@@ -1463,13 +1455,9 @@ def cmd_show_group_keys(session: CLISession):
     print(f"GROUP KEYS ({account.full_name}):")
     for i, ch in enumerate(channels_list, 1):
         channel_name = ch['name']
-        group_id = ch['group_id']
-
-        # Get the current key for this group
-        current_key_info = group.get_current_key(group_id, account.peer_id, session.db)
-        if current_key_info:
-            key_id = current_key_info['key_id']
-            key_id_short = key_id[:16] if key_id else "???"
+        key_id = ch['key_id']
+        if key_id:
+            key_id_short = key_id[:16]
             print(f"  {i}. #{channel_name:16} key_id={key_id_short}...")
         else:
             print(f"  {i}. #{channel_name:16} key_id=(none)")
