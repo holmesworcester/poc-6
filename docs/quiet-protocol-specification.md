@@ -299,13 +299,11 @@ Multiple networks are distinguished by the keys used (see [Transit-layer Encrypt
 
 The `group` event `id` is its `group-id`.
 
-Any member can add to a group, with `member` events naming a `group-id` and `user-id`. A member's id is their `member-id`. All events that require group membership include this `member-id` and `group-id` so that membership can be verified. 
+Only admins can add members to a group, with `group_member` events naming a `group-id` and `user-id`. All events that require group membership include the `group-id` so that membership can be verified.
 
-Admins can update the group's name by creating `group-name` events with a `global-counter`. 
+Admins can update the group's name by creating `group-name` events with a `global-counter`.
 
-To validate a `member` event, the recipient peer checks that it is signed by an existing validated member. If not, we set its state to "blocked" (see: [Blocking and Unblocking](#blocking-and-unblocking)). If it is, the recipient validates the `grant` event.
-
-In future iterations we will make it so that only admins can add new members to groups. (Question: should take this step now because it's actually simpler?)
+To validate a `group_member` event, the recipient peer checks that the signer has admin authorization. If not, we set its state to "blocked" (see: [Blocking and Unblocking](#blocking-and-unblocking)).
 
 # Linking Peers on Multiple Devices
 
