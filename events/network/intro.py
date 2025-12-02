@@ -124,15 +124,23 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
         return None
 
     # Verify signature
+    # Note: Intros are time-sensitive for NAT hole punching. If the signer's
+    # peer_shared isn't available, the intro is stale - just drop it.
     from events.identity import peer_shared
-    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+    try:
+        public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+    except ValueError:
+        log.info(f"intro.project() dropping stale intro - signer peer_shared not available: {signed_by[:20]}...")
+        # Return intro_id to mark as "processed" (dropped) rather than None (blocked)
+        return intro_id
+
     if not public_key:
-        log.warning(f"intro.project() could not get public key for {signed_by[:20]}...")
-        return None
+        log.warning(f"intro.project() dropping intro - no public key for {signed_by[:20]}...")
+        return intro_id
 
     if not crypto.verify_event(event_data, public_key):
-        log.warning(f"intro.project() signature verification failed for {intro_id[:20]}...")
-        return None
+        log.warning(f"intro.project() dropping intro - signature verification failed for {intro_id[:20]}...")
+        return intro_id
 
     # Use signed_by as initiator_peer_id for backwards compatibility
     initiator_peer_id = signed_by
