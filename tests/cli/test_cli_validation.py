@@ -70,7 +70,7 @@ class TestChannelNameValidation:
         """Empty channel name should be rejected."""
         commands = """
 new-network --name Test --username alice --devicename desktop
-create-channel ""
+new-channel ""
 quit
 """
         result = run_cli(commands)
@@ -81,7 +81,7 @@ quit
         """Whitespace-only channel name should be rejected."""
         commands = """
 new-network --name Test --username alice --devicename desktop
-create-channel "   "
+new-channel "   "
 quit
 """
         result = run_cli(commands)
@@ -92,7 +92,7 @@ quit
         """Valid channel name should be accepted."""
         commands = """
 new-network --name Test --username alice --devicename desktop
-create-channel random
+new-channel random
 quit
 """
         result = run_cli(commands)
@@ -103,8 +103,8 @@ quit
         """Duplicate channel names are allowed by design (ID-based selection)."""
         commands = """
 new-network --name Test --username alice --devicename desktop
-create-channel duplicate
-create-channel duplicate
+new-channel duplicate
+new-channel duplicate
 list-channels
 quit
 """
@@ -199,7 +199,7 @@ class TestFastForwardPrekeyRefresh:
         commands = """
 new-network --name Test --username alice --devicename desktop
 fast-forward --days 7
-create-invite
+invite
 quit
 """
         result = run_cli(commands)
@@ -215,7 +215,7 @@ quit
         # and that operations after fast-forward work
         commands = """
 new-network --name Test --username alice --devicename desktop
-set-auto-tick 0
+auto-tick 0
 fast-forward --days 30
 keys --summary
 quit

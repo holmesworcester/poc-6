@@ -39,7 +39,7 @@ def test_single_user_messaging():
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
 send hello world
-show-ui
+status
 """
     result = run_cli(commands)
 
@@ -62,15 +62,15 @@ def test_two_user_messaging():
     """Alice invites Bob, both send messages and sync."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
-create-invite
-join --username bob --devicename phone --invite 1
+invite
+accept-invite --username bob --devicename phone --invite 1
 switch 1
 send hello from alice
 switch 2
 send hi from bob
 tick 10
 switch 1
-show-ui
+status
 """
     result = run_cli(commands)
 
@@ -88,9 +88,9 @@ def test_usernames_display_correctly():
     """Test that usernames from other accounts display correctly."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
-create-invite
-join --username bob --devicename phone --invite 1
-show-ui
+invite
+accept-invite --username bob --devicename phone --invite 1
+status
 """
     result = run_cli(commands)
 
@@ -110,7 +110,7 @@ def test_list_commands():
     """Test list-accounts, list-channels, list-users, and time commands."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
-create-channel testing
+new-channel testing
 list-accounts
 list-channels
 list-users
@@ -151,10 +151,10 @@ def test_create_channel_and_send():
     """Test creating a channel and sending messages to it."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
-create-channel random
-select-channel 2
+new-channel random
+channel 2
 send test message
-show-ui
+status
 """
     result = run_cli(commands)
 
@@ -173,14 +173,14 @@ def test_auto_tick_behavior():
     """Test that auto-tick happens after send command."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
-create-invite
-join --username bob --devicename phone --invite 1
+invite
+accept-invite --username bob --devicename phone --invite 1
 switch 1
 send from alice
 switch 2
 send from bob
 switch 1
-show-ui
+status
 """
     result = run_cli(commands)
 
@@ -202,8 +202,8 @@ def test_link_device_basic():
     """Test linking a second device to an existing user."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
-create-link-invite
-link-device --devicename laptop --invite 1
+link
+accept-link --devicename laptop --invite 1
 list-accounts
 """
     result = run_cli(commands)
@@ -229,8 +229,8 @@ def test_link_device_with_messaging():
     """Test that linked devices can send/receive messages."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
-create-link-invite
-link-device --devicename laptop --invite 1
+link
+accept-link --devicename laptop --invite 1
 switch 1
 send Hello from desktop
 switch 2
@@ -252,14 +252,14 @@ show
 
 
 def test_join_and_link_device_together():
-    """Test both join (new user) and link-device (existing user) in same session."""
+    """Test both join (new user) and accept-link (existing user) in same session."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
-create-invite
-join --username bob --devicename phone --invite 1
+invite
+accept-invite --username bob --devicename phone --invite 1
 switch 1
-create-link-invite
-link-device --devicename laptop --invite 2
+link
+accept-link --devicename laptop --invite 2
 list-accounts
 """
     result = run_cli(commands)
@@ -302,11 +302,11 @@ list-accounts
 
 
 def test_link_device_wrong_invite_type():
-    """Test that link-device rejects network join invites."""
+    """Test that accept-link rejects network join invites."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
-create-invite
-link-device --devicename laptop --invite 1
+invite
+accept-link --devicename laptop --invite 1
 """
     result = run_cli(commands)
 
@@ -315,10 +315,10 @@ link-device --devicename laptop --invite 1
 
 
 def test_create_link_invite_hint():
-    """Test that create-link-invite shows correct usage hint."""
+    """Test that link shows correct usage hint."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
-create-link-invite
+link
 """
     result = run_cli(commands)
 
@@ -326,18 +326,18 @@ create-link-invite
 
     # Should show success and hint
     assert "created device link invite" in result.stdout
-    assert "link-device --devicename" in result.stdout
+    assert "accept-link --devicename" in result.stdout
 
 
 def test_non_admin_can_create_link_invite():
     """Test that non-admin users can create link invites for themselves."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
-create-invite
-join --username bob --devicename phone --invite 1
+invite
+accept-invite --username bob --devicename phone --invite 1
 switch 2
-create-link-invite
-link-device --devicename tablet --invite 2
+link
+accept-link --devicename tablet --invite 2
 list-accounts
 """
     result = run_cli(commands)
@@ -427,10 +427,10 @@ def test_all_help_commands_execute_without_crash():
     """Test that every command in help can be executed without crashing (may error but shouldn't crash)."""
     # Commands that need setup first
     commands_needing_setup = [
-        'send', 'select-channel', 'create-channel', 'list-channels', 'list-messages',
-        'delete-message', 'edit-message', 'react', 'unreact', 'list-reactions',
-        'create-invite', 'create-link-invite', 'keys', 'purge-keys',
-        'remove-user', 'set-disappearing', 'show-ui'
+        'send', 'channel', 'new-channel', 'list-channels', 'list-messages',
+        'delete', 'edit', 'react', 'unreact', 'list-reactions',
+        'invite', 'link', 'keys', 'purge-keys',
+        'ban', 'disappear', 'status'
     ]
 
     # Commands with their required minimal arguments
@@ -448,27 +448,27 @@ def test_all_help_commands_execute_without_crash():
         ('tick 1', None),
         ('set-auto-tick 10', None),
         ('fast-forward --days 1', None),
-        ('show-ui', None),
+        ('status', None),
         ('keys', None),
         ('keys --summary', None),
         ('purge-keys', None),
         ('list-channels', None),
-        ('create-channel testchan', None),
-        ('select-channel 1', None),
+        ('new-channel testchan', None),
+        ('channel 1', None),
         ('send "test message"', None),
         ('list-messages', None),
-        ('edit-message 1 "edited"', None),
-        ('delete-message 1', 'not found'),  # Will fail gracefully after edit
+        ('edit 1 "edited"', None),
+        ('delete 1', 'not found'),  # Will fail gracefully after edit
         ('react 1 thumbsup', 'not found'),  # Message was deleted
         ('unreact 1 thumbsup', 'not found'),
         ('list-reactions 1', 'not found'),
-        ('set-disappearing --days 1', None),
-        ('set-disappearing --off', None),
-        ('create-invite', None),
-        ('join --username bob --devicename phone --invite 1', None),
-        ('create-link-invite', None),
-        ('link-device --devicename tablet --invite 2', None),
-        ('remove-user 2', None),  # Remove bob
+        ('disappear --days 1', None),
+        ('disappear --off', None),
+        ('invite', None),
+        ('accept-invite --username bob --devicename phone --invite 1', None),
+        ('link', None),
+        ('accept-link --devicename tablet --invite 2', None),
+        ('ban 2', None),  # Remove bob
     ]
 
     # Build command sequence

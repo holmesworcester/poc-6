@@ -25,12 +25,12 @@ def run_cli(commands: str) -> subprocess.CompletedProcess:
 
 
 def test_set_disappearing_output_format():
-    """Verify set-disappearing shows correct confirmation message."""
+    """Verify disappear shows correct confirmation message."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-create-channel test-channel
-select-channel 1
-set-disappearing --days 7
+new-channel test-channel
+channel 1
+disappear --days 7
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
@@ -39,12 +39,12 @@ set-disappearing --days 7
 
 
 def test_set_disappearing_hours():
-    """Verify set-disappearing works with hours (via --time in ms)."""
+    """Verify disappear works with hours (via --time in ms)."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-create-channel test-channel
-select-channel 1
-set-disappearing --time 3600000
+new-channel test-channel
+channel 1
+disappear --time 3600000
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
@@ -56,10 +56,10 @@ def test_set_disappearing_off_output_format():
     """Verify turning off shows correct message."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-create-channel test-channel
-select-channel 1
-set-disappearing --days 7
-set-disappearing --off
+new-channel test-channel
+channel 1
+disappear --days 7
+disappear --off
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
@@ -68,11 +68,11 @@ set-disappearing --off
 
 
 def test_set_disappearing_on_auto_selected_channel():
-    """Verify set-disappearing works on auto-selected #general channel."""
+    """Verify disappear works on auto-selected #general channel."""
     # After new-network, #general is auto-selected
     commands = """
 new-network --name "Test" --username alice --device desktop
-set-disappearing --days 7
+disappear --days 7
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
@@ -84,9 +84,9 @@ def test_channel_list_shows_disappearing():
     """Verify channel list displays (disappearing: Xd) format."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-create-channel ephemeral
-select-channel 1
-set-disappearing --days 7
+new-channel ephemeral
+channel 1
+disappear --days 7
 list-channels
 """
     result = run_cli(commands)
@@ -119,9 +119,9 @@ def test_message_shows_expires_in():
     """Verify message display includes (expires in: Xd Yh) format."""
     commands = """
 new-network --name "Test" --username alice --device desktop
-create-channel ephemeral
-select-channel 2
-set-disappearing --days 7
+new-channel ephemeral
+channel 2
+disappear --days 7
 send Test message
 show
 """
@@ -157,11 +157,11 @@ fast-forward --days 1
 
 
 def test_help_shows_new_commands():
-    """Verify help includes set-disappearing and fast-forward."""
+    """Verify help includes disappear and fast-forward."""
     commands = """
 help
 """
     result = run_cli(commands)
     assert result.returncode == 0, f"CLI failed: {result.stderr}"
-    assert "set-disappearing" in result.stdout
+    assert "disappear" in result.stdout
     assert "fast-forward" in result.stdout

@@ -659,7 +659,7 @@ def cmd_create_invite(session: CLISession):
     session.last_invite_link = invite_link
 
     print(f"✓ created invite #{invite_num}")
-    print(f"  use: join --username <name> --devicename <device> --invite {invite_num}")
+    print(f"  use: accept-invite --username <name> --devicename <device> --invite {invite_num}")
     session.event_log.display()
 
 
@@ -706,7 +706,7 @@ def cmd_create_link_invite(session: CLISession):
     invite_num = len(session.invites)
 
     print(f"✓ created device link invite #{invite_num} for user: {account.user_name}")
-    print(f"  use: link-device --devicename <device> --invite {invite_num}")
+    print(f"  use: accept-link --devicename <device> --invite {invite_num}")
     session.event_log.display()
 
 
@@ -733,8 +733,8 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
     # Validate this is a device linking invite (quiet://link/...)
     if not invite_link.startswith('quiet://link/'):
         print("✗ this is not a device linking invite")
-        print("  hint: use 'join' for network join invites (quiet://invite/...)")
-        print("  hint: use 'link-device' for device linking invites (quiet://link/...)")
+        print("  hint: use 'accept-invite' for network join invites (quiet://invite/...)")
+        print("  hint: use 'accept-link' for device linking invites (quiet://link/...)")
         return
 
     # Create the peer first
@@ -752,7 +752,7 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
 
     if accepted['mode'] != 'peer':
         print("✗ this is not a device linking invite")
-        print("  hint: use 'join' for network join invites")
+        print("  hint: use 'accept-invite' for network join invites")
         return
 
     user_id = accepted.get('user_id')
@@ -1008,7 +1008,7 @@ def cmd_time(session: CLISession):
 def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: int | None = None, off: bool = False):
     """Set disappearing messages time for selected channel."""
     if not session.selected_channel_id:
-        print("Error: No channel selected. Use 'select-channel <n>' first.")
+        print("Error: No channel selected. Use 'channel <n>' first.")
         return
 
     account = session.get_selected_account()
@@ -1512,38 +1512,38 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: sync --ticks <n>")
 
-        elif cmd == "set-auto-tick":
+        elif cmd == "auto-tick":
             if len(parts) < 2:
-                print("usage: set-auto-tick <n>")
+                print("usage: auto-tick <n>")
             else:
                 try:
                     cmd_set_auto_tick(session, int(parts[1]))
                 except ValueError:
                     print("error: count must be an integer")
 
-        elif cmd == "select-channel":
+        elif cmd == "channel":
             if len(parts) < 2:
-                print("usage: select-channel <n>")
+                print("usage: channel <n>")
             else:
                 try:
                     cmd_select_channel(session, int(parts[1]))
                 except ValueError:
                     print("error: channel number must be an integer")
 
-        elif cmd == "create-channel":
+        elif cmd == "new-channel":
             if len(parts) < 2:
-                print("usage: create-channel <name>")
+                print("usage: new-channel <name>")
             else:
                 name = " ".join(parts[1:]).strip('"')
                 cmd_create_channel(session, name)
 
-        elif cmd == "create-invite":
+        elif cmd == "invite":
             cmd_create_invite(session)
 
-        elif cmd == "create-link-invite":
+        elif cmd == "link":
             cmd_create_link_invite(session)
 
-        elif cmd == "join":
+        elif cmd == "accept-invite":
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--username", required=True)
             parser.add_argument("--devicename", required=True)
@@ -1552,9 +1552,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 args = parser.parse_args(parts[1:])
                 cmd_join(session, args.username, args.devicename, args.invite)
             except SystemExit:
-                print("usage: join --username <username> --devicename <device> --invite <n|link>")
+                print("usage: accept-invite --username <username> --devicename <device> --invite <n|link>")
 
-        elif cmd == "link-device":
+        elif cmd == "accept-link":
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--devicename", required=True)
             parser.add_argument("--invite", required=True)
@@ -1562,9 +1562,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 args = parser.parse_args(parts[1:])
                 cmd_link_device(session, args.devicename, args.invite)
             except SystemExit:
-                print("usage: link-device --devicename <device> --invite <n|link>")
+                print("usage: accept-link --devicename <device> --invite <n|link>")
 
-        elif cmd == "show-ui":
+        elif cmd == "status":
             display_state(session)
 
         elif cmd == "list-accounts":
@@ -1583,18 +1583,18 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             summary = "--summary" in parts
             cmd_keys(session, summary=summary)
 
-        elif cmd == "delete-message":
+        elif cmd == "delete":
             if len(parts) < 2:
-                print("usage: delete-message <n>")
+                print("usage: delete <n>")
             else:
                 try:
                     cmd_delete_message(session, int(parts[1]))
                 except ValueError:
                     print("error: message number must be an integer")
 
-        elif cmd == "edit-message":
+        elif cmd == "edit":
             if len(parts) < 3:
-                print("usage: edit-message <message_num> <new_content>")
+                print("usage: edit <message_num> <new_content>")
             else:
                 try:
                     message_num = int(parts[1])
@@ -1606,9 +1606,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "purge-keys":
             cmd_purge_keys(session)
 
-        elif cmd == "remove-user":
+        elif cmd == "ban":
             if len(parts) < 2:
-                print("usage: remove-user <n>")
+                print("usage: ban <n>")
             else:
                 try:
                     cmd_remove_user(session, int(parts[1]))
@@ -1650,10 +1650,10 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "time":
             cmd_time(session)
 
-        elif cmd == "toggle-log":
+        elif cmd == "log":
             cmd_toggle_log(session)
 
-        elif cmd == "set-disappearing":
+        elif cmd == "disappear":
             parser = argparse.ArgumentParser(add_help=False)
             parser.add_argument("--days", type=int)
             parser.add_argument("--time", type=int)
@@ -1661,11 +1661,11 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             try:
                 args = parser.parse_args(parts[1:])
                 if not args.days and not args.time and not args.off:
-                    print("usage: set-disappearing --days <n> | --time <ms> | --off")
+                    print("usage: disappear --days <n> | --time <ms> | --off")
                 else:
                     cmd_set_disappearing(session, days=args.days, time_ms=args.time, off=args.off)
             except SystemExit:
-                print("usage: set-disappearing --days <n> | --time <ms> | --off")
+                print("usage: disappear --days <n> | --time <ms> | --off")
 
         elif cmd == "fast-forward":
             parser = argparse.ArgumentParser(add_help=False)
@@ -1683,11 +1683,11 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    new-network --name <name> --username <username> --devicename <device>")
             print()
             print("  Joining/linking:")
-            print("    create-invite                  Create invite for new user to join network")
-            print("    join --username <name> --devicename <device> --invite <n|link>")
+            print("    invite                         Create invite for new user to join network")
+            print("    accept-invite --username <name> --devicename <device> --invite <n|link>")
             print("                                   Join network as NEW user")
-            print("    create-link-invite             Create device link invite for current user")
-            print("    link-device --devicename <device> --invite <n|link>")
+            print("    link                           Create device link invite for current user")
+            print("    accept-link --devicename <device> --invite <n|link>")
             print("                                   Link device to EXISTING user (no username needed)")
             print()
             print("  Account management:")
@@ -1696,34 +1696,34 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    list-users")
             print()
             print("  Channels:")
-            print("    select-channel <n>")
-            print("    create-channel <name>")
+            print("    channel <n>")
+            print("    new-channel <name>")
             print("    list-channels")
             print()
             print("  Messaging:")
             print("    send <message>")
             print("    list-messages")
-            print("    delete-message <n>")
-            print("    edit-message <n> <new_content>")
+            print("    delete <n>")
+            print("    edit <n> <new_content>")
             print("    react <n> <emoji>")
             print("    unreact <n> <emoji>")
             print("    list-reactions <n>")
-            print("    set-disappearing --days <n> | --time <ms> | --off")
+            print("    disappear --days <n> | --time <ms> | --off")
             print()
             print("  Admin:")
-            print("    remove-user <n>")
+            print("    ban <n>")
             print()
             print("  Keys/sync:")
             print("    keys [--summary]")
             print("    purge-keys")
             print("    tick <n>")
             print("    sync --ticks <n>")
-            print("    set-auto-tick <n>")
+            print("    auto-tick <n>")
             print()
             print("  Other:")
-            print("    show-ui")
+            print("    status")
             print("    time")
-            print("    toggle-log                     Toggle event log display ON/OFF")
+            print("    log                            Toggle event log display ON/OFF")
             print("    fast-forward --days <n>")
             print("    quit")
 
