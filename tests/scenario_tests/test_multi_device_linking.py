@@ -91,14 +91,9 @@ def test_alice_links_phone_to_laptop(fresh_db):
         f"Devices should have different peer_ids"
     print(f"✅ Devices have different peer_ids")
 
-    # Verify device names are stored correctly
-    phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
-    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
-    assert phone_device_name == 'Phone', f"Phone device name should be 'Phone', got '{phone_device_name}'"
-    assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
-    print(f"✅ Device names stored correctly: Phone='{phone_device_name}', Laptop='{laptop_device_name}'")
-
     # Initial sync to converge (multiple rounds for GKS propagation)
+    # NOTE: Device names are encrypted via peer_name_update events which require group key.
+    # The laptop won't have the group key until after sync, so device name check is after sync.
     print("\n=== Initial sync to propagate link event and group keys ===")
 
     tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
@@ -113,6 +108,13 @@ def test_alice_links_phone_to_laptop(fresh_db):
     assert laptop_has_key, \
         f"Laptop should have Alice's group key after sync (received via group_key_shared)"
     print(f"✅ Laptop received group key via GKS")
+
+    # Verify device names are stored correctly (after sync - encrypted names require group key)
+    phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
+    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
+    assert phone_device_name == 'Phone', f"Phone device name should be 'Phone', got '{phone_device_name}'"
+    assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
+    print(f"✅ Device names stored correctly: Phone='{phone_device_name}', Laptop='{laptop_device_name}'")
 
     # Verify laptop has valid channel
     laptop_channel_valid = db.query_one(
@@ -262,14 +264,16 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
     )
     db.commit()
 
-    # Verify device names are stored
-    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
-    assert laptop_device_name == 'Laptop', f"Device name should be 'Laptop', got '{laptop_device_name}'"
-
-    # Sync to propagate messages to laptop
+    # Sync to propagate messages and group keys to laptop
+    # NOTE: Device names are encrypted, so we check after sync when laptop has the group key
     print("\n=== Sync messages to laptop ===")
 
     tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+
+    # Verify device name is now available (encrypted via peer_name_update)
+    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
+    assert laptop_device_name == 'Laptop', f"Device name should be 'Laptop', got '{laptop_device_name}'"
+    print(f"✅ Laptop device name: {laptop_device_name}")
 
     # Discover channel via sync (laptop should have same channel as phone through user linking)
     laptop_channels = db.query_all(
@@ -370,7 +374,12 @@ def test_three_devices_all_linked(fresh_db):
     assert alice_tablet['user_id'] == alice_phone['user_id']
     print(f"✅ All three devices share user_id: {alice_phone['user_id'][:20]}...")
 
-    # Verify device names are stored correctly
+    # Sync to share group keys (required for encrypted device names)
+    print("\n=== Sync all devices ===")
+
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+
+    # Verify device names are stored correctly (after sync - encrypted names require group key)
     phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
     laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
     tablet_device_name = peer_shared.get_device_name(alice_tablet['peer_shared_id'], alice_tablet['peer_id'], db)
@@ -378,11 +387,6 @@ def test_three_devices_all_linked(fresh_db):
     assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
     assert tablet_device_name == 'Tablet', f"Tablet device name should be 'Tablet', got '{tablet_device_name}'"
     print(f"✅ All device names stored correctly: Phone, Laptop, Tablet")
-
-    # Sync
-    print("\n=== Sync all devices ===")
-
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
 
     # Discover the shared channel for all devices
     print("\n=== Discovering shared channel ===")

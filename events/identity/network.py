@@ -22,11 +22,15 @@ def create(peer_id: str, t_ms: int, db: Any, name: str | None = None) -> tuple[s
     using its own keypair (like a root CA certificate). Groups, channels, and
     other content are created AFTER the user has a peer_shared identity.
 
+    NOTE: The name parameter is accepted for API compatibility but NOT stored
+    in the event. Network names are transmitted via encrypted network_name_update
+    events to protect privacy from NETWORK ACTIVE ATTACKER.
+
     Args:
         peer_id: Local peer ID (for recording, not signing)
         t_ms: Timestamp
         db: Database connection
-        name: Display name for the network
+        name: Display name for the network (ignored - use network_name_update instead)
 
     Returns:
         tuple: (network_id, network_private_key)
@@ -40,15 +44,13 @@ def create(peer_id: str, t_ms: int, db: Any, name: str | None = None) -> tuple[s
 
     # Create event data - minimal, just the network identity
     # Groups are created LATER after peer_shared exists
+    # NOTE: name is NOT stored - network names come from encrypted network_name_update events
     event_data = {
         'type': 'network',
         'network_pubkey': crypto.b64encode(network_public_key),
         'signed_by': 'SELF',  # Special marker for self-signed network event
         'created_at': t_ms
     }
-
-    if name:
-        event_data['name'] = name
 
     # Self-sign with network's own private key
     signed_event = crypto.sign_event(event_data, network_private_key)
