@@ -376,54 +376,34 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         return [None, recorded_id]
 
     # Check semantic dependencies
-    # Special case: Self-created user events with invite proof - creator doesn't have invite as valid event
-    # (invite comes from out-of-band link, not network sync)
     event_type = event_data.get('type')
-    skip_dep_check = False
-
-    # User events have signed_by=invite_id and user_pubkey (not invite_pubkey)
-    if event_type == 'user' and 'signed_by' in event_data:
-        # Self-created user with invite proof: creator doesn't have invite in valid_events
-        # (invite comes from out-of-band link, not network sync)
-        # Note: Bootstrap user events (from join_bootstrap) may have peer_id='PENDING',
-        # regular user events don't have peer_id field at all
-        user_peer_shared_id = event_data.get('peer_id')
-        # Check if this user's peer_id is THIS peer's peer_shared_id
-        peer_self_row = safedb.query_one(
-            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-            (recorded_by, recorded_by)
-        )
-        if peer_self_row and peer_self_row['peer_shared_id'] == user_peer_shared_id:
-            skip_dep_check = True
-            log.info(f"[USER_SKIP_DEPS] Skipping dep check for self-created user event")
 
     # NOTE: Invite validation moved to invite.project() for better modularity
     # Invites from URLs (with invite_accepted) skip validation in projector
     # Invites from sync are validated (signature, network, creator) in projector
     # NOTE: invite_accepted is now in NO_DEPS_TYPES in check_deps() since it's local-only
 
-    if not skip_dep_check:
-        missing_deps = check_deps(event_data, recorded_by, db)
-        if missing_deps:
-            # Ephemeral events (transit-layer) are recurring/retryable
-            # If deps are missing, drop them - sender will retry
-            # Use registry to check if event type is ephemeral
-            if registry.is_ephemeral(event_type):
-                log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
-                return [None, recorded_id]
-
-            # Historical events - block until dependencies resolved
-            requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
-            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
-
-            # DEBUG: If this is a channel event, log the actual dep_ids
-            if event_type == 'channel':
-                log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
-
-            timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
-                         status='blocked_deps', blocked_on=missing_deps)
-            queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
+    missing_deps = check_deps(event_data, recorded_by, db)
+    if missing_deps:
+        # Ephemeral events (transit-layer) are recurring/retryable
+        # If deps are missing, drop them - sender will retry
+        # Use registry to check if event type is ephemeral
+        if registry.is_ephemeral(event_type):
+            log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
             return [None, recorded_id]
+
+        # Historical events - block until dependencies resolved
+        requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+        log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
+
+        # DEBUG: If this is a channel event, log the actual dep_ids
+        if event_type == 'channel':
+            log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
+
+        timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
+                     status='blocked_deps', blocked_on=missing_deps)
+        queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
+        return [None, recorded_id]
 
     # All dependencies satisfied - proceed with projection
     projected_id = None

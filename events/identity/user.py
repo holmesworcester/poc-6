@@ -580,12 +580,13 @@ def join_bootstrap(peer_id: str, invite_id: str, invite_private_key: bytes,
     user_private_key, user_pubkey = crypto.generate_keypair()
 
     # Create user event signed by invite
+    # NOTE: user event does NOT contain peer_id - the user→peer relationship
+    # is established when peer_shared is projected (user_id stored in peers_shared table)
     event_data = {
         'type': 'user',
         'invite_id': invite_id,
         'signed_by': invite_id,
         'user_pubkey': crypto.b64encode(user_pubkey),
-        'peer_id': 'PENDING',  # Will be set to peer_shared_id after it's created
         'name': name,
         'created_at': t_ms
     }
