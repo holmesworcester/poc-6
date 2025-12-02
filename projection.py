@@ -106,10 +106,10 @@ def _load_projectors():
     # Pure functional projectors (have SPEC + project(input_dict))
     # Consolidated modules (in events/)
     from events.content import message
-    from events.identity import admin, bootstrap_complete, network_created, network_joined, address, peer
+    from events.identity import admin, bootstrap_complete, network_created, network_joined, address, peer, network
     from events.group import group_key
     # Still in projectors/ (to be consolidated)
-    from projectors import channel, group_member, user, network, group, peer_shared, invite, invite_accepted
+    from projectors import channel, group_member, user, group, peer_shared, invite, invite_accepted
     from projectors import transit_prekey_shared, group_prekey_shared
     from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice, message_attachment
     from projectors import transit_key as transit_key_projector

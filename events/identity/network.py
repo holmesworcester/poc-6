@@ -1,7 +1,7 @@
 """Network event type - self-signed root of trust for a network.
 
-Pure functions:
-    project(input_dict) -> ProjectorResult
+SPEC - declarative metadata for generic resolver
+project() - pure function: input_dict -> ProjectorResult
 
 API functions:
     create(peer_id, t_ms, db) -> tuple[str, bytes]
@@ -14,7 +14,7 @@ from typing import Any, TypedDict
 import logging
 import crypto
 import store
-from db import create_safe_db, create_unsafe_db
+from db import create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,18 @@ class NetworkEventData(TypedDict):
     signed_by: str  # Always 'SELF' for networks
     network_pubkey: str  # Base64-encoded public key
     created_at: int
+
+
+# ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "self",  # Self-signed (root of trust)
+    "dependencies": [],
+    "tables": ["networks"],
+}
 
 
 # ============================================================================
