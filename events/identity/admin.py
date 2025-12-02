@@ -53,6 +53,7 @@ SPEC = {
     "signer_type": "admin",  # Polymorphic: network_id OR peer_shared_id
     "dependencies": ["signer_user:linked_peer?", "admin_grant:admin_grant?"],
     "tables": ["admins"],
+    "generic_dispatch": True,
 }
 
 

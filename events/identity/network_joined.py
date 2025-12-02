@@ -45,6 +45,7 @@ SPEC = {
     "signer_type": "none",  # Local-only
     "dependencies": [],
     "tables": ["network_joiners"],
+    "generic_dispatch": True,
 }
 
 

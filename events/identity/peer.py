@@ -48,7 +48,10 @@ SPEC = {
     "encrypted": False,
     "signer_type": "none",  # Local-only, contains private key
     "dependencies": [],
-    "tables": ["local_peers"],  # Device-wide table
+    "tables": ["local_peers"],
+    "device_wide": True,  # Use apply_result_device_wide
+    "mark_valid": True,  # Mark in valid_events
+    "generic_dispatch": True,
 }
 
 

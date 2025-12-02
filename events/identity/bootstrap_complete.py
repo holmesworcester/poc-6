@@ -36,6 +36,7 @@ SPEC = {
     "signer_type": "none",  # Local-only, no signature verification
     "dependencies": [],
     "tables": ["bootstrap_completers"],
+    "generic_dispatch": True,  # Use generic project_event() from projection.py
 }
 
 

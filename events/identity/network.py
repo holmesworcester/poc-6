@@ -39,6 +39,7 @@ SPEC = {
     "signer_type": "self",  # Self-signed (root of trust)
     "dependencies": [],
     "tables": ["networks"],
+    "generic_dispatch": True,
 }
 
 

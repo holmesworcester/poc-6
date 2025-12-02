@@ -46,6 +46,8 @@ SPEC = {
     "signer_type": "none",  # Local-only, deterministic
     "dependencies": [],
     "tables": ["group_keys"],
+    "mark_valid": True,  # Mark in valid_events
+    "generic_dispatch": True,
 }
 
 

@@ -157,7 +157,91 @@ def get_spec(event_type: str) -> dict | None:
 
 
 # ============================================================================
-# DISPATCH - replaces the big switch in recorded.py
+# GENERIC PROJECT_EVENT - replaces per-module boilerplate
+# ============================================================================
+
+def project_event(event_type: str, event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Generic projection: resolve → project → apply_result.
+
+    This replaces the boilerplate project_event() in each module.
+    Modules only need SPEC + project() - no wrapper needed.
+
+    Returns event_id on success, None on failure/blocked.
+    """
+    from db import create_safe_db
+
+    _load_projectors()
+    module = _PROJECTORS.get(event_type)
+    if not module or not hasattr(module, 'SPEC'):
+        log.warning(f"project_event: no SPEC for {event_type}")
+        return None
+
+    spec = module.SPEC
+
+    # 1. Resolve: blob → input_dict
+    input_dict = resolve(event_type, event_id, recorded_by, recorded_at, db)
+    if not input_dict:
+        log.debug(f"project_event({event_type}): resolve returned None")
+        return None
+
+    # 2. Project: input_dict → result (pure function)
+    result = module.project(input_dict)
+
+    # 3. Check result
+    if result.blocked:
+        log.debug(f"project_event({event_type}): blocked, missing {result.missing_deps}")
+        return None
+
+    if not result.valid:
+        log.warning(f"project_event({event_type}): invalid - {result.reason}")
+        return None
+
+    # 4. Apply: result → DB writes
+    if spec.get("device_wide"):
+        apply_result_device_wide(result, recorded_at, db)
+    else:
+        apply_result(result, recorded_by, recorded_at, db)
+
+    # 5. Handle commands (side effects the pure projector can't do)
+    if result.commands:
+        _execute_commands(result.commands, event_type, recorded_by, db)
+
+    # 6. Mark as valid (for modules that need it)
+    if spec.get("mark_valid"):
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        safedb.execute(
+            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+            (event_id, recorded_by)
+        )
+
+    log.debug(f"project_event({event_type}): projected {event_id[:20]}...")
+    return event_id
+
+
+def _execute_commands(commands: list[dict], event_type: str, recorded_by: str, db: Any) -> None:
+    """Execute commands from projector result."""
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    for cmd in commands:
+        cmd_type = cmd.get("type")
+
+        if cmd_type == "set_network_creator":
+            # From admin projection - set creator_user_id on network
+            safedb.execute(
+                """UPDATE networks SET creator_user_id = ?
+                   WHERE network_id = ? AND recorded_by = ?
+                   AND (creator_user_id IS NULL OR creator_user_id = '')""",
+                (cmd["user_id"], cmd["network_id"], recorded_by)
+            )
+            log.info(f"set_network_creator: {cmd['user_id'][:20]}...")
+
+        else:
+            log.warning(f"Unknown command type: {cmd_type}")
+
+
+# ============================================================================
+# DISPATCH - routes to generic project_event or legacy handlers
 # ============================================================================
 
 def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
@@ -166,17 +250,18 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
 
     Returns projected_id on success, None on failure.
     """
-    # Pure projectors (use resolve + pure project function)
     _load_projectors()
-    if event_type in _PROJECTORS:
-        module = _PROJECTORS[event_type]
-        if hasattr(module, 'SPEC'):
-            # This is a pure projector - but we call the wrapper in events/
-            # which handles side effects and uses the pure projector internally
-            pass  # Fall through to legacy dispatch for now
 
-    # Legacy dispatch - call the project() function in events/
-    # This maintains backward compatibility while we migrate
+    # Try generic path first for modules with SPEC
+    module = _PROJECTORS.get(event_type)
+    if module and hasattr(module, 'SPEC'):
+        spec = module.SPEC
+        # Use generic path if module opts in (has 'generic_dispatch' flag)
+        if spec.get("generic_dispatch"):
+            return project_event(event_type, ref_id, recorded_by, recorded_at, db)
+
+    # Legacy dispatch - call the project_event() in events/ modules
+    # These will be migrated to generic dispatch over time
 
     if event_type == 'message':
         from events.content import message
@@ -885,31 +970,6 @@ def cleanup_deleted_events(recorded_by: str, db: Any) -> int:
         log.info(f"cleanup_deleted_events(): removed {total_removed} events from valid_events for peer {recorded_by[:20]}...")
 
     return total_removed
-
-
-# ============================================================================
-# PROJECT_EVENT - single entry point for pure projectors
-# ============================================================================
-
-def project_event(event_type: str, event_id: str, recorded_by: str, recorded_at: int, db: Any) -> Any:
-    """Single entry point for projection using pure projectors."""
-    _load_projectors()
-
-    module = _PROJECTORS.get(event_type)
-    if not module:
-        return None
-
-    input_dict = resolve(event_type, event_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        return None
-
-    result = module.project(input_dict)
-
-    if result.blocked or not result.valid:
-        return result
-
-    apply_result(result, recorded_by, recorded_at, db)
-    return result
 
 
 # ============================================================================

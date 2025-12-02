@@ -31,6 +31,7 @@ SPEC = {
     "signer_type": "none",  # Local-only, no signature
     "dependencies": [],
     "tables": ["network_creators"],
+    "generic_dispatch": True,
 }
 
 
