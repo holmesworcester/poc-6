@@ -1,16 +1,13 @@
 """Network created event type - marks peer as network creator (self-bootstrapped).
 
-Pure functions:
-    project(input_dict) -> ProjectorResult
+SPEC - declarative metadata for generic resolver
+project() - pure function: input_dict -> ProjectorResult
 
 API functions:
     project_event(event_id, recorded_by, recorded_at, db) -> str | None
 """
 from typing import Any, TypedDict
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +20,18 @@ class NetworkCreatedEventData(TypedDict):
     type: str
     peer_id: str
     created_at: int
+
+
+# ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "none",  # Local-only, no signature
+    "dependencies": [],
+    "tables": ["network_creators"],
+}
 
 
 # ============================================================================

@@ -1,7 +1,8 @@
 """Address event type (peer's network address for direct communication).
 
-Pure functions:
-    project(input_dict) -> ProjectorResult
+SPEC/DEPS - declarative metadata for generic resolver
+project() - pure function: input_dict -> ProjectorResult
+create_pure() - pure function: deps -> CreateResult
 
 API functions:
     create(peer_id, peer_shared_id, ip, port, t_ms, db) -> str
@@ -30,12 +31,39 @@ class AddressEventData(TypedDict):
     created_at: int
 
 
+class AddressCreateDeps(TypedDict):
+    """Dependencies for address creation."""
+    peer_shared_id: str
+    private_key: bytes
+
+
+# ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "peer_shared",
+    "dependencies": [],
+    "tables": ["addresses"],
+}
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    "private_key": {"type": "local_peer_key"},
+}
+
+
 # ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
 def project(input_dict: dict):
-    """Pure projection: dict -> result."""
+    """Pure projection: dict -> result. No database access."""
     from projection import ProjectorResult
 
     event_id = input_dict["event_id"]
@@ -62,6 +90,29 @@ def project(input_dict: dict):
     }
 
     return ProjectorResult(valid=True, tables={"addresses": [row]})
+
+
+def create_pure(deps: AddressCreateDeps, ip: str, port: int, t_ms: int):
+    """Pure function to create an address event."""
+    from projection import CreateResult, BlobSpec, compute_event_id
+
+    event_data = {
+        'type': 'address',
+        'peer_id': deps['peer_shared_id'],
+        'signed_by': deps['peer_shared_id'],
+        'ip': ip,
+        'port': port,
+        'created_at': t_ms,
+    }
+
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+    blob = crypto.canonicalize_json(signed_event)
+    address_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=address_id, event_type='address')],
+        primary_id=address_id,
+    )
 
 
 # ============================================================================
@@ -106,51 +157,26 @@ def make_input(
 # API FUNCTIONS
 # ============================================================================
 
-
 def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db: Any) -> str:
-    """Create an address event for a peer.
+    """Create an address event for a peer."""
+    from projection import store_create_result
 
-    Args:
-        peer_id: Local peer ID (creator)
-        peer_shared_id: Public peer shared ID
-        ip: IP address
-        port: Port number
-        t_ms: Timestamp
-        db: Database connection
-
-    Returns:
-        address_id: Event ID of the created address event
-    """
-    log.info(f"address.create() creating address for peer_shared_id={peer_shared_id[:20]}..., ip={ip}, port={port}")
-
-    # Get peer's private key for signing
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Create event dict (plaintext, will be signed)
-    event_data = {
-        'type': 'address',
-        'peer_id': peer_shared_id,
-        'signed_by': peer_shared_id,
-        'ip': ip,
-        'port': port,
-        'created_at': t_ms
+    deps = {
+        'peer_shared_id': peer_shared_id,
+        'private_key': private_key,
     }
 
-    # Sign the event with peer's private key
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Canonicalize to get deterministic blob
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Store event with recorded wrapper and projection
-    address_id = store.event(blob, peer_id, t_ms, db)
+    result = create_pure(deps, ip, port, t_ms)
+    address_id = store_create_result(result, peer_id, t_ms, db)
 
     log.info(f"address.create() created address_id={address_id[:20]}...")
     return address_id
 
 
 def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project address event into addresses table."""
+    """Project address event. Uses INSERT OR REPLACE for updates."""
     from projection import resolve
 
     input_dict = resolve("address", address_id, recorded_by, recorded_at, db)
@@ -163,7 +189,7 @@ def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) 
         log.warning(f"address.project_event() failed: {result.reason}")
         return None
 
-    # Use INSERT OR REPLACE for addresses (may update existing)
+    # Use INSERT OR REPLACE (addresses may update existing)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     for row in result.tables.get("addresses", []):
         safedb.execute(

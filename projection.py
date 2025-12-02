@@ -106,16 +106,16 @@ def _load_projectors():
     # Pure functional projectors (have SPEC + project(input_dict))
     # Consolidated modules (in events/)
     from events.content import message
+    from events.identity import admin, bootstrap_complete, network_created, network_joined, address
+    from events.group import group_key
     # Still in projectors/ (to be consolidated)
-    from projectors import channel, group_member, user, admin, network, group, peer_shared, invite, invite_accepted
-    from projectors import bootstrap_complete, network_joined, transit_prekey_shared, address, group_prekey_shared
+    from projectors import channel, group_member, user, network, group, peer_shared, invite, invite_accepted
+    from projectors import transit_prekey_shared, group_prekey_shared
     from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice, message_attachment
     from projectors import peer as peer_projector
     from projectors import transit_key as transit_key_projector
-    from projectors import group_key as group_key_projector
     from projectors import group_prekey as group_prekey_projector
     from projectors import transit_prekey as transit_prekey_projector
-    from projectors import network_created as network_created_projector
     from projectors import sync as sync_projector
 
     _PROJECTORS["message"] = message
@@ -125,10 +125,10 @@ def _load_projectors():
     _PROJECTORS["message_attachment"] = message_attachment
     _PROJECTORS["peer"] = peer_projector
     _PROJECTORS["transit_key"] = transit_key_projector
-    _PROJECTORS["group_key"] = group_key_projector
+    _PROJECTORS["group_key"] = group_key
     _PROJECTORS["group_prekey"] = group_prekey_projector
     _PROJECTORS["transit_prekey"] = transit_prekey_projector
-    _PROJECTORS["network_created"] = network_created_projector
+    _PROJECTORS["network_created"] = network_created
     _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
     _PROJECTORS["group_member"] = group_member

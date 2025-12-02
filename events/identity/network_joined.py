@@ -1,7 +1,8 @@
 """Network joined event type - marks successful bootstrap with inviter.
 
-Pure functions:
-    project(input_dict) -> ProjectorResult
+SPEC/DEPS - declarative metadata for generic resolver
+project() - pure function: input_dict -> ProjectorResult
+create_pure() - pure function: deps -> CreateResult
 
 API functions:
     create(peer_id, peer_shared_id, inviter_peer_shared_id, t_ms, db) -> str
@@ -11,7 +12,6 @@ from typing import Any, TypedDict
 import logging
 import crypto
 import store
-from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -28,12 +28,41 @@ class NetworkJoinedEventData(TypedDict):
     created_at: int
 
 
+class NetworkJoinedCreateDeps(TypedDict):
+    """Dependencies for network_joined creation."""
+    peer_id: str
+    peer_shared_id: str
+    private_key: bytes
+    inviter_peer_shared_id: str
+
+
+# ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "none",  # Local-only
+    "dependencies": [],
+    "tables": ["network_joiners"],
+}
+
+
+# ============================================================================
+# DEPS - dependencies needed for creation
+# ============================================================================
+
+DEPS = {
+    "private_key": {"type": "local_peer_key"},
+}
+
+
 # ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
 def project(input_dict: dict):
-    """Pure projection: dict -> result."""
+    """Pure projection: dict -> result. No database access."""
     from projection import ProjectorResult
 
     event_data = input_dict["event_data"]
@@ -55,6 +84,28 @@ def project(input_dict: dict):
     }
 
     return ProjectorResult(valid=True, tables={"network_joiners": [row]})
+
+
+def create_pure(deps: NetworkJoinedCreateDeps, t_ms: int):
+    """Pure function to create a network_joined event."""
+    from projection import CreateResult, BlobSpec, compute_event_id
+
+    event_data = {
+        'type': 'network_joined',
+        'peer_id': deps['peer_id'],
+        'signed_by': deps['peer_shared_id'],
+        'inviter_peer_shared_id': deps['inviter_peer_shared_id'],
+        'created_at': t_ms,
+    }
+
+    signed_event = crypto.sign_event(event_data, deps['private_key'])
+    blob = crypto.canonicalize_json(signed_event)
+    network_joined_id = compute_event_id(blob)
+
+    return CreateResult(
+        blobs=[BlobSpec(blob=blob, event_id=network_joined_id, event_type='network_joined')],
+        primary_id=network_joined_id,
+    )
 
 
 # ============================================================================
@@ -80,7 +131,7 @@ def make_event_data(
 def make_input(
     event_id: str = "nj_123",
     event_data: dict | None = None,
-    recorded_by: str = "peer_123",  # Must match peer_id for projection to occur
+    recorded_by: str = "peer_123",
     recorded_at: int = 1000001,
 ) -> dict:
     """Build complete input dict for testing."""
@@ -97,63 +148,42 @@ def make_input(
 # API FUNCTIONS
 # ============================================================================
 
-
 def create(peer_id: str, peer_shared_id: str, inviter_peer_shared_id: str,
            t_ms: int, db: Any) -> str:
-    """Create network_joined event after successful bootstrap.
-
-    Args:
-        peer_id: Joiner's peer_id
-        peer_shared_id: Joiner's peer_shared_id
-        inviter_peer_shared_id: Inviter's peer_shared_id
-        t_ms: Timestamp
-        db: Database connection
-
-    Returns:
-        network_joined event ID
-    """
+    """Create network_joined event after successful bootstrap."""
+    from projection import store_create_result
     from events.identity import peer
 
-    # Create event data
-    event_data = {
-        'type': 'network_joined',
-        'peer_id': peer_id,
-        'signed_by': peer_shared_id,
-        'inviter_peer_shared_id': inviter_peer_shared_id,
-        'created_at': t_ms
-    }
-
-    # Get joiner's private key for signing
     private_key = peer.get_private_key(peer_id, peer_id, db)
     if not private_key:
-        log.error(f"network_joined.create() no private key for peer {peer_id[:20]}...")
         raise ValueError(f"No private key for peer {peer_id}")
 
-    # Sign the event
-    signed_event = crypto.sign_event(event_data, private_key)
+    deps = {
+        'peer_id': peer_id,
+        'peer_shared_id': peer_shared_id,
+        'private_key': private_key,
+        'inviter_peer_shared_id': inviter_peer_shared_id,
+    }
 
-    # Store as signed plaintext
-    canonical = crypto.canonicalize_json(signed_event)
-    network_joined_id = store.event(canonical, peer_id, t_ms, db)
+    result = create_pure(deps, t_ms)
+    network_joined_id = store_create_result(result, peer_id, t_ms, db)
 
-    log.info(f"network_joined.create() created event {network_joined_id[:20]}... for peer {peer_id[:20]}...")
-
+    log.info(f"network_joined.create() created event {network_joined_id[:20]}...")
     return network_joined_id
 
 
 def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project network_joined event into network_joiners table."""
-    from projectors import resolve, apply_result
-    from projectors import network_joined as nj_projector
+    """Project network_joined event. Uses generic resolver."""
+    from projection import resolve, apply_result
 
     input_dict = resolve("network_joined", event_id, recorded_by, recorded_at, db)
     if not input_dict:
         return None
 
-    result = nj_projector.project(input_dict)
+    result = project(input_dict)
 
     if not result.valid:
-        log.warning(f"network_joined.project() failed: {result.reason}")
+        log.warning(f"network_joined.project_event() failed: {result.reason}")
         return None
 
     apply_result(result, recorded_by, recorded_at, db)
