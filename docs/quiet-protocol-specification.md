@@ -1233,7 +1233,7 @@ A team uses Quiet as a Slack replacement for team chat. The team has an existing
 
 ADMIN cannot:
 
-* Read messages from private chats or direct messages that did not include them, or cause these messages to be DELETED.
+* Read messages from private chats or direct messages that did not include them, or cause these messages to be DELETED. **NOTE: Until DMs are implemented, ADMINs are automatically added to all private channels for oversight purposes. This invariant will be enforced once DM support is added.**
 * Read DELETED messages.
 * Cause the contents of messages sent by other MEMBERS to appear incorrectly in any way.
 * Cause any message to appear as if it was sent twice when it was only sent once.

@@ -1,8 +1,15 @@
 """File slice event type - encrypted 450-byte chunks of files.
 
-Slices are NOT group-wrapped (access control via file descriptor event).
-Slices are NOT signed (root_hash detects tampering).
+Slices are NOT group-wrapped (access control via message_attachment event).
+Slices are NOT signed - integrity is verified via root_hash in message_attachment.
 Slices ARE transit-wrapped during sync (for routing).
+
+Security model:
+- message_attachment events are group-encrypted and signed
+- message_attachment contains root_hash computed from all slice ciphertexts
+- When retrieving files, root_hash is verified against actual slice data
+- This chain: signed message_attachment → root_hash → file_slices
+  provides integrity without per-slice signatures
 """
 
 # Registry metadata
@@ -24,11 +31,12 @@ _batch_mode = False
 
 
 def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
-           poly_tag: bytes, peer_id: str, signed_by: str, t_ms: int,
+           poly_tag: bytes, peer_id: str, t_ms: int,
            db: Any) -> str:
     """Create a file_slice event (encrypted chunk of file).
 
-    IMPORTANT: Slices are NOT group-wrapped. Access control happens via file descriptor.
+    IMPORTANT: Slices are NOT group-wrapped or signed. Access control and integrity
+    are enforced via the message_attachment event which contains the root_hash.
 
     Args:
         file_id: ID of the file this slice belongs to
@@ -37,7 +45,6 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
         ciphertext: Encrypted bytes (max 450 bytes)
         poly_tag: 16-byte AEAD authentication tag
         peer_id: Local peer creating this event
-        signed_by: Shareable peer_shared_id (for sync tracking)
         t_ms: Timestamp
         db: Database connection
 
@@ -49,6 +56,7 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
                  f"ciphertext_size={len(ciphertext)}B")
 
     # Build event structure (NO signatures, NO wrapping)
+    # Integrity verified via root_hash in message_attachment
     event_data = {
         'type': 'file_slice',
         'file_id': file_id,
@@ -56,7 +64,6 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
         'nonce': crypto.b64encode(nonce),
         'ciphertext': crypto.b64encode(ciphertext),
         'poly_tag': crypto.b64encode(poly_tag),
-        'signed_by': signed_by,  # Shareable peer identity
         'created_at': t_ms
     }
 
@@ -121,16 +128,16 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
 
 
 def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
-                        signed_by: str, t_ms: int, db: Any) -> int:
+                        t_ms: int, db: Any) -> int:
     """Efficiently create many file slices in batch mode.
 
     Uses optimized batch storage without immediate projection for massive performance gains.
+    Slices are not signed - integrity is verified via root_hash in message_attachment.
 
     Args:
         file_id: ID of the file these slices belong to
         slices_data: List of (slice_number, nonce, ciphertext, poly_tag) tuples
         peer_id: Local peer creating these events
-        signed_by: Shareable peer_shared_id
         t_ms: Timestamp
         db: Database connection
 
@@ -144,7 +151,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
     if not slices_data:
         return 0
 
-    # Build all event blobs upfront
+    # Build all event blobs upfront (no signing - integrity via root_hash)
     event_blobs = []
     for slice_number, slice_nonce, ciphertext, poly_tag in slices_data:
         event_data = {
@@ -154,7 +161,6 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
             'nonce': crypto.b64encode(slice_nonce),
             'ciphertext': crypto.b64encode(ciphertext),
             'poly_tag': crypto.b64encode(poly_tag),
-            'signed_by': signed_by,
             'created_at': t_ms
         }
         canonical = crypto.canonicalize_json(event_data)

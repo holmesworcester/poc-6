@@ -112,11 +112,11 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     file_id = crypto.compute_file_id(full_ciphertext)
 
     # Step 5: Create file_slice events in batch (now that we have file_id)
+    # Note: slices are not signed - integrity verified via root_hash
     slice_count = file_slice.batch_create_slices(
         file_id=file_id,
         slices_data=slices_to_create,
         peer_id=peer_id,
-        signed_by=peer_shared_id,
         t_ms=t_ms,
         db=db
     )

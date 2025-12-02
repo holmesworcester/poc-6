@@ -26,13 +26,17 @@ def create(peer_id: str, t_ms: int, db: Any,
     peer_shared is ALWAYS signed by an invite (mode=peer). This ensures every
     peer_shared is linked to a user_id via the invite chain.
 
+    NOTE: The device_name parameter is accepted for API compatibility but NOT
+    stored in the event. Device names are transmitted via encrypted peer_name_update
+    events to protect privacy from NETWORK ACTIVE ATTACKER.
+
     Args:
         peer_id: Local peer ID
         t_ms: Timestamp
         db: Database connection
         invite_id: Peer invite ID (required - from invite(mode=peer))
         invite_private_key: Invite private key for signing (required)
-        device_name: Device name (e.g., "Phone", "Desktop")
+        device_name: Device name - ignored here, use peer_name_update instead
 
     Returns:
         peer_shared_id: The ID of the created peer_shared event
@@ -43,11 +47,11 @@ def create(peer_id: str, t_ms: int, db: Any,
     public_key = peer.get_public_key(peer_id, peer_id, db)
 
     # Create event dict
+    # NOTE: device_name is NOT stored - device names come from encrypted peer_name_update events
     event_data = {
         'type': 'peer_shared',
         'public_key': crypto.b64encode(public_key),
         'peer_id': peer_id,  # Link back to local peer
-        'device_name': device_name,
         'created_at': t_ms
     }
 
@@ -140,8 +144,8 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
             return None
         log.info(f"peer_shared.project() verified self-signed")
 
-    # Extract device_name from event data
-    device_name = event_data.get('device_name', 'Device')
+    # Note: device_name is no longer stored in event - device names come from encrypted peer_name_update events
+    # Store NULL for now - actual name will be in peer_names table
 
     # Insert into peers_shared table (including user_id if invite-based)
     safedb.execute(
@@ -153,7 +157,7 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
             event_data['peer_id'],
             event_data['public_key'],
             user_id,  # NULL if self-signed bootstrap, set if invite-based
-            device_name,
+            None,  # device_name from encrypted peer_name_update events (in peer_names table)
             event_data['created_at'],
             recorded_by,
             recorded_at
@@ -299,6 +303,9 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
 def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
     """Get device name for a peer_shared_id.
 
+    Prefers encrypted name from peer_names table (from peer_name_update events),
+    falls back to peers_shared.device_name (legacy), then to "Device" default.
+
     Args:
         peer_shared_id: The public peer_shared ID
         recorded_by: Peer ID requesting access (for access control)
@@ -308,6 +315,16 @@ def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
         Device name (e.g., "Phone", "Desktop") or "Device" if not set
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # First try encrypted peer_names table (preferred)
+    peer_name_row = safedb.query_one(
+        "SELECT name FROM peer_names WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    if peer_name_row and peer_name_row['name']:
+        return peer_name_row['name']
+
+    # Fall back to peers_shared.device_name (legacy)
     row = safedb.query_one(
         "SELECT device_name FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, recorded_by)
@@ -396,6 +413,35 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     # - Call notify_event_valid(peer_invite_id) - unblocks dependent events
     # - Call notify_event_valid(prekey_id) - unblocks group_key_shared events sealed to this prekey
     # This is the "unblock cascade" that drives the joining flow
+
+    # Try to create peer_name_update event for device name (encrypted)
+    # May fail if key not available yet - will be stored in pending_name_updates
+    from events.identity import peer_name_update
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    try:
+        peer_name_update_id = peer_name_update.create(
+            peer_target_id=peer_shared_id,
+            name=device_name,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 5,
+            db=db
+        )
+        log.info(f"peer_shared.join() created peer_name_update: {peer_name_update_id[:20]}...")
+    except peer_name_update.KeyNotAvailableError:
+        # Key not available yet - store for later creation when group_key_shared arrives
+        log.info(f"peer_shared.join() key not available yet, storing device name intent in pending_name_updates")
+        import hashlib
+        pending_id = hashlib.sha256(f"{peer_shared_id}:peer_name:{t_ms + 5}".encode()).hexdigest()[:20]
+        safedb.execute(
+            """INSERT OR IGNORE INTO pending_name_updates
+               (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (pending_id, 'peer_name', peer_shared_id, device_name, peer_id, peer_shared_id,
+             'waiting_for_key', t_ms + 5, peer_id, t_ms + 5)
+        )
+        log.info(f"peer_shared.join() stored pending device name for peer {peer_shared_id[:20]}...")
 
     return {
         'peer_id': peer_id,

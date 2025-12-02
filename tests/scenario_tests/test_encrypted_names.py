@@ -76,15 +76,13 @@ def test_alice_network_with_encrypted_username(fresh_db):
     else:
         print("ℹ Network name not yet decrypted (key not available at creation)")
 
-    # Check device name in peers_shared (this is plaintext)
-    peers = safedb.query(
-        "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (alice_result['peer_shared_id'], alice_result['peer_id'])
+    # Check device name from encrypted peer_names table (via peer_name_update events)
+    from events.identity import peer_shared
+    device_name = peer_shared.get_device_name(
+        alice_result['peer_shared_id'], alice_result['peer_id'], db
     )
-
-    assert len(peers) == 1
-    assert peers[0]['device_name'] == 'Alice Phone'
-    print(f"✓ Device name stored: {peers[0]['device_name']}")
+    assert device_name == 'Alice Phone', f"Expected 'Alice Phone', got '{device_name}'"
+    print(f"✓ Device name from encrypted peer_names: {device_name}")
 
 
 def test_bob_joins_with_username():
@@ -146,15 +144,13 @@ def test_username_appears_with_device_link():
         assert user_names[0]['name'] == 'Alice'
         print(f"✓ Device 1 has username: {user_names[0]['name']}")
 
-    # Device name should always be available
-    peers = safedb.query(
-        "SELECT device_name FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
-        (alice_d1['peer_shared_id'], alice_d1['peer_id'])
+    # Device name should come from encrypted peer_names table
+    from events.identity import peer_shared
+    device_name = peer_shared.get_device_name(
+        alice_d1['peer_shared_id'], alice_d1['peer_id'], db
     )
-
-    assert len(peers) == 1
-    assert peers[0]['device_name'] == 'Phone'
-    print(f"✓ Device 1 device name: {peers[0]['device_name']}")
+    assert device_name == 'Phone', f"Expected 'Phone', got '{device_name}'"
+    print(f"✓ Device 1 device name: {device_name}")
 
 
 def test_pending_name_updates_table():
