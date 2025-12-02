@@ -122,7 +122,7 @@ class TestReactionValidation:
         commands = """
 new-network --name Test --username alice --devicename desktop
 send "test message"
-add-reaction 1 ""
+react 1 ""
 quit
 """
         result = run_cli(commands)
@@ -134,7 +134,7 @@ quit
         commands = """
 new-network --name Test --username alice --devicename desktop
 send "test message"
-add-reaction 1 "   "
+react 1 "   "
 quit
 """
         result = run_cli(commands)
@@ -146,7 +146,7 @@ quit
         commands = """
 new-network --name Test --username alice --devicename desktop
 send "test message"
-add-reaction 1 "👍"
+react 1 "👍"
 quit
 """
         result = run_cli(commands)

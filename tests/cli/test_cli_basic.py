@@ -428,7 +428,7 @@ def test_all_help_commands_execute_without_crash():
     # Commands that need setup first
     commands_needing_setup = [
         'send', 'select-channel', 'create-channel', 'list-channels', 'list-messages',
-        'delete-message', 'edit-message', 'add-reaction', 'remove-reaction', 'list-reactions',
+        'delete-message', 'edit-message', 'react', 'unreact', 'list-reactions',
         'create-invite', 'create-link-invite', 'keys', 'purge-keys',
         'remove-user', 'set-disappearing', 'show-ui'
     ]
@@ -459,8 +459,8 @@ def test_all_help_commands_execute_without_crash():
         ('list-messages', None),
         ('edit-message 1 "edited"', None),
         ('delete-message 1', 'not found'),  # Will fail gracefully after edit
-        ('add-reaction 1 thumbsup', 'not found'),  # Message was deleted
-        ('remove-reaction 1 thumbsup', 'not found'),
+        ('react 1 thumbsup', 'not found'),  # Message was deleted
+        ('unreact 1 thumbsup', 'not found'),
         ('list-reactions 1', 'not found'),
         ('set-disappearing --days 1', None),
         ('set-disappearing --off', None),

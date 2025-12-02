@@ -1615,9 +1615,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: user number must be an integer")
 
-        elif cmd == "add-reaction":
+        elif cmd == "react":
             if len(parts) < 3:
-                print("usage: add-reaction <message_num> <emoji>")
+                print("usage: react <message_num> <emoji>")
             else:
                 try:
                     message_num = int(parts[1])
@@ -1626,9 +1626,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: message number must be an integer")
 
-        elif cmd == "remove-reaction":
+        elif cmd == "unreact":
             if len(parts) < 3:
-                print("usage: remove-reaction <message_num> <emoji>")
+                print("usage: unreact <message_num> <emoji>")
             else:
                 try:
                     message_num = int(parts[1])
@@ -1705,8 +1705,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    list-messages")
             print("    delete-message <n>")
             print("    edit-message <n> <new_content>")
-            print("    add-reaction <n> <emoji>")
-            print("    remove-reaction <n> <emoji>")
+            print("    react <n> <emoji>")
+            print("    unreact <n> <emoji>")
             print("    list-reactions <n>")
             print("    set-disappearing --days <n> | --time <ms> | --off")
             print()
