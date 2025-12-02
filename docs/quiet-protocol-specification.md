@@ -798,12 +798,60 @@ Terminology notes for shared vs local-only identities and keys:
 
 Then the following are just the last outgoing sync events to and from each peer, used for scheduling next sync and remembering windows.
 
-* **LOCAL-ONLY-last-sync** 
-* **LOCAL-ONLY-last-sync-auth** 
-* **LOCAL-ONLY-last-sync-file** 
-* **LOCAL-ONLY-last-sync-lazy** 
+* **LOCAL-ONLY-last-sync**
+* **LOCAL-ONLY-last-sync-auth**
+* **LOCAL-ONLY-last-sync-file**
+* **LOCAL-ONLY-last-sync-lazy**
 
 Note that these events might make sense in an in-memory database.
+
+##### JSON Event Types (Event-Sourced)
+
+The following events use JSON format for storage and event-sourcing. They are canonicalized (sorted keys, no whitespace) before signing and hashing.
+
+###### Identity Events
+
+| Type | JSON Fields | Shareable | Encrypted | Description |
+|------|-------------|-----------|-----------|-------------|
+| **peer** | `type`, `public_key`, `private_key`, `created_at` | No | No | Local keypair for signing; private key never leaves device |
+| **peer_shared** | `type`, `public_key`, `peer_id`, `created_at`, `invite_id`, `signed_by` | Yes | No | Public peer identity shared for verification |
+| **peer_name_update** | `type`, `peer_id`, `name`, `key_id`, `global_count`, `signed_by`, `created_at` | Yes | Yes | Device display name (encrypted to group) |
+| **username_update** | `type`, `user_id`, `name`, `key_id`, `global_count`, `signed_by`, `created_at` | Yes | Yes | User display name (encrypted to group) |
+| **admin** | `type`, `user_id`, `network_id`, `signed_by`, `created_at`, `admin_grant`? | Yes | No | Admin authorization grant for network operations |
+
+###### Group Events
+
+| Type | JSON Fields | Shareable | Encrypted | Description |
+|------|-------------|-----------|-----------|-------------|
+| **group_key** | `type`, `key`, `signed_by`, `created_at` | No | No | Local symmetric key for group encryption |
+| **group_key_shared** | `type`, `key_id`, `symmetric_key`, `signed_by`, `created_at` | Yes | Wrapped | Symmetric key sealed to recipient's prekey |
+| **group_member** | `type`, `group_id`, `user_id`, `added_by`, `admin_grant`?, `signed_by`, `created_at` | Yes | Yes | Group membership grant (replaces spec's `grant`) |
+| **group_prekey** | `type`, `public_key`, `private_key`, `owner_peer_id`, `created_at` | No | No | Local prekey for receiving sealed keys |
+| **group_prekey_shared** | `type`, `group_prekey_id`, `peer_id`, `public_key`, `signed_by`, `created_at` | Yes | No | Public prekey shared for key sealing |
+
+###### Content Events
+
+| Type | JSON Fields | Shareable | Encrypted | Description |
+|------|-------------|-----------|-----------|-------------|
+| **message_attachment** | `type`, `message_id`, `file_id`, `filename`, `mime_type`, `blob_bytes`, `nonce_prefix`, `enc_key`, `root_hash`, `total_slices`, `signed_by`, `created_at` | Yes | Yes | File attachment metadata for a message |
+| **message_reaction** | `type`, `message_id`, `reactor_id`, `emoji`, `global_count`, `signed_by`, `created_at` | Yes | Yes | Emoji reaction on a message; uses global_count for LWW |
+| **message_reaction_deletion** | `type`, `reaction_id`, `deleted_by`, `created_at` | Yes | Yes | Removes a reaction; blocks future projections of that reaction_id |
+| **message_rekey** | `type`, `original_message_id`, `new_key_id`, `new_ciphertext`, `signed_by`, `created_at` | Yes | No | Re-encrypts message with new key for forward secrecy |
+| **message_update** | `type`, `message_id`, `group_id`, `edited_by`, `author_id`, `global_count`, `new_content`, `created_at` | Yes | Yes | Message edit; uses global_count for LWW ordering |
+
+###### Network Events
+
+| Type | JSON Fields | Shareable | Encrypted | Description |
+|------|-------------|-----------|-----------|-------------|
+| **network** | `type`, `network_pubkey`, `signed_by`='SELF', `created_at` | Yes | No | Self-signed network root of trust |
+| **network_name_update** | `type`, `network_id`, `name`, `key_id`, `global_count`, `signed_by`, `created_at` | Yes | Yes | Encrypted network display name |
+| **observed_address** | `type`, `observed_peer_id`, `observed_by_peer_id`, `ip`, `port`, `created_at` | Yes | No | Peer observes another peer's endpoint |
+| **self_address** | `type`, `peer_id`, `signed_by`, `ip`, `port`, `created_at` | Yes | No | Peer announces own endpoint |
+| **invite_accepted** | `type`, `invite_id`, `invite_prekey_id`, `invite_private_key`, `signed_by`, `created_at` | No | No | Local record of invite acceptance; stores out-of-band data |
+| **sync_connect** | `type`, `peer_id`, `signed_by`, `address`, `port`, `response_transit_key_id`, `response_transit_key`, `invite_id`?, `invite_signature`?, `created_at` | No | Wrapped | Connection request with symmetric key for replies |
+| **transit_key** | `type`, `key`, `signed_by`, `created_at` | No | No | Ephemeral symmetric key for sync responses |
+| **transit_prekey** | `type`, `public_key`, `private_key`, `signed_by`, `created_at` | No | No | Local prekey for receiving sync requests |
+| **transit_prekey_shared** | `type`, `transit_prekey_id`, `peer_id`, `public_key`, `signed_by`, `created_at` | Yes | No | Public transit prekey shared for initial sync wrapping |
 
 ##### File Slice (type `0x03`)  
 
