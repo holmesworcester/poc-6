@@ -878,17 +878,17 @@ The following events use JSON format for storage and event-sourcing. They are ca
 | 14 | 8 | `ttl_ms` |
 | 22 | 32 | `peer_pk` |
 
-*Followed by payload (bytes 50–447, 398 bytes: nonce + ct + tag if encrypted, or plaintext + zero-pad otherwise), then signature (bytes 448–511, 64 bytes, Ed25519 over bytes 0–447 plaintext form). Total: 512 bytes. Event-layer encryption: Applicable per-type notes below; if yes, reserve 40 bytes (max plaintext 358 bytes). ID computed on wire (encrypted) form for transmission, decrypted form for storage.*
+*Followed by payload (bytes 50–447, 398 bytes: id + nonce + ct + tag if encrypted, or plaintext + zero-pad otherwise), then signature (bytes 448–511, 64 bytes, Ed25519 over bytes 0–447 plaintext form). Total: 512 bytes. Event-layer encryption: Applicable per-type notes below; if yes, reserve 56 bytes (16 id + 24 nonce + 16 tag; max plaintext 342 bytes). ID computed on wire (encrypted) form for transmission, decrypted form for storage.*
 
 | Type               | Hex  | Plaintext Layout (zero-pad remainder)                                      | Event-Layer Encryption? |
 |--------------------|------|---------------------------------------------------------------------------|------------------------|
-| **message**        | 0x00 | `channel_id` 16 · `text` 338                                             | Yes                    |
-| **channel**        | 0x01 | `group_id` 16 · `channel_name` 32 · `disappearing_time_ms` 8 · pad (298) | Yes                    |
-| **update**         | 0x02 | `event_id` 16 · `global_count` 4 · `update_code` 1 · `user_id` 16 · `body` 317 | Yes                    |
+| **message**        | 0x00 | `channel_id` 16 · `text` 326                                             | Yes                    |
+| **channel**        | 0x01 | `group_id` 16 · `channel_name` 32 · `disappearing_time_ms` 8 · pad (286) | Yes                    |
+| **update**         | 0x02 | `event_id` 16 · `global_count` 4 · `update_code` 1 · `user_id` 16 · `body` 305 | Yes                    |
 | **slice**          | 0x03 | See dedicated table above (no common header or sig)                      | No                     |
-| **rekey**          | 0x04 | `original_event_id` 16 · `new_key_id` 16 · `new_ciphertext` ≤322 · pad | Yes                    |
-| **message_deletion** | 0x05 | `message_id` 16 · pad (338)                                              | Yes                    |
-| **delete-channel** | 0x06 | `channel_id` 16 · pad (338)                                              | Yes                    |
+| **rekey**          | 0x04 | `original_event_id` 16 · `new_key_id` 16 · `new_ciphertext` ≤310 · pad | Yes                    |
+| **message_deletion** | 0x05 | `message_id` 16 · pad (326)                                              | Yes                    |
+| **delete-channel** | 0x06 | `channel_id` 16 · pad (326)                                              | Yes                    |
 | **sync**           | 0x07 | `window` 2 · `bloom_bits` 64 · pad (328)                 | No                     |
 | **sync-auth**      | 0x08 | `window` 2 · `bloom_bits` 64 · `limit` 2 · pad (326)    | No                     |
 | **sync-lazy**      | 0x09 | `cursor` 16 · `bloom_bits` 64 · `limit` 2 · `channel_id` 16 · pad (296)   | No                     |
@@ -901,23 +901,23 @@ The following events use JSON format for storage and event-sourcing. They are ca
 | **link**           | 0x10 | `invite_proof` 32 · `user_id` 16 · `network_id` 16 · pad (330)           | No                     |
 | **remove-peer**  | 0x11 | `peer_shared_id` 32 · pad (362)                                      | No                     |
 | **remove-user**    | 0x12 | `user_id` 16 · pad (378)                                               | No                     |
-| **block**          | 0x13 | `blocked_user_id` 16 · `global_count` 4 · pad (334)                    | Yes (self-only)        |
-| **group**          | 0x14 | `user_id` 16 · `group_name` 32 · pad (306)                              | Yes                    |
-| **update-group-name** | 0x15| `group_id` 16 · `new_name` 32 · pad (306)                              | Yes                    |
-| **fixed-group**    | 0x16 | `num_members` 1 · `user_ids` (16 each, ≤20, sorted) · pad (≤353)       | Yes                    |
-| **grant**          | 0x17 | `group_id` 16 · `user_id` 16 · pad (322)                               | Yes                    |
+| **block**          | 0x13 | `blocked_user_id` 16 · `global_count` 4 · pad (322)                    | Yes (self-only)        |
+| **group**          | 0x14 | `user_id` 16 · `group_name` 32 · pad (294)                              | Yes                    |
+| **update-group-name** | 0x15| `group_id` 16 · `new_name` 32 · pad (294)                              | Yes                    |
+| **fixed-group**    | 0x16 | `num_members` 1 · `user_ids` (16 each, ≤20, sorted) · pad (≤341)       | Yes                    |
+| **grant**          | 0x17 | `group_id` 16 · `user_id` 16 · pad (310)                               | Yes                    |
 | **key**            | 0x18 | `type_inner` 1 · `peer_pk` 32 · `count` 4 · `created_ms` 8 · `ttl_ms` 8 · `tagId` 16 · `group_prekey_shared_id` 16 · `sealed_key` 80 · pad (229) | No                     |
 | **prekey** (group_prekey_shared) | 0x19 | `group_id` 16 · `channel_id` 16 · `prekey_pub` 32 · `eol_ms` 8 · pad (322)               | No                     |
-| **push-server**    | 0x1A | `user_id` 16 · `security_settings` 4 · `pad`  (338)	                                              | Yes                    |
-| **push-register**  | 0x1B | `token` 128 · `ttl_ms` 8 · pad (218)                                   | Yes                    |
-| **push-mute**      | 0x1C | `channel_id` 16 · pad (338)                             | Yes                    |
-| **push-unmute**    | 0x1D | `channel_id` 16 · pad (338)                             | Yes                    |
-| **mute-channel**   | 0x1E | `channel_id` 16 · `mute_flag` 1 · pad (337)                            | Yes (self-only)        |
-| **channel-update** | 0x1F | `channel_id` 16 · `new_channel_name` 32 · `new_disappearing_time_ms` 8 · `global_count` 4 · pad (294) | Yes                    |
-| **unblock**        | 0x20 | `blocked_user_id` 16 · `global_count` 4 · pad (334)                    | Yes (self-only)        |
-| **seen**           | 0x21 | `channel_id` 16 · `viewed_at_ms` 8 · `message_id` 16 · pad (314)       | Yes                    |
+| **push-server**    | 0x1A | `user_id` 16 · `security_settings` 4 · `pad`  (322)	                                              | Yes                    |
+| **push-register**  | 0x1B | `token` 128 · `ttl_ms` 8 · pad (206)                                   | Yes                    |
+| **push-mute**      | 0x1C | `channel_id` 16 · pad (326)                             | Yes                    |
+| **push-unmute**    | 0x1D | `channel_id` 16 · pad (326)                             | Yes                    |
+| **mute-channel**   | 0x1E | `channel_id` 16 · `mute_flag` 1 · pad (325)                            | Yes (self-only)        |
+| **channel-update** | 0x1F | `channel_id` 16 · `new_channel_name` 32 · `new_disappearing_time_ms` 8 · `global_count` 4 · pad (282) | Yes                    |
+| **unblock**        | 0x20 | `blocked_user_id` 16 · `global_count` 4 · pad (322)                    | Yes (self-only)        |
+| **seen**           | 0x21 | `channel_id` 16 · `viewed_at_ms` 8 · `message_id` 16 · pad (302)       | Yes                    |
 
-**Note**: Reserved codes (≥0x22) for future events; plaintext payload MUST be zero. Encrypted types pad to 354 bytes (394 - 40 for encryption); non-encrypted to 394 bytes.
+**Note**: Reserved codes (≥0x22) for future events; plaintext payload MUST be zero. Encrypted types pad to 342 bytes (398 - 56 for encryption); non-encrypted to 398 bytes.
 
 `security_settings` in **push-register** are: 
 * 0 - send empty notification for silent wake‑up
