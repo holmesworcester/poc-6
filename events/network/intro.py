@@ -51,17 +51,22 @@ def create(
         f"{peer1_id[:20]}... and {peer2_id[:20]}..."
     )
 
-    # Create event blob (plaintext JSON)
-    # TODO: This event should be signed even if not encrypted
+    # Create event data
     event_data = {
         'type': 'network_intro',
-        'initiator_peer_id': initiator_peer_id,
+        'signed_by': initiator_peer_id,
         'peer1_id': peer1_id,
         'peer2_id': peer2_id,
         'created_at': t_ms
     }
 
-    blob = json.dumps(event_data).encode()
+    # Sign with initiator's private key
+    from events.identity import peer
+    private_key = peer.get_private_key(initiator_peer_id, initiator_peer_id, db)
+    signed_event = crypto.sign_event(event_data, private_key)
+
+    # Canonicalize to get deterministic blob
+    blob = crypto.canonicalize_json(signed_event)
 
     # Store event with recorded wrapper
     intro_id = store.event(blob, initiator_peer_id, t_ms, db)
@@ -99,7 +104,7 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
 
     # Parse JSON
     try:
-        event_data = json.loads(blob.decode())
+        event_data = crypto.parse_json(blob)
     except Exception as e:
         log.warning(f"intro.project() failed to parse event data: {e}")
         return None
@@ -109,14 +114,28 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
         log.warning(f"intro.project() wrong type: {event_data.get('type')}")
         return None
 
-    initiator_peer_id = event_data.get('initiator_peer_id')
+    signed_by = event_data.get('signed_by')
     peer1_id = event_data.get('peer1_id')
     peer2_id = event_data.get('peer2_id')
     created_at = event_data.get('created_at')
 
-    if not all([initiator_peer_id, peer1_id, peer2_id, created_at]):
+    if not all([signed_by, peer1_id, peer2_id, created_at]):
         log.warning(f"intro.project() missing required fields")
         return None
+
+    # Verify signature
+    from events.identity import peer_shared
+    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+    if not public_key:
+        log.warning(f"intro.project() could not get public key for {signed_by[:20]}...")
+        return None
+
+    if not crypto.verify_event(event_data, public_key):
+        log.warning(f"intro.project() signature verification failed for {intro_id[:20]}...")
+        return None
+
+    # Use signed_by as initiator_peer_id for backwards compatibility
+    initiator_peer_id = signed_by
 
     # Insert into pending_intros table
     safedb.execute(
