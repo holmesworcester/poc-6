@@ -394,7 +394,7 @@ def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any
     """
     try:
         from simulator import network
-        from events.network import address as address_module
+        from events.network import observed_address as address_module
 
         engine = network.get_engine()
         if not engine or not engine.peer_endpoints:

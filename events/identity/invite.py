@@ -67,8 +67,8 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: Any) -> bool:
     """Validate that inviter has authorization to create invites.
 
-    DEPRECATED: This function is kept for backward compatibility.
-    New code should use is_admin() instead.
+    DEPRECATED: Not used internally. Use is_admin() instead.
+    This function checks group_members, while is_admin() checks the admins table.
 
     Authorization rule:
     - inviter_user_id must be a member of the network's admins group

@@ -210,12 +210,24 @@ class SyncConnectPurgeJob(Job):
         return {}
 
 
+class SelfAddressAnnounceJob(Job):
+    """Announce self-address for all local peers when address changes."""
+
+    def __init__(self):
+        super().__init__('self_address_announce', every_ms=60_000)  # 1 minute
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.network import self_address
+        return self_address.announce_for_all_peers(t_ms, db)
+
+
 # Registry of job instances
 JOBS = [
     SyncConnectSendJob(),
     SyncReceiveJob(),
     SyncSendJob(),
     SyncConnectPurgeJob(),
+    SelfAddressAnnounceJob(),
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),
     TransitPrekeyReplenishmentJob(),

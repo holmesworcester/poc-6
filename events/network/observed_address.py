@@ -1,4 +1,4 @@
-"""Network address event type (peer-announced endpoint observations).
+"""Observed address event type (peer-announced endpoint observations).
 
 A peer announces observations about another peer's public endpoint.
 This supports Byzantine fault tolerance: multiple peers can attest to the same address.
@@ -10,7 +10,7 @@ Usage:
 """
 
 # Registry metadata
-EVENT_TYPE = 'network_address'
+EVENT_TYPE = 'observed_address'
 SHAREABLE = True  # Address observations sync for peer discovery
 EPHEMERAL = False
 PROJECTION_TABLE = None
@@ -47,14 +47,14 @@ def create(
         address_id: Event ID of the created address event
     """
     log.info(
-        f"address.create() {observed_by_peer_id[:20]}... observed "
+        f"observed_address.create() {observed_by_peer_id[:20]}... observed "
         f"{observed_peer_id[:20]}... at {ip}:{port}"
     )
 
     # Create event blob (plaintext JSON, no signing for now)
     # TODO: This event should be signed even if not encrypted
     event_data = {
-        'type': 'network_address',
+        'type': 'observed_address',
         'observed_peer_id': observed_peer_id,
         'observed_by_peer_id': observed_by_peer_id,
         'ip': ip,
@@ -67,12 +67,12 @@ def create(
     # Store event with recorded wrapper and projection
     address_id = store.event(blob, observed_by_peer_id, t_ms, db)
 
-    log.info(f"address.create() created address_id={address_id[:20]}...")
+    log.info(f"observed_address.create() created address_id={address_id[:20]}...")
     return address_id
 
 
 def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
-    """Project address event into network_addresses table.
+    """Project observed_address event into network_addresses table.
 
     Args:
         address_id: Event ID of the address event
@@ -84,7 +84,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
         address_id if successful, None otherwise
     """
     log.debug(
-        f"address.project() address_id={address_id[:20]}..., "
+        f"observed_address.project() address_id={address_id[:20]}..., "
         f"recorded_by={recorded_by[:20]}..."
     )
 
@@ -95,19 +95,19 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
     unsafedb = create_unsafe_db(db)
     blob = store.get(address_id, unsafedb)
     if not blob:
-        log.warning(f"address.project() blob not found for address_id={address_id}")
+        log.warning(f"observed_address.project() blob not found for address_id={address_id}")
         return None
 
     # Parse JSON
     try:
         event_data = json.loads(blob.decode())
     except Exception as e:
-        log.warning(f"address.project() failed to parse event data: {e}")
+        log.warning(f"observed_address.project() failed to parse event data: {e}")
         return None
 
     # Validate event structure
-    if event_data.get('type') != 'network_address':
-        log.warning(f"address.project() wrong type: {event_data.get('type')}")
+    if event_data.get('type') != 'observed_address':
+        log.warning(f"observed_address.project() wrong type: {event_data.get('type')}")
         return None
 
     observed_peer_id = event_data.get('observed_peer_id')
@@ -117,7 +117,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
     created_at = event_data.get('created_at')
 
     if not all([observed_peer_id, observed_by_peer_id, ip, port, created_at]):
-        log.warning(f"address.project() missing required fields")
+        log.warning(f"observed_address.project() missing required fields")
         return None
 
     # Insert into network_addresses table
@@ -144,7 +144,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
     )
 
     log.info(
-        f"address.project() inserted: {observed_by_peer_id[:20]}... → "
+        f"observed_address.project() inserted: {observed_by_peer_id[:20]}... → "
         f"{observed_peer_id[:20]}... at {ip}:{port}"
     )
 

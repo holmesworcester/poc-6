@@ -15,7 +15,7 @@ from db import Database, create_safe_db
 import schema
 from events.identity import user, invite, peer
 import tick
-from events.network import address as address_module
+from events.network import observed_address as address_module
 from events.network import intro as intro_module
 import network_config
 

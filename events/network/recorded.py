@@ -385,8 +385,8 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if event_type == 'user' and 'signed_by' in event_data:
         # Self-created user with invite proof: creator doesn't have invite in valid_events
         # (invite comes from out-of-band link, not network sync)
-        # Note: signed_by is invite_id for user events, check peer_id from event
-        # User events have peer_id field which is the peer_shared_id
+        # Note: Bootstrap user events (from join_bootstrap) may have peer_id='PENDING',
+        # regular user events don't have peer_id field at all
         user_peer_shared_id = event_data.get('peer_id')
         # Check if this user's peer_id is THIS peer's peer_shared_id
         peer_self_row = safedb.query_one(
