@@ -17,63 +17,71 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(peer_id: str, name: str, t_ms: int, db: Any,
-           invite_id: str,
-           invite_private_key: bytes,
-           # Deprecated parameters kept for compatibility - not used
-           peer_shared_id: str | None = None) -> tuple[str, bytes]:
+def create(peer_id: str, peer_shared_id: str, name: str, t_ms: int, db: Any,
+           invite_id: str | None = None,
+           invite_private_key: bytes | None = None,
+           group_id: str | None = None, channel_id: str | None = None,
+           network_id: str | None = None) -> tuple[str, str, str, bytes]:
     """Create a user event representing network membership.
 
-    User events are signed by invite (signed_by=invite_id) with user's own keypair.
+    Also auto-creates a prekey for receiving sync requests.
+
+    Phase 2 design: User events are signed by invite (signed_by=invite_id) with user's own keypair.
     - invite_private_key: proves possession of invite link
     - user_pubkey: user's own unique public key (stored in event body)
-    - user_private_key: returned to caller for signing first peer invite
+    - user_private_key: returned to caller for signing first peer invite (Phase 3)
 
-    This function is isomorphic for both:
-    1. Network creator (Alice): Via bootstrap self-invite
-    2. Invite joiner (Bob): Via invite link from existing member
+    Two modes:
+    1. Invite joiner (Bob): Requires invite_id, invite_private_key. Metadata from invite.
+    2. Network creator (Alice): Uses same flow via self-invite (Phase 6).
 
     Args:
         peer_id: Local peer ID (for recording)
+        peer_shared_id: Public peer ID (for created_by and peer_id in event)
         name: Display name for the user
         t_ms: Timestamp
         db: Database connection
         invite_id: Reference to invite event (required - all users join via invite)
         invite_private_key: Invite private key for signing (required - proves invite possession)
-        peer_shared_id: Deprecated, not used (kept for compatibility)
+        group_id: Group ID (legacy, extracted from invite)
+        channel_id: Channel ID (legacy, extracted from invite)
+        network_id: Network ID (legacy, extracted from invite)
 
     Returns:
-        (user_id, user_private_key): The stored user event ID and user_private_key
-        for caller to sign first peer invite
+        (user_id, transit_prekey_shared_id, transit_prekey_id, user_private_key):
+        The stored user event ID, transit_prekey_shared ID, transit_prekey ID,
+        and user_private_key (for caller to sign first peer invite)
     """
-    # All users must join via invite
+    # Phase 2: All users must join via invite
     if not invite_id:
         raise ValueError("invite_id is required - all users must join via invite")
     if not invite_private_key:
         raise ValueError("invite_private_key is required - proves possession of invite")
 
-    # Extract metadata from invite (only network_id is used in user event creation)
+    # Extract metadata from invite
     invite_blob = store.get(invite_id, db)
     if not invite_blob:
         raise ValueError(f"invite event not found: {invite_id}")
 
     invite_event_data = crypto.parse_json(invite_blob)
+    group_id = invite_event_data['group_id']
+    channel_id = invite_event_data['channel_id']
+    key_id = invite_event_data['key_id']
     network_id = invite_event_data.get('network_id')
 
-    # Generate user's OWN unique keypair
+    # Phase 2: Generate user's OWN unique keypair
     # This is separate from invite keypair - each user has their own identity
     user_private_key, user_pubkey = crypto.generate_keypair()
 
     # Create user event with signed_by=invite_id and user_pubkey
     # NOTE: user event does NOT contain peer_id - the user→peer relationship
     # is established when peer_shared is projected (user_id stored in peers_shared table)
-    # NOTE: name is NOT included in event - usernames are transmitted via encrypted
-    # username_update events to protect privacy from NETWORK ACTIVE ATTACKER
     event_data = {
         'type': 'user',
         'invite_id': invite_id,  # Reference to invite that authorized this user
         'signed_by': invite_id,  # Polymorphic signer field (verified with invite_pubkey)
         'user_pubkey': crypto.b64encode(user_pubkey),  # User's OWN public key (for signing first peer invite)
+        'name': name,
         'created_at': t_ms
     }
 
@@ -81,7 +89,7 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
     if network_id:
         event_data['network_id'] = network_id
 
-    # Sign with invite_private_key (proves possession of invite link)
+    # Phase 2: Sign with invite_private_key (proves possession of invite link)
     # NOT with peer's private key - the signature proves invite possession
     signed_event = crypto.sign_event(event_data, invite_private_key)
 
@@ -93,19 +101,19 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
 
     # Note: peer_self.user_id is now set by peer_shared.project() when the peer_shared
     # is signed by an invite(mode=peer). This makes the first device use the same flow
-    # as subsequent devices (uniform peer linking).
+    # as subsequent devices (Phase 3 uniform peer linking).
 
     # Transit keys are now created by peer_shared.join() (canonical operation)
     # This avoids duplication and makes peer_shared.join() the complete operation
 
-    # Return user_private_key for caller to sign first peer invite
-    return user_id, user_private_key
+    # Phase 2: Return user_private_key for caller to sign first peer invite
+    return user_id, None, None, user_private_key
 
 
 def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project user event into users table.
 
-    User events are verified using invite_pubkey (not peer_shared pubkey).
+    Phase 2: User events are verified using invite_pubkey (not peer_shared pubkey).
     The user_pubkey from the event body is stored for signing first peer invite.
     """
     log.warning(f"[USER_PROJECT_ENTRY] user.project() called: user_id={user_id[:20]}..., recorded_by={recorded_by[:20]}...")
@@ -119,7 +127,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # Parse JSON (signed plaintext, no decryption needed)
     event_data = crypto.parse_json(blob)
 
-    # All user events must have invite_id and signed_by=invite_id
+    # Phase 2: All user events must have invite_id and signed_by=invite_id
     invite_id = event_data.get('invite_id')
     signed_by = event_data.get('signed_by')
 
@@ -159,14 +167,14 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
         log.warning(f"[USER_PROJECT_EARLY_RETURN] invite_id={invite_id[:20]}... not available yet")
         return None
 
-    # Verify signature using invite_pubkey (proves possession of invite link)
+    # Phase 2: Verify signature using invite_pubkey (proves possession of invite link)
     if not crypto.verify_event(event_data, invite_pubkey_bytes):
         log.warning(f"[USER_PROJECT_EARLY_RETURN] Signature verification failed using invite_pubkey")
         return None
 
     log.info(f"[USER_PROJECT] Signature verified with invite_pubkey from invites table")
 
-    # Extract user_pubkey from event body (user's OWN unique public key)
+    # Extract user_pubkey from event body (Phase 2: user's OWN unique public key)
     user_pubkey = event_data.get('user_pubkey', '')
 
     # Get network_id from event or from invite
@@ -179,7 +187,6 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
             network_id = invite_data.get('network_id')
 
     # Insert into users table (user→peer relationship is stored in peers_shared table, populated by peer_shared.project())
-    # Note: name is empty - actual usernames come from encrypted username_update events (stored in user_names table)
     log.warning(f"[USER_PROJECT_INSERT] Inserting user into users table: user_id={user_id[:20]}...")
     safedb.execute(
         """INSERT OR IGNORE INTO users
@@ -187,7 +194,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (
             user_id,
-            '',  # Placeholder - real name from encrypted username_update
+            event_data['name'],
             network_id,
             event_data['created_at'],
             user_pubkey,  # User's OWN public key (for verifying signed_by=user_id)
@@ -201,7 +208,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
     # after the user is created, not as a side effect here.
 
     # Add to group_members (all_users group from invite)
-    # invite_proof was removed, so we add group membership here for all users
+    # Phase 5: invite_proof was removed, so we add group membership here for all users
     # Get group_id from invite event
     invite_blob = store.get(invite_id, db)
     if invite_blob:
@@ -239,7 +246,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
 
     Simplified bootstrap: minimal identity events first, content after peer_shared exists.
 
-    Bootstrap (identity only, before peer_shared exists):
+    PHASE 1: Bootstrap (identity only, before peer_shared exists)
     1. peer.create() -> peer_id only (NO peer_shared)
     2. network.create() -> self-signed network (root of trust)
     3. invite (bootstrap user) -> signed by network
@@ -247,7 +254,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     5. invite (mode=peer) -> signed by user
     6. peer_shared -> signed by invite (THE canonical peer_shared)
 
-    Content setup (after peer_shared exists):
+    PHASE 2: Content setup (after peer_shared exists)
     7. admin_grant -> signed by network (grants admin to first user)
     8. group (all_users) -> signed by peer_shared_id
     9. channel -> signed by peer_shared_id
@@ -278,7 +285,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     log.info(f"new_network() creating network for '{name}' at t_ms={t_ms} (simplified bootstrap)")
 
     # =========================================================================
-    # Bootstrap (identity only)
+    # PHASE 1: Bootstrap (identity only)
     # =========================================================================
 
     # 1. Create peer (local only - NO peer_shared)
@@ -349,16 +356,17 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         (peer_id, 'PENDING', None, peer_id, t_ms)
     )
 
-    # 4. Create user via bootstrap invite (isomorphic with join() flow)
-    user_id, user_private_key = create(
+    join_result = join_bootstrap(
         peer_id=peer_id,
+        invite_id=invite_id,
+        invite_private_key=invite_private_key,
         name=name,
         t_ms=t_ms + 30,
-        db=db,
-        invite_id=invite_id,
-        invite_private_key=invite_private_key
+        db=db
     )
-    log.info(f"new_network() created user: user_id={user_id[:20]}...")
+    user_id = join_result['user_id']
+    user_private_key = join_result['user_private_key']
+    log.info(f"new_network() created user via bootstrap join: user_id={user_id[:20]}...")
 
     # 5-7. Delegate to peer_shared.join() for canonical peer creation flow
     # This reuses the same code as user.join(), eliminating duplication
@@ -393,7 +401,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     log.info(f"new_network() delegated to peer_shared.join(): {peer_shared_id[:20]}...")
 
     # =========================================================================
-    # Content setup (after peer_shared exists)
+    # PHASE 2: Content setup (after peer_shared exists)
     # =========================================================================
 
     from events.network import recorded
@@ -449,26 +457,6 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     except username_update.KeyNotAvailableError:
         # This shouldn't happen during bootstrap since we just created the key
         log.warning(f"new_network() key not available for username_update - unexpected during bootstrap")
-
-    # Create network_name_update if network_name provided
-    if network_name:
-        from events.identity import network_name_update
-        try:
-            network_name_update_id = network_name_update.create(
-                network_id=network_id,
-                name=network_name,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                t_ms=t_ms + 82,
-                db=db
-            )
-            recorded_id = recorded.create(network_name_update_id, peer_id, t_ms + 83, db, return_dupes=True)
-            recorded.project_ids([recorded_id], db)
-            log.info(f"new_network() created network_name_update: {network_name_update_id[:20]}...")
-        except network_name_update.KeyNotAvailableError:
-            log.warning(f"new_network() key not available for network_name_update - unexpected during bootstrap")
-
-    # NOTE: peer_name_update for device_name is created by peer_shared.join() above
 
     # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence
@@ -527,9 +515,61 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         'user_id': user_id,
         'invite_id': invite_id,
         'admin_grant_id': admin_grant_id,
-        # Convenience aliases for all_users group
+        # Backward compatibility - group_id and key_id reference all_users group
         'group_id': all_users_group_id,
         'key_id': all_users_key_id,
+    }
+
+
+def join_bootstrap(peer_id: str, invite_id: str, invite_private_key: bytes,
+                   name: str, t_ms: int, db: Any) -> dict[str, Any]:
+    """Bootstrap join - simplified join for network creator.
+
+    This is a minimal join that just creates the user event.
+    Used during new_network() before peer_shared exists.
+
+    Args:
+        peer_id: Local peer ID
+        invite_id: Bootstrap invite ID
+        invite_private_key: Invite private key for signing
+        name: Username/display name
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        {'user_id': str, 'user_private_key': bytes}
+    """
+    log.info(f"join_bootstrap() creating user for '{name}' at t_ms={t_ms}")
+
+    # Generate user's own keypair
+    user_private_key, user_pubkey = crypto.generate_keypair()
+
+    # Create user event signed by invite
+    event_data = {
+        'type': 'user',
+        'invite_id': invite_id,
+        'signed_by': invite_id,
+        'user_pubkey': crypto.b64encode(user_pubkey),
+        'peer_id': 'PENDING',  # Will be set to peer_shared_id after it's created
+        'name': name,
+        'created_at': t_ms
+    }
+
+    # Sign with invite private key
+    signed_event = crypto.sign_event(event_data, invite_private_key)
+    blob = crypto.canonicalize_json(signed_event)
+    user_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"join_bootstrap() created user_id={user_id[:20]}...")
+
+    # Project user immediately
+    from events.network import recorded
+    recorded_id = recorded.create(user_id, peer_id, t_ms + 1, db, return_dupes=True)
+    recorded.project_ids([recorded_id], db)
+
+    return {
+        'user_id': user_id,
+        'user_private_key': user_private_key,
     }
 
 
@@ -584,7 +624,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
          device_name: str = "Device") -> dict[str, Any]:
     """Join an existing network via invite link.
 
-    Peer must be created by caller before calling join().
+    Phase 5: Peer must be created by caller before calling join().
     This ensures consistent flow for both network creators and joiners.
 
     Creates:
@@ -613,7 +653,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     """
     log.info(f"join() user '{name}' joining via invite at t_ms={t_ms} with peer_id={peer_id[:20]}...")
 
-    # Get peer_shared_id from existing peer or create PENDING entry
+    # Phase 5: Get peer_shared_id from existing peer or create PENDING entry
     from db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
     peer_self_row = safedb.query_one(
@@ -664,7 +704,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     # Note: invite is now marked as valid via invite_accepted.project() for reprojection
     # During initial join, we'll mark it valid after creating invite_accepted event below
 
-    # Project inviter's peer_shared FIRST (before invite)
+    # Phase 4: Project inviter's peer_shared FIRST (before invite)
     # This ensures the creator's public key is available when validating the invite signature
     if 'inviter_peer_shared_blob' in invite_data:
         inviter_peer_shared_blob_b64 = invite_data['inviter_peer_shared_blob']
@@ -683,19 +723,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
         log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
 
-    # Project inviter's transit prekey from invite link (slim invite moved these from event to link)
-    # This allows the joiner to contact the inviter for sync
-    if 'inviter_transit_prekey_public_key' in invite_data and 'inviter_transit_prekey_shared_id' in invite_data and 'inviter_transit_prekey_id' in invite_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(invite_data['inviter_transit_prekey_public_key'])
-        inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
-        prekey_created_at = t_ms  # Use join timestamp for prekey
-
-        log.info(f"join() projecting inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (invite_data['inviter_transit_prekey_shared_id'], invite_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, peer_id)
-        )
-
     # Now project invite (after peer_shared, so creator's public key is available for validation)
     # Skip admin check for out-of-band invites - the joiner trusts the invite link they received
     from events.identity import invite
@@ -708,12 +735,11 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     log.info(f"join() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite link")
 
-    # Get metadata from invite event and link
-    # Slim invite: group_id in event, channel_id/key_id in link (for immediate access)
+    # Get metadata from invite event
     invite_event_data = crypto.parse_json(invite_blob)
     group_id = invite_event_data['group_id']
-    channel_id = invite_data.get('channel_id')  # From link (moved from event)
-    key_id = invite_data.get('key_id')  # From link (moved from event)
+    channel_id = invite_event_data['channel_id']
+    key_id = invite_event_data['key_id']
 
     # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
     # This restores the invite private key via projection BEFORE user.create() is called
@@ -728,23 +754,24 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         db=db
     )
 
-    # 2. Create user membership (user event is signed by invite)
-    # Returns user_private_key for signing first peer invite
-    user_id, user_private_key = create(
+    # 2. Create user membership (Phase 2: User event is signed by invite)
+    # Returns user_private_key for signing first peer invite (Phase 3)
+    user_id, _, _, user_private_key = create(
         peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
         name=name,
         t_ms=t_ms + 2,
         db=db,
         invite_id=invite_id,
-        invite_private_key=invite_private_key
+        invite_private_key=invite_private_key  # Phase 2: Required for signing user event
     )
 
-    # invite_proof removed - proof IS the signature on user event (signed_by=invite_id)
+    # Phase 5: invite_proof removed - proof IS the signature on user event (signed_by=invite_id)
 
     log.info(f"join() user '{name}' joined: peer={peer_id[:20]}..., group={group_id[:20]}...")
 
     # =========================================================================
-    # Complete isomorphic bootstrap - delegate to peer_shared.join()
+    # Phase 3: Complete isomorphic bootstrap - delegate to peer_shared.join()
     # =========================================================================
 
     # 5. Create invite (mode=peer) signed by user_id
@@ -806,8 +833,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
              'waiting_for_key', t_ms + 25, peer_id, t_ms + 25)
         )
         log.info(f"join() stored pending username for user {user_id[:20]}...")
-
-    # NOTE: peer_name_update for device_name is created by peer_shared.join() above
 
     return {
         'peer_id': peer_id,
