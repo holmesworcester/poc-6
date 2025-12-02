@@ -1,11 +1,95 @@
-"""Bootstrap complete event type - marks when a joiner receives first sync request from network."""
-from typing import Any
+"""Bootstrap complete event type - marks when a joiner receives first sync request from network.
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(peer_id, t_ms, db) -> str
+    project_event(event_id, recorded_by, recorded_at, db) -> str | None
+"""
+from typing import Any, TypedDict
 import logging
 import crypto
 import store
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class BootstrapCompleteEventData(TypedDict):
+    type: str
+    peer_id: str
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result."""
+    from projection import ProjectorResult
+
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+
+    peer_id = event_data.get("peer_id")
+
+    if not peer_id:
+        return ProjectorResult(valid=False, reason="Missing peer_id")
+
+    # Only project our own bootstrap_complete event
+    if recorded_by != peer_id:
+        # Foreign event - valid but no tables to write
+        return ProjectorResult(valid=True, tables={})
+
+    row = {
+        "peer_id": peer_id,
+        "recorded_by": recorded_by,
+    }
+
+    return ProjectorResult(valid=True, tables={"bootstrap_completers": [row]})
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    peer_id: str = "peer_123",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "bootstrap_complete",
+        "peer_id": peer_id,
+        "created_at": created_at,
+    }
+
+
+def make_input(
+    event_id: str = "bc_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_123",  # Must match peer_id for projection to occur
+    recorded_at: int = 1000001,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(peer_id=recorded_by),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def create(peer_id: str, t_ms: int, db: Any) -> str:
