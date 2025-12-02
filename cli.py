@@ -1441,27 +1441,6 @@ def cmd_list_reactions(session: CLISession, message_num: int):
     print()
 
 
-def cmd_show_group_keys(session: CLISession):
-    """Show current encryption keys for all groups/channels."""
-    account = session.get_selected_account()
-
-    # Get all channels with their keys (single query with JOIN)
-    channels_list = channel.list_channels_with_keys(recorded_by=account.peer_id, db=session.db)
-
-    if not channels_list:
-        print("(no channels)")
-        return
-
-    print(f"GROUP KEYS ({account.full_name}):")
-    for i, ch in enumerate(channels_list, 1):
-        channel_name = ch['name']
-        key_id = ch['key_id']
-        if key_id:
-            key_id_short = key_id[:16]
-            print(f"  {i}. #{channel_name:16} key_id={key_id_short}...")
-        else:
-            print(f"  {i}. #{channel_name:16} key_id=(none)")
-
 # ============================================================================
 # COMMAND EXECUTION
 # ============================================================================
@@ -1587,9 +1566,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "show-ui" or cmd == "show":
             display_state(session)
-
-        elif cmd == "show-group-keys":
-            cmd_show_group_keys(session)
 
         elif cmd == "list-accounts":
             cmd_list_accounts(session)
@@ -1739,7 +1715,6 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Keys/sync:")
             print("    keys [--summary]")
-            print("    show-group-keys")
             print("    purge-keys")
             print("    tick <n>")
             print("    sync --ticks <n>")

@@ -429,7 +429,7 @@ def test_all_help_commands_execute_without_crash():
     commands_needing_setup = [
         'send', 'select-channel', 'create-channel', 'list-channels', 'list-messages',
         'delete-message', 'edit-message', 'add-reaction', 'remove-reaction', 'list-reactions',
-        'create-invite', 'create-link-invite', 'keys', 'show-group-keys', 'purge-keys',
+        'create-invite', 'create-link-invite', 'keys', 'purge-keys',
         'remove-user', 'set-disappearing', 'show-ui'
     ]
 
@@ -452,7 +452,6 @@ def test_all_help_commands_execute_without_crash():
         ('show', None),
         ('keys', None),
         ('keys --summary', None),
-        ('show-group-keys', None),
         ('purge-keys', None),
         ('list-channels', None),
         ('create-channel testchan', None),
