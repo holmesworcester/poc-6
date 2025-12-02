@@ -3,12 +3,14 @@
 A peer announces observations about another peer's public endpoint.
 This supports Byzantine fault tolerance: multiple peers can attest to the same address.
 
-Usage:
-  - Alice observes Bob at 203.0.113.5:42000 (from Bob's sync packet)
-  - Alice creates address event announcing this observation
-  - Charlie receives Alice's observation and learns Bob's endpoint
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(observed_peer_id, observed_by_peer_id, ip, port, t_ms, db) -> str
+    project_event(address_id, recorded_by, recorded_at, db) -> str | None
 """
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 import json
 import logging
 import crypto
@@ -16,6 +18,105 @@ import store
 from db import create_safe_db
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class NetworkAddressEventData(TypedDict):
+    type: str
+    observed_peer_id: str
+    observed_by_peer_id: str
+    ip: str
+    port: int
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result.
+
+    Outputs network address observation to network_addresses table.
+    """
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+
+    observed_peer_id = event_data.get("observed_peer_id")
+    observed_by_peer_id = event_data.get("observed_by_peer_id")
+    ip = event_data.get("ip")
+    port = event_data.get("port")
+    created_at = event_data.get("created_at")
+
+    if not all([observed_peer_id, observed_by_peer_id, ip, port, created_at]):
+        return ProjectorResult(valid=False, reason="missing required fields")
+
+    # Output: network_addresses row
+    row = {
+        "address_id": event_id,
+        "observed_peer_id": observed_peer_id,
+        "observed_by_peer_id": observed_by_peer_id,
+        "ip": ip,
+        "port": port,
+        "created_at": created_at,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+    return ProjectorResult(
+        valid=True,
+        tables={"network_addresses": [row]},
+    )
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    observed_peer_id: str = "peer_123",
+    observed_by_peer_id: str = "peer_456",
+    ip: str = "203.0.113.5",
+    port: int = 42000,
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "network_address",
+        "observed_peer_id": observed_peer_id,
+        "observed_by_peer_id": observed_by_peer_id,
+        "ip": ip,
+        "port": port,
+        "created_at": created_at,
+    }
+
+
+def make_input(
+    event_id: str = "addr_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_789",
+    recorded_at: int = 1000001,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def create(
@@ -75,29 +176,28 @@ def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) 
     Returns:
         address_id if successful, None otherwise
     """
-    from projectors import resolve, apply_result
-    from projectors import network_address as na_projector
+    from projection import resolve, apply_result
 
     log.debug(
-        f"address.project() address_id={address_id[:20]}..., "
+        f"address.project_event() address_id={address_id[:20]}..., "
         f"recorded_by={recorded_by[:20]}..."
     )
 
     # Resolve: parse JSON, gather dependencies (none for this type)
     input_dict = resolve("network_address", address_id, recorded_by, recorded_at, db)
     if not input_dict:
-        log.warning(f"address.project() resolve failed for address_id={address_id[:20]}...")
+        log.warning(f"address.project_event() resolve failed for address_id={address_id[:20]}...")
         return None
 
     # Call pure projector
-    result = na_projector.project(input_dict)
+    result = project(input_dict)
 
     if result.blocked:
-        log.info(f"address.project() blocked: {result.missing_deps}")
+        log.info(f"address.project_event() blocked: {result.missing_deps}")
         return None
 
     if not result.valid:
-        log.warning(f"address.project() rejected: {result.reason}")
+        log.warning(f"address.project_event() rejected: {result.reason}")
         return None
 
     # Apply result: insert into tables

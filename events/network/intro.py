@@ -4,13 +4,14 @@ An initiator peer introduces two other peers to each other.
 This allows them to exchange hole punch packets to establish direct communication
 through NAT.
 
-Usage:
-  - Alice creates intro event for Bob and Charlie
-  - Bob and Charlie receive the intro
-  - Bob and Charlie trigger hole punch: both send packets to each other
-  - NAT mappings are established, allowing direct communication
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(initiator_peer_id, peer1_id, peer2_id, t_ms, db) -> str
+    project_event(intro_id, recorded_by, recorded_at, db) -> str | None
 """
-from typing import Any, Optional, List
+from typing import Any, Optional, List, TypedDict
 import json
 import logging
 import crypto
@@ -18,6 +19,101 @@ import store
 from db import create_safe_db
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class NetworkIntroEventData(TypedDict):
+    type: str
+    initiator_peer_id: str
+    peer1_id: str
+    peer2_id: str
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result.
+
+    Outputs intro to pending_intros table for hole punch processing.
+    """
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+
+    initiator_peer_id = event_data.get("initiator_peer_id")
+    peer1_id = event_data.get("peer1_id")
+    peer2_id = event_data.get("peer2_id")
+    created_at = event_data.get("created_at")
+
+    if not all([initiator_peer_id, peer1_id, peer2_id, created_at]):
+        return ProjectorResult(valid=False, reason="missing required fields")
+
+    # Output: pending_intros row
+    row = {
+        "intro_id": event_id,
+        "initiator_peer_id": initiator_peer_id,
+        "peer1_id": peer1_id,
+        "peer2_id": peer2_id,
+        "created_at": created_at,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "processed": False,
+    }
+
+    return ProjectorResult(
+        valid=True,
+        tables={"pending_intros": [row]},
+    )
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    initiator_peer_id: str = "alice_123",
+    peer1_id: str = "bob_123",
+    peer2_id: str = "charlie_123",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "network_intro",
+        "initiator_peer_id": initiator_peer_id,
+        "peer1_id": peer1_id,
+        "peer2_id": peer2_id,
+        "created_at": created_at,
+    }
+
+
+def make_input(
+    event_id: str = "intro_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_789",
+    recorded_at: int = 1000001,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def create(
