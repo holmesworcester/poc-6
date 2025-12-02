@@ -459,6 +459,8 @@ All users must be able to remove peers on lost or stolen devices. Admins must be
 
 When encrypting a new event, a peer MUST choose a key whose recipient set excludes every `user_id` and `peer_shared_id` present in any accepted `remove-user` or `remove-peer` event. If no such key exists, it MUST create a fresh key event for all remaining members and use that.
 
+> **Note:** "Accepted" means the peer has received and successfully projected the removal event. Each peer enforces this rule based on their own subjective view of removal state. A peer that has not yet received a removal event will correctly use keys that include the (from their perspective, not-yet-removed) user. This is consistent with the protocol's eventual consistency model.
+
 To ensure a convergent historical record, events from removed users are still valid. However, peers check their set of `remove-peer` and `remove-user` events and reject any [Transit-layer Encryption](#transit-layer-encryption) connection, request, or response from removed peers. 
 
 (Implementation note: projection of the removed_user event deletes connection information and with it transit keys.)
