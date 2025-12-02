@@ -1,5 +1,16 @@
-"""Invite event type (shareable, encrypted)."""
-from typing import Any
+"""Invite event type (shareable, encrypted).
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    is_admin(peer_shared_id, recorded_by, db) -> bool
+    create(...) -> tuple[str, str, dict]
+    project_event(invite_id, recorded_by, recorded_at, db, skip_admin_check) -> str | None
+    create_peer_invite(...) -> tuple[str, bytes, bytes]
+    accept(invite_link, peer_id, name, t_ms, db) -> dict
+"""
+from typing import Any, TypedDict, NotRequired
 import secrets
 import json
 import logging
@@ -10,6 +21,189 @@ from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class InviteEventData(TypedDict):
+    type: str
+    mode: NotRequired[str]  # 'user' or 'peer', defaults to 'user'
+    invite_pubkey: str  # For user proof signature
+    network_id: NotRequired[str]  # Network this invite is for
+    group_id: NotRequired[str]  # Target group (None for mode='peer')
+    channel_id: NotRequired[str]  # Target channel
+    key_id: NotRequired[str]  # Group key
+    user_id: NotRequired[str]  # For mode='peer': target user to link to
+    signed_by: NotRequired[str]  # network_id (bootstrap) or peer_shared_id (ongoing)
+    created_by: NotRequired[str]  # Legacy: inviter's peer_shared_id
+    inviter_peer_shared_id: NotRequired[str]  # Inviter's peer_shared_id
+    inviter_user_id: NotRequired[str]  # Inviter's user_id
+    admin_grant: NotRequired[str]  # For ongoing invites: admin_id authorizing signer
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result. No database access."""
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+    signature_valid = input_dict.get("signature_valid", True)
+    deps = input_dict.get("dependencies", {})
+
+    # Validate event type
+    if event_data.get("type") != "invite":
+        return ProjectorResult(valid=False, reason="Invalid event type")
+
+    # Check required fields
+    invite_pubkey = event_data.get("invite_pubkey")
+    if not invite_pubkey:
+        return ProjectorResult(valid=False, reason="Missing invite_pubkey")
+
+    # Signature must be valid (verified by resolver)
+    if not signature_valid:
+        return ProjectorResult(valid=False, reason="Invalid signature")
+
+    # Determine mode
+    mode = event_data.get("mode", "user")
+    signed_by = event_data.get("signed_by")
+    network_id = event_data.get("network_id")
+
+    # For ongoing invites (not bootstrap), validate admin_grant chain
+    if signed_by and signed_by != network_id:
+        admin_grant_id = event_data.get("admin_grant")
+
+        if admin_grant_id:
+            admin_grant = deps.get("admin_grant")
+            signer_user = deps.get("signer_user")
+
+            if admin_grant and signer_user:
+                signer_user_id = signer_user.get("user_id")
+                grant_user_id = admin_grant.get("user_id")
+
+                if signer_user_id != grant_user_id:
+                    return ProjectorResult(
+                        valid=False,
+                        reason=f"admin_grant does not authorize signer (grant grants {grant_user_id}, signer is {signer_user_id})"
+                    )
+                log.debug(f"invite.project() admin_grant chain verified")
+            elif admin_grant and not signer_user:
+                log.debug(f"invite.project() skipping admin_grant validation: signer_user not available")
+
+    # Determine inviter_id
+    inviter_id = (
+        event_data.get("inviter_peer_shared_id") or
+        event_data.get("signed_by") or
+        event_data.get("created_by") or
+        event_data.get("first_peer", "")
+    )
+
+    # Build output rows
+    tables = {}
+
+    # invites row
+    invite_row = {
+        "invite_id": event_id,
+        "invite_pubkey": invite_pubkey,
+        "group_id": event_data.get("group_id"),
+        "inviter_id": inviter_id,
+        "mode": mode,
+        "user_id": event_data.get("user_id"),
+        "created_at": event_data["created_at"],
+        "recorded_by": recorded_by,
+    }
+    tables["invites"] = [invite_row]
+
+    # valid_events row
+    valid_event_row = {
+        "event_id": event_id,
+        "recorded_by": recorded_by,
+    }
+    tables["valid_events"] = [valid_event_row]
+
+    return ProjectorResult(valid=True, tables=tables)
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    mode: str = "user",
+    invite_pubkey: str = "invite_pubkey_123",
+    network_id: str = "net_123",
+    group_id: str = "grp_all_users",
+    channel_id: str = "ch_123",
+    key_id: str = "key_123",
+    signed_by: str = "net_123",
+    inviter_peer_shared_id: str = "ps_inviter",
+    admin_grant: str = "",
+    user_id: str = "",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    result = {
+        "type": "invite",
+        "mode": mode,
+        "invite_pubkey": invite_pubkey,
+        "network_id": network_id,
+        "signed_by": signed_by,
+        "inviter_peer_shared_id": inviter_peer_shared_id,
+        "created_at": created_at,
+    }
+    if group_id:
+        result["group_id"] = group_id
+    if channel_id:
+        result["channel_id"] = channel_id
+    if key_id:
+        result["key_id"] = key_id
+    if admin_grant:
+        result["admin_grant"] = admin_grant
+    if user_id:
+        result["user_id"] = user_id
+    return result
+
+
+def make_input(
+    event_id: str = "inv_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    signature_valid: bool = True,
+    signer_user: dict | None = None,
+    admin_grant: dict | None = None,
+) -> dict:
+    """Build complete input dict for testing."""
+    if event_data is None:
+        event_data = make_event_data()
+
+    deps = {}
+    if signer_user is not None:
+        deps["signer_user"] = signer_user
+    if admin_grant is not None:
+        deps["admin_grant"] = admin_grant
+
+    return {
+        "event_id": event_id,
+        "event_data": event_data,
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "signature_valid": signature_valid,
+        "dependencies": deps,
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -433,29 +627,28 @@ def project_event(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
             skip_admin_check: bool = False) -> str | None:
     """Project invite event into invites table.
 
-    Uses pure functional projector from projectors.invite.
+    Uses pure functional projector.
     Note: Keeps side effect for projecting inviter's transit_prekey.
 
     Args:
         skip_admin_check: If True, skip admin validation. Used for invites
             received out-of-band (invite links) where the joiner trusts the invite.
     """
-    log.debug(f"invite.project() projecting invite_id={invite_id[:20]}...")
+    log.debug(f"invite.project_event() projecting invite_id={invite_id[:20]}...")
 
-    from projectors import resolve
-    from projectors import invite as invite_projector
+    from projection import resolve
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     input_dict = resolve("invite", invite_id, recorded_by, recorded_at, db)
     if not input_dict:
-        log.warning(f"invite.project() resolve failed for {invite_id[:20]}...")
+        log.warning(f"invite.project_event() resolve failed for {invite_id[:20]}...")
         return None
 
-    result = invite_projector.project(input_dict)
+    result = project(input_dict)
 
     if result.blocked or not result.valid:
-        log.warning(f"invite.project() failed: {result.reason}")
+        log.warning(f"invite.project_event() failed: {result.reason}")
         return None
 
     # Apply invites (INSERT OR IGNORE)

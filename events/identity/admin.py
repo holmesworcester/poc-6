@@ -3,14 +3,149 @@
 This is a first-class event type, NOT a group. Admin status is granted by:
 - Bootstrap: signed_by=network_id (verified with network_pubkey)
 - Ongoing: signed_by=peer_shared_id (verified with peer.pubkey + admin_grant chain)
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(...) -> str
+    project_event(admin_id, recorded_by, recorded_at, db) -> str | None
 """
-from typing import Any
+from typing import Any, TypedDict, NotRequired
 import logging
 import crypto
 import store
 from db import create_safe_db
 
 log = logging.getLogger(__name__)
+
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class AdminEventData(TypedDict):
+    type: str
+    user_id: str
+    network_id: str
+    signed_by: str
+    created_at: int
+    admin_grant: NotRequired[str]
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result. No database access."""
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+    deps = input_dict["dependencies"]
+
+    # Validate event type
+    if event_data.get("type") != "admin":
+        return ProjectorResult(valid=False, reason="Invalid event type")
+
+    signed_by = event_data["signed_by"]
+    network_id = event_data["network_id"]
+    user_id = event_data["user_id"]
+    admin_grant_id = event_data.get("admin_grant")
+
+    # Check signature was valid (pre-computed by resolver)
+    if not input_dict.get("signature_valid"):
+        return ProjectorResult(valid=False, reason="Signature verification failed")
+
+    # Determine if bootstrap or ongoing
+    is_bootstrap = (signed_by == network_id)
+
+    if not is_bootstrap:
+        # Ongoing: need admin_grant field and signer_user dependency
+        if not admin_grant_id:
+            return ProjectorResult(valid=False, reason="Ongoing admin grant requires admin_grant reference")
+
+        signer_user = deps.get("signer_user")
+        if not signer_user:
+            return ProjectorResult(blocked=True, missing_deps=["signer_user"])
+
+        admin_grant = deps.get("admin_grant")
+        if not admin_grant:
+            return ProjectorResult(blocked=True, missing_deps=["admin_grant"])
+
+        # Verify admin_grant authorizes the signer's user
+        if admin_grant["user_id"] != signer_user["user_id"]:
+            return ProjectorResult(
+                valid=False,
+                reason=f"admin_grant does not authorize signer {signer_user['user_id']}"
+            )
+
+    # Build output row
+    admin_row = {
+        "admin_id": event_id,
+        "user_id": user_id,
+        "network_id": network_id,
+        "signed_by": signed_by,
+        "admin_grant": admin_grant_id,
+        "created_at": event_data["created_at"],
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+    return ProjectorResult(valid=True, tables={"admins": [admin_row]})
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    user_id: str = "user_123",
+    network_id: str = "net_123",
+    signed_by: str | None = None,
+    created_at: int = 1000000,
+    admin_grant: str | None = None,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "admin",
+        "user_id": user_id,
+        "network_id": network_id,
+        "signed_by": signed_by or network_id,
+        "created_at": created_at,
+        "admin_grant": admin_grant,
+    }
+
+
+def make_input(
+    event_id: str = "admin_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    signature_valid: bool = True,
+    signer_user: dict | None = None,
+    admin_grant: dict | None = None,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "signature_valid": signature_valid,
+        "dependencies": {
+            "signer_user": signer_user,
+            "admin_grant": admin_grant,
+        },
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 
 def create(
