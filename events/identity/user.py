@@ -683,6 +683,19 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
         log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
 
+    # Project inviter's transit prekey from invite link (slim invite moved these from event to link)
+    # This allows the joiner to contact the inviter for sync
+    if 'inviter_transit_prekey_public_key' in invite_data and 'inviter_transit_prekey_shared_id' in invite_data and 'inviter_transit_prekey_id' in invite_data:
+        inviter_prekey_public_key_bytes = crypto.b64decode(invite_data['inviter_transit_prekey_public_key'])
+        inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
+        prekey_created_at = t_ms  # Use join timestamp for prekey
+
+        log.info(f"join() projecting inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
+        safedb.execute(
+            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
+            (invite_data['inviter_transit_prekey_shared_id'], invite_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, peer_id)
+        )
+
     # Now project invite (after peer_shared, so creator's public key is available for validation)
     # Skip admin check for out-of-band invites - the joiner trusts the invite link they received
     from events.identity import invite
@@ -695,11 +708,12 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     log.info(f"join() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite link")
 
-    # Get metadata from invite event
+    # Get metadata from invite event and link
+    # Slim invite: group_id in event, channel_id/key_id in link (for immediate access)
     invite_event_data = crypto.parse_json(invite_blob)
     group_id = invite_event_data['group_id']
-    channel_id = invite_event_data['channel_id']
-    key_id = invite_event_data['key_id']
+    channel_id = invite_data.get('channel_id')  # From link (moved from event)
+    key_id = invite_data.get('key_id')  # From link (moved from event)
 
     # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
     # This restores the invite private key via projection BEFORE user.create() is called

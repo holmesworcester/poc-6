@@ -278,26 +278,16 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_port = 6100
 
     # Create minimal invite event (signed by Alice, proves authorization)
-    # This event contains group/channel/key metadata that Bob's user event will reference
-    # Include inviter's prekey so Bob can send sync requests (projection into prekeys_shared)
+    # SLIM INVITE: Only essential fields for sync. Transit prekey + address info moved to link.
+    # This keeps invite event under 488-byte UDP limit.
     invite_event_data = {
         'type': 'invite',
-        'mode': mode,  # NEW - 'user' or 'link'
+        'mode': mode,
         'invite_pubkey': invite_pubkey_b64,  # For user proof signature
         'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
-        'network_id': network_id,  # NEW - explicit network reference
         'group_id': all_users_group_id,  # All users group (for adding joiner)
-        'channel_id': channel_id,
-        'key_id': key_id,
-        'inviter_peer_shared_id': peer_shared_id,
-        'inviter_user_id': inviter_user_id,  # NEW - for admin validation during projection
-        'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
-        'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
-        'inviter_transit_prekey_shared_created_at': inviter_transit_prekey_shared_created_at,  # For correct created_at in transit_prekeys_shared
-        'inviter_transit_prekey_id': inviter_prekey_id,
-        'address': inviter_ip,  # For bootstrap connections (stored in invite_accepteds)
-        'port': inviter_port,   # For bootstrap connections (stored in invite_accepteds)
-        'signed_by': peer_shared_id,
+        'inviter_user_id': inviter_user_id,  # For admin validation during projection
+        'signed_by': peer_shared_id,  # Also serves as inviter_peer_shared_id (redundancy removed)
         'created_at': t_ms
     }
 
@@ -420,8 +410,14 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'inviter_peer_shared_id': peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
         'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
         'network_id': network_id,  # For joiner to know which network they're joining
+        'channel_id': channel_id,  # Default channel (moved from event to link for immediate access)
+        'key_id': key_id,  # Encryption key (moved from event to link for immediate access)
         'ip': inviter_ip,
         'port': inviter_port,
+        # Transit prekey fields moved from invite event (for bootstrap contact only)
+        'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
+        'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
+        'inviter_transit_prekey_id': inviter_prekey_id,
     }
 
     # For mode='peer', also include the existing user blob (for device linking)
@@ -478,9 +474,12 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
         return None
     mode = event_data.get('mode', 'user')
     # Extract signer early for INSERT
-    # For bootstrap invites with signed_by=network_id, use inviter_peer_shared_id
-    # For ongoing invites, signed_by IS the inviter's peer_shared_id
-    inviter_id = event_data.get('inviter_peer_shared_id') or event_data.get('signed_by')
+    # For ongoing invites, signed_by IS the inviter's peer_shared_id (slim invite removes redundant field)
+    # For bootstrap invites with signed_by=network_id, inviter_peer_shared_id may still be present
+    inviter_id = event_data.get('signed_by')
+    if inviter_id == event_data.get('network_id'):
+        # Bootstrap invite signed by network - use inviter_peer_shared_id if available
+        inviter_id = event_data.get('inviter_peer_shared_id') or inviter_id
 
     log.info(f"invite.project() validating invite mode={mode} signed_by={signed_by[:20]}...")
 
@@ -595,21 +594,9 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
         )
     )
 
-    # Project inviter's prekey into transit_prekeys_shared (for Bob to send sync requests to Alice)
-    # Always project for anyone who receives the invite (INSERT OR IGNORE handles duplicates)
-    if 'inviter_transit_prekey_public_key' in event_data and 'inviter_peer_shared_id' in event_data and 'inviter_transit_prekey_shared_id' in event_data and 'inviter_transit_prekey_id' in event_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(event_data['inviter_transit_prekey_public_key'])
-        inviter_peer_shared_id = event_data['inviter_peer_shared_id']
-
-        # Use inviter_transit_prekey_shared_created_at if available, otherwise fall back to invite's created_at
-        # (for backwards compatibility with old invites that don't have this field)
-        prekey_created_at = event_data.get('inviter_transit_prekey_shared_created_at', event_data['created_at'])
-
-        log.info(f"invite.project() projecting inviter's prekey for {recorded_by[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (event_data['inviter_transit_prekey_shared_id'], event_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, recorded_by)
-        )
+    # NOTE: Transit prekey projection removed from invite event (slim invite)
+    # Transit prekey fields are now in the invite link and projected by user.join() / invite.accept()
+    # This saves ~233 bytes in the synced invite event
 
     # Mark invite as valid for this peer (required for invite_accepted dependencies)
     safedb.execute(
@@ -826,6 +813,18 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     from events.identity import peer_shared as peer_shared_module
     peer_shared_module.project(inviter_peer_shared_id, peer_id, t_ms, db)
     log.info(f"invite.accept() projected inviter's peer_shared {inviter_peer_shared_id[:20]}...")
+
+    # Step 3b: Project inviter's transit prekey from invite link (slim invite moved these from event to link)
+    # This allows the joiner to contact the inviter for sync
+    if 'inviter_transit_prekey_public_key' in link_data and 'inviter_transit_prekey_shared_id' in link_data and 'inviter_transit_prekey_id' in link_data:
+        inviter_prekey_public_key_bytes = crypto.b64decode(link_data['inviter_transit_prekey_public_key'])
+        prekey_created_at = t_ms  # Use accept timestamp for prekey
+
+        log.info(f"invite.accept() projecting inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
+        safedb.execute(
+            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
+            (link_data['inviter_transit_prekey_shared_id'], link_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, peer_id)
+        )
 
     # Step 4: Create invite_accepted event (event-sources invite secrets)
     from events.identity import invite_accepted as invite_accepted_module
