@@ -8,8 +8,9 @@ Key ideas:
 -- Groups: group prekeys, group keys, sealed group keys
 -- Network: transit prekeys, transit keys, addresses, intros
 - Events get recorded by ("seen by") peers (`recorded_by` is an event too)
-- Recorded events get a `recorded_by` event generated for them referencing their event id\
+- Recorded events get a `recorded_by` event generated for them referencing their event id
 - This is subtle and important: it means the same event can be recorded by multiple peers on a device, which is a possible case if we let users have multiple accounts on a single device, and which is helpful for testing "multiplayer" in a single instance. 
+- It was helpful to limit projectors to only write to their own subjective view, so I introduced an idea of safe and unsafe db. We prefer safedb because it's impossible to write other peers accidentally. This helped keep the LLM on the rails too.   
 - recorded_by also lets us have a multi-account setup where all data is expressed in a single event store; there is no other permanent state that cannot be restored by reprocessing the event store
 - We don't even have to process it in order or with idempotence: in fact I have tests that deliberately process events out of order and multiple times to make sure the logic is right.
 - We have a network simulator gadget that pretends to be a network and pulls from the outgoing queue of one peer and sends to the incoming queue of all peers
@@ -45,5 +46,6 @@ Key ideas:
 - In our scenario tests we have a sync gadget that runs "ticks" (cycles of processing events) and detects which peers are syncing at all, and then ticks until they have parity for certain kinds of events.
 - In our CLI prototype we can tell it to tick
 - We can also fast forward time to test disappearing messages or forward secrecy
+
 
 
