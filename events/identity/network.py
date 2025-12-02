@@ -1,5 +1,16 @@
-"""Network event type - self-signed root of trust for a network."""
-from typing import Any
+"""Network event type - self-signed root of trust for a network.
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(peer_id, t_ms, db) -> tuple[str, bytes]
+    project_event(network_id, recorded_by, recorded_at, db) -> str | None
+    get_all_users_group_id(network_id, recorded_by, db) -> str
+    get_public_key(network_id, recorded_by, db) -> bytes
+    get_for_peer(peer_id, recorded_by, db) -> dict | None
+"""
+from typing import Any, TypedDict
 import logging
 import crypto
 import store
@@ -7,6 +18,97 @@ from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class NetworkEventData(TypedDict):
+    type: str
+    signed_by: str  # Always 'SELF' for networks
+    network_pubkey: str  # Base64-encoded public key
+    created_at: int
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result. No database access."""
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+
+    # Validate signed_by is 'SELF'
+    signed_by = event_data.get("signed_by")
+    if signed_by != "SELF":
+        return ProjectorResult(valid=False, reason=f"Expected signed_by='SELF', got {signed_by}")
+
+    # Check signature
+    if not input_dict.get("signature_valid"):
+        return ProjectorResult(valid=False, reason="Self-signature verification failed")
+
+    # Check required field
+    network_pubkey = event_data.get("network_pubkey")
+    if not network_pubkey:
+        return ProjectorResult(valid=False, reason="Missing network_pubkey in event")
+
+    # Build output row
+    network_row = {
+        "network_id": event_id,
+        "creator_user_id": "",  # Set later by admin.project_event()
+        "network_pubkey": network_pubkey,
+        "signed_by": signed_by,
+        "created_at": event_data["created_at"],
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+    return ProjectorResult(valid=True, tables={"networks": [network_row]})
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    network_pubkey: str = "pubkey_abc123",
+    created_at: int = 1000000,
+) -> dict:
+    """Build event_data for testing."""
+    return {
+        "type": "network",
+        "signed_by": "SELF",
+        "network_pubkey": network_pubkey,
+        "created_at": created_at,
+    }
+
+
+def make_input(
+    event_id: str = "net_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    signature_valid: bool = True,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "signature_valid": signature_valid,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     """Create a self-signed network event (root of trust).
@@ -55,26 +157,25 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 def project_event(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project self-signed network event into networks table.
 
-    Uses pure functional projector from projectors.network.
+    Uses pure functional projector.
     """
-    log.debug(f"network.project() projecting network_id={network_id[:20]}...")
+    log.debug(f"network.project_event() projecting network_id={network_id[:20]}...")
 
-    from projectors import resolve, apply_result
-    from projectors import network as network_projector
+    from projection import resolve, apply_result
 
     input_dict = resolve("network", network_id, recorded_by, recorded_at, db)
     if not input_dict:
         return None
 
-    result = network_projector.project(input_dict)
+    result = project(input_dict)
 
     if result.blocked or not result.valid:
-        log.warning(f"network.project() failed: {result.reason}")
+        log.warning(f"network.project_event() failed: {result.reason}")
         return None
 
     apply_result(result, recorded_by, recorded_at, db)
 
-    log.info(f"network.project() projected network_id={network_id[:20]}...")
+    log.info(f"network.project_event() projected network_id={network_id[:20]}...")
     return network_id
 
 

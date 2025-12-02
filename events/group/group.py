@@ -1,5 +1,15 @@
-"""Group event type (shareable, encrypted)."""
-from typing import Any
+"""Group event type (shareable, encrypted).
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(name, peer_id, peer_shared_id, t_ms, db, ...) -> tuple[str, str]
+    project_event(event_id, recorded_by, recorded_at, db) -> str | None
+    pick_key(group_id, recorded_by, db) -> dict
+    list_all_groups(recorded_by, db) -> list[dict]
+"""
+from typing import Any, TypedDict, NotRequired
 import json
 import logging
 import crypto
@@ -10,6 +20,117 @@ from db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class GroupEventData(TypedDict):
+    type: str
+    name: str
+    signed_by: str  # network_id or peer_shared_id
+    created_at: int
+    key_id: str
+    is_main: NotRequired[int]  # 1 if main group, 0 otherwise
+    network_id: NotRequired[str]  # Network this group belongs to
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result. No database access."""
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+
+    # Validate event type
+    if event_data.get("type") != "group":
+        return ProjectorResult(valid=False, reason="Invalid event type")
+
+    # Check required fields
+    name = event_data.get("name")
+    if not name:
+        return ProjectorResult(valid=False, reason="Missing group name")
+
+    signed_by = event_data.get("signed_by")
+    if not signed_by:
+        return ProjectorResult(valid=False, reason="Missing signed_by")
+
+    key_id = event_data.get("key_id")
+    if not key_id:
+        return ProjectorResult(valid=False, reason="Missing key_id")
+
+    # Signature is verified by resolver (polymorphic: network or peer_shared)
+    # If we got here, signature was valid
+
+    # Build output row
+    group_row = {
+        "group_id": event_id,
+        "name": name,
+        "signed_by": signed_by,
+        "created_at": event_data["created_at"],
+        "key_id": key_id,
+        "is_main": event_data.get("is_main", 0),
+        "network_id": event_data.get("network_id", ""),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+    }
+
+    return ProjectorResult(valid=True, tables={"groups": [group_row]})
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    name: str = "Test Group",
+    signed_by: str = "peer_shared_123",
+    created_at: int = 1000000,
+    key_id: str = "key_123",
+    is_main: int = 0,
+    network_id: str = "",
+) -> dict:
+    """Build event_data for testing."""
+    result = {
+        "type": "group",
+        "name": name,
+        "signed_by": signed_by,
+        "created_at": created_at,
+        "key_id": key_id,
+        "is_main": is_main,
+    }
+    if network_id:
+        result["network_id"] = network_id
+    return result
+
+
+def make_input(
+    event_id: str = "grp_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_456",
+    recorded_at: int = 1000001,
+    key_id: str = "key_123",
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "key_id": key_id,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            is_main: bool = False, network_id: str | None = None,
@@ -75,13 +196,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group event into groups table.
 
-    Uses pure functional projector from projectors.group.
-    Note: Uses INSERT OR REPLACE (not IGNORE) to overwrite stubs from user.project().
+    Uses pure functional projector.
+    Note: Uses INSERT OR REPLACE (not IGNORE) to overwrite stubs from user.project_event().
     """
-    log.debug(f"group.project() projecting group_id={event_id[:20]}...")
+    log.debug(f"group.project_event() projecting group_id={event_id[:20]}...")
 
-    from projectors import resolve
-    from projectors import group as group_projector
+    from projection import resolve
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -89,10 +209,10 @@ def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     if not input_dict:
         return None
 
-    result = group_projector.project(input_dict)
+    result = project(input_dict)
 
     if result.blocked or not result.valid:
-        log.warning(f"group.project() failed: {result.reason}")
+        log.warning(f"group.project_event() failed: {result.reason}")
         return None
 
     # Apply with INSERT OR REPLACE (special case - overwrites stubs)

@@ -1,5 +1,16 @@
-"""Group key event type (subjective symmetric keys for network/group content encryption)."""
-from typing import Any
+"""Group key event type (subjective symmetric keys for network/group content encryption).
+
+Pure functions:
+    project(input_dict) -> ProjectorResult
+
+API functions:
+    create(peer_id, t_ms, db) -> str
+    create_with_material(key_material, peer_id, t_ms, db) -> str
+    project_event(key_id, recorded_by, recorded_at, db) -> None
+    get_key(key_id, recorded_by, db) -> dict
+    get_or_create_clean_key(group_id, peer_id, t_ms, db) -> str
+"""
+from typing import Any, TypedDict
 import json
 import logging
 import crypto
@@ -8,6 +19,92 @@ from db import create_safe_db
 
 log = logging.getLogger(__name__)
 
+
+# ============================================================================
+# TYPES
+# ============================================================================
+
+class GroupKeyEventData(TypedDict):
+    type: str
+    key: str  # base64 symmetric key
+
+
+# ============================================================================
+# PURE FUNCTIONS
+# ============================================================================
+
+def project(input_dict: dict):
+    """Pure projection: dict -> result.
+
+    Outputs group_keys row. Use apply_result() since group_keys is subjective.
+    Note: created_at comes from recorded_at (deterministic blobs have no timestamp).
+    """
+    from projection import ProjectorResult
+
+    event_id = input_dict["event_id"]  # key_id
+    event_data = input_dict["event_data"]
+    recorded_by = input_dict["recorded_by"]
+    recorded_at = input_dict["recorded_at"]
+
+    key_b64 = event_data.get("key")
+
+    if not key_b64:
+        return ProjectorResult(valid=False, reason="missing required field: key")
+
+    # Decode key (stored as bytes in DB)
+    key = crypto.b64decode(key_b64)
+
+    # Output: group_keys row (subjective table)
+    # Note: created_at comes from recorded_at since blob has no timestamp
+    row = {
+        "key_id": event_id,
+        "key": key,
+        "created_at": recorded_at,
+        "recorded_by": recorded_by,
+    }
+
+    return ProjectorResult(
+        valid=True,
+        tables={"group_keys": [row]},
+    )
+
+
+# ============================================================================
+# TEST BUILDERS
+# ============================================================================
+
+def make_event_data(
+    key: str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",  # 32 bytes base64
+) -> dict:
+    """Build event_data for testing.
+
+    Note: group_key events are deterministic - only type and key, no timestamp.
+    """
+    return {
+        "type": "group_key",
+        "key": key,
+    }
+
+
+def make_input(
+    event_id: str = "key_123",
+    event_data: dict | None = None,
+    recorded_by: str = "peer_123",
+    recorded_at: int = 1000001,
+) -> dict:
+    """Build complete input dict for testing."""
+    return {
+        "event_id": event_id,
+        "event_data": event_data or make_event_data(),
+        "recorded_by": recorded_by,
+        "recorded_at": recorded_at,
+        "dependencies": {},
+    }
+
+
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
 def create(peer_id: str, t_ms: int, db: Any) -> str:
     """Create a group key for network content encryption, owned by peer_id."""
@@ -72,20 +169,19 @@ def project_event(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> N
     Uses apply_result since group_keys is subjective (has recorded_by).
     Note: created_at comes from recorded_at (deterministic blobs have no timestamp).
     """
-    from projectors import resolve, apply_result
-    from projectors import group_key as gk_projector
+    from projection import resolve, apply_result
 
-    log.debug(f"group_key.project() projecting key_id={key_id}, seen_by={recorded_by}")
+    log.debug(f"group_key.project_event() projecting key_id={key_id}, seen_by={recorded_by}")
 
     input_dict = resolve("group_key", key_id, recorded_by, recorded_at, db)
     if not input_dict:
-        log.warning(f"group_key.project() resolve failed for key_id={key_id}")
+        log.warning(f"group_key.project_event() resolve failed for key_id={key_id}")
         return
 
-    result = gk_projector.project(input_dict)
+    result = project(input_dict)
 
     if not result.valid:
-        log.warning(f"group_key.project() rejected: {result.reason}")
+        log.warning(f"group_key.project_event() rejected: {result.reason}")
         return
 
     # Apply to subjective table
@@ -98,7 +194,7 @@ def project_event(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> N
         (key_id, recorded_by)
     )
 
-    log.info(f"group_key.project() projected key_id={key_id} into group_keys table")
+    log.info(f"group_key.project_event() projected key_id={key_id} into group_keys table")
 
 
 def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
