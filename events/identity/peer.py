@@ -180,27 +180,7 @@ def create(t_ms: int, db: Any) -> str:
     return peer_id
 
 
-def project_event(peer_id: str, recorded_by: str, db: Any) -> None:
-    """Project peer event. Uses device-wide apply."""
-    from projection import resolve, apply_result_device_wide
-
-    input_dict = resolve("peer", peer_id, recorded_by, 0, db)
-    if not input_dict:
-        return
-
-    result = project(input_dict)
-
-    if not result.valid:
-        log.warning(f"peer.project_event() rejected: {result.reason}")
-        return
-
-    apply_result_device_wide(result, input_dict["recorded_at"], db)
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (peer_id, recorded_by)
-    )
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_private_key(peer_id: str, recorded_by: str, db: Any) -> bytes:

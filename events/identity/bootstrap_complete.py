@@ -123,19 +123,4 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     return bootstrap_complete_id
 
 
-def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project bootstrap_complete event. Uses generic resolver."""
-    from projection import resolve, apply_result
-
-    input_dict = resolve("bootstrap_complete", event_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        return None
-
-    result = project(input_dict)
-
-    if not result.valid:
-        log.warning(f"bootstrap_complete.project_event() failed: {result.reason}")
-        return None
-
-    apply_result(result, recorded_by, recorded_at, db)
-    return event_id
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)

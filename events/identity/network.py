@@ -167,29 +167,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return network_id, network_private_key
 
 
-def project_event(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project self-signed network event into networks table.
-
-    Uses pure functional projector.
-    """
-    log.debug(f"network.project_event() projecting network_id={network_id[:20]}...")
-
-    from projection import resolve, apply_result
-
-    input_dict = resolve("network", network_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        return None
-
-    result = project(input_dict)
-
-    if result.blocked or not result.valid:
-        log.warning(f"network.project_event() failed: {result.reason}")
-        return None
-
-    apply_result(result, recorded_by, recorded_at, db)
-
-    log.info(f"network.project_event() projected network_id={network_id[:20]}...")
-    return network_id
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:

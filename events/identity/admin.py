@@ -273,43 +273,7 @@ def create(
     return admin_id
 
 
-def project_event(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project admin event into admins table.
-
-    Uses generic resolver + pure projector + apply_result.
-    """
-    from projection import resolve, apply_result
-
-    input_dict = resolve("admin", admin_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        return None
-
-    result = project(input_dict)
-
-    if result.blocked:
-        log.debug(f"admin.project_event() blocked, missing: {result.missing_deps}")
-        return None
-
-    if not result.valid:
-        log.warning(f"admin.project_event() invalid: {result.reason}")
-        return None
-
-    apply_result(result, recorded_by, recorded_at, db)
-
-    # Handle commands (side effects that pure projector can't do)
-    for cmd in result.commands:
-        if cmd["type"] == "set_network_creator":
-            safedb = create_safe_db(db, recorded_by=recorded_by)
-            safedb.execute(
-                """UPDATE networks SET creator_user_id = ?
-                   WHERE network_id = ? AND recorded_by = ?
-                   AND (creator_user_id IS NULL OR creator_user_id = '')""",
-                (cmd["user_id"], cmd["network_id"], recorded_by)
-            )
-            log.info(f"admin.project_event() set creator_user_id={cmd['user_id'][:20]}...")
-
-    log.info(f"admin.project_event() projected admin_id={admin_id[:20]}...")
-    return admin_id
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def is_user_admin(user_id: str, network_id: str, recorded_by: str, db: Any) -> bool:

@@ -41,6 +41,21 @@ class TransitPrekeyEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "none",  # Local-only
+    "dependencies": [],
+    "tables": ["transit_prekeys"],
+    "device_wide": True,
+    "mark_valid": True,
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -262,37 +277,7 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     return prekey_id
 
 
-def project_event(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project transit prekey event using pure projector.
-
-    Uses apply_result_device_wide since transit_prekeys is device-wide.
-    """
-    from projectors import resolve, apply_result_device_wide
-    from projectors import transit_prekey as tp_projector
-
-    log.info(f"transit_prekey.project() prekey_id={prekey_id[:30]}..., seen_by={recorded_by[:20]}...")
-
-    input_dict = resolve("transit_prekey", prekey_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        log.warning(f"transit_prekey.project() resolve failed for prekey_id={prekey_id}")
-        return
-
-    result = tp_projector.project(input_dict)
-
-    if not result.valid:
-        log.warning(f"transit_prekey.project() rejected: {result.reason}")
-        return
-
-    # Apply to device-wide table
-    apply_result_device_wide(result, recorded_at, db)
-
-    # Mark as valid for this peer
-    log.warning(f"[VALID_EVENT] Marking transit_prekey {prekey_id[:20]}... as valid for peer {recorded_by[:20]}...")
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (prekey_id, recorded_by)
-    )
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_transit_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:

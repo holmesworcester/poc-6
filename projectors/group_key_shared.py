@@ -6,7 +6,7 @@ This projector only handles the pure computation after those checks pass.
 """
 
 from typing import TypedDict
-from projectors.project import ProjectorResult, CreateResult, BlobSpec, compute_event_id
+from projection import ProjectorResult, CreateResult, BlobSpec, compute_event_id
 import logging
 import crypto
 

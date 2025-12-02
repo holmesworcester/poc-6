@@ -34,6 +34,19 @@ class NetworkIntroEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "none",  # Local intro, no signature
+    "dependencies": [],
+    "tables": ["pending_intros"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -158,53 +171,7 @@ def create(
     return intro_id
 
 
-def project_event(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
-    """Project network_intro event using pure projector.
-
-    Args:
-        intro_id: Event ID of the intro event
-        recorded_by: Peer ID that recorded this event
-        recorded_at: Timestamp when recorded
-        db: Database connection
-
-    Returns:
-        intro_id if successful, None otherwise
-    """
-    from projectors import resolve, apply_result
-    from projectors import network_intro as ni_projector
-
-    log.debug(
-        f"intro.project() intro_id={intro_id[:20]}..., "
-        f"recorded_by={recorded_by[:20]}..."
-    )
-
-    # Resolve: parse JSON, gather dependencies (none for this type)
-    input_dict = resolve("network_intro", intro_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        log.warning(f"intro.project() resolve failed for intro_id={intro_id[:20]}...")
-        return None
-
-    # Call pure projector
-    result = ni_projector.project(input_dict)
-
-    if result.blocked:
-        log.info(f"intro.project() blocked: {result.missing_deps}")
-        return None
-
-    if not result.valid:
-        log.warning(f"intro.project() rejected: {result.reason}")
-        return None
-
-    # Apply result: insert into tables
-    apply_result(result, recorded_by, recorded_at, db)
-
-    event_data = input_dict["event_data"]
-    log.info(
-        f"intro.project() inserted: {event_data.get('initiator_peer_id', '')[:20]}... introducing "
-        f"{event_data.get('peer1_id', '')[:20]}... and {event_data.get('peer2_id', '')[:20]}..."
-    )
-
-    return intro_id
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_pending_intros(recorded_by: str, db: Any) -> List[dict[str, Any]]:

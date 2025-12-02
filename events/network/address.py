@@ -34,6 +34,19 @@ class NetworkAddressEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "none",  # Local observation, no signature
+    "dependencies": [],
+    "tables": ["network_addresses"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -164,52 +177,7 @@ def create(
     return address_id
 
 
-def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optional[str]:
-    """Project network_address event using pure projector.
-
-    Args:
-        address_id: Event ID of the address event
-        recorded_by: Peer ID that recorded this event
-        recorded_at: Timestamp when recorded
-        db: Database connection
-
-    Returns:
-        address_id if successful, None otherwise
-    """
-    from projection import resolve, apply_result
-
-    log.debug(
-        f"address.project_event() address_id={address_id[:20]}..., "
-        f"recorded_by={recorded_by[:20]}..."
-    )
-
-    # Resolve: parse JSON, gather dependencies (none for this type)
-    input_dict = resolve("network_address", address_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        log.warning(f"address.project_event() resolve failed for address_id={address_id[:20]}...")
-        return None
-
-    # Call pure projector
-    result = project(input_dict)
-
-    if result.blocked:
-        log.info(f"address.project_event() blocked: {result.missing_deps}")
-        return None
-
-    if not result.valid:
-        log.warning(f"address.project_event() rejected: {result.reason}")
-        return None
-
-    # Apply result: insert into tables
-    apply_result(result, recorded_by, recorded_at, db)
-
-    event_data = input_dict["event_data"]
-    log.info(
-        f"address.project() inserted: {event_data.get('observed_by_peer_id', '')[:20]}... → "
-        f"{event_data.get('observed_peer_id', '')[:20]}... at {event_data.get('ip')}:{event_data.get('port')}"
-    )
-
-    return address_id
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_addresses(peer_id: str, recorded_by: str, db: Any) -> list[dict[str, Any]]:

@@ -34,6 +34,20 @@ class TransitKeyEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,
+    "signer_type": "none",  # Local-only, deterministic
+    "dependencies": [],
+    "tables": ["transit_keys"],
+    "device_wide": True,
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -172,31 +186,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     return key_id
 
 
-def project_event(key_id: str, recorded_by: str, db: Any) -> None:
-    """Project transit key event using pure projector.
-
-    Uses apply_result_device_wide since transit_keys is device-wide.
-    """
-    from projection import resolve, apply_result_device_wide
-
-    log.warning(f"[TRANSIT_KEY_PROJECT] key_id={key_id[:20]}... recorded_by={recorded_by[:10]}...")
-
-    input_dict = resolve("transit_key", key_id, recorded_by, 0, db)
-    if not input_dict:
-        log.warning(f"[TRANSIT_KEY_PROJECT] result=resolve_failed key_id={key_id[:20]}...")
-        return
-
-    result = project(input_dict)
-
-    if not result.valid:
-        log.warning(f"[TRANSIT_KEY_PROJECT] rejected: {result.reason}")
-        return
-
-    # Apply to device-wide table
-    log.warning(f"[TRANSIT_KEY_PROJECT] result=inserting key_id={key_id[:20]}... into_transit_keys_table")
-    apply_result_device_wide(result, input_dict["recorded_at"], db)
-
-    log.info(f"transit_key.project_event() projected key_id={key_id} into transit_keys table")
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def extract_id(blob: bytes) -> bytes:

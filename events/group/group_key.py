@@ -170,28 +170,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     return key_id
 
 
-def project_event(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project group key event. Uses generic resolver."""
-    from projection import resolve, apply_result
-
-    input_dict = resolve("group_key", key_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        return
-
-    result = project(input_dict)
-
-    if not result.valid:
-        log.warning(f"group_key.project_event() rejected: {result.reason}")
-        return
-
-    apply_result(result, recorded_by, recorded_at, db)
-
-    # Mark as valid for this peer
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (key_id, recorded_by)
-    )
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:

@@ -107,14 +107,15 @@ def _load_projectors():
     # Consolidated modules (in events/)
     from events.content import message
     from events.identity import admin, bootstrap_complete, network_created, network_joined, address, peer, network
-    from events.group import group_key
+    from events.group import group_key, group
+    from events.network import transit_key, transit_prekey
+    from events.network import address as network_address
+    from events.network import intro as network_intro
     # Still in projectors/ (to be consolidated)
-    from projectors import channel, group_member, user, group, peer_shared, invite, invite_accepted
+    from projectors import channel, group_member, user, peer_shared, invite, invite_accepted
     from projectors import transit_prekey_shared, group_prekey_shared
-    from projectors import group_key_shared, message_deletion, network_address, network_intro, file_slice, message_attachment
-    from projectors import transit_key as transit_key_projector
+    from projectors import group_key_shared, message_deletion, file_slice, message_attachment
     from projectors import group_prekey as group_prekey_projector
-    from projectors import transit_prekey as transit_prekey_projector
     from projectors import sync as sync_projector
 
     _PROJECTORS["message"] = message
@@ -123,10 +124,10 @@ def _load_projectors():
     _PROJECTORS["file_slice"] = file_slice
     _PROJECTORS["message_attachment"] = message_attachment
     _PROJECTORS["peer"] = peer
-    _PROJECTORS["transit_key"] = transit_key_projector
+    _PROJECTORS["transit_key"] = transit_key
     _PROJECTORS["group_key"] = group_key
     _PROJECTORS["group_prekey"] = group_prekey_projector
-    _PROJECTORS["transit_prekey"] = transit_prekey_projector
+    _PROJECTORS["transit_prekey"] = transit_prekey
     _PROJECTORS["network_created"] = network_created
     _PROJECTORS["message_deletion"] = message_deletion
     _PROJECTORS["channel"] = channel
@@ -271,25 +272,6 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
         from events.content import message_deletion
         return message_deletion.project_event(ref_id, recorded_by, recorded_at, db)
 
-    elif event_type == 'group':
-        from events.group import group
-        return group.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'peer':
-        from events.identity import peer
-        peer.project_event(ref_id, recorded_by, db)
-        return ref_id
-
-    elif event_type == 'transit_key':
-        from events.network import transit_key
-        transit_key.project_event(ref_id, recorded_by, db)
-        return ref_id
-
-    elif event_type == 'group_key':
-        from events.group import group_key
-        group_key.project_event(ref_id, recorded_by, recorded_at, db)
-        return ref_id
-
     elif event_type == 'peer_shared':
         from events.identity import peer_shared
         return peer_shared.project_event(ref_id, recorded_by, recorded_at, db)
@@ -317,11 +299,6 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
         from events.identity import user
         return user.project_event(ref_id, recorded_by, recorded_at, db)
 
-    elif event_type == 'transit_prekey':
-        from events.network import transit_prekey
-        transit_prekey.project_event(ref_id, recorded_by, recorded_at, db)
-        return ref_id
-
     elif event_type == 'transit_prekey_shared':
         from events.network import transit_prekey_shared
         return transit_prekey_shared.project_event(ref_id, recorded_by, recorded_at, db)
@@ -347,30 +324,6 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
         from events.group import group_member
         return group_member.project_event(ref_id, recorded_by, recorded_at, db)
 
-    elif event_type == 'network':
-        from events.identity import network
-        return network.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'admin':
-        from events.identity import admin
-        return admin.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'network_created':
-        from events.identity import network_created
-        return network_created.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'network_joined':
-        from events.identity import network_joined
-        return network_joined.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'bootstrap_complete':
-        from events.identity import bootstrap_complete
-        return bootstrap_complete.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'address':
-        from events.identity import address
-        return address.project_event(ref_id, recorded_by, recorded_at, db)
-
     elif event_type == 'file_slice':
         from events.content import file_slice
         file_slice.project_event(ref_id, event_data, recorded_by, recorded_at, db)
@@ -380,14 +333,6 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
         from events.content import message_attachment
         message_attachment.project_event(ref_id, event_data, recorded_by, recorded_at, db)
         return ref_id
-
-    elif event_type == 'network_address':
-        from events.network import address as network_address
-        return network_address.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'network_intro':
-        from events.network import intro as network_intro
-        return network_intro.project_event(ref_id, recorded_by, recorded_at, db)
 
     # Unknown event type
     log.warning(f"dispatch(): unknown event type: {event_type}")

@@ -46,6 +46,7 @@ SPEC = {
     "signer_type": "peer_shared",
     "dependencies": [],
     "tables": ["addresses"],
+    "generic_dispatch": True,
 }
 
 
@@ -175,29 +176,4 @@ def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db:
     return address_id
 
 
-def project_event(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project address event. Uses INSERT OR REPLACE for updates."""
-    from projection import resolve
-
-    input_dict = resolve("address", address_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        return None
-
-    result = project(input_dict)
-
-    if not result.valid:
-        log.warning(f"address.project_event() failed: {result.reason}")
-        return None
-
-    # Use INSERT OR REPLACE (addresses may update existing)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    for row in result.tables.get("addresses", []):
-        safedb.execute(
-            """INSERT OR REPLACE INTO addresses
-               (address_id, peer_shared_id, ip, port, created_at, recorded_by, recorded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (row["address_id"], row["peer_shared_id"], row["ip"], row["port"],
-             row["created_at"], row["recorded_by"], row["recorded_at"])
-        )
-
-    return address_id
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
