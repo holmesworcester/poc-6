@@ -107,15 +107,13 @@ def _load_projectors():
     # Consolidated modules (in events/)
     from events.content import message
     from events.identity import admin, bootstrap_complete, network_created, network_joined, address, peer, network
-    from events.group import group_key, group
-    from events.network import transit_key, transit_prekey
+    from events.group import group_key, group, group_prekey_shared, group_prekey
+    from events.network import transit_key, transit_prekey, transit_prekey_shared
     from events.network import address as network_address
     from events.network import intro as network_intro
     # Still in projectors/ (to be consolidated)
     from projectors import channel, group_member, user, peer_shared, invite, invite_accepted
-    from projectors import transit_prekey_shared, group_prekey_shared
     from projectors import group_key_shared, message_deletion, file_slice, message_attachment
-    from projectors import group_prekey as group_prekey_projector
     from projectors import sync as sync_projector
 
     _PROJECTORS["message"] = message
@@ -126,7 +124,7 @@ def _load_projectors():
     _PROJECTORS["peer"] = peer
     _PROJECTORS["transit_key"] = transit_key
     _PROJECTORS["group_key"] = group_key
-    _PROJECTORS["group_prekey"] = group_prekey_projector
+    _PROJECTORS["group_prekey"] = group_prekey
     _PROJECTORS["transit_prekey"] = transit_prekey
     _PROJECTORS["network_created"] = network_created
     _PROJECTORS["message_deletion"] = message_deletion
@@ -298,19 +296,6 @@ def dispatch(event_type: str, ref_id: str, recorded_by: str, recorded_at: int,
     elif event_type == 'user':
         from events.identity import user
         return user.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'transit_prekey_shared':
-        from events.network import transit_prekey_shared
-        return transit_prekey_shared.project_event(ref_id, recorded_by, recorded_at, db)
-
-    elif event_type == 'group_prekey':
-        from events.group import group_prekey
-        group_prekey.project_event(ref_id, recorded_by, recorded_at, db)
-        return ref_id
-
-    elif event_type == 'group_prekey_shared':
-        from events.group import group_prekey_shared
-        return group_prekey_shared.project_event(ref_id, recorded_by, recorded_at, db)
 
     elif event_type == 'group_key_shared':
         from events.group import group_key_shared

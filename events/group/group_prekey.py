@@ -39,6 +39,20 @@ class GroupPrekeyEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,  # Plain JSON (local-only)
+    "signer_type": "none",  # Not signed (local-only, contains private key)
+    "dependencies": [],
+    "tables": ["group_prekeys"],  # Subjective table (has recorded_by)
+    "generic_dispatch": True,
+    "mark_valid": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -195,36 +209,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return prekey_id, prekey_private
 
 
-def project_event(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Project group prekey event using pure projector.
-
-    Uses apply_result since group_prekeys is subjective (has recorded_by).
-    """
-    from projectors import resolve, apply_result
-    from projectors import group_prekey as gpk_projector
-
-    log.info(f"group_prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
-
-    input_dict = resolve("group_prekey", prekey_id, recorded_by, recorded_at, db)
-    if not input_dict:
-        log.warning(f"group_prekey.project() resolve failed for prekey_id={prekey_id}")
-        return
-
-    result = gpk_projector.project(input_dict)
-
-    if not result.valid:
-        log.warning(f"group_prekey.project() rejected: {result.reason}")
-        return
-
-    # Apply to subjective table
-    apply_result(result, recorded_by, recorded_at, db)
-
-    # Mark as valid for this peer
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (prekey_id, recorded_by)
-    )
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
 
 
 def get_group_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
@@ -329,8 +314,9 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
                 prekey_ids = generate_batch(peer_id, REPLENISH_GROUP_PREKEYS, t_ms, db)
 
                 # Project each prekey
+                from projection import dispatch
                 for i, prekey_id in enumerate(prekey_ids):
-                    project_event(prekey_id, peer_id, t_ms + i, db)
+                    dispatch('group_prekey', prekey_id, peer_id, t_ms + i, db)
 
                 stats['peers_replenished'] += 1
                 stats['total_prekeys_generated'] += len(prekey_ids)
