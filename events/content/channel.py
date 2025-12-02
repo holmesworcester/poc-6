@@ -373,8 +373,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             event_data['group_id'],
             event_data['signed_by'],
             event_data['created_at'],
-            event_data.get('disappearing_time_ms', 0),  # Default to 0 if not present (backward compatibility)
-            event_data.get('is_main', 0),  # Default to 0 if not present (backward compatibility)
+            event_data.get('disappearing_time_ms', 0),  # Default to 0 (permanent)
+            event_data.get('is_main', 0),  # Default to 0 (not main channel)
             recorded_by,
             recorded_at
         )

@@ -229,8 +229,8 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
 def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial') -> list[str | None]:
     """Project recorded event with two-phase dependency checking.
 
-    Phase 1: Check encryption keys (block if missing).
-    Phase 2: Check event dependencies (block if missing).
+    1. Check encryption keys (block if missing).
+    2. Check event dependencies (block if missing).
     Dispatches to type-specific projector if all deps satisfied.
 
     Args:
@@ -284,7 +284,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if not event_blob:
         return [None, recorded_id]
 
-    # Phase 1: Try to unwrap (for encrypted events)
+    # Try to unwrap (for encrypted events)
     plaintext, missing_key_ids = crypto.unwrap_event(event_blob, recorded_by, db)
 
     # DEBUG: Log unwrap results for all events to understand what's happening
@@ -375,17 +375,17 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if not event_data:
         return [None, recorded_id]
 
-    # Phase 2: Check semantic dependencies
+    # Check semantic dependencies
     # Special case: Self-created user events with invite proof - creator doesn't have invite as valid event
     # (invite comes from out-of-band link, not network sync)
     event_type = event_data.get('type')
     skip_dep_check = False
 
-    # Phase 2: User events now have signed_by=invite_id and user_pubkey (not invite_pubkey)
+    # User events have signed_by=invite_id and user_pubkey (not invite_pubkey)
     if event_type == 'user' and 'signed_by' in event_data:
         # Self-created user with invite proof: creator doesn't have invite in valid_events
         # (invite comes from out-of-band link, not network sync)
-        # Note: signed_by is invite_id for Phase 2 user events, check peer_id from event
+        # Note: signed_by is invite_id for user events, check peer_id from event
         # User events have peer_id field which is the peer_shared_id
         user_peer_shared_id = event_data.get('peer_id')
         # Check if this user's peer_id is THIS peer's peer_shared_id

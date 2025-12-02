@@ -326,7 +326,6 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
     logger.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
     event_id = crypto.b64encode(crypto.hash(unwrapped_blob))
 
-    # Phase 3: Bootstrap special case removed
     # Peers now sync normally via established connections (sync_connect)
     # No need for bootstrap_complete tracking
 

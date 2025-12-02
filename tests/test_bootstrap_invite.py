@@ -1,5 +1,5 @@
 """
-Test Phase 4: Bootstrap user invite signed by network_id.
+Test bootstrap user invite signed by network_id.
 
 Tests that create_bootstrap_user_invite() works correctly:
 1. Creates an invite(mode=user) signed by network_id
@@ -26,7 +26,7 @@ def test_bootstrap_user_invite_signed_by_network():
     db = Database(conn)
     schema.create_all(db)
 
-    # Create network using the proper Phase 3 flow
+    # Create network using the proper bootstrap flow
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     network_id = alice['network_id']
@@ -38,7 +38,7 @@ def test_bootstrap_user_invite_signed_by_network():
     assert 'network_pubkey' in network_event, "Network event should have network_pubkey"
     print(f"Network has network_pubkey: {network_event['network_pubkey'][:20]}...")
 
-    # Verify network is self-signed (Phase 3: network is root of trust)
+    # Verify network is self-signed (network is root of trust)
     assert network_event.get('signed_by') == 'SELF', f"Network should be self-signed, got {network_event.get('signed_by')}"
     print("✓ Network is self-signed (signed_by='SELF')")
 
@@ -85,7 +85,7 @@ def test_network_get_public_key():
     db = Database(conn)
     schema.create_all(db)
 
-    # Create network using the proper Phase 3 flow
+    # Create network using the proper bootstrap flow
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     network_id = alice['network_id']

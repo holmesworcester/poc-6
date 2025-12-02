@@ -70,8 +70,8 @@ def create(peer_id: str, t_ms: int, db: Any,
 def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project peer_shared event into peers_shared table (including user_id if invite-based).
 
-    Phase 3: Two verification modes:
-    1. Legacy (no invite_id): Self-signed, verify with public_key from event
+    Two verification modes:
+    1. Self-signed (no invite_id): Verify with public_key from event
     2. Invite-based (signed_by=invite_id): Verify with invite_pubkey, link to user
     """
     log.warning(f"[PEER_SHARED_PROJECT] peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
@@ -94,13 +94,13 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         log.warning(f"peer_shared.project() missing public_key in event data")
         return None
 
-    # Phase 3: Determine verification mode
+    # Determine verification mode
     invite_id = event_data.get('invite_id')
     signed_by = event_data.get('signed_by')
     user_id = None  # Will be set if invite-based linking
 
     if invite_id and signed_by == invite_id:
-        # Invite-based verification (Phase 3 uniform peer linking)
+        # Invite-based verification (uniform peer linking)
         # Get invite_pubkey from invites table or store blob
         invite_pubkey_bytes = None
 
@@ -133,12 +133,12 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
         log.info(f"peer_shared.project() verified with invite_pubkey, user_id={user_id[:20] if user_id else 'None'}...")
     else:
-        # Legacy self-signed verification
+        # Self-signed verification (bootstrap case)
         public_key = crypto.b64decode(public_key_b64)
         if not crypto.verify_event(event_data, public_key):
             log.warning(f"peer_shared.project() signature verification failed for peer_shared_id={peer_shared_id}")
             return None
-        log.info(f"peer_shared.project() verified self-signed (legacy mode)")
+        log.info(f"peer_shared.project() verified self-signed")
 
     # Extract device_name from event data
     device_name = event_data.get('device_name', 'Device')

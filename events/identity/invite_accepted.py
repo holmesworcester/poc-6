@@ -133,9 +133,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     # Store inviter metadata in invite_accepteds table BEFORE bootstrap check
     # This table entry signals that bootstrap has been initiated
     # Get inviter's peer_shared_id from invite event
-    # For new invites: use inviter_peer_shared_id field
-    # For legacy: fall back to created_by, then signed_by
-    inviter_peer_shared_id = invite_event.get('inviter_peer_shared_id') or invite_event.get('signed_by') or invite_event.get('created_by')
+    inviter_peer_shared_id = invite_event.get('inviter_peer_shared_id') or invite_event.get('signed_by')
     inviter_transit_prekey_id = invite_event.get('inviter_transit_prekey_id')
     inviter_transit_prekey_public_key = None
 

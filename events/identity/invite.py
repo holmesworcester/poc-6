@@ -261,8 +261,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
     # Get prekey_shared_id from transit_prekeys_shared table
-    # Phase 3: Query by recorded_by only (not peer_id) since peer_id may be old peer_shared
-    # after Phase 3 isomorphic linking creates new peer_shared_id
+    # Query by recorded_by only since peer_id may be old peer_shared_id after linking
     inviter_prekey_shared_row = safedb.query_one(
         "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
@@ -452,10 +451,9 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
             skip_admin_check: bool = False) -> str | None:
     """Project invite event into invites table.
 
-    Phase 4: Supports polymorphic signed_by:
+    Supports polymorphic signed_by:
     - signed_by=network_id (bootstrap): verify with network pubkey
     - signed_by=peer_shared_id (ongoing): verify with peer_shared pubkey
-    - Legacy (no signed_by): verify with created_by peer_shared pubkey
 
     Args:
         skip_admin_check: If True, skip admin validation. Used for invites
@@ -473,138 +471,106 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
     # Parse JSON (plaintext, no unwrap needed)
     event_data = crypto.parse_json(blob)
 
-    # Phase 4: Determine verification mode based on signed_by
+    # Determine verification mode based on signed_by
     signed_by = event_data.get('signed_by')
+    if not signed_by:
+        log.warning(f"invite.project() missing signed_by field - invalid invite")
+        return None
     mode = event_data.get('mode', 'user')
     # Extract signer early for INSERT
-    # For Phase 4 bootstrap invites with signed_by=network_id, use inviter_peer_shared_id or first_peer
+    # For bootstrap invites with signed_by=network_id, use inviter_peer_shared_id
     # For ongoing invites, signed_by IS the inviter's peer_shared_id
-    inviter_id = event_data.get('inviter_peer_shared_id') or event_data.get('signed_by') or event_data.get('first_peer', '')
+    inviter_id = event_data.get('inviter_peer_shared_id') or event_data.get('signed_by')
 
-    log.info(f"invite.project() validating invite mode={mode} signed_by={signed_by[:20] if signed_by else 'None'}...")
+    log.info(f"invite.project() validating invite mode={mode} signed_by={signed_by[:20]}...")
 
-    if signed_by:
-        # New Phase 4 flow: polymorphic signed_by
-        network_id = event_data.get('network_id')
+    # Polymorphic signed_by verification
+    network_id = event_data.get('network_id')
 
-        if signed_by == network_id:
-            # Bootstrap invite: signed by network key
-            # Get network pubkey from networks table or store blob
-            network_pubkey = None
+    if signed_by == network_id:
+        # Bootstrap invite: signed by network key
+        # Get network pubkey from networks table or store blob
+        network_pubkey = None
 
-            network_row = safedb.query_one(
-                "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
-                (network_id, recorded_by)
-            )
-            if network_row and network_row.get('network_pubkey'):
-                network_pubkey = crypto.b64decode(network_row['network_pubkey'])
-            else:
-                # Try store blob (bootstrap case)
-                network_blob = store.get(network_id, unsafedb)
-                if network_blob:
-                    network_data = crypto.parse_json(network_blob)
-                    network_pubkey_b64 = network_data.get('network_pubkey')
-                    if network_pubkey_b64:
-                        network_pubkey = crypto.b64decode(network_pubkey_b64)
-                        log.info(f"invite.project() got network_pubkey from store blob")
-
-            if not network_pubkey:
-                log.warning(f"invite.project() network_id={network_id[:20]}... not available yet")
-                return None
-
-            if not crypto.verify_event(event_data, network_pubkey):
-                log.warning(f"invite.project() signature verification FAILED using network_pubkey")
-                return None
-
-            log.info(f"invite.project() verified bootstrap invite with network_pubkey")
-
+        network_row = safedb.query_one(
+            "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
+            (network_id, recorded_by)
+        )
+        if network_row and network_row.get('network_pubkey'):
+            network_pubkey = crypto.b64decode(network_row['network_pubkey'])
         else:
-            # Ongoing invite: signed by peer_shared or user
-            # Try peer_shared first, then user
-            signer_pubkey = None
+            # Try store blob (bootstrap case)
+            network_blob = store.get(network_id, unsafedb)
+            if network_blob:
+                network_data = crypto.parse_json(network_blob)
+                network_pubkey_b64 = network_data.get('network_pubkey')
+                if network_pubkey_b64:
+                    network_pubkey = crypto.b64decode(network_pubkey_b64)
+                    log.info(f"invite.project() got network_pubkey from store blob")
 
-            # Try peer_shared
-            from events.identity import peer_shared
-            try:
-                signer_pubkey = peer_shared.get_public_key(signed_by, recorded_by, db)
-                log.info(f"invite.project() using peer_shared pubkey for signer {signed_by[:20]}...")
-            except ValueError:
-                pass
+        if not network_pubkey:
+            log.warning(f"invite.project() network_id={network_id[:20]}... not available yet")
+            return None
 
-            # Try user (for mode=peer signed_by=user_id)
-            if not signer_pubkey:
-                user_row = safedb.query_one(
-                    "SELECT user_pubkey FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-                    (signed_by, recorded_by)
-                )
-                if user_row and user_row.get('user_pubkey'):
-                    signer_pubkey = crypto.b64decode(user_row['user_pubkey'])
-                    log.info(f"invite.project() using user_pubkey for signer {signed_by[:20]}...")
+        if not crypto.verify_event(event_data, network_pubkey):
+            log.warning(f"invite.project() signature verification FAILED using network_pubkey")
+            return None
 
-            if not signer_pubkey:
-                log.warning(f"invite.project() signer {signed_by[:20]}... not available yet")
-                return None
-
-            if not crypto.verify_event(event_data, signer_pubkey):
-                log.warning(f"invite.project() signature verification FAILED for signed_by={signed_by[:20]}...")
-                return None
-
-            log.info(f"invite.project() verified ongoing invite with signer pubkey")
-
-            # Per spec: Validate admin_grant chain for ongoing invite(mode=user)
-            # The signer must be an admin, authorized by admin_grant
-            admin_grant = event_data.get('admin_grant')
-            if admin_grant:
-                # Verify admin_grant references an admin event for the signer's user
-                # Get signer's user_id from peers_shared (user→peer relationship stored there)
-                signer_user_row = safedb.query_one(
-                    "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
-                    (signed_by, recorded_by)
-                )
-                if signer_user_row:
-                    signer_user_id = signer_user_row['user_id']
-                    grant_row = safedb.query_one(
-                        "SELECT user_id FROM admins WHERE admin_id = ? AND recorded_by = ?",
-                        (admin_grant, recorded_by)
-                    )
-                    if grant_row and grant_row['user_id'] == signer_user_id:
-                        log.info(f"invite.project() admin_grant chain verified for signer {signed_by[:20]}...")
-                    else:
-                        log.warning(f"invite.project() admin_grant {admin_grant[:20]}... does not authorize signer {signed_by[:20]}...")
-                        # Note: Don't reject yet for backward compatibility - just warn
-                        # TODO: Make this rejection mandatory once migration is complete
-            else:
-                # Legacy invite without admin_grant - allow for backward compatibility
-                log.info(f"invite.project() no admin_grant in ongoing invite (legacy)")
+        log.info(f"invite.project() verified bootstrap invite with network_pubkey")
 
     else:
-        # Legacy flow: no signed_by, use inviter_id as signer
-        # Phase 9: This path handles legacy events that used created_by instead of signed_by
-        legacy_signer = event_data.get('created_by') or inviter_id
-        if not legacy_signer:
-            log.warning(f"invite.project() missing both signed_by and created_by")
-            return None
+        # Ongoing invite: signed by peer_shared or user
+        # Try peer_shared first, then user
+        signer_pubkey = None
 
+        # Try peer_shared
         from events.identity import peer_shared
         try:
-            creator_public_key = peer_shared.get_public_key(legacy_signer, recorded_by, db)
+            signer_pubkey = peer_shared.get_public_key(signed_by, recorded_by, db)
+            log.info(f"invite.project() using peer_shared pubkey for signer {signed_by[:20]}...")
         except ValueError:
-            log.warning(f"invite.project() signer not found: {legacy_signer[:20]}...")
+            pass
+
+        # Try user (for mode=peer signed_by=user_id)
+        if not signer_pubkey:
+            user_row = safedb.query_one(
+                "SELECT user_pubkey FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+                (signed_by, recorded_by)
+            )
+            if user_row and user_row.get('user_pubkey'):
+                signer_pubkey = crypto.b64decode(user_row['user_pubkey'])
+                log.info(f"invite.project() using user_pubkey for signer {signed_by[:20]}...")
+
+        if not signer_pubkey:
+            log.warning(f"invite.project() signer {signed_by[:20]}... not available yet")
             return None
 
-        if not crypto.verify_event(event_data, creator_public_key):
-            log.warning(f"invite.project() signature verification FAILED for invite {invite_id[:20]}...")
+        if not crypto.verify_event(event_data, signer_pubkey):
+            log.warning(f"invite.project() signature verification FAILED for signed_by={signed_by[:20]}...")
             return None
 
-        log.info(f"invite.project() verified legacy invite with signer pubkey")
+        log.info(f"invite.project() verified ongoing invite with signer pubkey")
 
-        # Admin validation using admin events table (not legacy group_members)
-        # created_by is the inviter's peer_shared_id
-        # Skip admin check for out-of-band invites (invite links) where the joiner trusts the invite
-        created_by = event_data.get('created_by') or inviter_id
-        if not skip_admin_check and not is_admin(created_by, recorded_by, db):
-            log.warning(f"invite.project() authorization FAILED: inviter {created_by[:20]}... is not an admin")
-            return None
+        # Validate admin_grant chain for ongoing invite(mode=user)
+        # The signer must be an admin, authorized by admin_grant
+        admin_grant = event_data.get('admin_grant')
+        if admin_grant:
+            # Verify admin_grant references an admin event for the signer's user
+            # Get signer's user_id from peers_shared (user→peer relationship stored there)
+            signer_user_row = safedb.query_one(
+                "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+                (signed_by, recorded_by)
+            )
+            if signer_user_row:
+                signer_user_id = signer_user_row['user_id']
+                grant_row = safedb.query_one(
+                    "SELECT user_id FROM admins WHERE admin_id = ? AND recorded_by = ?",
+                    (admin_grant, recorded_by)
+                )
+                if grant_row and grant_row['user_id'] == signer_user_id:
+                    log.info(f"invite.project() admin_grant chain verified for signer {signed_by[:20]}...")
+                else:
+                    log.warning(f"invite.project() admin_grant {admin_grant[:20]}... does not authorize signer {signed_by[:20]}...")
 
     log.info(f"invite.project() validation passed")
 
@@ -664,7 +630,7 @@ def create_peer_invite(
 ) -> tuple[str, bytes, bytes]:
     """Create an invite(mode=peer) for linking a peer to a user.
 
-    Phase 3: Uniform peer linking - first peer and later peers use same flow.
+    Uniform peer linking - first peer and later peers use same flow.
 
     For first peer: signer_id=user_id, signer_private_key=user_private_key
     For later peers: signer_id=peer_shared_id, signer_private_key=peer_private_key

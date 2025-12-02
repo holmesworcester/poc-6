@@ -225,10 +225,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     if disappearing_time_ms > 0:
         ttl_ms = created_at + disappearing_time_ms
     else:
-        # Permanent message (disappearing_time_ms = 0)
-        # For backward compatibility with old events that don't have this field,
-        # use default TTL only if field is missing entirely
-        ttl_ms = 0 if 'disappearing_time_ms' in event_data else (created_at + DEFAULT_MESSAGE_TTL_MS)
+        # Permanent message (disappearing_time_ms = 0 or not set)
+        ttl_ms = 0
 
     # Extract key_id from blob for efficient purge lookups
     # Key ID is the first 16 bytes of the blob (the hint)
