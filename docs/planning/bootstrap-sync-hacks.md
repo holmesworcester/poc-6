@@ -119,30 +119,30 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 
 ---
 
-## 9. Implicit Dependencies (return None without blocking)
+## 9. Implicit Dependencies (return None without blocking) - PARTIALLY FIXED
 
 **Pattern**: `project()` functions querying tables and returning `None` if data missing, but not declaring those as dependencies in `check_deps()`.
 
-| Location | Missing Blocking On |
-|----------|---------------------|
-| `user.py:139-160` | `invite_id` - queries `invites` table |
-| `admin.py:153-171` | `peer_shared`, `admin_grant` - queries multiple tables |
-| `group_member.py:225-244` | `group_id`, `user_id` - queries `groups`, `users` tables |
-| `peer_shared.py:121-131` | `invite_id` - queries store |
+| Location | Missing Blocking On | Status |
+|----------|---------------------|--------|
+| `user.py:139-160` | `invite_id` - queries `invites` table | Crypto verification (keep) |
+| `admin.py:153-171` | `peer_shared`, `admin_grant` - queries multiple tables | Authorization check (keep) |
+| ~~`group_member.py:225-244`~~ | ~~`group_id`, `user_id`~~ | ✅ FIXED: Removed redundant checks, check_deps() handles |
+| `peer_shared.py:121-131` | `invite_id` - queries store | Crypto verification (keep) |
 
-**Problem**: Events fail silently instead of blocking properly; won't be retried.
+**Note**: Some checks are for cryptographic verification or authorization, not just existence. These should remain. The group_member.py checks were pure existence checks that check_deps() handles.
 
 ---
 
-## 10. Self-Connection in Bootstrap
+## 10. Self-Connection in Bootstrap - UPDATED
 
 **Pattern**: Network creator invites themselves, creating self-referential state.
 
-| Location | Code |
-|----------|------|
-| `user.py:329` | `'inviter_peer_shared_id': 'PENDING'` - "Will connect to self after peer_shared created" |
+| Location | Code | Status |
+|----------|------|--------|
+| ~~`user.py:329`~~ | ~~`'inviter_peer_shared_id': 'PENDING'`~~ | ✅ Now uses `None` |
 
-**Problem**: Conceptually weird - you're inviting yourself.
+**Note**: The PENDING string is gone, but the conceptual pattern remains (network creator self-invites). This is actually the correct design - the bootstrap invite is signed by the network, not a peer.
 
 ---
 
