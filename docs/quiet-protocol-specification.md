@@ -604,18 +604,180 @@ Upon successful handshake, store:
 
 ```
 connections (
-    peer_shared_id,         -- remote peer's public identity
-    our_transit_key_id,     -- key ID we sent (for matching acks, routing via owner_peer_id)
+    our_transit_key_id,     -- key we gave them (for routing lookups)
+    recorded_by,            -- local peer who owns this connection (from transit_keys.owner_peer_id)
+
+    -- Identity labels (at least one required)
+    peer_shared_id,         -- remote peer's public identity (NULL until synced)
+    invite_id,              -- invite used for this connection (for bootstrap)
+
+    -- Their key (we send to them)
     their_transit_key_id,   -- key ID they provided (for nonce derivation)
     their_transit_key,      -- symmetric key to send TO them
+
+    -- Network
     origin_ip, origin_port,
-    last_seen_ms, ttl_ms
+
+    -- Lifecycle
+    last_seen_ms, ttl_ms,
+
+    PRIMARY KEY (our_transit_key_id, recorded_by),
+    CHECK (peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
 )
 ```
 
-The `our_transit_key_id` serves dual purposes:
-1. **Ack matching**: When receiving `sync_connect_ack`, match `for_transit_key_id` to find the connection
-2. **Multi-account routing**: Look up `transit_keys.owner_peer_id` to determine which local peer owns this connection
+The `connections` table is **peer-scoped** (subjective), enabling SafeDB access:
+
+```python
+# Sync gets only this peer's connections
+safedb = create_safe_db(db, recorded_by=peer_id)
+my_connections = safedb.query(
+    "SELECT * FROM connections WHERE recorded_by = ? AND last_seen_ms + ttl_ms > ?",
+    (peer_id, t_ms)
+)
+
+# Look up connection by remote peer identity (when we have it)
+conn = safedb.query_one(
+    "SELECT * FROM connections WHERE peer_shared_id = ? AND recorded_by = ?",
+    (remote_peer_id, peer_id)
+)
+
+# During bootstrap, look up by invite_id instead
+conn = safedb.query_one(
+    "SELECT * FROM connections WHERE invite_id = ? AND recorded_by = ?",
+    (invite_id, peer_id)
+)
+```
+
+Indexes support both lookup patterns:
+```sql
+CREATE INDEX idx_connections_peer ON connections(peer_shared_id, recorded_by)
+    WHERE peer_shared_id IS NOT NULL;  -- partial index, only when we have it
+CREATE INDEX idx_connections_invite ON connections(invite_id, recorded_by)
+    WHERE invite_id IS NOT NULL;
+```
+
+The `our_transit_key_id` enables:
+1. **Routing**: Look up connection by hint (via device-wide `connection_inbox`)
+2. **Ack matching**: When receiving `sync_connect_ack`, match `for_transit_key_id` to find the connection
+
+The `recorded_by` is denormalized from `transit_keys.owner_peer_id` — the local peer who created the transit key and thus owns this connection.
+
+## Connection Identity and Bootstrap
+
+Connections are keyed by `our_transit_key_id` — the transit key we gave the remote peer. This key appears as the hint in the first 16 bytes of incoming blobs, enabling routing before decryption.
+
+### Identity Labels
+
+Each connection has one or both identity labels:
+
+- **`peer_shared_id`**: The remote peer's public identity. Set after their `peer_shared` event syncs and validates.
+- **`invite_id`**: The invite used to establish this connection. Set when `sync_connect` includes an `invite_id` field (indicating the sender is a new joiner).
+
+During bootstrap, before `peer_shared` has synced:
+1. Joiner sends `sync_connect` with `signed_by: invite_id` and includes `invite_id` field
+2. Inviter validates the invite signature and stores `invite_id` as the connection label
+3. Connection is usable for sync immediately
+4. When joiner's `peer_shared` arrives and validates, connection upgrades to include `peer_shared_id`
+
+This allows bidirectional sync to begin before the DAG knowledge catches up.
+
+### Label Upgrade
+
+When a `peer_shared` event projects that corresponds to an existing connection (matching by invite lineage or direct observation), update the connection:
+
+```
+UPDATE connections
+SET peer_shared_id = :peer_shared_id
+WHERE invite_id = :invite_id AND peer_shared_id IS NULL
+```
+
+The `invite_id` is retained for audit and debugging purposes.
+
+## Connection Inbox and Routing
+
+The `connection_inbox` table is **device-wide** (not peer-scoped) to enable routing by transit key hint before we know which peer owns the connection.
+
+### Inbox Table
+
+```
+connection_inbox (
+    id PRIMARY KEY,
+    our_transit_key_id,     -- routes to connection (hint from blob)
+    blob,                   -- raw transit-wrapped blob
+    received_at
+)
+-- Device-wide: no recorded_by, no foreign key to subjective connections table
+```
+
+### Connection Interface
+
+The connection layer provides three methods:
+
+```python
+# Send to a specific connection
+connection.send(connection_id, blob)
+
+# Receive for a specific peer (SafeDB-scoped)
+connection.receive(peer_id)  # peer_id provides the scoping
+
+# Process the device-wide inbox, routing to receive()
+connection.process_inbox()
+```
+
+### process_inbox()
+
+Routes blobs from the device-wide inbox to peer-scoped `receive()`:
+
+```python
+def process_inbox(t_ms: int, db: Database) -> None:
+    """Drain inbox, route by transit_key_id to receive(peer_id)."""
+    unsafedb = create_unsafe_db(db)
+
+    entries = unsafedb.query(
+        "SELECT id, our_transit_key_id, blob FROM connection_inbox ORDER BY received_at"
+    )
+
+    for entry in entries:
+        # Look up transit key to find owner peer
+        key_row = unsafedb.query_one(
+            "SELECT owner_peer_id FROM transit_keys WHERE key_id = ?",
+            (entry['our_transit_key_id'],)
+        )
+
+        if key_row:
+            # Route to peer-scoped receive
+            receive(key_row['owner_peer_id'], entry['our_transit_key_id'], entry['blob'], t_ms, db)
+
+        # Delete processed (or orphaned) entry
+        unsafedb.execute("DELETE FROM connection_inbox WHERE id = ?", (entry['id'],))
+```
+
+### receive(peer_id, ...)
+
+Peer-scoped receive - SafeDB because `peer_id` is passed in:
+
+```python
+def receive(peer_id: str, transit_key_id: str, blob: bytes, t_ms: int, db: Database) -> None:
+    """Process blob for this peer. SafeDB-scoped."""
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    conn = safedb.query_one(
+        "SELECT * FROM connections WHERE our_transit_key_id = ? AND recorded_by = ?",
+        (transit_key_id, peer_id)
+    )
+
+    if conn:
+        # Unwrap, create recorded event, trigger projection
+        unwrapped = unwrap_blob(blob, conn['their_transit_key'])
+        create_recorded_event(unwrapped, peer_id, t_ms, db)
+        # Normal projection handles the rest
+```
+
+This keeps the scoping clean:
+- `process_inbox()` is device-wide (UnsafeDB) — just routing
+- `receive(peer_id)` is peer-scoped (SafeDB) — all the real work
+- Callers like sync only use `send()` and don't worry about receive
 
 ## Lifecycle
 
@@ -634,18 +796,56 @@ The `our_transit_key_id` serves dual purposes:
 
 ## Multi-Account Routing
 
-On devices with multiple local peers (linked accounts), incoming messages must be routed to the correct local peer. This is handled by the transit key:
+On devices with multiple local peers (linked accounts), incoming messages must be routed to the correct local peer. Routing happens in two stages:
 
-1. Each `transit_key` and `transit_prekey` has an `owner_peer_id` (the local peer that created it)
-2. When receiving a wrapped message, try decryption with available transit keys
-3. The key that successfully decrypts identifies the target local peer via `owner_peer_id`
-4. Process the message under that peer's context (`recorded_by = owner_peer_id`)
+### Stage 1: Route to Connection (by hint)
 
-This avoids requiring explicit peer routing in the protocol — the transit key implicitly encodes which local account should handle the message.
+The first 16 bytes of every transit-wrapped blob is a hint matching `our_transit_key_id`. This routes the blob to the correct connection's inbox without decryption.
 
-# Sync 
+### Stage 2: Route to Local Peer (by key ownership)
 
-To sync data, peers periodically send `sync` events to all connections. 
+When processing a connection's inbox:
+
+1. Unwrap blob using `our_transit_key` (the key we gave them)
+2. Look up `transit_keys.owner_peer_id` for that key
+3. The `owner_peer_id` identifies which local peer should process this blob
+4. Process under that peer's context (`recorded_by = owner_peer_id`)
+
+This two-stage routing means:
+- Blobs reach the right connection immediately (no decryption needed)
+- Local peer assignment happens during unwrap (natural point in the flow)
+- Connections are device-wide but processing is peer-specific
+
+# Sync
+
+To sync data, peers periodically send `sync` events to all connections.
+
+## Connection Interface
+
+Sync sends requests through the connection abstraction:
+
+```
+# Sending sync requests
+for connection in get_all_connections():
+    sync_request = build_sync_request(local_peer, connection.label)
+    connection.send(sync_request)
+```
+
+Sync does not have a special receive path. When responses arrive:
+
+1. Connection receives blob from its inbox
+2. Connection unwraps and determines `local_peer_id` from key ownership
+3. Connection creates a `recorded` event for that peer
+4. Normal projection handles the rest
+
+This means sync is purely about *requesting* events via bloom filters. Responses flow through the standard `recorded` → projection path like any other incoming event.
+
+Benefits:
+- **Single receive path**: All incoming events use the same projection flow
+- **Separation of concerns**: Sync only sends; connections handle receiving
+- **Identity context**: `connection.label` provides `peer_shared_id` or `invite_id` for sync state tracking
+
+## Bloom Filter Protocol
 
 First they create a sync event containing a "window" describing a range of ~100 events and a small bloom filter. (Bloom filters have false positive rates, so some events could fail to sync forever if we did not limit our search).
 

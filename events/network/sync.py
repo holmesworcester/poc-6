@@ -10,6 +10,7 @@ from typing import Any, Iterator
 from events.network import recorded, transit_key, transit_prekey, sync_window
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
+import connection as conn_module
 import queues
 import crypto
 import store
@@ -536,7 +537,7 @@ def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
     """Send sync requests to all active connections.
 
-    Uses the connection layer (sync_connections) instead of querying peers_shared directly.
+    Uses the connection module for peer-scoped connection lookups.
     This follows the two-layer architecture: connections are established first via sync_connect,
     then sync operates on those established connections.
     """
@@ -547,19 +548,19 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     else:
         peer_id_str = from_peer_id
 
-    # Query active connections (device-wide, no recorded_by)
-    unsafedb = create_unsafe_db(db)
-    connection_rows = unsafedb.query(
-        """SELECT peer_shared_id FROM sync_connections
-           WHERE last_seen_ms + ttl_ms > ?""",
-        (t_ms,)
-    )
+    # Query active connections (peer-scoped via connection module)
+    connections = conn_module.get_connections(from_peer_id, t_ms, db)
 
-    connection_ids = [row['peer_shared_id'][:10] + '...' for row in connection_rows]
-    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(connection_rows)} ids={connection_ids}")
+    connection_labels = [conn.label[:10] + '...' for conn in connections]
+    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(connections)} ids={connection_labels}")
 
-    for row in connection_rows:
-        peer_shared_id = row['peer_shared_id']
+    for conn in connections:
+        # Skip connections without peer_shared_id (bootstrap-only connections)
+        if not conn.peer_shared_id:
+            log.debug(f"[SYNC_SEND] skipping bootstrap connection (invite_id={conn.invite_id[:10] if conn.invite_id else 'None'}...)")
+            continue
+
+        peer_shared_id = conn.peer_shared_id
 
         # Skip connections to ourselves (can happen in shared-database tests)
         if peer_shared_id == from_peer_shared_id:
@@ -667,20 +668,13 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     canonical = crypto.canonicalize_json(signed_request)
 
     # Try to get established connection first (uses symmetric transit key they provided)
-    unsafedb = create_unsafe_db(db)
-    conn = unsafedb.query_one("""
-        SELECT their_transit_key_id, their_transit_key
-        FROM sync_connections
-        WHERE peer_shared_id = ?
-          AND last_seen_ms + ttl_ms > ?
-          AND their_transit_key IS NOT NULL
-    """, (to_peer_shared_id, t_ms))
+    conn = conn_module.get_connection_by_peer(from_peer_id, to_peer_shared_id, t_ms, db)
 
-    if conn:
+    if conn and conn.can_send():
         # Use established connection's transit key (the key they sent us)
         to_key = {
-            'id': crypto.b64decode(conn['their_transit_key_id']),
-            'key': conn['their_transit_key'],
+            'id': crypto.b64decode(conn.their_transit_key_id),
+            'key': conn.their_transit_key,
             'type': 'symmetric'
         }
         log.info(f"send_request: using established connection with {to_peer_shared_id[:20]}...")
@@ -768,11 +762,7 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     )
     if not requester_known:
         # Fallback: allow if we have an active connection for this requester
-        unsafedb = create_unsafe_db(db)
-        conn_ok = unsafedb.query_one(
-            "SELECT 1 FROM sync_connections WHERE peer_shared_id = ? AND last_seen_ms + ttl_ms > ?",
-            (requester_peer_shared_id, recorded_by and recorded_at)
-        )
+        conn_ok = conn_module.get_connection_by_peer(recorded_by, requester_peer_shared_id, recorded_at, db)
         if not conn_ok:
             log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}... no_active_connection")
             return

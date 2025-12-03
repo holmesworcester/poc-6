@@ -5,6 +5,8 @@ When a peer receives a sync_connect, it sends sync_connect_ack back containing
 its own transit_key wrapped with the sender's transit_key.
 
 This completes the bidirectional key exchange needed for encrypted sync.
+
+Now uses the connection module for peer-scoped connection management.
 """
 
 # Registry metadata
@@ -15,9 +17,10 @@ PROJECTION_TABLE = None
 
 import logging
 from typing import Any
-from db import create_unsafe_db
+from db import create_safe_db, create_unsafe_db
 import crypto
 import store
+import connection as conn_module
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     log.debug(f"sync_connect_ack.project: event_id={event_id[:20]}... recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get blob from store
     blob = store.get(event_id, unsafedb)
@@ -59,29 +63,32 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Match by OUR transit_key_id that we sent (secure - we know who we sent it to)
     # This prevents a malicious peer from claiming to be someone else in their ack
-    existing_conn = unsafedb.query_one("""
-        SELECT peer_shared_id FROM sync_connections WHERE our_transit_key_id = ?
-    """, (for_transit_key_id,))
+    # Now uses peer-scoped connections table
+    existing_conn = safedb.query_one("""
+        SELECT peer_shared_id, invite_id FROM connections
+        WHERE our_transit_key_id = ? AND recorded_by = ?
+    """, (for_transit_key_id, recorded_by))
 
     if not existing_conn:
-        log.warning(f"sync_connect_ack.project: no connection found for transit_key_id {for_transit_key_id[:20]}...")
+        log.warning(f"sync_connect_ack.project: no connection found for transit_key_id {for_transit_key_id[:20]}... recorded_by={recorded_by[:20]}...")
         return None
 
     peer_shared_id = existing_conn['peer_shared_id']
+    invite_id = existing_conn['invite_id']
 
-    # Update connection with their transit_key_id and transit_key
-    unsafedb.execute("""
-        UPDATE sync_connections
-        SET their_transit_key_id = ?, their_transit_key = ?, last_seen_ms = ?, ttl_ms = ?
-        WHERE peer_shared_id = ?
-    """, (
-        transit_key_id,
-        transit_key_bytes,
-        recorded_at,
-        300000,  # 5 minutes default TTL
-        peer_shared_id
-    ))
+    # Update connection with their transit_key via connection module
+    conn_module.upsert_connection(
+        our_transit_key_id=for_transit_key_id,
+        recorded_by=recorded_by,
+        peer_shared_id=peer_shared_id,
+        invite_id=invite_id,
+        their_transit_key_id=transit_key_id,
+        their_transit_key=transit_key_bytes,
+        t_ms=recorded_at,
+        ttl_ms=300000,  # 5 minutes default TTL
+        db=db
+    )
 
-    log.warning(f"[SYNC_CONNECT_ACK_RECEIVED] from={from_peer_shared_id[:10] if from_peer_shared_id else '?'}... matched_peer={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... UPDATING_CONNECTION")
+    log.warning(f"[SYNC_CONNECT_ACK_RECEIVED] from={from_peer_shared_id[:10] if from_peer_shared_id else '?'}... matched_peer={peer_shared_id[:10] if peer_shared_id else invite_id[:10] if invite_id else '?'}... recorded_by={recorded_by[:10]}... UPDATING_CONNECTION")
 
     return event_id

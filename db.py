@@ -59,6 +59,7 @@ SUBJECTIVE_TABLES = {
     'message_reactions',           # Message reactions (peer-scoped)
     'message_reaction_deletions',  # Message reaction deletions (peer-scoped)
     'message_updates',             # Message updates/edits (peer-scoped)
+    'connections',                 # Peer connections (peer-scoped, keyed by our_transit_key_id + recorded_by)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
@@ -71,7 +72,8 @@ DEVICE_TABLES = {
     'sync_state_ephemeral',
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
     'job_state',                   # Job execution state tracking (device-wide)
-    'sync_connections',            # Established connections for sync (device-wide)
+    'sync_connections',            # DEPRECATED: use connections (subjective) instead
+    'connection_inbox',            # Routing inbox for incoming blobs (device-wide)
     'peer_global_counter',         # Lamport clock state for each peer (device-wide)
 }
 

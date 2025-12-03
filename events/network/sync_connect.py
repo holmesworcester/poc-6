@@ -11,6 +11,8 @@ Flow:
 3. Recipient's project() validates, stores connection, and sends sync_connect_ack back
 4. Ack contains their transit_key (wrapped to our key), allowing bidirectional sync
 5. Sync uses established connections with both peers' transit keys
+
+Now uses the connection module for peer-scoped connection management.
 """
 from typing import Any
 
@@ -23,6 +25,7 @@ import logging
 import json
 import crypto
 import store
+import connection as conn_module
 from events.identity import peer
 from events.network import transit_key, transit_prekey
 from db import create_safe_db, create_unsafe_db
@@ -92,9 +95,10 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
 
         # Query connected peers (peers who have sent us sync_connect)
         # Only include active connections (not expired)
-        connection_rows = unsafedb.query(
-            "SELECT peer_shared_id FROM sync_connections WHERE last_seen_ms + ttl_ms > ?",
-            (t_ms,)
+        # Now uses peer-scoped connections table
+        connection_rows = safedb.query(
+            "SELECT peer_shared_id FROM connections WHERE recorded_by = ? AND last_seen_ms + ttl_ms > ? AND peer_shared_id IS NOT NULL",
+            (peer_id, t_ms)
         )
 
         # Query linked peers (other devices of same user - get our user_id then find all peers with that user_id)
@@ -220,20 +224,13 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     # Try to get established connection first (uses symmetric transit key)
     # This allows bidirectional sync_connect even before transit_prekey_shared syncs
-    unsafedb = create_unsafe_db(db)
-    conn = unsafedb.query_one("""
-        SELECT their_transit_key_id, their_transit_key
-        FROM sync_connections
-        WHERE peer_shared_id = ?
-          AND last_seen_ms + ttl_ms > ?
-          AND their_transit_key IS NOT NULL
-    """, (to_peer_shared_id, t_ms))
+    existing_conn = conn_module.get_connection_by_peer(from_peer_id, to_peer_shared_id, t_ms, db)
 
-    if conn:
+    if existing_conn and existing_conn.can_send():
         # Use established connection's transit key (symmetric)
         to_key = {
-            'id': crypto.b64decode(conn['their_transit_key_id']),
-            'key': conn['their_transit_key'],
+            'id': crypto.b64decode(existing_conn.their_transit_key_id),
+            'key': existing_conn.their_transit_key,
             'type': 'symmetric'
         }
         log.info(f"sync_connect: using established connection with {to_peer_shared_id[:20]}...")
@@ -248,17 +245,20 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     # Queue for delivery
     import queues
-    queues.incoming.add(wrapped, t_ms, db)
+    unsafedb = create_unsafe_db(db)
+    queues.incoming.add(wrapped, t_ms, unsafedb)
 
-    # Store our_transit_key_id so we can match the ack when it arrives
-    # UPSERT: preserve their_* fields if they exist, just update our_transit_key_id
-    unsafedb.execute("""
-        INSERT INTO sync_connections (peer_shared_id, our_transit_key_id, last_seen_ms, ttl_ms)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(peer_shared_id) DO UPDATE SET
-            our_transit_key_id = excluded.our_transit_key_id,
-            last_seen_ms = excluded.last_seen_ms
-    """, (to_peer_shared_id, transit_key_id, t_ms, 300000))
+    # Store connection with our_transit_key_id so we can match the ack when it arrives
+    # Uses peer-scoped connections table via connection module
+    conn_module.upsert_connection(
+        our_transit_key_id=transit_key_id,
+        recorded_by=from_peer_id,
+        peer_shared_id=to_peer_shared_id,
+        invite_id=invite_id,
+        t_ms=t_ms,
+        ttl_ms=300000,
+        db=db
+    )
 
     log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}...")
 
@@ -343,18 +343,24 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"sync_connect.project: missing required fields (peer_shared_id={bool(peer_shared_id)}, transit_key_id={bool(transit_key_id)}, transit_key={bool(transit_key_bytes)})")
         return None
 
-    # Upsert into sync_connections table with THEIR transit_key
-    unsafedb.execute("""
-        INSERT OR REPLACE INTO sync_connections
-        (peer_shared_id, their_transit_key_id, their_transit_key, last_seen_ms, ttl_ms)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        peer_shared_id,
-        transit_key_id,
-        transit_key_bytes,
-        recorded_at,
-        300000  # 5 minutes default TTL
-    ))
+    # Get our transit key ID for this connection (we created it when we sent our own connect)
+    # We'll update the connection with their transit key
+    # First, get the transit key we're using for this peer
+    our_transit_key_id = transit_key.create(recorded_by, recorded_at, db)
+
+    # Store connection with their transit key via connection module
+    # This is peer-scoped (uses recorded_by)
+    conn_module.upsert_connection(
+        our_transit_key_id=our_transit_key_id,
+        recorded_by=recorded_by,
+        peer_shared_id=peer_shared_id,
+        invite_id=invite_id,
+        their_transit_key_id=transit_key_id,
+        their_transit_key=transit_key_bytes,
+        t_ms=recorded_at,
+        ttl_ms=300000,  # 5 minutes default TTL
+        db=db
+    )
 
     log.warning(f"[SYNC_CONNECT_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... STORING_CONNECTION")
 
@@ -405,14 +411,9 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
         return
 
     # Get their transit_key from the connection we just stored
-    unsafedb = create_unsafe_db(db)
-    conn = unsafedb.query_one("""
-        SELECT their_transit_key_id, their_transit_key
-        FROM sync_connections
-        WHERE peer_shared_id = ?
-    """, (to_peer_shared_id,))
+    existing_conn = conn_module.get_connection_by_peer(from_peer_id, to_peer_shared_id, t_ms, db)
 
-    if not conn or not conn['their_transit_key']:
+    if not existing_conn or not existing_conn.can_send():
         log.warning(f"[SYNC_CONNECT_ACK_NO_CONNECTION] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
         return
 
@@ -421,7 +422,7 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
     # (more secure than trusting from_peer_shared_id claim)
     ack_data = {
         'type': 'sync_connect_ack',
-        'for_transit_key_id': conn['their_transit_key_id'],  # Echo their transit_key_id for secure matching
+        'for_transit_key_id': existing_conn.their_transit_key_id,  # Echo their transit_key_id for secure matching
         'from_peer_shared_id': from_peer_shared_id,  # Who is sending (for logging, not trusted for matching)
         'transit_key_id': transit_key_id,
         'transit_key': crypto.b64encode(transit_key_bytes),
@@ -434,8 +435,8 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
 
     # Wrap ack with their transit_key (the key they sent us in the connect)
     to_key = {
-        'id': crypto.b64decode(conn['their_transit_key_id']),
-        'key': conn['their_transit_key'],
+        'id': crypto.b64decode(existing_conn.their_transit_key_id),
+        'key': existing_conn.their_transit_key,
         'type': 'symmetric'
     }
 
@@ -443,13 +444,14 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
 
     # Queue for delivery
     import queues
-    queues.incoming.add(wrapped, t_ms, db)
+    unsafedb = create_unsafe_db(db)
+    queues.incoming.add(wrapped, t_ms, unsafedb)
 
     log.warning(f"[SYNC_CONNECT_ACK_SEND] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
 
 
 def purge_expired(t_ms: int, db: Any) -> None:
-    """Remove expired connections from sync_connections table.
+    """Remove expired connections.
 
     Connections expire when: last_seen_ms + ttl_ms < current_time
     Called by tick() periodically.
@@ -458,15 +460,8 @@ def purge_expired(t_ms: int, db: Any) -> None:
         t_ms: Current timestamp in milliseconds
         db: Database connection
     """
-    unsafedb = create_unsafe_db(db)
-
-    # Delete expired connections
-    result = unsafedb.execute("""
-        DELETE FROM sync_connections
-        WHERE last_seen_ms + ttl_ms < ?
-    """, (t_ms,))
-
-    deleted_count = result.rowcount if hasattr(result, 'rowcount') else 0
+    # Use connection module for purging
+    deleted_count = conn_module.purge_expired(t_ms, db)
 
     if deleted_count > 0:
         log.info(f"sync_connect: purged {deleted_count} expired connections")
