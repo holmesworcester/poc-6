@@ -32,6 +32,20 @@ class GroupKeySharedEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,  # Wrapped to recipient prekey
+    "signer_type": "peer_shared",
+    "dependencies": [],
+    "tables": ["group_keys_shared"],
+    "generic_dispatch": True,
+    "mark_valid": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 

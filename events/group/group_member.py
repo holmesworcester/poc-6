@@ -36,6 +36,20 @@ class GroupMemberEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,
+    "signer_type": "peer_shared",
+    "signer_field": "added_by",  # group_member uses added_by instead of signed_by
+    "dependencies": ["group:event", "user:event", "adder_user:linked_peer", "admin_grant:admin_grant?"],
+    "tables": ["group_members"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
