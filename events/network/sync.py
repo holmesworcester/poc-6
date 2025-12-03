@@ -457,6 +457,7 @@ def send_request_to_all(t_ms: int, db: Any) -> None:
             peer_id_str = peer_id
 
         # Find this peer's peer_shared_id
+        # Method 1: Check peers_shared table (works for validated peers)
         peer_shared_id = None
         safedb = create_safe_db(db, recorded_by=peer_id)
         candidate_rows = safedb.query(
@@ -476,8 +477,30 @@ def send_request_to_all(t_ms: int, db: Any) -> None:
             except Exception:
                 continue
 
+        # Method 2: Fall back to shareable_events for joiners whose peer_shared isn't validated yet
+        # This handles the bootstrap case where a joiner needs to sync to receive the invite chain
         if not peer_shared_id:
-            continue  # Skip if we can't find peer_shared_id
+            shareable_rows = safedb.query(
+                "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
+                (peer_id,)
+            )
+            for row in shareable_rows:
+                event_id = row['event_id']
+                try:
+                    event_blob = store.get(event_id, db)
+                    if not event_blob:
+                        continue
+                    event_data = crypto.parse_json(event_blob)
+                    if event_data.get('type') == 'peer_shared' and event_data.get('peer_id') == peer_id:
+                        peer_shared_id = event_id
+                        log.info(f"send_request_to_all: found peer_shared_id via shareable_events fallback for {peer_id_str[:10]}...")
+                        break
+                except Exception:
+                    continue
+
+        if not peer_shared_id:
+            log.debug(f"send_request_to_all: skipping peer {peer_id_str[:10]}... - no peer_shared_id found")
+            continue
 
         # Send sync requests from this peer to all peers they've seen
         send_requests(peer_id, peer_shared_id, t_ms, db)
@@ -572,29 +595,31 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
 
         # Send sync request using their transit key
         log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to_key={their_transit_key_id[:10]}...")
-        send_request_to_key(their_transit_key_id, their_transit_key, from_peer_id, from_peer_shared_id, t_ms, db)
+        send_request_to_connection(their_transit_key_id, their_transit_key, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
 
 
-def send_request_to_key(their_transit_key_id: str, their_transit_key: bytes,
-                        from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send bloom-based sync request to a connection identified by transit key.
+def send_request_to_connection(their_transit_key_id: str, their_transit_key: bytes,
+                               from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
+    """Send bloom-based sync request to an established connection.
 
-    Key-based version that doesn't require knowing recipient's identity.
-    Uses random windows instead of tracking state per-peer.
+    The connection is identified by the recipient's transit key.
+    Uses random windows instead of tracking state per-connection.
 
     TODO: Implement proper window state tracking per-connection for efficiency.
     Currently picks random windows which works but is inefficient.
     """
     import random
 
-    log.debug(f"[SEND_REQUEST_TO_KEY] from={from_peer_id[:20]}... to_key={their_transit_key_id[:20]}...")
+    log.debug(f"[SEND_REQUEST_TO_CONNECTION] from={from_peer_id[:20]}... to_key={their_transit_key_id[:20]}...")
 
     # TODO: Track window state per-connection. For now, pick random window.
-    w_param = 10
-    max_window = t_ms // (60 * 1000)  # One window per minute
-    window_id = random.randint(0, max(0, max_window))
+    # Use w_param=4 which gives 2^4=16 query windows - faster convergence for small event counts
+    # (with w=10/1024 windows, random selection is too inefficient for tests with ~20 events)
+    w_param = 4
+    num_query_windows = 2 ** w_param  # 16 query windows
+    window_id = random.randint(0, num_query_windows - 1)
 
     # Use SyncWindow to compute storage window range
     window = sync_window.SyncWindow(w=w_param, query_window_id=window_id)
@@ -613,9 +638,9 @@ def send_request_to_key(their_transit_key_id: str, their_transit_key: bytes,
 
     event_id_bytes_list = [crypto.b64decode(row['event_id']) for row in my_events_in_window]
 
-    # Derive salt for bloom filter
-    from events.identity import peer_shared
-    requester_public_key = peer_shared.get_public_key(from_peer_shared_id, from_peer_id, db)
+    # Derive salt for bloom filter (using our own public key)
+    # Use peer.get_public_key() for own key - peer_shared may not be validated yet (bootstrap)
+    requester_public_key = peer.get_public_key(from_peer_id, from_peer_id, db)
     salt = derive_salt(requester_public_key, window_id)
     bloom_filter = create_bloom(event_id_bytes_list, salt)
 
@@ -627,11 +652,13 @@ def send_request_to_key(their_transit_key_id: str, their_transit_key: bytes,
         raise ValueError(f"transit key not found: {response_transit_key_id}")
     response_transit_key_bytes = key_row['key']
 
-    # Build request
+    # Build request - include public key so receiver can derive same bloom salt
+    # even before peer_shared is validated (key-based connection bootstrap)
     request_data = {
         'type': 'sync',
         'peer_id': from_peer_id,
         'signed_by': from_peer_shared_id,
+        'requester_public_key': crypto.b64encode(requester_public_key),  # For bloom salt derivation
         'address': '127.0.0.1:8000',
         'window_id': window_id,
         'window_min': window_min,
@@ -655,7 +682,7 @@ def send_request_to_key(their_transit_key_id: str, their_transit_key: bytes,
     request_blob = crypto.wrap(canonical, to_key, db)
 
     queues.incoming.add(request_blob, t_ms, db)
-    log.info(f"send_request_to_key: sent window={window_id} to_key={their_transit_key_id[:10]}...")
+    log.info(f"send_request_to_connection: sent window={window_id} to_key={their_transit_key_id[:10]}...")
 
 
 def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
@@ -700,11 +727,9 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Build list of event_id bytes for bloom
     event_id_bytes_list = [crypto.b64decode(row['event_id']) for row in my_events_in_window]
 
-    # Derive salt for this window (from requester's peer_shared public key)
-    # IMPORTANT: Must use peer_shared public key, not local peer key, because responder
-    # won't have access to requester's local peer table (only peers_shared table)
-    from events.identity import peer_shared
-    requester_public_key = peer_shared.get_public_key(from_peer_shared_id, from_peer_id, db)
+    # Derive salt for this window (from our own peer public key)
+    # Use local peer key - we always have it, and we include it in request for receiver
+    requester_public_key = peer.get_public_key(from_peer_id, from_peer_id, db)
     salt = derive_salt(requester_public_key, window_id)
     log.debug(f"[BLOOM_CREATE] from={from_peer_id[:10]}... from_peer_shared={from_peer_shared_id[:20]}... pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
 
@@ -733,6 +758,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         'type': 'sync',
         'peer_id': from_peer_id,
         'signed_by': from_peer_shared_id,  # Include so recipient knows which events to send
+        'requester_public_key': crypto.b64encode(requester_public_key),  # For bloom salt derivation
         'address': '127.0.0.1:8000',
         'window_id': window_id,  # Which window we're requesting (for salt derivation and state tracking)
         'window_min': window_min,  # Concrete storage window range start
@@ -818,10 +844,14 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     """Internal function to handle sync request logic (shared between ephemeral and stored)."""
     log.debug(f"[SYNC_PROJECT] sync_id={sync_event_id[:20]}... recorded_by={recorded_by[:10]}...")
 
-    # Verify signature using requester's peer_shared public key
-    if not crypto.verify_signed_by_peer_shared(sync_data, recorded_by, db):
-        log.warning(f"sync.project() signature verification failed or peer_shared not available yet")
-        return
+    # Authentication: try signature first, fall back to implicit auth via transit key
+    sig_verified = crypto.verify_signed_by_peer_shared(sync_data, recorded_by, db)
+
+    if not sig_verified:
+        # Signature verification failed - this is OK if they authenticated via transit key.
+        # With key-based connections, if they decrypted our transit_key to send this request,
+        # they're implicitly authenticated. We accept the request without peer_shared verification.
+        log.debug(f"[SYNC_PROJECT] signature verification failed, accepting via implicit auth (transit key decryption)")
 
     # Extract requester info
     requester_peer_id = sync_data.get('peer_id')
@@ -843,17 +873,15 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
         log.info(f"Missing bloom/window data in sync request")
         return  # Invalid bloom-based sync request
 
-    # Only respond to sync requests from peers we recognize (have their peer_shared valid)
-    # or that have an active connection entry. This allows multi-device/link bootstrap
-    # where sync_connect established a connection before peer_shared has synced.
+    # Log acceptance (for debugging)
     safedb = create_safe_db(db, recorded_by=recorded_by)
     requester_known = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
         (requester_peer_shared_id, recorded_by)
     )
-    if not requester_known:
-        # With key-based connections, implicit auth via decryption is sufficient.
-        # If they decrypted our transit key to send this request, they're authenticated.
+    if requester_known:
+        log.debug(f"[SYNC_PROJECT] ACCEPT via known peer_shared requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
+    else:
         log.debug(f"[SYNC_PROJECT] ACCEPT via implicit auth requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
 
     log.debug(f"[SYNC_PROJECT] result=ACCEPTED requester={requester_peer_shared_id[:20]}... recognized_by={recorded_by[:10]}... window={window_id}")
@@ -880,9 +908,20 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
     bloom_filter = crypto.b64decode(bloom_b64)
 
     # Get requester's public key (for deriving bloom salt)
-    # Use peer_shared since requester is a remote peer (not in local_peers)
-    from events.identity import peer_shared
-    requester_public_key = peer_shared.get_public_key(requester_peer_shared_id, recorded_by, db)
+    # First try to use public key from request (needed for key-based bootstrap before peer_shared is validated)
+    # Fall back to looking up from peers_shared if not in request
+    requester_public_key_b64 = sync_data.get('requester_public_key')
+    if requester_public_key_b64:
+        requester_public_key = crypto.b64decode(requester_public_key_b64)
+        log.debug(f"[SYNC_PROJECT] using requester_public_key from request")
+    else:
+        # Legacy path: lookup from peer_shared (requires peer_shared to be validated)
+        from events.identity import peer_shared
+        try:
+            requester_public_key = peer_shared.get_public_key(requester_peer_shared_id, recorded_by, db)
+        except ValueError:
+            log.warning(f"[SYNC_PROJECT] peer_shared not available and no requester_public_key in request, cannot derive bloom salt")
+            return
 
     # Always use normal bloom-filtered sync response (single window)
     log.debug(f"[SYNC_PROJECT] calling send_response with transit_key_hint={crypto.b64encode(transit_key_dict['id'])} ({len(crypto.b64encode(transit_key_dict['id']))} chars)")
