@@ -45,6 +45,19 @@ class CreateDeps(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,
+    "signer_type": "peer_shared",
+    "dependencies": ["message:message_event"],
+    "tables": [],  # No type-specific table - uses generic deleted_events
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -101,8 +114,9 @@ def project(input_dict: dict):
         return ProjectorResult(blocked=True, missing_deps=["message"])
 
     # Authorization: deleted_by must be author OR admin
-    message_author = message.get("author_id")
-    is_author = (deleted_by == message_author)
+    # Compare peer_shared_ids (signed_by fields) since that's who signed both events
+    message_signed_by = message.get("signed_by")
+    is_author = (deleted_by == message_signed_by)
     is_admin = deps.get("is_admin", False)
 
     if not is_author and not is_admin:
