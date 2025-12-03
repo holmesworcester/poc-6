@@ -184,7 +184,7 @@ def send_to_connection(their_transit_key_id: str, their_transit_key: bytes, from
             "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
             (from_peer_id, from_peer_id)
         )
-        if not peer_self_row or not peer_self_row['peer_shared_id'] or peer_self_row['peer_shared_id'] == 'PENDING':
+        if not peer_self_row or not peer_self_row['peer_shared_id']:
             log.warning(f"[SYNC_CONNECT_REFRESH_NO_AUTH] peer={from_peer_id[:10]}...")
             return
         signed_by = peer_self_row['peer_shared_id']
@@ -275,7 +275,7 @@ def send(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: Any) -> None:
             "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
             (from_peer_id, from_peer_id)
         )
-        if not peer_self_row or not peer_self_row['peer_shared_id'] or peer_self_row['peer_shared_id'] == 'PENDING':
+        if not peer_self_row or not peer_self_row['peer_shared_id']:
             log.warning(f"[SYNC_CONNECT_NO_AUTH] peer={from_peer_id[:10]}... has no invite key and no peer_shared_id")
             return
         signed_by = peer_self_row['peer_shared_id']
