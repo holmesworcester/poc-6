@@ -776,19 +776,8 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     invite_private_key = crypto.b64decode(link_data['invite_private_key'])
     inviter_peer_shared_id = link_data['inviter_peer_shared_id']
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
-    # Store inviter's transit prekey so we can encrypt sync_connect to them
-    if 'inviter_transit_prekey_public_key' in link_data and 'inviter_transit_prekey_shared_id' in link_data and 'inviter_transit_prekey_id' in link_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(link_data['inviter_transit_prekey_public_key'])
-
-        log.info(f"invite.accept() storing inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (link_data['inviter_transit_prekey_shared_id'], link_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, t_ms, peer_id)
-        )
-
     # Create invite_accepted event (event-sources invite secrets for reprojection)
+    # This stores inviter's transit prekey in invite_accepteds table via projection
     from events.identity import invite_accepted as invite_accepted_module
     invite_accepted_id = invite_accepted_module.create(
         invite_link_data=link_data,

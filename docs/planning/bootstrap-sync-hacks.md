@@ -41,13 +41,15 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 |----------|-------|-------|
 | ~~`user.py:342-344`~~ | ~~`peer_self`~~ | ✅ FIXED: Now handled by peer_shared.project() |
 | ~~`user.py:628-630`~~ | ~~`peer_self`~~ | ✅ FIXED: Now handled by peer_shared.project() |
-| `user.py:647` | `transit_prekeys_shared` | Direct insert from invite link data |
+| ~~`user.py:647`~~ | ~~`transit_prekeys_shared`~~ | ✅ FIXED: Now stored in invite_accepteds via invite_accepted.project() |
 | `peer_shared.py:179` | `peer_self` | Direct `INSERT OR REPLACE INTO peer_self` (consolidated - single source) |
-| `invite.py:783` | `transit_prekeys_shared` | Direct insert |
+| ~~`invite.py:783`~~ | ~~`transit_prekeys_shared`~~ | ✅ FIXED: Now stored in invite_accepteds via invite_accepted.project() |
 
 **Problem**: Bypasses event-sourcing model, can't be reprojected.
 
 **Note**: `peer_self` inserts have been consolidated to a single location in `peer_shared.project()`. This is acceptable since `peer_self` is local-only state mapping "my peer_id → my peer_shared_id".
+
+**Note**: `transit_prekeys_shared` direct inserts have been removed. Inviter's transit prekey data from invite links is now stored in `invite_accepteds` table via `invite_accepted.project()`. The `transit_prekey.get_transit_prekey_for_peer()` function queries `invite_accepteds` as a fallback when the peer is not found in `transit_prekeys_shared`.
 
 ---
 
@@ -368,8 +370,8 @@ if not authenticated: ...
 ## Summary Statistics
 
 - **21+ distinct hack patterns** identified
-- **PENDING**: 6 locations
-- **Direct table inserts**: 5 locations
+- ~~**PENDING**: 6 locations~~ ✅ FIXED: Now uses None
+- ~~**Direct table inserts**: 5 locations~~ ✅ FIXED: Only 1 acceptable location remains (peer_self in peer_shared.py)
 - **Timestamp offsets**: 30+ occurrences
 - **Special case types**: 7 in NO_DEPS_TYPES, 3 in SIGNER_ONLY_TYPES
 - **Fallback patterns**: 3 locations

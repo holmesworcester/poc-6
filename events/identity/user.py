@@ -638,17 +638,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     log.info(f"join() extracted invite_id={invite_id[:20]}... from invite link")
 
-    # Store inviter's transit prekey so we can encrypt sync_connect to them
-    if 'inviter_transit_prekey_public_key' in invite_data and 'inviter_transit_prekey_shared_id' in invite_data and 'inviter_transit_prekey_id' in invite_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(invite_data['inviter_transit_prekey_public_key'])
-
-        log.info(f"join() storing inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (invite_data['inviter_transit_prekey_shared_id'], invite_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, t_ms, peer_id)
-        )
-
     # Create invite_accepted event to capture invite link data for event-sourcing
+    # This stores inviter's transit prekey in invite_accepteds table via projection
     # invite_private_key is stored in invite_accepteds table via projection
     # sync_connect.send() queries invite_accepteds by invite_id to get the signing key
     from events.identity import invite_accepted
