@@ -73,16 +73,16 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Generate Ed25519 keypair for prekey
     prekey_private, prekey_public = crypto.generate_keypair()
 
-    # Create event blob (plaintext JSON, no encryption for local-only)
+    # Create DETERMINISTIC event blob - only type and keys
+    # This ensures same key material = same prekey_id on all peers
     event_data = {
         'type': 'group_prekey',
         'public_key': crypto.b64encode(prekey_public),
-        'private_key': crypto.b64encode(prekey_private),
-        'signed_by': peer_id,  # Local peer who created this prekey
-        'created_at': t_ms
+        'private_key': crypto.b64encode(prekey_private)
     }
 
-    blob = json.dumps(event_data).encode()
+    # Use sort_keys=True for canonical ordering
+    blob = json.dumps(event_data, sort_keys=True).encode()
 
     # Store the blob to get prekey_id
     prekey_id = store.event(blob, peer_id, t_ms, db)
@@ -91,8 +91,50 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     return prekey_id, prekey_private
 
 
+def create_from_material(public_key: bytes, private_key: bytes, peer_id: str, t_ms: int, db: Any) -> str:
+    """Create group prekey event from provided key material (for invite prekeys).
+
+    Creates a DETERMINISTIC group_prekey event from the key material.
+    Same key material = same prekey_id on all peers.
+
+    Args:
+        public_key: The Ed25519 public key bytes
+        private_key: The Ed25519 private key bytes
+        peer_id: Peer ID that owns this prekey
+        t_ms: Timestamp (used for recorded_at, NOT in the blob)
+        db: Database connection
+
+    Returns:
+        prekey_id: The deterministic event ID
+    """
+    log.info(f"group_prekey.create_from_material() creating prekey for peer_id={peer_id}, t_ms={t_ms}")
+
+    # Create DETERMINISTIC event blob - only type and keys
+    # This ensures same key material = same prekey_id on all peers
+    event_data = {
+        'type': 'group_prekey',
+        'public_key': crypto.b64encode(public_key),
+        'private_key': crypto.b64encode(private_key)
+    }
+
+    # Use sort_keys=True for canonical ordering
+    blob = json.dumps(event_data, sort_keys=True).encode()
+
+    # Store event - t_ms is used for recorded_at metadata, not in the blob itself
+    prekey_id = store.event(blob, peer_id, t_ms, db)
+    log.info(f"group_prekey.create_from_material() created prekey_id={prekey_id}")
+
+    return prekey_id
+
+
 def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project group prekey event into group_prekeys table with recorded_by scoping.
+
+    Args:
+        prekey_id: The group_prekey event ID
+        recorded_by: Peer projecting this event (also the owner for local prekeys)
+        recorded_at: Timestamp to use for created_at (since blob has no timestamp)
+        db: Database connection
 
     Returns:
         prekey_id on success, None on failure
@@ -107,10 +149,13 @@ def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         log.warning(f"group_prekey.project() blob not found for prekey_id={prekey_id}")
         return None
 
-    # Parse JSON
+    # Parse JSON - deterministic blob has only type, public_key, private_key
     event_data = crypto.parse_json(blob)
-    owner_peer_id = event_data['signed_by']
-    created_at = event_data['created_at']
+
+    # Use recorded_at for timestamp (deterministic blobs have no timestamp)
+    # Use recorded_by as owner (local prekeys are always owned by the projecting peer)
+    owner_peer_id = recorded_by
+    created_at = recorded_at
 
     # Calculate TTL: absolute time when this prekey expires
     ttl_ms = created_at + GROUP_PREKEY_TTL_MS
