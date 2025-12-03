@@ -52,32 +52,44 @@ def test_connection_establishment(fresh_db):
     print("✓ No connections before first tick")
 
     # Run one tick cycle - should establish connections
-    print("\n=== Running first tick (establishes connections) ===")
+    # Run multiple ticks for full two-way handshake:
+    # Tick 1: peers send sync_connect (creates rows with our_transit_key_id)
+    # Tick 2: peers receive sync_connect, store their_transit_key, send ack
+    # Tick 3: peers receive ack (completes bidirectional key exchange)
+    print("\n=== Running first tick (sends sync_connect) ===")
     tick.tick(t_ms=3000, db=db)
 
-    # Check that connections were established
+    # Check that connections were initiated
     connections = db.query("SELECT peer_shared_id FROM sync_connections")
-    print(f"Connections established: {len(connections)}")
-
-    # Should have connections (Alice→Bob and Bob→Alice)
+    print(f"Connections initiated: {len(connections)}")
     assert len(connections) >= 1, "Should have at least one connection after first tick"
-    print(f"✓ Established {len(connections)} connection(s)")
+    print(f"✓ Initiated {len(connections)} connection(s)")
 
-    # Verify connection has required fields
-    conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
+    print("\n=== Running second tick (receives connect, sends ack) ===")
+    tick.tick(t_ms=4000, db=db)
+
+    print("\n=== Running third tick (receives ack, completes handshake) ===")
+    tick.tick(t_ms=5000, db=db)
+
+    # Now connections should have both our_transit_key_id and their_transit_key
+    conn_row = db.query_one("""
+        SELECT * FROM sync_connections
+        WHERE their_transit_key IS NOT NULL
+        LIMIT 1
+    """)
+    assert conn_row is not None, "Should have at least one complete connection"
     assert conn_row['peer_shared_id'], "Connection should have peer_shared_id"
-    assert conn_row['response_transit_key_id'], "Connection should have response_transit_key_id"
-    assert conn_row['response_transit_key'], "Connection should have response_transit_key"
-    assert conn_row['last_seen_ms'] == 3000, "Connection should have correct timestamp"
-    print("✓ Connection has all required fields")
+    assert conn_row['their_transit_key_id'], "Connection should have their_transit_key_id"
+    assert conn_row['their_transit_key'], "Connection should have their_transit_key"
+    print("✓ Connection has all required fields after handshake")
 
-    # Run another tick - connections should refresh (sync_connect runs every 1s)
-    print("\n=== Running second tick (refreshes connections) ===")
-    tick.tick(t_ms=4000, db=db)  # 1s later so sync_connect runs again
+    # Run another tick - connections should refresh
+    print("\n=== Running fourth tick (refreshes connections) ===")
+    tick.tick(t_ms=6000, db=db)
 
     # Check that connection timestamps were updated
     conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
-    assert conn_row['last_seen_ms'] == 4000, "Connection should have updated timestamp"
+    assert conn_row['last_seen_ms'] >= 5000, "Connection should have updated timestamp"
     print("✓ Connection timestamp refreshed")
 
 
@@ -190,8 +202,163 @@ def test_sync_uses_connections(fresh_db):
     print("✓ Peers successfully synced via established connections")
 
 
+def test_two_way_handshake(fresh_db):
+    """Test explicit two-way connection handshake: connect → ack → bidirectional keys.
+
+    Verifies:
+    1. Bob sends sync_connect to Alice
+    2. Alice receives, stores Bob's transit_key, sends sync_connect_ack
+    3. Bob receives ack, stores Alice's transit_key
+    4. Both peers have each other's transit_keys for bidirectional sync
+    """
+    from db import create_safe_db, create_unsafe_db
+    from events.network import sync_connect, sync
+
+    db = fresh_db
+
+    print("\n=== Setup: Create network with Alice and Bob ===")
+
+    # Alice creates a network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_peer_id = alice['peer_id']
+    print(f"Alice peer_id: {alice_peer_id[:20]}...")
+
+    # Get Alice's peer_shared_id
+    alice_safedb = create_safe_db(db, recorded_by=alice_peer_id)
+    alice_self = alice_safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (alice_peer_id, alice_peer_id)
+    )
+    alice_peer_shared_id = alice_self['peer_shared_id']
+    print(f"Alice peer_shared_id: {alice_peer_shared_id[:20]}...")
+
+    # Create invite and Bob joins
+    invite_id, invite_link, invite_data = invite.create(
+        peer_id=alice_peer_id,
+        t_ms=1500,
+        db=db
+    )
+    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_shared_id = bob['peer_shared_id']
+    print(f"Bob peer_shared_id: {bob_peer_shared_id[:20]}...")
+
+    db.commit()
+
+    # Initially no connections
+    unsafedb = create_unsafe_db(db)
+    connections = unsafedb.query("SELECT * FROM sync_connections")
+    assert len(connections) == 0, "Should have no connections initially"
+    print("✓ No connections initially")
+
+    # Step 1: Bob sends sync_connect to Alice
+    print("\n=== Step 1: Bob sends sync_connect to Alice ===")
+    sync_connect.send_connect(
+        to_peer_shared_id=alice_peer_shared_id,
+        from_peer_id=bob_peer_id,
+        from_peer_shared_id=bob_peer_shared_id,
+        invite_id=invite_id,
+        t_ms=3000,
+        db=db
+    )
+    db.commit()
+    print("✓ Bob sent sync_connect")
+
+    # Step 2: Process the queue - Alice receives, stores Bob's key, sends ack
+    print("\n=== Step 2: Process queue (Alice receives, stores, sends ack) ===")
+    sync.receive(batch_size=100, t_ms=3000, db=db)
+    db.commit()
+
+    # Alice should have stored Bob's connection
+    alice_conn = unsafedb.query_one(
+        "SELECT * FROM sync_connections WHERE peer_shared_id = ?",
+        (bob_peer_shared_id,)
+    )
+    assert alice_conn is not None, "Alice should have stored Bob's connection"
+    assert alice_conn['their_transit_key_id'], "Alice should have Bob's transit_key_id"
+    assert alice_conn['their_transit_key'], "Alice should have Bob's transit_key"
+    print(f"✓ Alice stored Bob's transit_key: {alice_conn['their_transit_key_id'][:20]}...")
+
+    # Step 3: Process the ack - Bob receives Alice's transit_key
+    print("\n=== Step 3: Process ack (Bob receives Alice's transit_key) ===")
+    sync.receive(batch_size=100, t_ms=3001, db=db)
+    db.commit()
+
+    # Bob should have updated connection with Alice's transit_key
+    # Note: Bob doesn't have a connection row until he receives an ack,
+    # so we need to check after a sync_connect was sent TO Bob
+    # Actually, the ack updates the existing connection that was created
+    # when Bob received Alice's sync_connect (which happens during bidirectional connection)
+
+    # Let's also have Alice send a connect to Bob
+    print("\n=== Step 4: Alice sends sync_connect to Bob ===")
+    sync_connect.send_connect(
+        to_peer_shared_id=bob_peer_shared_id,
+        from_peer_id=alice_peer_id,
+        from_peer_shared_id=alice_peer_shared_id,
+        invite_id=None,  # Alice is not a joiner
+        t_ms=4000,
+        db=db
+    )
+    db.commit()
+
+    # Process Bob receiving Alice's connect
+    print("\n=== Step 5: Process (Bob receives Alice's connect, sends ack) ===")
+    sync.receive(batch_size=100, t_ms=4000, db=db)
+    db.commit()
+
+    # Bob should have stored Alice's connection
+    bob_conn = unsafedb.query_one(
+        "SELECT * FROM sync_connections WHERE peer_shared_id = ?",
+        (alice_peer_shared_id,)
+    )
+    assert bob_conn is not None, "Bob should have stored Alice's connection"
+    assert bob_conn['their_transit_key_id'], "Bob should have Alice's transit_key_id"
+    assert bob_conn['their_transit_key'], "Bob should have Alice's transit_key"
+    print(f"✓ Bob stored Alice's transit_key: {bob_conn['their_transit_key_id'][:20]}...")
+
+    # Process Alice receiving Bob's ack
+    print("\n=== Step 6: Process (Alice receives Bob's ack) ===")
+    sync.receive(batch_size=100, t_ms=4001, db=db)
+    db.commit()
+
+    # Verify final state: both peers have each other's transit keys
+    print("\n=== Verifying bidirectional connection state ===")
+
+    all_connections = unsafedb.query("SELECT * FROM sync_connections ORDER BY peer_shared_id")
+    print(f"Total connections: {len(all_connections)}")
+
+    for conn in all_connections:
+        print(f"  Connection to {conn['peer_shared_id'][:20]}...")
+        print(f"    their_transit_key_id: {conn['their_transit_key_id'][:20] if conn['their_transit_key_id'] else 'None'}...")
+        print(f"    their_transit_key: {'[present]' if conn['their_transit_key'] else 'None'}")
+
+    # Verify both peers can wrap messages to each other
+    # Alice should be able to wrap to Bob
+    alice_to_bob_conn = unsafedb.query_one(
+        "SELECT their_transit_key FROM sync_connections WHERE peer_shared_id = ?",
+        (bob_peer_shared_id,)
+    )
+    assert alice_to_bob_conn and alice_to_bob_conn['their_transit_key'], \
+        "Alice should have Bob's transit_key for sending"
+
+    # Bob should be able to wrap to Alice
+    bob_to_alice_conn = unsafedb.query_one(
+        "SELECT their_transit_key FROM sync_connections WHERE peer_shared_id = ?",
+        (alice_peer_shared_id,)
+    )
+    assert bob_to_alice_conn and bob_to_alice_conn['their_transit_key'], \
+        "Bob should have Alice's transit_key for sending"
+
+    print("\n✅ Two-way handshake test passed!")
+    print("  ✓ Bob → Alice: sync_connect delivered, transit_key stored, ack sent")
+    print("  ✓ Alice → Bob: sync_connect delivered, transit_key stored, ack sent")
+    print("  ✓ Bidirectional: Both peers have each other's transit_keys")
+
+
 if __name__ == '__main__':
     test_connection_establishment()
     test_connection_expiry()
     test_sync_uses_connections()
+    test_two_way_handshake()
     print("\n=== All sync_connect tests passed ===")

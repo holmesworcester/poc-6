@@ -814,3 +814,115 @@ def test_rekey_no_duplicates(fresh_db_with_alice):
     print(f"✓ For message {message_id[:20]}..., only keeping best rekey (smallest sufficient TTL)")
 
 
+def test_deterministic_prekey_ids(fresh_db_with_alice):
+    """Test: group_prekey events are deterministic - same key material = same prekey_id."""
+    db, alice = fresh_db_with_alice
+
+    print("\n=== Generate a prekey and extract key material ===")
+    prekey_id1, prekey_private = group_prekey.create(alice['peer_id'], 2000, db)
+    db.commit()
+    print(f"Created prekey 1: {prekey_id1[:20]}...")
+
+    # Get the public key from the stored blob
+    unsafedb = create_unsafe_db(db)
+    blob_row = unsafedb.query_one(
+        "SELECT blob FROM store WHERE id = ?",
+        (prekey_id1,)
+    )
+    event_data = crypto.parse_json(blob_row['blob'])
+    prekey_public = crypto.b64decode(event_data['public_key'])
+
+    print("\n=== Recreate prekey with same key material ===")
+    # Use create_from_material to recreate with the same keys
+    prekey_id2 = group_prekey.create_from_material(
+        public_key=prekey_public,
+        private_key=prekey_private,
+        peer_id=alice['peer_id'],
+        t_ms=3000,  # Different timestamp!
+        db=db
+    )
+    db.commit()
+    print(f"Created prekey 2: {prekey_id2[:20]}...")
+
+    print("\n=== Verify IDs are identical ===")
+    assert prekey_id1 == prekey_id2, f"Prekey IDs should be identical: {prekey_id1} != {prekey_id2}"
+    print(f"✓ Prekey IDs match: {prekey_id1}")
+
+    print("\n=== Verify with different peer_id (should still be same ID) ===")
+    # Create another peer to verify determinism is purely from key material
+    from events.identity import peer as peer_module
+    other_peer_id = peer_module.create(t_ms=4000, db=db)
+    db.commit()
+
+    prekey_id3 = group_prekey.create_from_material(
+        public_key=prekey_public,
+        private_key=prekey_private,
+        peer_id=other_peer_id,  # Different peer!
+        t_ms=5000,              # Different timestamp!
+        db=db
+    )
+    db.commit()
+    print(f"Created prekey 3 (different peer): {prekey_id3[:20]}...")
+
+    assert prekey_id1 == prekey_id3, f"Prekey IDs should be identical regardless of peer: {prekey_id1} != {prekey_id3}"
+    print(f"✓ Prekey ID still matches with different peer")
+
+    print("\n✅ Deterministic prekey IDs test passed")
+
+
+def test_deterministic_group_key_ids(fresh_db_with_alice):
+    """Test: group_key events are deterministic - same key material = same key_id."""
+    db, alice = fresh_db_with_alice
+
+    print("\n=== Generate a group_key and extract key material ===")
+    from events.group import group_key
+
+    key_id1 = group_key.create(alice['peer_id'], 2000, db)
+    db.commit()
+    print(f"Created key 1: {key_id1[:20]}...")
+
+    # Get the key material from the stored blob
+    unsafedb = create_unsafe_db(db)
+    blob_row = unsafedb.query_one(
+        "SELECT blob FROM store WHERE id = ?",
+        (key_id1,)
+    )
+    event_data = crypto.parse_json(blob_row['blob'])
+    key_material = crypto.b64decode(event_data['key'])
+
+    print("\n=== Recreate key with same material ===")
+    # Use create_with_material to recreate with the same key
+    key_id2 = group_key.create_with_material(
+        key_material=key_material,
+        peer_id=alice['peer_id'],
+        t_ms=3000,  # Different timestamp!
+        db=db
+    )
+    db.commit()
+    print(f"Created key 2: {key_id2[:20]}...")
+
+    print("\n=== Verify IDs are identical ===")
+    assert key_id1 == key_id2, f"Key IDs should be identical: {key_id1} != {key_id2}"
+    print(f"✓ Key IDs match: {key_id1}")
+
+    print("\n=== Verify with different peer_id (should still be same ID) ===")
+    # Create another peer to verify determinism is purely from key material
+    from events.identity import peer as peer_module
+    other_peer_id = peer_module.create(t_ms=4000, db=db)
+    db.commit()
+
+    key_id3 = group_key.create_with_material(
+        key_material=key_material,
+        peer_id=other_peer_id,  # Different peer!
+        t_ms=5000,              # Different timestamp!
+        db=db
+    )
+    db.commit()
+    print(f"Created key 3 (different peer): {key_id3[:20]}...")
+
+    assert key_id1 == key_id3, f"Key IDs should be identical regardless of peer: {key_id1} != {key_id3}"
+    print(f"✓ Key ID still matches with different peer")
+
+    print("\n✅ Deterministic group_key IDs test passed")
+
+
