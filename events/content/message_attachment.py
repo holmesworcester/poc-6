@@ -46,6 +46,19 @@ class MessageAttachmentEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,
+    "signer_type": "peer_shared",
+    "dependencies": ["message:message_id"],
+    "tables": ["message_attachments", "event_dependencies"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 

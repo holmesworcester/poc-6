@@ -36,6 +36,19 @@ class FileSliceEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,  # Plain JSON (not group-wrapped)
+    "signer_type": "none",  # NOT signed - integrity via root_hash
+    "dependencies": [],
+    "tables": ["file_slices", "event_dependencies"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 

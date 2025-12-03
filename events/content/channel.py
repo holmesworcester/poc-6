@@ -36,6 +36,19 @@ class ChannelEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,
+    "signer_type": "peer_shared",
+    "dependencies": ["signer_user:linked_peer", "admin_grant:admin_grant?"],
+    "tables": ["channels"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
