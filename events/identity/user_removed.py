@@ -11,6 +11,7 @@ import logging
 import crypto
 import store
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +103,9 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
     # store.event() creates recorded wrapper and triggers projection
     blob = crypto.canonicalize_json(signed_event)
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
+
+    # Trace for human-readable event logging
+    trace('user_removed', user_id=removed_user_id[:12], name=removed_user_name)
 
     # Get updated member list after removal (for immediate UI feedback)
     from events.identity import network

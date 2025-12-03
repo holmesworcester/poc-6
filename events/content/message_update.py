@@ -11,6 +11,7 @@ from events.group import group as group_module
 from events.identity import peer
 import global_counter
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +114,9 @@ def create(
         f"message_update.create() created update_id={event_id} for message_id={message_id}, "
         f"global_count={global_count}"
     )
+
+    # Trace for human-readable event logging
+    trace('message_update', message_id=message_id[:12], new_content=f'"{new_content[:30]}..."' if len(new_content) > 30 else f'"{new_content}"')
 
     return event_id
 

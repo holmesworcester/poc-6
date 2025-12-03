@@ -10,6 +10,7 @@ import crypto
 import store
 import global_counter
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,10 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     reaction_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_reaction.create() created reaction_id={reaction_id[:20]}...")
+
+    # Trace for human-readable event logging
+    trace('message_reaction', message_id=message_id[:12], emoji=emoji, reactor_id=reactor_user_id[:12])
+
     return reaction_id
 
 

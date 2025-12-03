@@ -13,6 +13,7 @@ import store
 from events.group import group
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,9 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message.create() created message_id={event_id}")
+
+    # Trace for human-readable event logging
+    trace('message', channel_id=channel_id[:12], author_id=user_id[:12], content=f'"{content[:30]}..."' if len(content) > 30 else f'"{content}"')
 
     # Get latest messages (skip for bulk creation performance)
     latest = list(channel_id, peer_id, db) if return_latest else []

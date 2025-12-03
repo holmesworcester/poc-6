@@ -18,6 +18,7 @@ import logging
 import crypto
 import store
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -194,6 +195,10 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
     deletion_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_deletion.create() created deletion_id={deletion_id[:20]}...")
+
+    # Trace for human-readable event logging
+    trace('message_deletion', message_id=message_id[:12])
+
     return deletion_id
 
 

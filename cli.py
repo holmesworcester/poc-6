@@ -83,6 +83,7 @@ if not _verbose:
 from db import Database
 import schema
 import tick
+import event_trace
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed, peer_shared
@@ -92,38 +93,42 @@ from events.group import group_member, group_key, group_prekey, group
 
 
 class EventLog:
-    """Captures human-readable event descriptions during command execution.
+    """Wrapper around event_trace for human-readable event logging.
 
-    When enabled, logs events in JSON-lite format:
-        → event_type {field=value, field=<substituted>}
+    When enabled, collects events traced by the actual backend code
+    and displays them in JSON-lite format:
+        -> event_type {field=value, ...}
 
-    Angle brackets denote human-readable substitutions for event IDs.
+    This shows what the code ACTUALLY did, not hand-written descriptions.
     """
 
     def __init__(self):
-        self.entries: List[str] = []
         self.enabled: bool = False
 
     def clear(self):
-        """Clear log entries before each command."""
-        self.entries = []
+        """Start a new trace before each command."""
+        if self.enabled:
+            event_trace.start()
 
     def log(self, event_type: str, **fields):
-        """Log an event with key=value fields.
+        """DEPRECATED: Manual logging is no longer needed.
 
-        Use angle brackets in values to denote ID substitutions:
-            log("message", channel="<#general>", author="<alice>", content="hello")
+        Events are now traced automatically by the backend.
+        This method is kept for backward compatibility but does nothing.
         """
-        if self.enabled:
-            field_strs = [f"{k}={v}" for k, v in fields.items()]
-            self.entries.append(f"  → {event_type} {{{', '.join(field_strs)}}}")
+        pass  # Events come from backend via event_trace, not manual calls
 
     def display(self):
-        """Display log entries if any exist and logging is enabled."""
-        if self.enabled and self.entries:
-            print("☰ event log:")
-            for entry in self.entries:
-                print(entry)
+        """Display traced events from the actual backend code."""
+        if not self.enabled:
+            return
+
+        events = event_trace.collect()
+        if events:
+            rendered = event_trace.render(events)
+            print("☰ event trace:")
+            for line in rendered:
+                print(line)
             print()
 
 

@@ -14,6 +14,7 @@ import store
 from events.group import group_key, group as group_module, group_member
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +257,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"channel.create() created channel_id={event_id}")
+
+    # Trace for human-readable event logging
+    visibility = 'private' if member_user_ids else 'public'
+    trace('channel', name=name, visibility=visibility, group_id=group_id[:12])
+
     return event_id
 
 

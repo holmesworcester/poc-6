@@ -17,6 +17,7 @@ import store
 from events.group import group_key, group as group_module
 from events.identity import peer, invite as invite_module
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +129,14 @@ def create(
         f"channel_update.create() created update_id={event_id} for channel_id={channel_id}, "
         f"name={new_channel_name}, ttl={new_disappearing_time_ms}"
     )
+
+    # Trace for human-readable event logging
+    updates = {}
+    if new_channel_name is not None:
+        updates['name'] = new_channel_name
+    if new_disappearing_time_ms is not None:
+        updates['disappearing_ms'] = new_disappearing_time_ms
+    trace('channel_update', channel_id=channel_id[:12], **updates)
 
     return event_id
 

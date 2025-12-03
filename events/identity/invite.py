@@ -15,6 +15,7 @@ import store
 from events.network import transit_key
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
+from event_trace import trace
 
 log = logging.getLogger(__name__)
 
@@ -439,6 +440,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     invite_link = f"quiet://{url_prefix}/{invite_code}"
 
     log.info(f"invite.create() invite link created (mode={mode}) with invite_prekey_id={invite_prekey_id[:20]}...")
+
+    # Trace for human-readable event logging
+    trace('invite', mode=mode, inviter_id=peer_shared_id[:12])
 
     return (invite_id, invite_link, invite_link_data)
 
