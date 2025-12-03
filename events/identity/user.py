@@ -290,8 +290,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     network_id, network_private_key = network.create(
         peer_id=peer_id,
         t_ms=t_ms + 10,
-        db=db,
-        name=network_name
+        db=db
     )
     log.info(f"new_network() created self-signed network: {network_id[:20]}...")
 
