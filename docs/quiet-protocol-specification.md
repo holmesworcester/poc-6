@@ -145,7 +145,7 @@ The all_users group is special: it's **signed by `network_id`** rather than `pee
 
 When creating invites, admins find the all_users group via signature query and share its key to the invite prekey.
 
-Note that network and admin events remain blocked until Joining admits the first user via an invite; Alice must invite herself and join to complete network creation. Accepting an invitation link forces the `network_id` named in the invite to be valid; this validity cascades to the other events.
+Note that network and admin events remain blocked until Joining admits the first user via an invite; Alice must invite herself and join to complete network creation. The `invite_accepted` event is the trust anchor that forces `network_id` to be valid, triggering the cascade that unblocks dependent events. See [Invite Acceptance and Trust Anchoring](#invite-acceptance-and-trust-anchoring).
 
 ## Invitation
 
@@ -163,6 +163,7 @@ Note: `invite.mode` is one of `user` | `peer` and determines authorization and d
 - Signed_by: `user_id` (first) | linked `peer_shared_id` of that user (ongoing).
 
 Invite links include the `invite_id` and private material needed by the joiner; group encryption prekeys (`group_prekey_id` with corresponding private key, and `group_prekey_shared_id` for sync) can be referenced here as needed (see: [Event-layer Encryption](#event-layer-encryption)).
+
 ## Joining (Graph)
 
 Joining uses a uniform invite → prove-invite model with signatures over entire events:
@@ -214,7 +215,7 @@ A critical insight is that **first-peer joining and device linking follow identi
 
 3. **Network creation bootstrap** uses the same mechanism:
    - Creator links their initial device via `peer_shared.join()`
-   - `invite_accepted` event unblocks `network_id` valid → cascade unblocks dependent events
+   - `invite_accepted.project()` marks `network_id` valid → cascade unblocks dependent events (see [Invite Acceptance and Trust Anchoring](#invite-acceptance-and-trust-anchoring))
    - All subsequent user joins use the same `invite(mode=peer)` → `peer_shared` flow
 
 This design eliminates separate "link" events or "link invites" - peer linking is fundamental to the protocol, not a special case.
@@ -328,24 +329,101 @@ Users often work on multiple devices (e.g., phone and laptop) and must link them
 
 Identical to Link Peer in [Joining (Graph)](#joining-graph): the new device publishes `peer_shared` signed_by = `invite_id` (signature over its canonical body).
 
-**Execution** (via `peer_shared.join()`):
-1. Validate `peer_invite` is valid and references correct `user_id` <!-- i think this is wrong. you won't have an invite event until you sync! in joining you just ref it in your peer_shared-->
+This flow is **identical for first device and later devices**. For network join, the `user` event is created first via `invite(mode=user)`, then this flow links the first device. For device linking, the user already exists.
+
+**Execution**:
+1. Create `invite_accepted` event containing the **complete raw invite link data**
 2. Create `peer_shared` event signed by `peer_invite_private_key` (from invite link)
-3. Create `invite_accepted` event to event-source the secrets <!-- it's also important for invite_accepted to force-unblock the `network_id` and make it valid etc as currently happens when a new user joins-->
-4. Project `peer_shared` immediately to establish the peer↔user link <!-- i'm not sure this is clear. nothing exceptional should happen here, i'm fairly sure. this is just normal event creation -->
-5. When `peer_shared` projects, it triggers projection of `invite_prekey_id` (if provided) via unblock cascade <!-- I don't think this makes sense. unblock cascade is triggered by the forced validity of network_id, see how user joining works.-->
-6. Dependent `group_key_shared` events unblock once the prekey is valid 
+3. All events project normally; `invite_accepted.project()` establishes the trust anchor (see below)
 
 **Projection**: Projectors verify the `peer_shared` signature with `invite_pubkey` from the invite. On success, they:
 - Insert `peers_shared(peer_shared_id, public_key, ...)`
 - Insert `linked_peers(user_id, peer_shared_id)` — establishing the peer↔user relationship
 - Update `peer_self` with the established `user_id`
 
+## Invite Acceptance and Trust Anchoring
+
+The `invite_accepted` event is the **trust anchor** for joining. It captures the complete out-of-band invite link data and triggers the validity cascade that makes the network's event graph accessible.
+
+### Event Structure
+
+The `invite_accepted` event stores the **raw invite link data** as received:
+
+```
+invite_accepted = {
+    type: 'invite_accepted',
+    invite_link_data: {
+        invite_blob,              // The signed invite event (contains network_id, group_id, etc.)
+        invite_private_key,       // Private key for invite proof and prekey decryption
+        invite_prekey_id,         // Crypto hint for group_key_shared decryption
+        inviter_peer_shared_blob, // Inviter's peer_shared for immediate projection
+        inviter_transit_prekey,   // For initial sync connection
+        network_id,               // Which network we're joining
+        // ... other invite link fields
+    },
+    signed_by: peer_id,           // Local peer accepting the invite
+    created_at: t_ms
+}
+```
+
+This design follows the event-sourcing principle: **events are immutable facts containing raw input; projectors interpret those facts into state.**
+
+### Projection and Trust Cascade
+
+When `invite_accepted.project()` runs, it:
+
+1. **Parses the raw invite link data** — Parsed here in the projector, not by frontend. Returns error if malformed.
+
+2. **Marks `network_id` as valid** — This is the trust anchor. By accepting the invite, the peer trusts this network.
+
+3. **Creates the invite prekey from key material** — The invite link contains `invite_private_key` and `invite_prekey_id`. Rather than manual table insertion, projection creates a proper `group_prekey` event from this material. If `group_prekey` event IDs are deterministic from key content, this produces the same `prekey_id` and naturally cascades validity.
+
+4. **Cascades unblock** — Events blocked on `network_id` or `invite_prekey_id` now unblock:
+   - `invite`, `group`, `channel`, `admin` events signed by `network_id`
+   - `group_key_shared` events sealed to `invite_prekey_id`
+   - These cascade further to unblock messages, members, etc.
+
+### Why This Architecture
+
+1. **Complete reprojection**: Drop all tables, replay events from store, get identical state. The `invite_accepted` event contains everything needed — no external dependencies on invite link availability.
+
+2. **Single source of truth**: All "what does accepting mean" logic lives in `invite_accepted.project()`, not scattered across join functions.
+
+3. **Future-proof**: If invite link format changes, old events still contain their original data.
+
+4. **Natural cascade**: Uses the standard blocking/unblocking mechanism rather than manual `notify_event_valid()` calls.
+
+### Deterministic Key Event IDs
+
+For the cascade to work naturally, local key events (`group_key` and `group_prekey`) have IDs that are deterministic from key material alone:
+
+```
+group_prekey = {
+    type: 'group_prekey',
+    public_key: ...,
+    private_key: ...
+    // NO peer_id, NO timestamp — pure key container
+}
+prekey_id = hash(canonical(group_prekey))
+
+group_key = {
+    type: 'group_key',
+    key: ...
+    // NO peer_id, NO timestamp — pure key container
+}
+key_id = hash(canonical(group_key))
+```
+
+This ensures:
+
+1. **Prekey cascade**: Creating a `group_prekey` from the same key material (whether by inviter or joiner) produces the same `prekey_id`. When `invite_accepted.project()` creates this prekey, it matches the `invite_prekey_id` from the invite, and `group_key_shared` events sealed to that ID naturally unblock.
+
+2. **Key consistency**: When `group_key_shared` events are synced, recipients can recreate the same `group_key` event from the shared key material, producing the same `key_id`. This ensures all peers reference messages with the same `key_id`.
+
 ## Validation
 
 - `invite(mode=peer)` must reference `network_id`, `user_id`, and `invite_pubkey`. It is authorized when signed_by a `peer_shared_id` that is already linked to that `user_id`.
-- `peer_shared` is signed_by = `invite_id`; projectors load the invite and verify the signature with `invite_pubkey`. On success, they establish the peer↔user link.  
-- `invite_prekey_id` (if present) is a blocking dependency: the prekey must project before dependent `group_key_shared` events can project. <!-- this is wrong and does not make sense-->
+- `peer_shared` is signed_by = `invite_id`; projectors load the invite and verify the signature with `invite_pubkey`. On success, they establish the peer↔user link.
 - Any linked peer can subsequently publish updates for that `user_id` (e.g., profile updates) subject to normal validation.
 # Encryption
 
@@ -483,44 +561,70 @@ We choose to wait until Post Quantum support exists in libsodium, but the design
 
 # Connection
 
-To share data between peers, peers must first connect to each other. A "connection" is the successful receipt of a valid `connect` event by Bob from Alice.
+To share data between peers, peers must first connect to each other. A "connection" is a bidirectional channel established via a two-way handshake.
 
-`connect` events are [`recipient_peer_shared_id`, `ciphertext`] where `ciphertext` is the following, sealed to the recipient’s `transit_prekey_shared.pubkey` identified by `transit_prekey_id` (a soon-to-expire transit prekey):
+## Handshake Protocol
 
-* `transit_key` - a secret used for all subsequent symmetric encryption
-* `created_at_ms` - sender’s monotonic timestamp for this connection.
-* `ttl_ms` - the time in ms the connection expires. Recipients MUST enforce a configured maximum connection duration (`max_connection_ttl_ms`); do not blindly trust sender-provided values. Either clamp the effective expiry to `min(created_at_ms + ttl_ms, created_at_ms + max_connection_ttl_ms)` or reject connections exceeding the cap.
-* `created_by` - the sender's `peer_shared_id`
-* `invite_id` - the `invite` the user joined with
-* `transit_prekey_id` - id of the recipient’s `transit_prekey_shared` that this connection targets (binds the message to the advertised address/key from the invite link). Use `transit_prekey`/`transit_prekey_shared` naming consistently with `group_prekey`/`group_prekey_shared`.
-* `sig_invite` - signature by the `invite_private_key` over the canonical connection body (excluding signature fields); proves possession of the invite.
-* `sig_peer` - signature by the sender’s peer private key (corresponding to `peer_shared.pubkey`) over the same canonical connection body (excluding signature fields); proves possession of the peer key.
+**Step 1: Connect (Bob → Alice)**
 
-Verification (dual‑proof): accept the `connect` if either signature validates against currently known state:
-- If the recipient has the `invite` but not the sender’s `peer_shared`, `sig_invite` authenticates the sender.
-- If the recipient has the sender’s `peer_shared` but not (or no longer trusts) the `invite` (expired/removed), `sig_peer` authenticates the sender.
-- If both states are present, either (or both) may validate. For CPU efficiency, attempt `sig_peer` verification first (typical during steady state), then fall back to `sig_invite` if `peer_shared` is unknown.
+Bob sends `sync_connect` to Alice, sealed to Alice's `transit_prekey_shared`:
 
-Canonicalization: both signatures cover the canonical connection body with signature fields omitted. Include time fields (`created_at_ms`, `ttl_ms`) and identifiers (`invite_id`, `created_by`, `transit_prekey_id`, and optionally `network_id`) so tampering breaks signatures. This avoids circularity with the event id and provides natural replay protection in combination with `connection_id`.
+* `transit_key` - symmetric key for Alice → Bob communication
+* `created_at_ms`, `ttl_ms` - timing and expiry
+* `signed_by` - either `invite_id` (new joiner) or `peer_shared_id` (established peer)
+* `sig` - signature by the corresponding private key
 
-Upon validation, Bob stores this data in a `connections` table along with the `origin_ip` and `origin_port` of the message. (We don't include ip and port in the message because many peers will not know their public ip and port.)
+This unified `signed_by` pattern matches other events in the protocol — the signer type determines which key to verify with.
 
-The `connection_id` serves as a nonce. Replayed connection events are naturally filtered as duplicates and do not update address information. Enforce expiry at acceptance time: accept only if `now <= created_at_ms + ttl_ms + skew_ms`.
+**Step 2: Acknowledge (Alice → Bob)**
 
-These `connection` events are stored but they are not shared, as they would be undecryptable by any other peer.
+Alice validates the connect (see Verification below), then sends `sync_connect_ack` **wrapped to Bob's transit_key**:
 
-Peers periodically send connection requests to the latest address they know about for all peers, including the address in the invite link.
+* `transit_key` - symmetric key for Bob → Alice communication
+* `created_at_ms`, `ttl_ms` - timing and expiry
 
-Peers send more frequent connection requests to peers they have recently received sync requests from (see: [Sync](#sync))
+The ack requires no signature — Bob authenticates it implicitly: he sent to Alice's prekey, so whoever decrypted and responded must possess Alice's prekey private key.
 
-Connections give us:
+**Result:**
+- Alice has `bob_transit_key` → uses it to send to Bob
+- Bob has `alice_transit_key` → uses it to send to Alice
+- Bidirectional channel established
 
-- A set of recently online peers with their public IP and ports, including recently-invited online peers whose peer information we do not yet have. 
-- A periodically-replenished set of peers to pursue syncing with
-- A set of peers to maintain holepunches with (see: [Hole Punching](#hole-punching)) 
-- Transit secrets private to each pair that we can use for syncing
-- Forward secrecy for transit, because the transit prekeys (`transit_prekey_shared`) the transit secrets were encrypted to will be purged soon
-- Resistance to replay attacks (nonce)
+## Verification (Connect only)
+
+Verify the `sig` using the public key for `signed_by`:
+- **`signed_by: invite_id`** → verify with `invite_pubkey` from the invite event
+- **`signed_by: peer_shared_id`** → verify with `public_key` from the peer_shared event
+
+The ack needs no verification — if Bob can decrypt it, it came from whoever received his connect (authenticated by Alice's transit_prekey).
+
+## Connection Table
+
+Upon successful handshake, store:
+
+```
+connections (
+    peer_shared_id,      -- who (may be "unknown" initially for bootstrap)
+    their_transit_key,   -- key to send TO them
+    origin_ip, origin_port,
+    last_seen_ms, ttl_ms
+)
+```
+
+## Lifecycle
+
+- Peers attempt handshakes with known peers on a regular cadence
+- Connections expire after `ttl_ms` and must be re-established
+- Replayed connect events are filtered as duplicates (nonce via `created_at_ms`)
+- Enforce expiry at acceptance: `now <= created_at_ms + ttl_ms + skew_ms`
+
+## What Connections Provide
+
+- Bidirectional communication channels decoupled from DAG state
+- A set of recently online peers with their addresses
+- Transit secrets private to each pair for sync
+- Forward secrecy (transit prekeys are purged periodically)
+- Bootstrap connectivity before peer_shared events have synced
 
 # Sync 
 
@@ -821,10 +925,10 @@ The following events use JSON format for storage and event-sourcing. They are ca
 
 | Type | JSON Fields | Shareable | Encrypted | Description |
 |------|-------------|-----------|-----------|-------------|
-| **group_key** | `type`, `key`, `signed_by`, `created_at` | No | No | Local symmetric key for group encryption |
+| **group_key** | `type`, `key` | No | No | Local symmetric key for group encryption. Event ID is deterministic from key material only. See [Deterministic Key Event IDs](#deterministic-key-event-ids). |
 | **group_key_shared** | `type`, `key_id`, `symmetric_key`, `signed_by`, `created_at` | Yes | Wrapped | Symmetric key sealed to recipient's prekey |
 | **group_member** | `type`, `group_id`, `user_id`, `added_by`, `admin_grant`?, `signed_by`, `created_at` | Yes | Yes | Group membership grant (replaces spec's `grant`) |
-| **group_prekey** | `type`, `public_key`, `private_key`, `owner_peer_id`, `created_at` | No | No | Local prekey for receiving sealed keys |
+| **group_prekey** | `type`, `public_key`, `private_key` | No | No | Local prekey for receiving sealed keys. Event ID is deterministic from key material only. See [Deterministic Key Event IDs](#deterministic-key-event-ids). |
 | **group_prekey_shared** | `type`, `group_prekey_id`, `peer_id`, `public_key`, `signed_by`, `created_at` | Yes | No | Public prekey shared for key sealing |
 
 ###### Content Events
@@ -845,8 +949,9 @@ The following events use JSON format for storage and event-sourcing. They are ca
 | **network_name_update** | `type`, `network_id`, `name`, `key_id`, `global_count`, `signed_by`, `created_at` | Yes | Yes | Encrypted network display name |
 | **observed_address** | `type`, `observed_peer_id`, `observed_by_peer_id`, `ip`, `port`, `created_at` | Yes | No | Peer observes another peer's endpoint |
 | **self_address** | `type`, `peer_id`, `signed_by`, `ip`, `port`, `created_at` | Yes | No | Peer announces own endpoint |
-| **invite_accepted** | `type`, `invite_id`, `invite_prekey_id`, `invite_private_key`, `signed_by`, `created_at` | No | No | Local record of invite acceptance; stores out-of-band data |
-| **sync_connect** | `type`, `peer_id`, `signed_by`, `address`, `port`, `response_transit_key_id`, `response_transit_key`, `invite_id`?, `invite_signature`?, `created_at` | No | Wrapped | Connection request with symmetric key for replies |
+| **invite_accepted** | `type`, `invite_link_data` (complete invite link), `signed_by`, `created_at` | No | No | Trust anchor for joining; contains raw invite link data. Projection marks `network_id` valid and triggers cascade. See [Invite Acceptance and Trust Anchoring](#invite-acceptance-and-trust-anchoring). |
+| **sync_connect** | `type`, `transit_key`, `signed_by` (invite_id or peer_shared_id), `sig`, `created_at`, `ttl_ms` | No | Wrapped | Connection handshake step 1; includes symmetric key for reverse direction. See [Connection](#connection). |
+| **sync_connect_ack** | `type`, `transit_key`, `created_at`, `ttl_ms` | No | Wrapped | Connection handshake step 2; no signature needed (implicit auth via decryption). See [Connection](#connection). |
 | **transit_key** | `type`, `key`, `signed_by`, `created_at` | No | No | Ephemeral symmetric key for sync responses |
 | **transit_prekey** | `type`, `public_key`, `private_key`, `signed_by`, `created_at` | No | No | Local prekey for receiving sync requests |
 | **transit_prekey_shared** | `type`, `transit_prekey_id`, `peer_id`, `public_key`, `signed_by`, `created_at` | Yes | No | Public transit prekey shared for initial sync wrapping |
