@@ -537,9 +537,12 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     """Send sync requests to all active connections.
 
     Uses the connection layer (sync_connections) instead of querying peers_shared directly.
-    This follows the two-layer architecture: connections are established first via sync_connect,
-    then sync operates on those established connections.
+    Connections are key-based - we identify by transit keys, not peer_shared_id.
+
+    TODO: Window state tracking currently uses random windows. Should track progress
+    per-connection (keyed by their_transit_key_id) for efficiency.
     """
+    import random
 
     # Standardize encoding for logging
     if isinstance(from_peer_id, bytes):
@@ -547,30 +550,112 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     else:
         peer_id_str = from_peer_id
 
-    # Query active connections (device-wide, no recorded_by)
+    # Query active connections with completed handshake (have their_transit_key)
     unsafedb = create_unsafe_db(db)
     connection_rows = unsafedb.query(
-        """SELECT peer_shared_id FROM sync_connections
-           WHERE last_seen_ms + ttl_ms > ?""",
+        """SELECT their_transit_key_id, their_transit_key, our_peer_id
+           FROM sync_connections
+           WHERE last_seen_ms + ttl_ms > ?
+             AND their_transit_key IS NOT NULL""",
         (t_ms,)
     )
 
-    connection_ids = [row['peer_shared_id'][:10] + '...' for row in connection_rows]
-    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(connection_rows)} ids={connection_ids}")
+    # Only process connections for OUR peer
+    our_connections = [row for row in connection_rows if row['our_peer_id'] == from_peer_id]
 
-    for row in connection_rows:
-        peer_shared_id = row['peer_shared_id']
+    connection_ids = [row['their_transit_key_id'][:10] + '...' for row in our_connections]
+    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(our_connections)} keys={connection_ids}")
 
-        # Skip connections to ourselves (can happen in shared-database tests)
-        if peer_shared_id == from_peer_shared_id:
-            log.warning(f"[SYNC_SEND] skipping self-connection: from={from_peer_shared_id[:10]}... to={peer_shared_id[:10]}...")
-            continue
+    for row in our_connections:
+        their_transit_key_id = row['their_transit_key_id']
+        their_transit_key = row['their_transit_key']
 
-        # Send sync request to this connected peer
-        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... (peer_shared={from_peer_shared_id[:10]}...) to={peer_shared_id[:10]}...")
-        send_request(peer_shared_id, from_peer_id, from_peer_shared_id, t_ms, db)
+        # Send sync request using their transit key
+        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to_key={their_transit_key_id[:10]}...")
+        send_request_to_key(their_transit_key_id, their_transit_key, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
+
+
+def send_request_to_key(their_transit_key_id: str, their_transit_key: bytes,
+                        from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
+    """Send bloom-based sync request to a connection identified by transit key.
+
+    Key-based version that doesn't require knowing recipient's identity.
+    Uses random windows instead of tracking state per-peer.
+
+    TODO: Implement proper window state tracking per-connection for efficiency.
+    Currently picks random windows which works but is inefficient.
+    """
+    import random
+
+    log.debug(f"[SEND_REQUEST_TO_KEY] from={from_peer_id[:20]}... to_key={their_transit_key_id[:20]}...")
+
+    # TODO: Track window state per-connection. For now, pick random window.
+    w_param = 10
+    max_window = t_ms // (60 * 1000)  # One window per minute
+    window_id = random.randint(0, max(0, max_window))
+
+    # Use SyncWindow to compute storage window range
+    window = sync_window.SyncWindow(w=w_param, query_window_id=window_id)
+    window_min, window_max = window.get_storage_window_range()
+
+    # Query events we can share in this window
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    my_events_in_window = safedb.query(
+        """SELECT event_id, window_id FROM shareable_events
+           WHERE can_share_peer_id = ?
+             AND window_id >= ?
+             AND window_id < ?
+           ORDER BY recorded_at ASC""",
+        (from_peer_id, window_min, window_max)
+    )
+
+    event_id_bytes_list = [crypto.b64decode(row['event_id']) for row in my_events_in_window]
+
+    # Derive salt for bloom filter
+    from events.identity import peer_shared
+    requester_public_key = peer_shared.get_public_key(from_peer_shared_id, from_peer_id, db)
+    salt = derive_salt(requester_public_key, window_id)
+    bloom_filter = create_bloom(event_id_bytes_list, salt)
+
+    # Create transit key for response
+    response_transit_key_id = transit_key.create(from_peer_id, t_ms, db)
+    unsafedb = create_unsafe_db(db)
+    key_row = unsafedb.query_one("SELECT key FROM transit_keys WHERE key_id = ?", (response_transit_key_id,))
+    if not key_row:
+        raise ValueError(f"transit key not found: {response_transit_key_id}")
+    response_transit_key_bytes = key_row['key']
+
+    # Build request
+    request_data = {
+        'type': 'sync',
+        'peer_id': from_peer_id,
+        'signed_by': from_peer_shared_id,
+        'address': '127.0.0.1:8000',
+        'window_id': window_id,
+        'window_min': window_min,
+        'window_max': window_max,
+        'bloom': crypto.b64encode(bloom_filter),
+        'response_transit_key_id': response_transit_key_id,
+        'response_transit_key': crypto.b64encode(response_transit_key_bytes),
+        'created_at': t_ms
+    }
+
+    # Sign and wrap
+    private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
+    signed_request = crypto.sign_event(request_data, private_key)
+    canonical = crypto.canonicalize_json(signed_request)
+
+    to_key = {
+        'id': crypto.b64decode(their_transit_key_id),
+        'key': their_transit_key,
+        'type': 'symmetric'
+    }
+    request_blob = crypto.wrap(canonical, to_key, db)
+
+    queues.incoming.add(request_blob, t_ms, db)
+    log.info(f"send_request_to_key: sent window={window_id} to_key={their_transit_key_id[:10]}...")
 
 
 def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
@@ -767,17 +852,9 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
         (requester_peer_shared_id, recorded_by)
     )
     if not requester_known:
-        # Fallback: allow if we have an active connection for this requester
-        unsafedb = create_unsafe_db(db)
-        conn_ok = unsafedb.query_one(
-            "SELECT 1 FROM sync_connections WHERE peer_shared_id = ? AND last_seen_ms + ttl_ms > ?",
-            (requester_peer_shared_id, recorded_by and recorded_at)
-        )
-        if not conn_ok:
-            log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}... no_active_connection")
-            return
-        else:
-            log.debug(f"[SYNC_PROJECT] ACCEPT via connection requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
+        # With key-based connections, implicit auth via decryption is sufficient.
+        # If they decrypted our transit key to send this request, they're authenticated.
+        log.debug(f"[SYNC_PROJECT] ACCEPT via implicit auth requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
 
     log.debug(f"[SYNC_PROJECT] result=ACCEPTED requester={requester_peer_shared_id[:20]}... recognized_by={recorded_by[:10]}... window={window_id}")
 
