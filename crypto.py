@@ -191,8 +191,10 @@ def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
         log.warning(f"crypto.verify_event() missing signature for event type={event_type}")
         return False
 
-    # Remove signature from dict for verification
-    event_without_sig = {k: v for k, v in event_data.items() if k != 'signature'}
+    # Remove signature and any secondary signatures from dict for verification
+    # invite_signature is added after the main signature in sync_connect events
+    EXCLUDE_FIELDS = {'signature', 'invite_signature'}
+    event_without_sig = {k: v for k, v in event_data.items() if k not in EXCLUDE_FIELDS}
     canonical = canonicalize_json(event_without_sig)
 
     try:
