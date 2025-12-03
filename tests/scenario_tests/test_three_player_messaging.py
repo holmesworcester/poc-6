@@ -15,6 +15,7 @@ import schema
 from events.identity import user, invite, peer
 from events.content import message
 from tests.utils import tick_helper
+import tick
 
 
 def test_three_player_messaging(fresh_db):
@@ -65,22 +66,22 @@ def test_three_player_messaging(fresh_db):
 
     # Check connections BEFORE sync (device-wide table, no per-peer scope)
     print("\n=== Connections BEFORE sync ===")
-    connections_before = db.query("SELECT peer_shared_id FROM sync_connections")
+    connections_before = db.query("SELECT our_transit_key_id FROM sync_connections")
     print(f"Device has {len(connections_before)} connections before sync")
 
-    # Initial sync to converge (need multiple rounds for GKS events to propagate)
+    # Initial sync - run fixed number of ticks
     print("\n=== Initial sync ===")
-    final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=True
-    )
-    print(f"Initial sync completed in {rounds_used} rounds (converged={converged})")
+    for i in range(50):
+        tick.tick(t_ms=4000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
+    final_t_ms = 4000 + 50 * tick_helper.TICK_INTERVAL_MS
+    print(f"Initial sync completed after 50 ticks")
 
     # Check connections AFTER sync (device-wide table, no per-peer scope)
     print("\n=== Connections AFTER sync ===")
-    connections_after = db.query("SELECT peer_shared_id FROM sync_connections")
+    connections_after = db.query("SELECT our_transit_key_id, our_peer_id FROM sync_connections")
     print(f"Device has {len(connections_after)} connections after sync")
     for c in connections_after:
-        print(f"  Connection to peer_shared_id: {c['peer_shared_id'][:20]}...")
+        print(f"  Connection key: {c['our_transit_key_id'][:20]}... for peer: {c['our_peer_id'][:20]}...")
 
     # Assert connections were established (at least 2 - Alice<->Bob bidirectional)
     assert len(connections_after) >= 1, "At least one connection should be established after sync"

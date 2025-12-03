@@ -85,12 +85,14 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
         bootstrap_peer_ids = [row['peer_shared_id'] for row in bootstrap_rows]
         log.warning(f"[SYNC_CONNECT_BOOTSTRAP] peer={peer_id[:10]}... bootstrap_rows={len(bootstrap_rows)} ids={[pid[:10]+'...' if pid else 'NULL' for pid in bootstrap_peer_ids]}")
 
-        # Query existing connections for this peer (active, not expired, have their_transit_key)
-        # These are established connections we can use to send
-        connection_rows = unsafedb.query(
-            "SELECT our_transit_key_id, their_transit_key_id, their_transit_key FROM sync_connections WHERE our_peer_id = ? AND their_transit_key IS NOT NULL AND last_seen_ms + ttl_ms > ?",
+        # Query existing connections for this peer (active, not expired)
+        # Include connections waiting for ack (their_transit_key IS NULL) to avoid sending duplicates
+        all_connection_rows = unsafedb.query(
+            "SELECT our_transit_key_id, their_transit_key_id, their_transit_key FROM sync_connections WHERE our_peer_id = ? AND last_seen_ms + ttl_ms > ?",
             (peer_id, t_ms)
         )
+        # Completed connections (have their_transit_key) can be refreshed
+        connection_rows = [c for c in all_connection_rows if c['their_transit_key'] is not None]
 
         # Query linked peers (other devices of same user - get our user_id then find all peers with that user_id)
         our_user_id = None
@@ -122,9 +124,11 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
             if row['peer_shared_id']:
                 known_peer_shared_ids.add(row['peer_shared_id'])
 
-        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10] if peer_shared_id else 'NONE'}... known_peers={len(known_peer_shared_ids)} existing_connections={len(connection_rows)}")
+        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10] if peer_shared_id else 'NONE'}... known_peers={len(known_peer_shared_ids)} existing_connections={len(all_connection_rows)} completed={len(connection_rows)}")
 
         # 1. Refresh existing connections (use their_transit_key directly)
+        # Track which connections we've refreshed so we don't also send() to them
+        refreshed_connections = set()
         for conn in connection_rows:
             try:
                 send_to_connection(
@@ -134,24 +138,31 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
                     t_ms=t_ms,
                     db=db
                 )
+                # Note: We can't easily track by peer_shared_id since connections are key-based
+                # But existing connections are already being refreshed, so we don't need to send() new ones
             except Exception as e:
                 log.warning(f"[SYNC_CONNECT_REFRESH_EXCEPTION] peer={peer_id[:10]}... error={e}")
 
-        # 2. Send to known peers (use transit_prekey for initial connection)
-        for to_peer_shared_id in known_peer_shared_ids:
-            # Skip self
-            if peer_shared_id and to_peer_shared_id == peer_shared_id:
-                continue
+        # 2. Send to known peers ONLY if we don't have existing connections
+        # With key-based connections, skip send() if we have any active connections to avoid accumulating
+        # Check all_connection_rows (includes pending connections waiting for ack)
+        if len(all_connection_rows) > 0:
+            log.warning(f"[SYNC_CONNECT_SKIP_SEND] peer={peer_id[:10]}... already has {len(all_connection_rows)} connections, skipping new sends")
+        else:
+            for to_peer_shared_id in known_peer_shared_ids:
+                # Skip self
+                if peer_shared_id and to_peer_shared_id == peer_shared_id:
+                    continue
 
-            try:
-                send(
-                    to_peer_shared_id=to_peer_shared_id,
-                    from_peer_id=peer_id,
-                    t_ms=t_ms,
-                    db=db
-                )
-            except Exception as e:
-                log.warning(f"[SYNC_CONNECT_EXCEPTION] peer={peer_id[:10]}... to_peer={to_peer_shared_id[:10]}... error={e}")
+                try:
+                    send(
+                        to_peer_shared_id=to_peer_shared_id,
+                        from_peer_id=peer_id,
+                        t_ms=t_ms,
+                        db=db
+                    )
+                except Exception as e:
+                    log.warning(f"[SYNC_CONNECT_EXCEPTION] peer={peer_id[:10]}... to_peer={to_peer_shared_id[:10]}... error={e}")
 
 
 def send_to_connection(their_transit_key_id: str, their_transit_key: bytes, from_peer_id: str, t_ms: int, db: Any) -> None:
