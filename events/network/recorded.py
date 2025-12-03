@@ -137,13 +137,15 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # Event types with NO dependencies (root events or self-signed)
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
-        'peer_shared',      # Self-signed, peer_id is foreign local
-        'sync_connect',     # Ephemeral, auth handled in projection
+        'sync_connect',     # Ephemeral, auth handled in projection (invite signature)
+        'sync_connect_ack', # Ephemeral, auth via implicit decryption
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
         'transit_key',      # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
+    # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
+    # and must wait for that invite to be valid before projecting
 
     if event_type in NO_DEPS_TYPES:
         return []
@@ -155,8 +157,10 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
     # For user events, check invite (which contains group/channel stubs) not group/channel directly
+    # Note: peer_id is NOT a dependency - it's metadata about which local peer created this user
+    # The cryptographic trust comes from signed_by (the invite)
     elif event_type == 'user':
-        dep_fields = ['signed_by', 'peer_id', 'invite_id']
+        dep_fields = ['signed_by', 'invite_id']
     else:
         # DEFAULT: Find all fields ending in '_id' plus known reference fields
         dep_fields = []

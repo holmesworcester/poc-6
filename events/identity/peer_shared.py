@@ -184,11 +184,7 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         # Self-signed peer_shared: skip peer_self update (bootstrap only, not canonical)
         log.info(f"peer_shared.project() skipping peer_self update for self-signed peer_shared (no user_id)")
 
-    # Mark as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (peer_shared_id, recorded_by)
-    )
+    # NOTE: validity is handled by recorded.project() after successful projection
 
     # For invite-based peer_shared (device linking): Seed group keys for all groups this user belongs to
     # This ensures new devices get keys for existing groups created after the invite
@@ -374,11 +370,16 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
 
     # 2. Create invite_accepted to event-source the secrets (triggers notify_event_valid cascade)
+    # Build invite_link_data for peer invites (mode=peer) - no network_id since this is device linking
     from events.identity import invite_accepted
+    peer_invite_link_data = {
+        'invite_id': peer_invite_id,
+        'invite_prekey_id': prekey_id,
+        'invite_private_key': crypto.b64encode(peer_invite_private_key),
+        # Peer invites don't have network_id - they link devices to existing users
+    }
     invite_accepted_id = invite_accepted.create(
-        invite_id=peer_invite_id,
-        invite_prekey_id=prekey_id,
-        invite_private_key=peer_invite_private_key,
+        invite_link_data=peer_invite_link_data,
         peer_id=peer_id,
         t_ms=t_ms + 1,
         db=db

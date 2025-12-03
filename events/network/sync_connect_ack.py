@@ -48,7 +48,6 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Extract for_transit_key_id (the key ID we sent, echoed back for secure matching)
     for_transit_key_id = event_data.get('for_transit_key_id')
-    from_peer_shared_id = event_data.get('from_peer_shared_id')  # For logging only, not trusted
     transit_key_id = event_data.get('transit_key_id')
     transit_key_b64 = event_data.get('transit_key')
     transit_key_bytes = crypto.b64decode(transit_key_b64) if transit_key_b64 else None
@@ -82,6 +81,6 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         peer_shared_id
     ))
 
-    log.warning(f"[SYNC_CONNECT_ACK_RECEIVED] from={from_peer_shared_id[:10] if from_peer_shared_id else '?'}... matched_peer={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... UPDATING_CONNECTION")
+    log.warning(f"[SYNC_CONNECT_ACK_RECEIVED] matched_peer={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... UPDATING_CONNECTION")
 
     return event_id

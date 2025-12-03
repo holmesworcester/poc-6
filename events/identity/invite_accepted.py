@@ -7,6 +7,7 @@ EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any
+import base64
 import json
 import logging
 import crypto
@@ -16,17 +17,26 @@ from db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
-def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
-           peer_id: str, t_ms: int, db: Any) -> str:
+def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
     """Create local invite_accepted event (not shareable).
 
-    This event captures the invite acceptance action and stores ALL
+    This event captures the invite acceptance action and stores
     out-of-band data from the invite link for event-sourcing (reprojection).
 
+    By storing the invite_link_data, we ensure that:
+    - Full reprojection works without the original invite link
+    - The projection system has all necessary data to restore state
+    - The trust anchor (network_id) can be marked valid naturally
+
     Args:
-        invite_id: The invite event being accepted
-        invite_prekey_id: Deterministic prekey ID for storing invite proof keypair
-        invite_private_key: Private key for GKS decryption + invite proof signature
+        invite_link_data: Invite link data dictionary containing:
+            - invite_id: ID of the invite event (syncs separately)
+            - invite_private_key: For prekey and signing
+            - invite_prekey_id: Crypto hint for prekey ID
+            - network_id: Network being joined (trust anchor)
+            - inviter_peer_shared_id: Inviter's peer_shared_id
+            - inviter_peer_shared_blob: Inviter's peer_shared blob (base64 urlsafe)
+            - ip/port: Inviter's address for connection
         peer_id: Bob's peer_id (local)
         t_ms: Timestamp
         db: Database connection
@@ -34,13 +44,11 @@ def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
     Returns:
         invite_accepted_id: Event ID
     """
-    log.info(f"invite_accepted.create() for invite={invite_id}, peer={peer_id}")
+    log.info(f"invite_accepted.create() for invite={invite_link_data['invite_id']}, peer={peer_id}")
 
     event_data = {
         'type': 'invite_accepted',
-        'invite_id': invite_id,
-        'invite_prekey_id': invite_prekey_id,
-        'invite_private_key': crypto.b64encode(invite_private_key),
+        'invite_link_data': invite_link_data,
         'signed_by': peer_id,
         'created_at': t_ms
     }
@@ -55,15 +63,20 @@ def create(invite_id: str, invite_prekey_id: str, invite_private_key: bytes,
 
 
 def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project invite_accepted: restore ALL invite link data for event-sourcing.
+    """Project invite_accepted: establish trust anchor for network join.
 
-    This restores the invite_transit_key from the invite link and enables
-    full reprojection without the original invite link.
+    This is the trust anchor for the network join. It:
+    1. Marks network_id as valid (TRUST ANCHOR) - unblocks bootstrap invite
+    2. Stores inviter's peer_shared from link data (enabling sync)
+    3. Stores connection metadata (ip/port)
+    4. The cascade then naturally flows: network -> invite -> user -> etc.
+
+    The invite itself syncs normally like all other events.
 
     Returns:
         invite_accepted_id on success, None on failure
     """
-    log.warning(f"[INVITE_ACCEPTED_PROJECT_ENTRY] id={invite_accepted_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    log.info(f"[INVITE_ACCEPTED_PROJECT] id={invite_accepted_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -76,102 +89,86 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
 
     event_data = crypto.parse_json(blob)
 
-    # Extract invite proof keypair data from invite_accepted and invite events
-    invite_id = event_data['invite_id']
-    invite_prekey_id = event_data['invite_prekey_id']  # From invite link
-    invite_private_key = crypto.b64decode(event_data['invite_private_key'])
+    # Extract invite link data
+    invite_link_data = event_data['invite_link_data']
 
-    # Get invite event to extract public key
-    invite_blob = store.get(invite_id, unsafedb)
-    if not invite_blob:
-        log.warning(f"invite_accepted.project() invite blob not found: {invite_id}")
-        return None
+    invite_id = invite_link_data['invite_id']
+    network_id = invite_link_data.get('network_id')
+    inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
 
-    invite_event = crypto.parse_json(invite_blob)
-    log.info(f"[INVITE_ACCEPTED_PROJECT] invite event keys={list(invite_event.keys())}")
-    invite_public_key = crypto.b64decode(invite_event['invite_pubkey'])
-
-    # Store invite proof keypair in group_prekeys table (for GKS decryption)
-    # Use invite_prekey_id as prekey_id (matches hint in GKS blob)
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_prekeys
-           (prekey_id, owner_peer_id, public_key, private_key, created_at, recorded_by)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (
-            invite_prekey_id,  # Deterministic prekey ID (matches GKS hint)
-            recorded_by,
-            invite_public_key,
-            invite_private_key,
-            event_data['created_at'],
-            recorded_by
-        )
-    )
-
-    log.warning(f"[INVITE_ACCEPTED_PROJECT] stored invite_private_key prekey_id={invite_prekey_id[:20]}... for peer {recorded_by[:20]}...")
-
-    # Unblock events that were waiting for this prekey (e.g., group_key_shared events sealed to this invite)
-    import queues
+    # =========================================================================
+    # 1. MARK NETWORK_ID AS VALID (TRUST ANCHOR)
+    # This is the cascade trigger - unblocks events waiting on network_id
+    # =========================================================================
     from events.network import recorded as recorded_module
-    unblocked_ids = queues.blocked.notify_event_valid(invite_prekey_id, recorded_by, safedb)
-    if unblocked_ids:
-        log.info(f"invite_accepted.project() unblocked {len(unblocked_ids)} events waiting for invite prekey")
-        recorded_module.project_ids(unblocked_ids, db)
+    import queues
 
-    # Mark invite_accepted as valid
+    if network_id:
+        safedb.execute(
+            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+            (network_id, recorded_by)
+        )
+        log.info(f"[INVITE_ACCEPTED_PROJECT] marked network_id={network_id[:20]}... as valid (TRUST ANCHOR)")
+
+        # Unblock events that were waiting for network_id
+        # This triggers the cascade: network -> bootstrap invite -> user -> etc.
+        unblocked_by_network = queues.blocked.notify_event_valid(network_id, recorded_by, safedb)
+        if unblocked_by_network:
+            log.info(f"invite_accepted.project() unblocked {len(unblocked_by_network)} events waiting for network_id")
+            recorded_module.project_ids(unblocked_by_network, db)
+
+    # =========================================================================
+    # 2. STORE INVITER'S PEER_SHARED FROM LINK DATA
+    # This allows Bob to know Alice for sync purposes
+    # =========================================================================
+    inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
+
+    if inviter_peer_shared_blob_b64 and inviter_peer_shared_id:
+        # Decode from urlsafe base64
+        padding = 4 - len(inviter_peer_shared_blob_b64) % 4
+        if padding != 4:
+            inviter_peer_shared_blob_b64 += '=' * padding
+        inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64)
+
+        # Store the inviter's peer_shared blob
+        stored_ps_id = store.blob(inviter_peer_shared_blob, recorded_at, True, unsafedb)
+        log.info(f"[INVITE_ACCEPTED_PROJECT] stored inviter peer_shared blob, id={stored_ps_id[:20]}...")
+
+        # Create recorded wrapper for the inviter's peer_shared so it can be projected
+        ps_recorded_id = recorded_module.create(stored_ps_id, recorded_by, recorded_at, db, return_dupes=False)
+        log.info(f"[INVITE_ACCEPTED_PROJECT] created recorded wrapper for inviter peer_shared")
+
+    # =========================================================================
+    # 3. MARK INVITE_ACCEPTED AS VALID
+    # =========================================================================
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (invite_accepted_id, recorded_by)
     )
 
-    # Mark the invite itself as valid (restores out-of-band trust from invite link)
-    # This is necessary for reprojection since the invite link is not available
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (invite_id, recorded_by)
-    )
-
-    # Store inviter metadata in invite_accepteds table BEFORE bootstrap check
-    # This table entry signals that bootstrap has been initiated
-    # Get inviter's peer_shared_id from invite event
-    inviter_peer_shared_id = invite_event.get('inviter_peer_shared_id') or invite_event.get('signed_by')
-    inviter_transit_prekey_id = invite_event.get('inviter_transit_prekey_id')
-    inviter_transit_prekey_public_key = None
-
-    if inviter_transit_prekey_id:
-        inviter_transit_prekey_public_key = crypto.b64decode(
-            invite_event.get('inviter_transit_prekey_public_key', '')
-        )
-
-    # Extract address/port from invite event (for bootstrap connections)
-    # These fields allow send_connect_to_all() to connect to inviter before sync completes
-    address = invite_event.get('address')
-    port = invite_event.get('port')
+    # =========================================================================
+    # 4. STORE CONNECTION METADATA IN invite_accepteds TABLE
+    # =========================================================================
+    address = invite_link_data.get('ip')
+    port = invite_link_data.get('port')
+    invite_private_key_b64 = invite_link_data.get('invite_private_key')
+    invite_private_key = crypto.b64decode(invite_private_key_b64) if invite_private_key_b64 else None
 
     safedb.execute("""
         INSERT OR IGNORE INTO invite_accepteds
-        (invite_id, inviter_peer_shared_id, address, port,
-         inviter_transit_prekey_id, inviter_transit_prekey_public_key,
-         created_at, recorded_by)
+        (invite_id, inviter_peer_shared_id, address, port, network_id,
+         invite_private_key, created_at, recorded_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         invite_id,
         inviter_peer_shared_id,
-        address,  # Now extracted from invite event
-        port,     # Now extracted from invite event
-        inviter_transit_prekey_id,
-        inviter_transit_prekey_public_key,
+        address,
+        port,
+        network_id,
+        invite_private_key,
         event_data['created_at'],
         recorded_by
     ))
-
-    # Bootstrap invites use signed_by=network_id which doesn't need artificial blocking
-    # Admin privileges are granted via admin event created in new_network()
-
-    # Unblock events waiting for the invite
-    unblocked_by_invite = queues.blocked.notify_event_valid(invite_id, recorded_by, safedb)
-    if unblocked_by_invite:
-        log.info(f"invite_accepted.project() unblocked {len(unblocked_by_invite)} events waiting for invite")
-        recorded_module.project_ids(unblocked_by_invite, db)
 
     log.info(f"invite_accepted.project() completed for {recorded_by}")
     return invite_accepted_id

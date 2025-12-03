@@ -253,7 +253,7 @@ def test_two_way_handshake(fresh_db):
 
     # Step 1: Bob sends sync_connect to Alice
     print("\n=== Step 1: Bob sends sync_connect to Alice ===")
-    sync_connect.send_connect(
+    sync_connect.send(
         to_peer_shared_id=alice_peer_shared_id,
         from_peer_id=bob_peer_id,
         from_peer_shared_id=bob_peer_shared_id,
@@ -292,7 +292,7 @@ def test_two_way_handshake(fresh_db):
 
     # Let's also have Alice send a connect to Bob
     print("\n=== Step 4: Alice sends sync_connect to Bob ===")
-    sync_connect.send_connect(
+    sync_connect.send(
         to_peer_shared_id=bob_peer_shared_id,
         from_peer_id=alice_peer_id,
         from_peer_shared_id=alice_peer_shared_id,

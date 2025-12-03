@@ -6,7 +6,7 @@ This module handles two-way connection handshake before sync. Connections provid
 - Address discovery for NAT traversal
 
 Flow:
-1. send_connect_to_all() → send_connect() for each known peer
+1. send_connect_to_all() → send() for each known peer
 2. Connect event contains our transit_key, wrapped with recipient's transit_prekey
 3. Recipient's project() validates, stores connection, and sends sync_connect_ack back
 4. Ack contains their transit_key (wrapped to our key), allowing bidirectional sync
@@ -146,7 +146,7 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
                 continue
 
             try:
-                send_connect(
+                send(
                     to_peer_shared_id=to_peer_shared_id,
                     from_peer_id=peer_id,
                     from_peer_shared_id=peer_shared_id,
@@ -158,15 +158,15 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
                 log.warning(f"[SYNC_CONNECT_EXCEPTION] peer={peer_id[:10]}... to_peer={to_peer_shared_id[:10]}... error={e}")
 
 
-def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str,
-                 invite_id: str | None, t_ms: int, db: Any) -> None:
+def send(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str,
+         invite_id: str | None, t_ms: int, db: Any) -> None:
     """Send a connection announcement to a specific peer.
 
     Args:
         to_peer_shared_id: Recipient's public peer identity
         from_peer_id: Sender's local peer ID
         from_peer_shared_id: Sender's public peer identity
-        invite_id: Optional invite ID for authentication (not used in new protocol, kept for compatibility)
+        invite_id: Optional invite ID for authentication (joiner uses this)
         t_ms: Current timestamp
         db: Database connection
     """
@@ -201,14 +201,14 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     if invite_id:
         safedb = create_safe_db(db, recorded_by=from_peer_id)
 
-        # Look up invite private key from group_prekeys
+        # Look up invite private key from invite_accepteds table
         invite_key_row = safedb.query_one(
-            "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
-            (from_peer_id, from_peer_id)
+            "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+            (invite_id, from_peer_id)
         )
 
-        if invite_key_row:
-            invite_private_key = invite_key_row['private_key']
+        if invite_key_row and invite_key_row['invite_private_key']:
+            invite_private_key = invite_key_row['invite_private_key']
             # Create invite signature over the entire signed_connect structure
             invite_sig_data = json.dumps(signed_connect, sort_keys=True).encode()
             invite_signature = crypto.sign(invite_sig_data, invite_private_key)
@@ -300,38 +300,35 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             log.info(f"sync_connect.project(): rejecting connection from removed peer {peer_shared_id[:20]}...")
             return None
 
-    # Authentication: Try invite signature first (for bootstrap), fall back to peer signature
+    # Authentication via invite signature (joiner proves they have invite private key)
     invite_id = event_data.get('invite_id')
     invite_signature_b64 = event_data.get('invite_signature')
-    authenticated = False
 
-    # Try invite signature first (allows joiner to connect before peer_shared syncs)
-    if invite_id and invite_signature_b64:
-        invite_blob = store.get(invite_id, unsafedb)
-        if invite_blob:
-            try:
-                invite_event = crypto.parse_json(invite_blob)
-                invite_public_key = crypto.b64decode(invite_event.get('invite_pubkey', ''))
+    if not invite_id or not invite_signature_b64:
+        log.warning(f"sync_connect.project: missing invite_id or invite_signature")
+        return None
 
-                # Verify signature over the signed_connect structure (without invite_signature field)
-                connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
-                sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
-                invite_signature = crypto.b64decode(invite_signature_b64)
+    invite_blob = store.get(invite_id, unsafedb)
+    if not invite_blob:
+        log.warning(f"sync_connect.project: invite blob not found for {invite_id[:20]}...")
+        return None
 
-                if crypto.verify(sig_data, invite_signature, invite_public_key):
-                    log.info(f"sync_connect.project: ✓ invite signature verified for {invite_id[:20]}...")
-                    authenticated = True
-            except Exception as e:
-                log.debug(f"sync_connect.project: invite signature check failed: {e}")
+    try:
+        invite_event = crypto.parse_json(invite_blob)
+        invite_public_key = crypto.b64decode(invite_event.get('invite_pubkey', ''))
 
-    # Fall back to peer signature verification
-    if not authenticated:
-        if crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
-            log.debug(f"sync_connect.project: ✓ peer signature verified")
-            authenticated = True
+        # Verify signature over the signed_connect structure (without invite_signature field)
+        connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
+        sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
+        invite_signature = crypto.b64decode(invite_signature_b64)
 
-    if not authenticated:
-        log.warning(f"sync_connect.project: authentication failed (no valid invite or peer signature)")
+        if not crypto.verify(sig_data, invite_signature, invite_public_key):
+            log.warning(f"sync_connect.project: invite signature verification failed")
+            return None
+
+        log.info(f"sync_connect.project: ✓ invite signature verified for {invite_id[:20]}...")
+    except Exception as e:
+        log.warning(f"sync_connect.project: invite signature check failed: {e}")
         return None
 
     # Extract connection info
@@ -383,18 +380,6 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
     """
     log.debug(f"sync_connect_ack: sending from {from_peer_id[:20]}... to {to_peer_shared_id[:20]}...")
 
-    # Get our peer_shared_id
-    safedb = create_safe_db(db, recorded_by=from_peer_id)
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-        (from_peer_id, from_peer_id)
-    )
-    if not peer_self_row:
-        log.warning(f"[SYNC_CONNECT_ACK_NO_PEER_SELF] from={from_peer_id[:10]}...")
-        return
-
-    from_peer_shared_id = peer_self_row['peer_shared_id']
-
     # Create our transit key (symmetric key for them to send to us in future connects)
     transit_key_id = transit_key.create(from_peer_id, t_ms, db)
     transit_key_dict = transit_key.get_key(transit_key_id, from_peer_id, db)
@@ -418,11 +403,9 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
 
     # Build ack event data (no signature - implicit auth via decryption)
     # Include for_transit_key_id so recipient can match ack by their own key ID
-    # (more secure than trusting from_peer_shared_id claim)
     ack_data = {
         'type': 'sync_connect_ack',
         'for_transit_key_id': conn['their_transit_key_id'],  # Echo their transit_key_id for secure matching
-        'from_peer_shared_id': from_peer_shared_id,  # Who is sending (for logging, not trusted for matching)
         'transit_key_id': transit_key_id,
         'transit_key': crypto.b64encode(transit_key_bytes),
         'created_at': t_ms,
