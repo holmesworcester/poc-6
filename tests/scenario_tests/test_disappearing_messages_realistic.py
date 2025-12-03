@@ -17,6 +17,7 @@ from db import Database
 import schema
 from events.identity import user, invite, peer as peer_module
 from events.content import channel, message, channel_update
+from projection import dispatch
 import purge_expired
 import tick
 
@@ -148,8 +149,8 @@ def test_alice_and_bob_see_messages_disappear_together():
     db.commit()
 
     # Project message for both
-    message.project_event(message_id, alice['peer_id'], 4000, db)
-    message.project_event(message_id, bob['peer_id'], 4500, db)
+    dispatch('message', message_id, alice['peer_id'], 4000, db)
+    dispatch('message', message_id, bob['peer_id'], 4500, db)
     db.commit()
 
     # Both see the message
