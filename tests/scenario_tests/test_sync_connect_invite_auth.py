@@ -113,20 +113,20 @@ def test_sync_connect_has_invite_signature(setup_alice_bob):
 
 
 def test_bob_has_invite_private_key(setup_alice_bob):
-    """Test that Bob has the invite private key in group_prekeys table."""
+    """Test that Bob has the invite private key in invite_accepteds table."""
     data = setup_alice_bob
     db = data['db']
 
     bob_safedb = create_safe_db(db, recorded_by=data['bob_peer_id'])
 
-    # Check Bob's group_prekeys
-    prekey_row = bob_safedb.query_one(
-        "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
-        (data['bob_peer_id'], data['bob_peer_id'])
+    # Check Bob's invite_accepteds table (invite_private_key stored here now)
+    invite_row = bob_safedb.query_one(
+        "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+        (data['invite_id'], data['bob_peer_id'])
     )
 
-    assert prekey_row is not None, "Bob should have a group_prekey"
-    assert prekey_row['private_key'] is not None, "Bob should have the private key"
+    assert invite_row is not None, "Bob should have an invite_accepted record"
+    assert invite_row['invite_private_key'] is not None, "Bob should have the invite private key"
 
 
 def test_invite_blob_exists_for_alice(setup_alice_bob):

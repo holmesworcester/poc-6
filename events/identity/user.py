@@ -601,7 +601,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
             'peer_id': str,
             'peer_shared_id': str,
             'user_id': str,
-            'group_id': str,
             'invite_data': dict,
         }
     """
@@ -696,7 +695,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     # invite_proof removed - proof IS the signature on user event (signed_by=invite_id)
 
-    log.info(f"join() user '{name}' joined: peer={peer_id[:20]}..., group={group_id[:20]}...")
+    log.info(f"join() user '{name}' joined: peer={peer_id[:20]}...")
 
     # =========================================================================
     # Complete isomorphic bootstrap - delegate to peer_shared.join()
@@ -771,7 +770,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,
         'network_id': invite_data.get('network_id'),  # From invite
-        'group_id': group_id,
         'channel_id': channel_id,
         'key_id': key_id,
         'invite_data': invite_data,
