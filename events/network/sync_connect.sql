@@ -4,8 +4,9 @@
 
 CREATE TABLE IF NOT EXISTS sync_connections (
     peer_shared_id TEXT PRIMARY KEY,        -- Remote peer's public identity
-    their_transit_key_id TEXT NOT NULL,     -- Key ID they provided (for nonce derivation/lookup)
-    their_transit_key BLOB NOT NULL,        -- Symmetric key they provided (to send TO them)
+    our_transit_key_id TEXT,                -- Key ID we sent to them (for matching acks)
+    their_transit_key_id TEXT,              -- Key ID they provided (for nonce derivation/lookup)
+    their_transit_key BLOB,                 -- Symmetric key they provided (to send TO them)
     origin_ip TEXT,                          -- IP address (e.g., "127.0.0.1")
     origin_port INTEGER,                     -- Port number (e.g., 6100)
     last_seen_ms INTEGER NOT NULL,           -- Timestamp of last connect/ack received
@@ -17,3 +18,6 @@ ON sync_connections(last_seen_ms);
 
 CREATE INDEX IF NOT EXISTS idx_sync_connections_ttl
 ON sync_connections(last_seen_ms, ttl_ms);
+
+CREATE INDEX IF NOT EXISTS idx_sync_connections_our_transit_key
+ON sync_connections(our_transit_key_id);

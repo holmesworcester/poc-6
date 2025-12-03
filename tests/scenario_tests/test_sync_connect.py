@@ -52,32 +52,44 @@ def test_connection_establishment(fresh_db):
     print("✓ No connections before first tick")
 
     # Run one tick cycle - should establish connections
-    print("\n=== Running first tick (establishes connections) ===")
+    # Run multiple ticks for full two-way handshake:
+    # Tick 1: peers send sync_connect (creates rows with our_transit_key_id)
+    # Tick 2: peers receive sync_connect, store their_transit_key, send ack
+    # Tick 3: peers receive ack (completes bidirectional key exchange)
+    print("\n=== Running first tick (sends sync_connect) ===")
     tick.tick(t_ms=3000, db=db)
 
-    # Check that connections were established
+    # Check that connections were initiated
     connections = db.query("SELECT peer_shared_id FROM sync_connections")
-    print(f"Connections established: {len(connections)}")
-
-    # Should have connections (Alice→Bob and Bob→Alice)
+    print(f"Connections initiated: {len(connections)}")
     assert len(connections) >= 1, "Should have at least one connection after first tick"
-    print(f"✓ Established {len(connections)} connection(s)")
+    print(f"✓ Initiated {len(connections)} connection(s)")
 
-    # Verify connection has required fields
-    conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
+    print("\n=== Running second tick (receives connect, sends ack) ===")
+    tick.tick(t_ms=4000, db=db)
+
+    print("\n=== Running third tick (receives ack, completes handshake) ===")
+    tick.tick(t_ms=5000, db=db)
+
+    # Now connections should have both our_transit_key_id and their_transit_key
+    conn_row = db.query_one("""
+        SELECT * FROM sync_connections
+        WHERE their_transit_key IS NOT NULL
+        LIMIT 1
+    """)
+    assert conn_row is not None, "Should have at least one complete connection"
     assert conn_row['peer_shared_id'], "Connection should have peer_shared_id"
     assert conn_row['their_transit_key_id'], "Connection should have their_transit_key_id"
     assert conn_row['their_transit_key'], "Connection should have their_transit_key"
-    assert conn_row['last_seen_ms'] == 3000, "Connection should have correct timestamp"
-    print("✓ Connection has all required fields")
+    print("✓ Connection has all required fields after handshake")
 
-    # Run another tick - connections should refresh (sync_connect runs every 1s)
-    print("\n=== Running second tick (refreshes connections) ===")
-    tick.tick(t_ms=4000, db=db)  # 1s later so sync_connect runs again
+    # Run another tick - connections should refresh
+    print("\n=== Running fourth tick (refreshes connections) ===")
+    tick.tick(t_ms=6000, db=db)
 
     # Check that connection timestamps were updated
     conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
-    assert conn_row['last_seen_ms'] == 4000, "Connection should have updated timestamp"
+    assert conn_row['last_seen_ms'] >= 5000, "Connection should have updated timestamp"
     print("✓ Connection timestamp refreshed")
 
 

@@ -226,6 +226,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         FROM sync_connections
         WHERE peer_shared_id = ?
           AND last_seen_ms + ttl_ms > ?
+          AND their_transit_key IS NOT NULL
     """, (to_peer_shared_id, t_ms))
 
     if conn:
@@ -248,6 +249,16 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Queue for delivery
     import queues
     queues.incoming.add(wrapped, t_ms, db)
+
+    # Store our_transit_key_id so we can match the ack when it arrives
+    # UPSERT: preserve their_* fields if they exist, just update our_transit_key_id
+    unsafedb.execute("""
+        INSERT INTO sync_connections (peer_shared_id, our_transit_key_id, last_seen_ms, ttl_ms)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(peer_shared_id) DO UPDATE SET
+            our_transit_key_id = excluded.our_transit_key_id,
+            last_seen_ms = excluded.last_seen_ms
+    """, (to_peer_shared_id, transit_key_id, t_ms, 300000))
 
     log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}...")
 
@@ -393,20 +404,6 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
         log.warning(f"[SYNC_CONNECT_ACK_NO_KEY] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
         return
 
-    # Build ack event data (no signature - implicit auth via decryption)
-    # Include from_peer_shared_id so recipient can match ack to connection
-    ack_data = {
-        'type': 'sync_connect_ack',
-        'from_peer_shared_id': from_peer_shared_id,  # Who is sending the ack
-        'transit_key_id': transit_key_id,
-        'transit_key': crypto.b64encode(transit_key_bytes),
-        'created_at': t_ms,
-        'ttl_ms': 300000  # 5 minutes
-    }
-
-    # Canonicalize to JSON
-    canonical = crypto.canonicalize_json(ack_data)
-
     # Get their transit_key from the connection we just stored
     unsafedb = create_unsafe_db(db)
     conn = unsafedb.query_one("""
@@ -418,6 +415,22 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
     if not conn or not conn['their_transit_key']:
         log.warning(f"[SYNC_CONNECT_ACK_NO_CONNECTION] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
         return
+
+    # Build ack event data (no signature - implicit auth via decryption)
+    # Include for_transit_key_id so recipient can match ack by their own key ID
+    # (more secure than trusting from_peer_shared_id claim)
+    ack_data = {
+        'type': 'sync_connect_ack',
+        'for_transit_key_id': conn['their_transit_key_id'],  # Echo their transit_key_id for secure matching
+        'from_peer_shared_id': from_peer_shared_id,  # Who is sending (for logging, not trusted for matching)
+        'transit_key_id': transit_key_id,
+        'transit_key': crypto.b64encode(transit_key_bytes),
+        'created_at': t_ms,
+        'ttl_ms': 300000  # 5 minutes
+    }
+
+    # Canonicalize to JSON
+    canonical = crypto.canonicalize_json(ack_data)
 
     # Wrap ack with their transit_key (the key they sent us in the connect)
     to_key = {

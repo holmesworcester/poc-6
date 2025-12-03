@@ -46,25 +46,28 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     event_data = crypto.parse_json(blob)
 
-    # Extract sender identity and transit key info
-    peer_shared_id = event_data.get('from_peer_shared_id')
+    # Extract for_transit_key_id (the key ID we sent, echoed back for secure matching)
+    for_transit_key_id = event_data.get('for_transit_key_id')
+    from_peer_shared_id = event_data.get('from_peer_shared_id')  # For logging only, not trusted
     transit_key_id = event_data.get('transit_key_id')
     transit_key_b64 = event_data.get('transit_key')
     transit_key_bytes = crypto.b64decode(transit_key_b64) if transit_key_b64 else None
 
-    if not peer_shared_id or not transit_key_id or not transit_key_bytes:
-        log.warning(f"sync_connect_ack.project: missing required fields (from_peer_shared_id={bool(peer_shared_id)}, transit_key_id={bool(transit_key_id)}, transit_key={bool(transit_key_bytes)})")
+    if not for_transit_key_id or not transit_key_id or not transit_key_bytes:
+        log.warning(f"sync_connect_ack.project: missing required fields (for_transit_key_id={bool(for_transit_key_id)}, transit_key_id={bool(transit_key_id)}, transit_key={bool(transit_key_bytes)})")
         return None
 
-    # Verify we have an existing connection to this peer
-    # (we should have received a sync_connect from them first)
+    # Match by OUR transit_key_id that we sent (secure - we know who we sent it to)
+    # This prevents a malicious peer from claiming to be someone else in their ack
     existing_conn = unsafedb.query_one("""
-        SELECT 1 FROM sync_connections WHERE peer_shared_id = ?
-    """, (peer_shared_id,))
+        SELECT peer_shared_id FROM sync_connections WHERE our_transit_key_id = ?
+    """, (for_transit_key_id,))
 
     if not existing_conn:
-        log.warning(f"sync_connect_ack.project: no existing connection for peer {peer_shared_id[:10]}...")
+        log.warning(f"sync_connect_ack.project: no connection found for transit_key_id {for_transit_key_id[:20]}...")
         return None
+
+    peer_shared_id = existing_conn['peer_shared_id']
 
     # Update connection with their transit_key_id and transit_key
     unsafedb.execute("""
@@ -79,6 +82,6 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         peer_shared_id
     ))
 
-    log.warning(f"[SYNC_CONNECT_ACK_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... UPDATING_CONNECTION")
+    log.warning(f"[SYNC_CONNECT_ACK_RECEIVED] from={from_peer_shared_id[:10] if from_peer_shared_id else '?'}... matched_peer={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... UPDATING_CONNECTION")
 
     return event_id

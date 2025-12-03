@@ -673,6 +673,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         FROM sync_connections
         WHERE peer_shared_id = ?
           AND last_seen_ms + ttl_ms > ?
+          AND their_transit_key IS NOT NULL
     """, (to_peer_shared_id, t_ms))
 
     if conn:
