@@ -119,10 +119,25 @@ def test_deterministic_group_key_ids():
 
 ## Completed Work
 
-### Task 2: Fix ack sender matching ✓
-- `sync_connect.send_connect_ack()` now includes `from_peer_shared_id` in the ack
-- `sync_connect_ack.project()` uses `from_peer_shared_id` to directly match connections
-- Removed fragile "most recent connection" heuristic
+### Task 2: Fix ack sender matching ✓ (SUPERSEDED by security fix below)
+- Initially added `from_peer_shared_id` to ack
+- Found to be vulnerable (see security fix)
+
+### SECURITY FIX: Authenticated ack matching ✓
+**Vulnerability found:** `from_peer_shared_id` in ack was NOT authenticated.
+A malicious peer (Mallory) receiving your sync_connect could send an ack
+claiming to be Alice, hijacking your connection to Alice.
+
+**Fix:** Use transit_key_id echo instead:
+- Schema: Added `our_transit_key_id` column to sync_connections
+- `send_connect()` stores `our_transit_key_id` when sending
+- `send_connect_ack()` includes `for_transit_key_id` (echoes sender's ID)
+- `ack.project()` matches by `our_transit_key_id = for_transit_key_id`
+
+**Why this is secure:**
+- We know which transit_key_id we sent to each peer
+- When ack echoes that ID, we know who it's from (ourselves)
+- No need to trust identity claims in the ack
 
 ### Task 3: Explicit handshake test ✓
 - Added `test_two_way_handshake()` in `tests/scenario_tests/test_sync_connect.py`
