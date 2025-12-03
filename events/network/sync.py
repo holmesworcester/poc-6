@@ -666,20 +666,20 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     # Store as signed plaintext
     canonical = crypto.canonicalize_json(signed_request)
 
-    # Try to get established connection first (uses symmetric transit key)
+    # Try to get established connection first (uses symmetric transit key they provided)
     unsafedb = create_unsafe_db(db)
     conn = unsafedb.query_one("""
-        SELECT response_transit_key_id, response_transit_key
+        SELECT their_transit_key_id, their_transit_key
         FROM sync_connections
         WHERE peer_shared_id = ?
           AND last_seen_ms + ttl_ms > ?
     """, (to_peer_shared_id, t_ms))
 
     if conn:
-        # Use established connection's transit key
+        # Use established connection's transit key (the key they sent us)
         to_key = {
-            'id': crypto.b64decode(conn['response_transit_key_id']),
-            'key': conn['response_transit_key'],
+            'id': crypto.b64decode(conn['their_transit_key_id']),
+            'key': conn['their_transit_key'],
             'type': 'symmetric'
         }
         log.info(f"send_request: using established connection with {to_peer_shared_id[:20]}...")
@@ -687,7 +687,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         # Fall back to transit prekey for initial contact (asymmetric)
         to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
         if to_key:
-            log.info(f"send_request: falling back to prekey for {to_peer_shared_id[:20]}... hint={crypto.b64encode(to_key['id'])[:30]}...")
+            log.info(f"send_request: falling back to prekey for {to_peer_shared_id[:20]}...")
         else:
             log.warning(f"send_request: NO CONNECTION OR PREKEY for {to_peer_shared_id[:20]}...")
             return

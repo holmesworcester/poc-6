@@ -66,8 +66,8 @@ def test_connection_establishment(fresh_db):
     # Verify connection has required fields
     conn_row = db.query_one("SELECT * FROM sync_connections LIMIT 1")
     assert conn_row['peer_shared_id'], "Connection should have peer_shared_id"
-    assert conn_row['response_transit_key_id'], "Connection should have response_transit_key_id"
-    assert conn_row['response_transit_key'], "Connection should have response_transit_key"
+    assert conn_row['their_transit_key_id'], "Connection should have their_transit_key_id"
+    assert conn_row['their_transit_key'], "Connection should have their_transit_key"
     assert conn_row['last_seen_ms'] == 3000, "Connection should have correct timestamp"
     print("✓ Connection has all required fields")
 
