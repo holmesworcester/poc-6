@@ -40,6 +40,20 @@ class UserEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,  # User events are plaintext, not encrypted
+    "signer_type": "invite",  # Signed by invite key
+    "dependencies": ["invite:invite"],
+    "tables": ["users", "valid_events", "group_members"],
+    "generic_dispatch": True,
+    "mark_valid": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 

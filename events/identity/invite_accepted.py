@@ -31,6 +31,20 @@ class InviteAcceptedEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,  # Plaintext, local
+    "signer_type": "none",  # Local event, no signature verification
+    "dependencies": ["invite:invite"],  # Need invite for public key
+    "tables": ["group_prekeys", "invite_accepteds", "valid_events"],
+    "generic_dispatch": True,
+    "mark_valid": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 

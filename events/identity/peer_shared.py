@@ -33,6 +33,20 @@ class PeerSharedEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,  # Plaintext, signed
+    "signer_type": "peer_shared_polymorphic",  # Custom: invite or self
+    "dependencies": ["invite:invite?"],  # Optional - only for invite-signed mode
+    "tables": ["peers_shared", "peer_self", "valid_events"],
+    "generic_dispatch": True,
+    "mark_valid": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 

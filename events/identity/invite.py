@@ -45,6 +45,23 @@ class InviteEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": False,  # Plaintext, signed
+    "signer_type": "invite_polymorphic",  # Custom: network or peer_shared
+    "dependencies": [
+        "signer_user:linked_peer?",  # For ongoing invites
+        "admin_grant:admin_grant?",  # For ongoing invites with admin_grant
+    ],
+    "tables": ["invites", "valid_events"],
+    "generic_dispatch": True,
+    "mark_valid": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
