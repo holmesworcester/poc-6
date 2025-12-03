@@ -46,32 +46,25 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     event_data = crypto.parse_json(blob)
 
-    # Extract their transit_key_id and transit_key
+    # Extract sender identity and transit key info
+    peer_shared_id = event_data.get('from_peer_shared_id')
     transit_key_id = event_data.get('transit_key_id')
     transit_key_b64 = event_data.get('transit_key')
     transit_key_bytes = crypto.b64decode(transit_key_b64) if transit_key_b64 else None
 
-    if not transit_key_id or not transit_key_bytes:
-        log.warning(f"sync_connect_ack.project: missing transit_key_id or transit_key")
+    if not peer_shared_id or not transit_key_id or not transit_key_bytes:
+        log.warning(f"sync_connect_ack.project: missing required fields (from_peer_shared_id={bool(peer_shared_id)}, transit_key_id={bool(transit_key_id)}, transit_key={bool(transit_key_bytes)})")
         return None
 
-    # Find who sent this ack by looking at the most recent connection
-    # The ack was wrapped to OUR transit_key, so it came from someone we sent a sync_connect to
-    # We match by finding the most recent connection (last_seen_ms closest to recorded_at)
-    pending_conn = unsafedb.query_one("""
-        SELECT peer_shared_id FROM sync_connections
-        WHERE last_seen_ms = (
-            SELECT MAX(last_seen_ms) FROM sync_connections
-            WHERE last_seen_ms <= ?
-        )
-        LIMIT 1
-    """, (recorded_at,))
+    # Verify we have an existing connection to this peer
+    # (we should have received a sync_connect from them first)
+    existing_conn = unsafedb.query_one("""
+        SELECT 1 FROM sync_connections WHERE peer_shared_id = ?
+    """, (peer_shared_id,))
 
-    if not pending_conn:
-        log.warning(f"sync_connect_ack.project: no recent connection found to match ack")
+    if not existing_conn:
+        log.warning(f"sync_connect_ack.project: no existing connection for peer {peer_shared_id[:10]}...")
         return None
-
-    peer_shared_id = pending_conn['peer_shared_id']
 
     # Update connection with their transit_key_id and transit_key
     unsafedb.execute("""

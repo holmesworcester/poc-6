@@ -372,6 +372,18 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
     """
     log.debug(f"sync_connect_ack: sending from {from_peer_id[:20]}... to {to_peer_shared_id[:20]}...")
 
+    # Get our peer_shared_id
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (from_peer_id, from_peer_id)
+    )
+    if not peer_self_row:
+        log.warning(f"[SYNC_CONNECT_ACK_NO_PEER_SELF] from={from_peer_id[:10]}...")
+        return
+
+    from_peer_shared_id = peer_self_row['peer_shared_id']
+
     # Create our transit key (symmetric key for them to send to us in future connects)
     transit_key_id = transit_key.create(from_peer_id, t_ms, db)
     transit_key_dict = transit_key.get_key(transit_key_id, from_peer_id, db)
@@ -382,8 +394,10 @@ def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: A
         return
 
     # Build ack event data (no signature - implicit auth via decryption)
+    # Include from_peer_shared_id so recipient can match ack to connection
     ack_data = {
         'type': 'sync_connect_ack',
+        'from_peer_shared_id': from_peer_shared_id,  # Who is sending the ack
         'transit_key_id': transit_key_id,
         'transit_key': crypto.b64encode(transit_key_bytes),
         'created_at': t_ms,
