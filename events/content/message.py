@@ -49,6 +49,19 @@ class CreateDeps(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,
+    "signer_type": "peer_shared",
+    "dependencies": ["deletion:message_deletion?"],
+    "tables": ["messages", "event_dependencies", "deleted_events"],
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -289,79 +302,4 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     return messages
 
 
-def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project a message event into the database.
-
-    Resolves blob, decrypts, verifies signature, checks deletion, then projects.
-    """
-    from projection import apply_result
-
-    log.debug(f"message.project_event() projecting message_id={event_id}")
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    unsafedb = create_unsafe_db(db)
-
-    # 1. Get and decrypt blob
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        return None
-
-    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
-    if not unwrapped:
-        return None
-
-    event_data = crypto.parse_json(unwrapped)
-    key_id = crypto.b64encode(blob[:crypto.ID_SIZE])
-
-    # 2. Verify peer_shared signature
-    signed_by = event_data.get("signed_by")
-    if signed_by:
-        from events.identity import peer_shared
-        try:
-            public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
-            if not crypto.verify_event(event_data, public_key):
-                log.warning(f"Invalid signature for message {event_id}")
-                return None
-        except (ValueError, KeyError):
-            # Signer not found yet - can't verify
-            return None
-
-    # 3. Resolve deletion dependency
-    deletion = None
-    deletion_row = safedb.query_one(
-        "SELECT deleted_by FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
-        (event_id, recorded_by)
-    )
-    if deletion_row:
-        from events.content import message_deletion
-        is_valid = message_deletion.validate(event_id, deletion_row["deleted_by"], recorded_by, db)
-        deletion = {"deleted_by": deletion_row["deleted_by"], "is_valid": is_valid}
-
-        # Side effect: cleanup invalid deletion
-        if not is_valid:
-            safedb.execute(
-                "DELETE FROM message_deletions WHERE message_id = ? AND recorded_by = ?",
-                (event_id, recorded_by)
-            )
-
-    # 4. Build input and project
-    input_dict = {
-        "event_id": event_id,
-        "event_data": event_data,
-        "key_id": key_id,
-        "recorded_by": recorded_by,
-        "recorded_at": recorded_at,
-        "dependencies": {"deletion": deletion},
-    }
-
-    result = project(input_dict)
-
-    if result.blocked or not result.valid:
-        return None
-
-    apply_result(result, recorded_by, recorded_at, db)
-
-    if "messages" in result.tables:
-        log.info(f"message.project_event() projected id={event_id[:20]}...")
-        return event_id
-    return None
+# project_event() handled by generic dispatch (SPEC.generic_dispatch = True)
