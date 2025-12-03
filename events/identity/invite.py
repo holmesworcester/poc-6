@@ -649,9 +649,9 @@ def create_peer_invite(
 def create_bootstrap_user_invite(
     network_id: str,
     network_private_key: bytes,
-    group_id: str,
-    channel_id: str,
-    key_id: str,
+    group_id: str | None,
+    channel_id: str | None,
+    key_id: str | None,
     peer_id: str,
     peer_shared_id: str | None,
     t_ms: int,
@@ -685,15 +685,19 @@ def create_bootstrap_user_invite(
         'type': 'invite',
         'mode': 'user',
         'network_id': network_id,
-        'group_id': group_id,
-        'channel_id': channel_id,
-        'key_id': key_id,
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': network_id,  # Bootstrap: signed by network key
         'created_at': t_ms
     }
 
-    # Only include inviter_peer_shared_id if provided (None for bootstrap self-invite)
+    # Only include optional fields if provided (not empty string or None)
+    # Bootstrap invites may not have group/channel/key yet - they're created later
+    if group_id:
+        event_data['group_id'] = group_id
+    if channel_id:
+        event_data['channel_id'] = channel_id
+    if key_id:
+        event_data['key_id'] = key_id
     if peer_shared_id:
         event_data['inviter_peer_shared_id'] = peer_shared_id
 

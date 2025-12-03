@@ -93,15 +93,15 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 
 ---
 
-## 7. Empty String Placeholders for IDs
+## 7. Empty String Placeholders for IDs ✅ FIXED
 
 **Pattern**: Using empty strings `''` for IDs that don't exist yet.
 
-| Location | Code |
-|----------|------|
-| `user.py:306-308` | `group_id=''`, `channel_id=''`, `key_id=''` |
+| Location | Code | Status |
+|----------|------|--------|
+| ~~`user.py:306-308`~~ | ~~`group_id=''`, `channel_id=''`, `key_id=''`~~ | ✅ Now uses `None`, fields omitted from event if not provided |
 
-**Problem**: Semantic confusion - empty string vs null vs missing.
+**Resolution**: Changed to `None` and invite.create_bootstrap_user_invite() only includes fields if they have values.
 
 ---
 
