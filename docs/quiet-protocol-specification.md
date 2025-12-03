@@ -604,12 +604,18 @@ Upon successful handshake, store:
 
 ```
 connections (
-    peer_shared_id,      -- who (may be "unknown" initially for bootstrap)
-    their_transit_key,   -- key to send TO them
+    peer_shared_id,         -- remote peer's public identity
+    our_transit_key_id,     -- key ID we sent (for matching acks, routing via owner_peer_id)
+    their_transit_key_id,   -- key ID they provided (for nonce derivation)
+    their_transit_key,      -- symmetric key to send TO them
     origin_ip, origin_port,
     last_seen_ms, ttl_ms
 )
 ```
+
+The `our_transit_key_id` serves dual purposes:
+1. **Ack matching**: When receiving `sync_connect_ack`, match `for_transit_key_id` to find the connection
+2. **Multi-account routing**: Look up `transit_keys.owner_peer_id` to determine which local peer owns this connection
 
 ## Lifecycle
 
@@ -626,13 +632,24 @@ connections (
 - Forward secrecy (transit prekeys are purged periodically)
 - Bootstrap connectivity before peer_shared events have synced
 
+## Multi-Account Routing
+
+On devices with multiple local peers (linked accounts), incoming messages must be routed to the correct local peer. This is handled by the transit key:
+
+1. Each `transit_key` and `transit_prekey` has an `owner_peer_id` (the local peer that created it)
+2. When receiving a wrapped message, try decryption with available transit keys
+3. The key that successfully decrypts identifies the target local peer via `owner_peer_id`
+4. Process the message under that peer's context (`recorded_by = owner_peer_id`)
+
+This avoids requiring explicit peer routing in the protocol — the transit key implicitly encodes which local account should handle the message.
+
 # Sync 
 
 To sync data, peers periodically send `sync` events to all connections. 
 
 First they create a sync event containing a "window" describing a range of ~100 events and a small bloom filter. (Bloom filters have false positive rates, so some events could fail to sync forever if we did not limit our search).
 
-The sync event and all respones are symmetrically encrypted to the `transit_secret` for that connection. (see: [Connection](#connection)), with the `connection_id` as the hint. On the wire, sync events are `connection_id`, `ciphertext`.
+The sync event and all responses are symmetrically encrypted to the `transit_key` for that connection (see: [Connection](#connection)), with the `transit_key_id` as the hint. On the wire, sync events are `transit_key_id`, `ciphertext`. The `transit_key_id` also enables multi-account routing (see: [Multi-Account Routing](#multi-account-routing)).
 
 The responder replies, to the address for that connection, with all events in the window that fail to match the bloom filter. Dropped or duplicate events affect performance but not reliability. Events sync eventually. 
 
