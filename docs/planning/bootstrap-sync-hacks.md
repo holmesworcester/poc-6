@@ -2,34 +2,34 @@
 
 Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync_connect, and bootstrap code.
 
-## 1. PENDING Placeholder String
+## 1. PENDING Placeholder String ✅ FIXED
 
 **Pattern**: Using literal string `'PENDING'` as a placeholder for `peer_shared_id` before it exists.
 
-| Location | Code |
-|----------|------|
-| `user.py:310` | `peer_shared_id='PENDING'` in bootstrap invite |
-| `user.py:329` | `'inviter_peer_shared_id': 'PENDING'` in invite_link_data |
-| `user.py:343` | `INSERT INTO peer_self ... 'PENDING'` |
-| `user.py:625-631` | Creates `PENDING` peer_self entry for joiners |
-| `sync_connect.py:55,64-65,74` | Special-cases `PENDING` as null-equivalent |
-| `recorded.py:185` | `if dep_id in ('SELF', 'PENDING'): continue` - skips dep check |
+| Location | Code | Status |
+|----------|------|--------|
+| ~~`user.py:310`~~ | ~~`peer_shared_id='PENDING'`~~ | ✅ Now uses `None` |
+| ~~`user.py:329`~~ | ~~`'inviter_peer_shared_id': 'PENDING'`~~ | ✅ Now uses `None` |
+| ~~`user.py:343`~~ | ~~`INSERT INTO peer_self ... 'PENDING'`~~ | ✅ Removed, handled by peer_shared.project() |
+| ~~`user.py:625-631`~~ | ~~Creates `PENDING` peer_self entry~~ | ✅ Removed |
+| ~~`sync_connect.py:55,64-65,74`~~ | ~~Special-cases `PENDING`~~ | ✅ Now checks for truthy value |
+| ~~`recorded.py:185`~~ | ~~Skips dep check for `'PENDING'`~~ | ✅ Removed |
 
-**Problem**: Pollutes data model, requires special-casing throughout codebase.
+**Resolution**: Replaced with `None` where appropriate. Truthy checks handle None naturally.
 
 ---
 
-## 2. SELF Placeholder String
+## 2. SELF Placeholder String ✅ FIXED
 
 **Pattern**: Using literal string `'SELF'` for self-signed network events.
 
-| Location | Code |
-|----------|------|
-| `network.py:48` | `'signed_by': 'SELF'` for network event |
-| `network.py:98-99` | Verifies `signed_by == 'SELF'` |
-| `recorded.py:185` | Skips dependency check for `'SELF'` |
+| Location | Code | Status |
+|----------|------|--------|
+| ~~`network.py:48`~~ | ~~`'signed_by': 'SELF'`~~ | ✅ Network events now omit `signed_by` field entirely |
+| ~~`network.py:98-99`~~ | ~~Verifies `signed_by == 'SELF'`~~ | ✅ Now verifies using `network_pubkey` from event body |
+| ~~`recorded.py:185`~~ | ~~Skips dependency check for `'SELF'`~~ | ✅ Removed |
 
-**Problem**: Another magic string that requires special-casing.
+**Resolution**: Network events are self-signed using their own keypair. No `signed_by` field needed - verification uses `network_pubkey` from the event body. The network is the root of trust.
 
 ---
 
@@ -39,13 +39,15 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 
 | Location | Table | Notes |
 |----------|-------|-------|
-| `user.py:342-344` | `peer_self` | Bootstrap: `INSERT OR REPLACE INTO peer_self` |
-| `user.py:628-630` | `peer_self` | Join: `INSERT OR REPLACE INTO peer_self` |
-| `user.py:669-671` | `transit_prekeys_shared` | Direct insert from invite link data |
-| `peer_shared.py:179` | `peer_self` | Direct `INSERT OR REPLACE INTO peer_self` |
-| `invite.py:781` | `transit_prekeys_shared` | Direct insert |
+| ~~`user.py:342-344`~~ | ~~`peer_self`~~ | ✅ FIXED: Now handled by peer_shared.project() |
+| ~~`user.py:628-630`~~ | ~~`peer_self`~~ | ✅ FIXED: Now handled by peer_shared.project() |
+| `user.py:647` | `transit_prekeys_shared` | Direct insert from invite link data |
+| `peer_shared.py:179` | `peer_self` | Direct `INSERT OR REPLACE INTO peer_self` (consolidated - single source) |
+| `invite.py:783` | `transit_prekeys_shared` | Direct insert |
 
 **Problem**: Bypasses event-sourcing model, can't be reprojected.
+
+**Note**: `peer_self` inserts have been consolidated to a single location in `peer_shared.project()`. This is acceptable since `peer_self` is local-only state mapping "my peer_id → my peer_shared_id".
 
 ---
 
