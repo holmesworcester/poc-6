@@ -181,11 +181,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         if not dep_id:
             continue
 
-        # Skip special placeholder values (used during bootstrap)
-        # Note: PENDING has been eliminated - only SELF remains for network events
-        if dep_id == 'SELF':
-            log.debug(f"recorded.check_deps() skipping special value: {field}={dep_id}")
-            continue
+        # Note: PENDING and SELF placeholders have been eliminated from the codebase
+        # Network events (which were self-signed with SELF) are in NO_DEPS_TYPES
 
         # Skip foreign local deps (creator's local state we'll never have)
         if is_foreign_local_dep(field, event_data, recorded_by):

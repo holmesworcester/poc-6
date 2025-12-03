@@ -42,12 +42,13 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 
     # Create event data - minimal, just the network identity
     # Groups are created LATER after peer_shared exists
+    # Network events are self-signed: verified using network_pubkey from event body
     event_data = {
         'type': 'network',
         'network_pubkey': crypto.b64encode(network_public_key),
-        'signed_by': 'SELF',  # Special marker for self-signed network event
         'created_at': t_ms
     }
+    # Note: no signed_by field - network events are self-signed (root of trust)
 
     # Self-sign with network's own private key
     signed_event = crypto.sign_event(event_data, network_private_key)
@@ -92,12 +93,8 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     event_data = crypto.parse_json(blob)
 
     # Verify self-signature using network_pubkey from event body
-    signed_by = event_data.get('signed_by')
+    # Network events have no signed_by field - they're self-signed (root of trust)
     network_pubkey_b64 = event_data.get('network_pubkey')
-
-    if signed_by != 'SELF':
-        log.warning(f"network.project() expected signed_by='SELF', got {signed_by}")
-        return None
 
     if not network_pubkey_b64:
         log.warning(f"network.project() missing network_pubkey in event")
@@ -113,6 +110,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     # Insert into networks table (minimal - no groups, no creator)
     # Groups and admin grants are separate events created after network
     # Network only stores its own identity data - groups store their network_id/network_role
+    # signed_by = network_id for self-signed network events
     safedb.execute(
         """INSERT OR REPLACE INTO networks
            (network_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
@@ -120,7 +118,7 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
         (
             network_id,
             network_pubkey_b64,
-            signed_by,
+            network_id,  # Self-signed: signed_by = network_id
             event_data['created_at'],
             recorded_by,
             recorded_at
