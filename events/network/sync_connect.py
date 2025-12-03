@@ -126,22 +126,14 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
 
         log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10] if peer_shared_id else 'NONE'}... known_peers={len(known_peer_shared_ids)} existing_connections={len(all_connection_rows)} completed={len(connection_rows)}")
 
-        # 1. Refresh existing connections (use their_transit_key directly)
-        # Track which connections we've refreshed so we don't also send() to them
-        refreshed_connections = set()
-        for conn in connection_rows:
-            try:
-                send_to_connection(
-                    their_transit_key_id=conn['their_transit_key_id'],
-                    their_transit_key=conn['their_transit_key'],
-                    from_peer_id=peer_id,
-                    t_ms=t_ms,
-                    db=db
-                )
-                # Note: We can't easily track by peer_shared_id since connections are key-based
-                # But existing connections are already being refreshed, so we don't need to send() new ones
-            except Exception as e:
-                log.warning(f"[SYNC_CONNECT_REFRESH_EXCEPTION] peer={peer_id[:10]}... error={e}")
+        # 1. Refresh existing connections - just update last_seen_ms (no network traffic needed for keepalive)
+        # Connections are already established with keys, we just need to keep them alive locally
+        if connection_rows:
+            unsafedb.execute(
+                "UPDATE sync_connections SET last_seen_ms = ? WHERE our_peer_id = ? AND their_transit_key IS NOT NULL",
+                (t_ms, peer_id)
+            )
+            log.warning(f"[SYNC_CONNECT_REFRESH] peer={peer_id[:10]}... refreshed {len(connection_rows)} connections")
 
         # 2. Send to known peers ONLY if we don't have existing connections
         # With key-based connections, skip send() if we have any active connections to avoid accumulating

@@ -64,17 +64,34 @@ def test_three_player_messaging(fresh_db):
     print(f"Alice has {len(alice_events_before)} shareable events before sync")
     print(f"Bob has {len(bob_events_before)} shareable events before sync")
 
+    # Show Alice's events by query window (w=4)
+    alice_windows = db.query("""
+        SELECT (window_id / 65536) as qw, event_id FROM shareable_events
+        WHERE can_share_peer_id = ? ORDER BY qw
+    """, (alice['peer_id'],))
+    print("\n=== Alice's events by query window (w=4) ===")
+    by_qw = {}
+    for row in alice_windows:
+        qw = row['qw']
+        if qw not in by_qw:
+            by_qw[qw] = []
+        by_qw[qw].append(row['event_id'][:15])
+    for qw in sorted(by_qw.keys()):
+        print(f"  QW {qw}: {len(by_qw[qw])} events")
+
     # Check connections BEFORE sync (device-wide table, no per-peer scope)
     print("\n=== Connections BEFORE sync ===")
     connections_before = db.query("SELECT our_transit_key_id FROM sync_connections")
     print(f"Device has {len(connections_before)} connections before sync")
 
-    # Initial sync - run fixed number of ticks
+    # Initial sync - run enough ticks for random window selection to cover all 16 windows
+    # With w=4 (16 windows), we need ~100 rounds to have high probability of hitting all windows
     print("\n=== Initial sync ===")
-    for i in range(50):
+    num_rounds = 100
+    for i in range(num_rounds):
         tick.tick(t_ms=4000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
-    final_t_ms = 4000 + 50 * tick_helper.TICK_INTERVAL_MS
-    print(f"Initial sync completed after 50 ticks")
+    final_t_ms = 4000 + num_rounds * tick_helper.TICK_INTERVAL_MS
+    print(f"Initial sync completed after {num_rounds} ticks")
 
     # Check connections AFTER sync (device-wide table, no per-peer scope)
     print("\n=== Connections AFTER sync ===")
@@ -104,6 +121,22 @@ def test_three_player_messaging(fresh_db):
     bob_new_events = len(bob_events_after) - len(bob_events_before)
     print(f"Alice gained {alice_new_events} events from sync")
     print(f"Bob gained {bob_new_events} events from sync")
+
+    # Check how many events are blocked for Bob
+    bob_blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?", (bob['peer_id'],))
+    print(f"\nBob has {bob_blocked_count['cnt'] if bob_blocked_count else 0} events blocked (pending deps)")
+    print(f"Bob has {len(bob_events_after)} events in shareable_events")
+
+    # Debug: Check what Bob's 4 original events were
+    print("\n=== Bob's original events ===")
+    import store, crypto
+    for row in bob_events_before:
+        try:
+            blob = store.get(row['event_id'], db)
+            data = crypto.parse_json(blob)
+            print(f"  {row['event_id'][:20]}... type={data.get('type', '?')}")
+        except Exception as e:
+            print(f"  {row['event_id'][:20]}... (encrypted or error: {e})")
 
     # Check what's blocked BEFORE assertions (query blocked_events_ephemeral directly)
     alice_blocked = db.query(
@@ -189,7 +222,7 @@ def test_three_player_messaging(fresh_db):
         trace_chain(b['dep_id'], bob['peer_id'], depth=1)
 
     # Check if the bootstrap invite (mode=user) was even blocked or if projection failed
-    print("\n=== Checking bootstrap invite status ===")
+    print("\n=== Checking all shareable events ===")
     # Get Alice's network_id and bootstrap invite
     alice_network = db.query_one(
         "SELECT network_id FROM users WHERE recorded_by = ? LIMIT 1",
@@ -207,6 +240,16 @@ def test_three_player_messaging(fresh_db):
                 inv_data = json.loads(inv_blob.decode())
                 if inv_data.get('signed_by') == net_id:
                     print(f"Bootstrap invite: {inv['invite_id'][:25]}... mode={inv['mode']}")
+
+                    # Check if Alice has this in shareable_events
+                    alice_has_event = db.query_one(
+                        "SELECT window_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+                        (inv['invite_id'], alice['peer_id'])
+                    )
+                    if alice_has_event:
+                        print(f"  Alice has in shareable_events: True (window={alice_has_event['window_id']}, qw={alice_has_event['window_id'] // 65536})")
+                    else:
+                        print(f"  Alice has in shareable_events: False")
 
                     # Check if Bob has this in shareable_events
                     bob_has_event = db.query_one(

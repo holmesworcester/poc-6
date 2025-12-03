@@ -638,6 +638,18 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     log.info(f"join() extracted invite_id={invite_id[:20]}... from invite link")
 
+    # Store invite prekey in group_prekeys table so we can decrypt group_key_shared events
+    # The invite_prekey_id was used by Alice when wrapping group_key_shared to us
+    # Derive public key from invite_private_key
+    from nacl.signing import SigningKey
+    signing_key = SigningKey(invite_private_key)
+    invite_pubkey = bytes(signing_key.verify_key)
+    safedb.execute(
+        "INSERT OR IGNORE INTO group_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (invite_prekey_id, peer_id, invite_pubkey, invite_private_key, t_ms, 0, peer_id)
+    )
+    log.info(f"join() stored invite prekey {invite_prekey_id[:20]}... in group_prekeys for decryption")
+
     # Store inviter's transit prekey so we can encrypt sync_connect to them
     if 'inviter_transit_prekey_public_key' in invite_data and 'inviter_transit_prekey_shared_id' in invite_data and 'inviter_transit_prekey_id' in invite_data:
         inviter_prekey_public_key_bytes = crypto.b64decode(invite_data['inviter_transit_prekey_public_key'])
