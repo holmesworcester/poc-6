@@ -2,10 +2,10 @@
 
 ## Goals
 
-1. Fix connection handshake to match spec (unified `signed_by`)
-2. Fix fragile ack matching
-3. Add explicit handshake test
-4. Add group_key determinism test
+1. Fix connection handshake to match spec (unified `signed_by`) - **DEFERRED** (works but could be simplified)
+2. Fix fragile ack matching - **DONE**
+3. Add explicit handshake test - **DONE**
+4. Add group_key determinism test - **DONE**
 
 ## Task 1: Unified `signed_by` in sync_connect
 
@@ -116,3 +116,23 @@ def test_deterministic_group_key_ids():
 2. Fix ack sender matching (simpler, fewer dependencies)
 3. Unify `signed_by` (more involved, may break things)
 4. Verify all tests pass
+
+## Completed Work
+
+### Task 2: Fix ack sender matching ✓
+- `sync_connect.send_connect_ack()` now includes `from_peer_shared_id` in the ack
+- `sync_connect_ack.project()` uses `from_peer_shared_id` to directly match connections
+- Removed fragile "most recent connection" heuristic
+
+### Task 3: Explicit handshake test ✓
+- Added `test_two_way_handshake()` in `tests/scenario_tests/test_sync_connect.py`
+- Tests complete flow: Bob→Alice connect, ack, Alice→Bob connect, ack
+- Verifies both peers have each other's transit_keys
+
+### Task 4: group_key determinism test ✓
+- Added `test_deterministic_group_key_ids()` in `tests/scenario_tests/test_forward_secrecy.py`
+- Verifies same key material produces same key_id regardless of peer/timestamp
+
+### Task 1: Unified signed_by - DEFERRED
+- Current dual-signature approach works correctly
+- Could be simplified in future iteration to match spec more closely
