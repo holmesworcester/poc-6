@@ -222,12 +222,12 @@ def _execute_process_sync_request(command: dict, recorded_by: str, recorded_at: 
 
     # Check if requester is recognized (peer_shared valid OR active connection)
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
     requester_known = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
         (requester_peer_shared_id, recorded_by)
     )
     if not requester_known:
-        unsafedb = create_unsafe_db(db)
         conn_ok = unsafedb.query_one(
             "SELECT 1 FROM sync_connections WHERE peer_shared_id = ? AND last_seen_ms + ttl_ms > ?",
             (requester_peer_shared_id, recorded_at)
@@ -290,10 +290,9 @@ def _execute_process_sync_request(command: dict, recorded_by: str, recorded_at: 
 
         # Wrap with transit key and queue
         wrapped_blob = crypto.wrap(event_blob, transit_key_dict, db)
-        queues.incoming.add(wrapped_blob, recorded_at, db)
+        queues.incoming.add(wrapped_blob, recorded_at, unsafedb)
 
     # Initialize sync state if needed
-    unsafedb = create_unsafe_db(db)
     sync_state_exists = unsafedb.query_one(
         "SELECT 1 FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
         (recorded_by, requester_peer_shared_id)

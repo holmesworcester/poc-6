@@ -501,6 +501,8 @@ def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any, sy
         return
 
     import queues
+    from db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
     slices_sent = 0
 
     # Send each slice wrapped with requester's prekey
@@ -533,7 +535,7 @@ def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any, sy
             wrapped_slice = crypto.wrap(slice_blob, requester_prekey_dict, db)
 
             # Add to incoming queue for requester to receive
-            queues.incoming.add(wrapped_slice, recorded_at, db)
+            queues.incoming.add(wrapped_slice, recorded_at, unsafedb)
 
             slices_sent += 1
             log.debug(f"sync_file.project() queued slice {slice_num} for requester")

@@ -41,6 +41,19 @@ class SyncEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,  # Transit-wrapped
+    "signer_type": "peer_shared",
+    "dependencies": [],  # No blocking deps - handler fetches what it needs
+    "tables": [],  # No direct table output - uses commands
+    "generic_dispatch": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -546,7 +559,8 @@ def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
-    transit_blobs = queues.incoming.drain(batch_size, t_ms, db)
+    unsafedb = create_unsafe_db(db)
+    transit_blobs = queues.incoming.drain(batch_size, t_ms, unsafedb)
     log.info(f"sync.receive: processing {len(transit_blobs)} blobs")
 
     # unwrap_and_store returns list of recorded_ids (one per peer who can decrypt)
@@ -826,7 +840,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     request_blob = crypto.wrap(canonical, to_key, db)
 
     # simulate sending - add to incoming queue
-    queues.incoming.add(request_blob, t_ms, db)
+    queues.incoming.add(request_blob, t_ms, unsafedb)
 
     # Mark window as synced (optimistically - in production might wait for response)
     mark_window_synced(from_peer_id, to_peer_shared_id, window_id, t_ms, db)
@@ -1097,7 +1111,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         from db import create_unsafe_db
         unsafedb = create_unsafe_db(db)
         before_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
-        queues.incoming.add(wrapped_blob, t_ms, db)
+        queues.incoming.add(wrapped_blob, t_ms, unsafedb)
         after_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
         log.debug(f"[SYNC_RESPONSE] added blob to incoming queue: before={before_count}, after={after_count}, hint={actual_hint_in_blob}")
 
