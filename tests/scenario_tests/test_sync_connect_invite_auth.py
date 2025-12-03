@@ -63,12 +63,10 @@ def test_sync_connect_has_invite_id(setup_alice_bob):
     data = setup_alice_bob
     db = data['db']
 
-    # Bob sends sync_connect to Alice
+    # Bob sends sync_connect to Alice (auth determined automatically from invite_accepteds)
     sync_connect.send(
         to_peer_shared_id=data['alice_peer_shared_id'],
         from_peer_id=data['bob_peer_id'],
-        from_peer_shared_id=data['bob_peer_shared_id'],
-        invite_id=data['invite_id'],
         t_ms=3000,
         db=db
     )
@@ -96,8 +94,6 @@ def test_sync_connect_has_invite_signature(setup_alice_bob):
     sync_connect.send(
         to_peer_shared_id=data['alice_peer_shared_id'],
         from_peer_id=data['bob_peer_id'],
-        from_peer_shared_id=data['bob_peer_shared_id'],
-        invite_id=data['invite_id'],
         t_ms=3000,
         db=db
     )
@@ -154,8 +150,6 @@ def test_invite_signature_verification_manual(setup_alice_bob):
     sync_connect.send(
         to_peer_shared_id=data['alice_peer_shared_id'],
         from_peer_id=data['bob_peer_id'],
-        from_peer_shared_id=data['bob_peer_shared_id'],
-        invite_id=data['invite_id'],
         t_ms=3000,
         db=db
     )
@@ -240,8 +234,6 @@ def test_sync_connect_project_authenticates_with_invite(setup_alice_bob):
     sync_connect.send(
         to_peer_shared_id=data['alice_peer_shared_id'],
         from_peer_id=data['bob_peer_id'],
-        from_peer_shared_id=data['bob_peer_shared_id'],
-        invite_id=data['invite_id'],
         t_ms=3000,
         db=db
     )
@@ -264,11 +256,12 @@ def test_sync_connect_project_authenticates_with_invite(setup_alice_bob):
 
     assert result is not None, "sync_connect.project should succeed with invite auth"
 
-    # Check connection was stored
+    # Check connection was stored (now keyed by our_transit_key_id, not peer identity)
     unsafedb = create_unsafe_db(db)
     conn = unsafedb.query_one(
-        "SELECT * FROM sync_connections WHERE peer_shared_id = ?",
-        (data['bob_peer_shared_id'],)
+        "SELECT * FROM sync_connections WHERE our_peer_id = ?",
+        (data['alice_peer_id'],)  # Connection is for Alice
     )
     assert conn is not None, "Connection should be stored"
     assert conn['their_transit_key'] is not None, "their_transit_key should be stored"
+    assert conn['our_transit_key_id'] is not None, "our_transit_key_id should be stored"

@@ -307,7 +307,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         channel_id='',  # Not available yet - content created after peer_shared
         key_id='',  # Not available yet - content created after peer_shared
         peer_id=peer_id,
-        peer_shared_id='PENDING',  # Will be set to peer_shared_id after it's created
+        peer_shared_id=None,  # Bootstrap: no inviter (self-invite)
         t_ms=t_ms + 20,
         db=db
     )
@@ -326,7 +326,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         'invite_id': invite_id,
         'invite_prekey_id': bootstrap_invite_prekey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
-        'inviter_peer_shared_id': 'PENDING',  # Will connect to self after peer_shared created
+        'inviter_peer_shared_id': None,  # Bootstrap: no inviter (self-invite)
         'ip': '127.0.0.1',
         'port': 6100,
     }
@@ -335,15 +335,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     invite_link = f"quiet://invite/{invite_code}"
     log.info(f"new_network() built invite_link with invite_prekey_id={bootstrap_invite_prekey_id[:20]}...")
 
-    # 4. Join using own invite (creates user_id)
-    # Note: join() expects peer to already have peer_self entry
-    # We need to create a temporary peer_self entry for the join to work
-    safedb.execute(
-        "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
-        (peer_id, 'PENDING', None, peer_id, t_ms)
-    )
-
     # 4. Create user via bootstrap invite (isomorphic with join() flow)
+    # Note: peer_self is populated later by peer_shared.project() - no PENDING entry needed
     user_id, user_private_key = create(
         peer_id=peer_id,
         name=name,
@@ -608,30 +601,14 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     from events.identity import invite
 
-    # Get peer_shared_id from existing peer or create PENDING entry
+    # Verify peer was created (check local_peers table)
     from db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row:
-        # Verify peer was created (check local_peers table)
-        unsafedb = create_unsafe_db(db)
-        peer_exists = unsafedb.query_one("SELECT 1 FROM local_peers WHERE peer_id = ?", (peer_id,))
-        if not peer_exists:
-            raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
-
-        # Create PENDING peer_self entry - will be updated after peer_shared is created
-        # This follows the same pattern as new_network() bootstrap
-        safedb.execute(
-            "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
-            (peer_id, 'PENDING', None, peer_id, t_ms)
-        )
-        peer_shared_id = 'PENDING'
-        log.info(f"join() created PENDING peer_self entry for peer {peer_id[:20]}...")
-    else:
-        peer_shared_id = peer_self_row['peer_shared_id']
+    unsafedb = create_unsafe_db(db)
+    peer_exists = unsafedb.query_one("SELECT 1 FROM local_peers WHERE peer_id = ?", (peer_id,))
+    if not peer_exists:
+        raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
+    # Note: peer_self is populated later by peer_shared.project() - no PENDING entry needed
 
     # Parse invite link
     import base64

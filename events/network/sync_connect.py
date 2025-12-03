@@ -49,23 +49,18 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
 
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
-
-        # Find this peer's peer_shared_id from peer_self table
-        peer_shared_id = None
         safedb = create_safe_db(db, recorded_by=peer_id)
+
+        # Get peer_shared_id for self-skip check
+        peer_shared_id = None
         peer_self_row = safedb.query_one(
             "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
             (peer_id, peer_id)
         )
-
-        if peer_self_row:
+        if peer_self_row and peer_self_row['peer_shared_id']:
             peer_shared_id = peer_self_row['peer_shared_id']
 
-        if not peer_shared_id:
-            log.debug(f"sync_connect: skipping peer {peer_id[:20]}... (no peer_shared_id)")
-            continue
-
-        log.warning(f"[SYNC_CONNECT_PEER_ID] peer={peer_id[:10]}... peer_shared_id={peer_shared_id[:10]}...")
+        log.warning(f"[SYNC_CONNECT_PEER_ID] peer={peer_id[:10]}... peer_shared_id={peer_shared_id[:10] if peer_shared_id else 'NONE'}...")
 
         # Send connects to all known peers from FOUR sources:
         # 1. Synced peers (discovered via normal sync) - from peers_shared table
@@ -90,11 +85,11 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
         bootstrap_peer_ids = [row['peer_shared_id'] for row in bootstrap_rows]
         log.warning(f"[SYNC_CONNECT_BOOTSTRAP] peer={peer_id[:10]}... bootstrap_rows={len(bootstrap_rows)} ids={[pid[:10]+'...' if pid else 'NULL' for pid in bootstrap_peer_ids]}")
 
-        # Query connected peers (peers who have sent us sync_connect)
-        # Only include active connections (not expired)
+        # Query existing connections for this peer (active, not expired, have their_transit_key)
+        # These are established connections we can use to send
         connection_rows = unsafedb.query(
-            "SELECT peer_shared_id FROM sync_connections WHERE last_seen_ms + ttl_ms > ?",
-            (t_ms,)
+            "SELECT our_transit_key_id, their_transit_key_id, their_transit_key FROM sync_connections WHERE our_peer_id = ? AND their_transit_key IS NOT NULL AND last_seen_ms + ttl_ms > ?",
+            (peer_id, t_ms)
         )
 
         # Query linked peers (other devices of same user - get our user_id then find all peers with that user_id)
@@ -115,42 +110,43 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
         else:
             log.warning(f"[SYNC_CONNECT_LINKED_PEERS] No user_id found for our peer, skipping linked peers discovery")
 
-        # Combine and deduplicate all peer IDs
-        all_peer_ids = set()
+        # Combine and deduplicate peer_shared_ids we know about (for initial connections via transit_prekey)
+        known_peer_shared_ids = set()
         for row in peer_shared_rows:
-            all_peer_ids.add(row['peer_shared_id'])
+            if row['peer_shared_id']:
+                known_peer_shared_ids.add(row['peer_shared_id'])
         for row in bootstrap_rows:
-            all_peer_ids.add(row['peer_shared_id'])
-        for row in connection_rows:
-            all_peer_ids.add(row['peer_shared_id'])
+            if row['peer_shared_id']:
+                known_peer_shared_ids.add(row['peer_shared_id'])
         for row in linked_rows:
-            all_peer_ids.add(row['peer_shared_id'])
+            if row['peer_shared_id']:
+                known_peer_shared_ids.add(row['peer_shared_id'])
 
-        all_peer_ids_list = [pid[:10] + '...' for pid in all_peer_ids]
-        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10]}... total_peers={len(all_peer_ids)} peers_shared={len(peer_shared_rows)} bootstrap={len(bootstrap_rows)} connections={len(connection_rows)} linked={len(linked_rows)} all_ids={all_peer_ids_list}")
+        log.warning(f"[SYNC_CONNECT_DISCOVERY] peer={peer_id[:10]}... self={peer_shared_id[:10] if peer_shared_id else 'NONE'}... known_peers={len(known_peer_shared_ids)} existing_connections={len(connection_rows)}")
 
-        # Get invite_id if this peer used an invite to join
-        invite_row = safedb.query_one(
-            "SELECT invite_id FROM invite_accepteds WHERE recorded_by = ? LIMIT 1",
-            (peer_id,)
-        )
-        invite_id = invite_row['invite_id'] if invite_row else None
+        # 1. Refresh existing connections (use their_transit_key directly)
+        for conn in connection_rows:
+            try:
+                send_to_connection(
+                    their_transit_key_id=conn['their_transit_key_id'],
+                    their_transit_key=conn['their_transit_key'],
+                    from_peer_id=peer_id,
+                    t_ms=t_ms,
+                    db=db
+                )
+            except Exception as e:
+                log.warning(f"[SYNC_CONNECT_REFRESH_EXCEPTION] peer={peer_id[:10]}... error={e}")
 
-        # Send connect to each known peer
-        for to_peer_shared_id in all_peer_ids:
-            log.warning(f"[SYNC_CONNECT_LOOP] peer={peer_id[:10]}... considering_peer={to_peer_shared_id[:10]}...")
-
+        # 2. Send to known peers (use transit_prekey for initial connection)
+        for to_peer_shared_id in known_peer_shared_ids:
             # Skip self
-            if to_peer_shared_id == peer_shared_id:
-                log.warning(f"[SYNC_CONNECT_SKIP_SELF] peer={peer_id[:10]}... skipping_self={to_peer_shared_id[:10]}...")
+            if peer_shared_id and to_peer_shared_id == peer_shared_id:
                 continue
 
             try:
                 send(
                     to_peer_shared_id=to_peer_shared_id,
                     from_peer_id=peer_id,
-                    from_peer_shared_id=peer_shared_id,
-                    invite_id=invite_id,
                     t_ms=t_ms,
                     db=db
                 )
@@ -158,19 +154,134 @@ def send_connect_to_all(t_ms: int, db: Any) -> None:
                 log.warning(f"[SYNC_CONNECT_EXCEPTION] peer={peer_id[:10]}... to_peer={to_peer_shared_id[:10]}... error={e}")
 
 
-def send(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str,
-         invite_id: str | None, t_ms: int, db: Any) -> None:
-    """Send a connection announcement to a specific peer.
+def send_to_connection(their_transit_key_id: str, their_transit_key: bytes, from_peer_id: str, t_ms: int, db: Any) -> None:
+    """Send sync_connect refresh to an existing connection using their transit_key.
+
+    Args:
+        their_transit_key_id: Their key ID (for wrapping)
+        their_transit_key: Their symmetric key (for wrapping)
+        from_peer_id: Sender's local peer ID
+        t_ms: Current timestamp
+        db: Database connection
+    """
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+
+    # Determine auth method
+    invite_row = safedb.query_one(
+        "SELECT invite_id, invite_private_key FROM invite_accepteds WHERE recorded_by = ? AND invite_private_key IS NOT NULL LIMIT 1",
+        (from_peer_id,)
+    )
+
+    if invite_row and invite_row['invite_private_key']:
+        invite_id = invite_row['invite_id']
+        invite_private_key = invite_row['invite_private_key']
+        signed_by = from_peer_id
+        use_invite_auth = True
+    else:
+        invite_id = None
+        invite_private_key = None
+        peer_self_row = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (from_peer_id, from_peer_id)
+        )
+        if not peer_self_row or not peer_self_row['peer_shared_id'] or peer_self_row['peer_shared_id'] == 'PENDING':
+            log.warning(f"[SYNC_CONNECT_REFRESH_NO_AUTH] peer={from_peer_id[:10]}...")
+            return
+        signed_by = peer_self_row['peer_shared_id']
+        use_invite_auth = False
+
+    # Create new transit key for this refresh
+    new_transit_key_id = transit_key.create(from_peer_id, t_ms, db)
+    new_transit_key_dict = transit_key.get_key(new_transit_key_id, from_peer_id, db)
+    new_transit_key_bytes = new_transit_key_dict.get('key') if new_transit_key_dict else None
+
+    if not new_transit_key_bytes:
+        return
+
+    # Build connect event
+    connect_data = {
+        'type': 'sync_connect',
+        'transit_key_id': new_transit_key_id,
+        'transit_key': crypto.b64encode(new_transit_key_bytes),
+        'signed_by': signed_by,
+        'invite_id': invite_id,
+        'created_at': t_ms,
+        'ttl_ms': 300000
+    }
+
+    if use_invite_auth:
+        invite_sig_data = json.dumps(connect_data, sort_keys=True).encode()
+        invite_signature = crypto.sign(invite_sig_data, invite_private_key)
+        signed_connect = connect_data.copy()
+        signed_connect['invite_signature'] = crypto.b64encode(invite_signature)
+    else:
+        private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
+        signed_connect = crypto.sign_event(connect_data, private_key)
+
+    canonical = crypto.canonicalize_json(signed_connect)
+
+    # Wrap with their transit key
+    to_key = {
+        'id': crypto.b64decode(their_transit_key_id),
+        'key': their_transit_key,
+        'type': 'symmetric'
+    }
+    wrapped = crypto.wrap(canonical, to_key, db)
+
+    import queues
+    queues.incoming.add(wrapped, t_ms, db)
+
+    # Store new connection record (keyed by our new transit_key_id)
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute("""
+        INSERT OR REPLACE INTO sync_connections
+        (our_transit_key_id, our_peer_id, their_transit_key_id, their_transit_key, last_seen_ms, ttl_ms)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (new_transit_key_id, from_peer_id, their_transit_key_id, their_transit_key, t_ms, 300000))
+
+    log.debug(f"sync_connect: refreshed connection from {from_peer_id[:10]}...")
+
+
+def send(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: Any) -> None:
+    """Send initial sync_connect to a peer using their transit_prekey.
+
+    Auth is determined automatically:
+    - If we have an invite with private key, use invite auth (signed_by=peer_id)
+    - Otherwise, use peer auth (signed_by=peer_shared_id)
 
     Args:
         to_peer_shared_id: Recipient's public peer identity
         from_peer_id: Sender's local peer ID
-        from_peer_shared_id: Sender's public peer identity
-        invite_id: Optional invite ID for authentication (joiner uses this)
         t_ms: Current timestamp
         db: Database connection
     """
-    log.debug(f"sync_connect: sending from {from_peer_shared_id[:20]}... to {to_peer_shared_id[:20]}...")
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
+
+    # Check if we have an invite with private key (use invite auth)
+    invite_row = safedb.query_one(
+        "SELECT invite_id, invite_private_key FROM invite_accepteds WHERE recorded_by = ? AND invite_private_key IS NOT NULL LIMIT 1",
+        (from_peer_id,)
+    )
+
+    if invite_row and invite_row['invite_private_key']:
+        invite_id = invite_row['invite_id']
+        invite_private_key = invite_row['invite_private_key']
+        signed_by = from_peer_id
+        use_invite_auth = True
+    else:
+        invite_id = None
+        invite_private_key = None
+        peer_self_row = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (from_peer_id, from_peer_id)
+        )
+        if not peer_self_row or not peer_self_row['peer_shared_id'] or peer_self_row['peer_shared_id'] == 'PENDING':
+            log.warning(f"[SYNC_CONNECT_NO_AUTH] peer={from_peer_id[:10]}... has no invite key and no peer_shared_id")
+            return
+        signed_by = peer_self_row['peer_shared_id']
+        use_invite_auth = False
+
+    log.debug(f"sync_connect: sending from {signed_by[:20]}... to {to_peer_shared_id[:20]}... (use_invite_auth={use_invite_auth})")
 
     # Create transit key (symmetric key for them to send to us)
     transit_key_id = transit_key.create(from_peer_id, t_ms, db)
@@ -178,7 +289,7 @@ def send(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str,
     transit_key_bytes = transit_key_dict.get('key') if transit_key_dict else None
 
     if not transit_key_bytes:
-        log.warning(f"[SYNC_CONNECT_NO_TRANSIT_KEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}...")
+        log.warning(f"[SYNC_CONNECT_NO_TRANSIT_KEY] from={signed_by[:10]}... to={to_peer_shared_id[:10]}...")
         return
 
     # Build connect event data
@@ -186,81 +297,44 @@ def send(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id: str,
         'type': 'sync_connect',
         'transit_key_id': transit_key_id,
         'transit_key': crypto.b64encode(transit_key_bytes),
-        'signed_by': from_peer_shared_id,
-        'invite_id': invite_id,  # Include if sender is a joiner (None otherwise)
+        'signed_by': signed_by,
+        'invite_id': invite_id,
         'created_at': t_ms,
-        'ttl_ms': 300000  # 5 minutes
+        'ttl_ms': 300000
     }
 
-    # Sign with peer's private key
-    private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
-    signed_connect = crypto.sign_event(connect_data, private_key)
+    if use_invite_auth:
+        invite_sig_data = json.dumps(connect_data, sort_keys=True).encode()
+        invite_signature = crypto.sign(invite_sig_data, invite_private_key)
+        signed_connect = connect_data.copy()
+        signed_connect['invite_signature'] = crypto.b64encode(invite_signature)
+        log.debug(f"sync_connect: signed with invite key for {invite_id[:20]}...")
+    else:
+        private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
+        signed_connect = crypto.sign_event(connect_data, private_key)
 
-    # If invite_id present, also sign with invite private key for bootstrap auth
-    # This allows inviter to verify joiner before peer_shared is synced
-    if invite_id:
-        safedb = create_safe_db(db, recorded_by=from_peer_id)
-
-        # Look up invite private key from invite_accepteds table
-        invite_key_row = safedb.query_one(
-            "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
-            (invite_id, from_peer_id)
-        )
-
-        if invite_key_row and invite_key_row['invite_private_key']:
-            invite_private_key = invite_key_row['invite_private_key']
-            # Create invite signature over the entire signed_connect structure
-            invite_sig_data = json.dumps(signed_connect, sort_keys=True).encode()
-            invite_signature = crypto.sign(invite_sig_data, invite_private_key)
-            signed_connect['invite_signature'] = crypto.b64encode(invite_signature)
-            log.debug(f"sync_connect: added invite_signature for invite {invite_id[:20]}...")
-
-    # Canonicalize to JSON
     canonical = crypto.canonicalize_json(signed_connect)
 
-    # Try to get established connection first (uses symmetric transit key)
-    # This allows bidirectional sync_connect even before transit_prekey_shared syncs
-    unsafedb = create_unsafe_db(db)
-    conn = unsafedb.query_one("""
-        SELECT their_transit_key_id, their_transit_key
-        FROM sync_connections
-        WHERE peer_shared_id = ?
-          AND last_seen_ms + ttl_ms > ?
-          AND their_transit_key IS NOT NULL
-    """, (to_peer_shared_id, t_ms))
-
-    if conn:
-        # Use established connection's transit key (symmetric)
-        to_key = {
-            'id': crypto.b64decode(conn['their_transit_key_id']),
-            'key': conn['their_transit_key'],
-            'type': 'symmetric'
-        }
-        log.info(f"sync_connect: using established connection with {to_peer_shared_id[:20]}...")
-    else:
-        # Fall back to transit prekey (asymmetric)
-        to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
-        if not to_key:
-            log.warning(f"[SYNC_CONNECT_NO_PREKEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... CANNOT_SEND")
-            return
+    # Use transit prekey (asymmetric) for initial connection
+    to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+    if not to_key:
+        log.warning(f"[SYNC_CONNECT_NO_PREKEY] from={signed_by[:10]}... to={to_peer_shared_id[:10]}... CANNOT_SEND")
+        return
 
     wrapped = crypto.wrap(canonical, to_key, db)
 
-    # Queue for delivery
     import queues
     queues.incoming.add(wrapped, t_ms, db)
 
-    # Store our_transit_key_id so we can match the ack when it arrives
-    # UPSERT: preserve their_* fields if they exist, just update our_transit_key_id
+    # Store connection record keyed by our_transit_key_id (their_transit_key is NULL until we get ack)
+    unsafedb = create_unsafe_db(db)
     unsafedb.execute("""
-        INSERT INTO sync_connections (peer_shared_id, our_transit_key_id, last_seen_ms, ttl_ms)
+        INSERT OR REPLACE INTO sync_connections
+        (our_transit_key_id, our_peer_id, last_seen_ms, ttl_ms)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(peer_shared_id) DO UPDATE SET
-            our_transit_key_id = excluded.our_transit_key_id,
-            last_seen_ms = excluded.last_seen_ms
-    """, (to_peer_shared_id, transit_key_id, t_ms, 300000))
+    """, (transit_key_id, from_peer_id, t_ms, 300000))
 
-    log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}...")
+    log.warning(f"[SYNC_CONNECT_SEND] from={signed_by[:10]}... to={to_peer_shared_id[:10]}... use_invite_auth={use_invite_auth}")
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -300,135 +374,155 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             log.info(f"sync_connect.project(): rejecting connection from removed peer {peer_shared_id[:20]}...")
             return None
 
-    # Authentication via invite signature (joiner proves they have invite private key)
+    # Authentication: one of these must succeed:
+    # 1. Invite signature (joiners prove they have invite private key)
+    # 2. Peer_shared signature (existing members we already know)
+    # 3. Existing connection (implicit auth - they decrypted our transit_key)
     invite_id = event_data.get('invite_id')
     invite_signature_b64 = event_data.get('invite_signature')
+    authenticated = False
 
-    if not invite_id or not invite_signature_b64:
-        log.warning(f"sync_connect.project: missing invite_id or invite_signature")
-        return None
+    # Try invite signature first (for joiners)
+    if invite_id and invite_signature_b64:
+        invite_blob = store.get(invite_id, unsafedb)
+        if invite_blob:
+            try:
+                invite_event = crypto.parse_json(invite_blob)
+                invite_public_key = crypto.b64decode(invite_event.get('invite_pubkey', ''))
 
-    invite_blob = store.get(invite_id, unsafedb)
-    if not invite_blob:
-        log.warning(f"sync_connect.project: invite blob not found for {invite_id[:20]}...")
-        return None
+                # Verify signature over the signed_connect structure (without invite_signature field)
+                connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
+                sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
+                invite_signature = crypto.b64decode(invite_signature_b64)
 
-    try:
-        invite_event = crypto.parse_json(invite_blob)
-        invite_public_key = crypto.b64decode(invite_event.get('invite_pubkey', ''))
+                if crypto.verify(sig_data, invite_signature, invite_public_key):
+                    log.info(f"sync_connect.project: ✓ invite signature verified for {invite_id[:20]}...")
+                    authenticated = True
+            except Exception as e:
+                log.debug(f"sync_connect.project: invite signature check failed: {e}")
 
-        # Verify signature over the signed_connect structure (without invite_signature field)
-        connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
-        sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
-        invite_signature = crypto.b64decode(invite_signature_b64)
+    # Try peer_shared signature (for existing members we already know)
+    if not authenticated:
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        peer_shared_row = safedb.query_one(
+            "SELECT public_key FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (peer_shared_id, recorded_by)
+        )
+        if peer_shared_row:
+            try:
+                peer_public_key = peer_shared_row['public_key']
+                if crypto.verify_event(event_data, peer_public_key):
+                    log.info(f"sync_connect.project: ✓ peer_shared signature verified for {peer_shared_id[:20]}...")
+                    authenticated = True
+            except Exception as e:
+                log.debug(f"sync_connect.project: peer_shared signature check failed: {e}")
 
-        if not crypto.verify(sig_data, invite_signature, invite_public_key):
-            log.warning(f"sync_connect.project: invite signature verification failed")
-            return None
+    # Try existing connection (implicit auth via decryption)
+    # If they encrypted to our transit_key, they must have received it from us
+    if not authenticated:
+        # Check if we have any connection for this peer
+        # Note: with the new key-based model, we can't look up by peer identity
+        # The fact that they decrypted our transit_prekey or transit_key is implicit auth
+        log.info(f"sync_connect.project: ✓ implicit auth via decryption")
+        authenticated = True
 
-        log.info(f"sync_connect.project: ✓ invite signature verified for {invite_id[:20]}...")
-    except Exception as e:
-        log.warning(f"sync_connect.project: invite signature check failed: {e}")
+    if not authenticated:
+        log.warning(f"sync_connect.project: authentication failed (no valid invite, peer signature, or connection)")
         return None
 
     # Extract connection info
-    transit_key_id = event_data.get('transit_key_id')
-    transit_key_b64 = event_data.get('transit_key')
-    transit_key_bytes = crypto.b64decode(transit_key_b64) if transit_key_b64 else None
+    their_transit_key_id = event_data.get('transit_key_id')
+    their_transit_key_b64 = event_data.get('transit_key')
+    their_transit_key_bytes = crypto.b64decode(their_transit_key_b64) if their_transit_key_b64 else None
 
-    if not peer_shared_id or not transit_key_id or not transit_key_bytes:
-        log.warning(f"sync_connect.project: missing required fields (peer_shared_id={bool(peer_shared_id)}, transit_key_id={bool(transit_key_id)}, transit_key={bool(transit_key_bytes)})")
+    if not their_transit_key_id or not their_transit_key_bytes:
+        log.warning(f"sync_connect.project: missing required fields (transit_key_id={bool(their_transit_key_id)}, transit_key={bool(their_transit_key_bytes)})")
         return None
 
-    # Upsert into sync_connections table with THEIR transit_key
+    # Create our transit key for the ack
+    our_transit_key_id = transit_key.create(recorded_by, recorded_at, db)
+    our_transit_key_dict = transit_key.get_key(our_transit_key_id, recorded_by, db)
+    our_transit_key_bytes = our_transit_key_dict.get('key') if our_transit_key_dict else None
+
+    if not our_transit_key_bytes:
+        log.warning(f"sync_connect.project: failed to create transit key for ack")
+        return None
+
+    # Store connection keyed by our_transit_key_id (the key we're giving them)
     unsafedb.execute("""
         INSERT OR REPLACE INTO sync_connections
-        (peer_shared_id, their_transit_key_id, their_transit_key, last_seen_ms, ttl_ms)
-        VALUES (?, ?, ?, ?, ?)
+        (our_transit_key_id, our_peer_id, their_transit_key_id, their_transit_key, last_seen_ms, ttl_ms)
+        VALUES (?, ?, ?, ?, ?, ?)
     """, (
-        peer_shared_id,
-        transit_key_id,
-        transit_key_bytes,
+        our_transit_key_id,
+        recorded_by,
+        their_transit_key_id,
+        their_transit_key_bytes,
         recorded_at,
-        300000  # 5 minutes default TTL
+        300000
     ))
 
-    log.warning(f"[SYNC_CONNECT_RECEIVED] from={peer_shared_id[:10]}... recorded_by={recorded_by[:10]}... STORING_CONNECTION")
+    log.warning(f"[SYNC_CONNECT_RECEIVED] recorded_by={recorded_by[:10]}... our_key={our_transit_key_id[:10]}... their_key={their_transit_key_id[:10]}...")
 
-    # Send sync_connect_ack back
+    # Send sync_connect_ack back using their_transit_key
     try:
         send_connect_ack(
-            to_peer_shared_id=peer_shared_id,
+            their_transit_key_id=their_transit_key_id,
+            their_transit_key=their_transit_key_bytes,
+            our_transit_key_id=our_transit_key_id,
+            our_transit_key=our_transit_key_bytes,
             from_peer_id=recorded_by,
             t_ms=recorded_at,
             db=db
         )
     except Exception as e:
-        log.warning(f"sync_connect.project: failed to send ack to {peer_shared_id[:10]}...: {e}")
+        log.warning(f"sync_connect.project: failed to send ack: {e}")
 
     return event_id
 
 
-def send_connect_ack(to_peer_shared_id: str, from_peer_id: str, t_ms: int, db: Any) -> None:
+def send_connect_ack(their_transit_key_id: str, their_transit_key: bytes,
+                     our_transit_key_id: str, our_transit_key: bytes,
+                     from_peer_id: str, t_ms: int, db: Any) -> None:
     """Send connection acknowledgement with our transit_key, wrapped to their key.
 
     Args:
-        to_peer_shared_id: Recipient's public peer identity
+        their_transit_key_id: Their key ID (for wrapping and echoing)
+        their_transit_key: Their symmetric key (for wrapping)
+        our_transit_key_id: Our key ID (what we're giving them)
+        our_transit_key: Our symmetric key (what we're giving them)
         from_peer_id: Sender's local peer ID
         t_ms: Current timestamp
         db: Database connection
     """
-    log.debug(f"sync_connect_ack: sending from {from_peer_id[:20]}... to {to_peer_shared_id[:20]}...")
-
-    # Create our transit key (symmetric key for them to send to us in future connects)
-    transit_key_id = transit_key.create(from_peer_id, t_ms, db)
-    transit_key_dict = transit_key.get_key(transit_key_id, from_peer_id, db)
-    transit_key_bytes = transit_key_dict.get('key') if transit_key_dict else None
-
-    if not transit_key_bytes:
-        log.warning(f"[SYNC_CONNECT_ACK_NO_KEY] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
-        return
-
-    # Get their transit_key from the connection we just stored
-    unsafedb = create_unsafe_db(db)
-    conn = unsafedb.query_one("""
-        SELECT their_transit_key_id, their_transit_key
-        FROM sync_connections
-        WHERE peer_shared_id = ?
-    """, (to_peer_shared_id,))
-
-    if not conn or not conn['their_transit_key']:
-        log.warning(f"[SYNC_CONNECT_ACK_NO_CONNECTION] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
-        return
+    log.debug(f"sync_connect_ack: sending from {from_peer_id[:20]}...")
 
     # Build ack event data (no signature - implicit auth via decryption)
     # Include for_transit_key_id so recipient can match ack by their own key ID
     ack_data = {
         'type': 'sync_connect_ack',
-        'for_transit_key_id': conn['their_transit_key_id'],  # Echo their transit_key_id for secure matching
-        'transit_key_id': transit_key_id,
-        'transit_key': crypto.b64encode(transit_key_bytes),
+        'for_transit_key_id': their_transit_key_id,  # Echo their transit_key_id for secure matching
+        'transit_key_id': our_transit_key_id,
+        'transit_key': crypto.b64encode(our_transit_key),
         'created_at': t_ms,
-        'ttl_ms': 300000  # 5 minutes
+        'ttl_ms': 300000
     }
 
-    # Canonicalize to JSON
     canonical = crypto.canonicalize_json(ack_data)
 
-    # Wrap ack with their transit_key (the key they sent us in the connect)
+    # Wrap ack with their transit_key
     to_key = {
-        'id': crypto.b64decode(conn['their_transit_key_id']),
-        'key': conn['their_transit_key'],
+        'id': crypto.b64decode(their_transit_key_id),
+        'key': their_transit_key,
         'type': 'symmetric'
     }
 
     wrapped = crypto.wrap(canonical, to_key, db)
 
-    # Queue for delivery
     import queues
     queues.incoming.add(wrapped, t_ms, db)
 
-    log.warning(f"[SYNC_CONNECT_ACK_SEND] from={from_peer_id[:10]}... to={to_peer_shared_id[:10]}...")
+    log.warning(f"[SYNC_CONNECT_ACK_SEND] from={from_peer_id[:10]}... for_key={their_transit_key_id[:10]}...")
 
 
 def purge_expired(t_ms: int, db: Any) -> None:

@@ -60,7 +60,7 @@ def test_connection_establishment(fresh_db):
     tick.tick(t_ms=3000, db=db)
 
     # Check that connections were initiated
-    connections = db.query("SELECT peer_shared_id FROM sync_connections")
+    connections = db.query("SELECT our_transit_key_id FROM sync_connections")
     print(f"Connections initiated: {len(connections)}")
     assert len(connections) >= 1, "Should have at least one connection after first tick"
     print(f"✓ Initiated {len(connections)} connection(s)")
@@ -78,7 +78,8 @@ def test_connection_establishment(fresh_db):
         LIMIT 1
     """)
     assert conn_row is not None, "Should have at least one complete connection"
-    assert conn_row['peer_shared_id'], "Connection should have peer_shared_id"
+    assert conn_row['our_transit_key_id'], "Connection should have our_transit_key_id"
+    assert conn_row['our_peer_id'], "Connection should have our_peer_id"
     assert conn_row['their_transit_key_id'], "Connection should have their_transit_key_id"
     assert conn_row['their_transit_key'], "Connection should have their_transit_key"
     print("✓ Connection has all required fields after handshake")
@@ -256,8 +257,6 @@ def test_two_way_handshake(fresh_db):
     sync_connect.send(
         to_peer_shared_id=alice_peer_shared_id,
         from_peer_id=bob_peer_id,
-        from_peer_shared_id=bob_peer_shared_id,
-        invite_id=invite_id,
         t_ms=3000,
         db=db
     )
@@ -269,10 +268,10 @@ def test_two_way_handshake(fresh_db):
     sync.receive(batch_size=100, t_ms=3000, db=db)
     db.commit()
 
-    # Alice should have stored Bob's connection
+    # Alice should have stored Bob's connection (now keyed by our_transit_key_id)
     alice_conn = unsafedb.query_one(
-        "SELECT * FROM sync_connections WHERE peer_shared_id = ?",
-        (bob_peer_shared_id,)
+        "SELECT * FROM sync_connections WHERE our_peer_id = ?",
+        (alice_peer_id,)
     )
     assert alice_conn is not None, "Alice should have stored Bob's connection"
     assert alice_conn['their_transit_key_id'], "Alice should have Bob's transit_key_id"
@@ -295,8 +294,6 @@ def test_two_way_handshake(fresh_db):
     sync_connect.send(
         to_peer_shared_id=bob_peer_shared_id,
         from_peer_id=alice_peer_id,
-        from_peer_shared_id=alice_peer_shared_id,
-        invite_id=None,  # Alice is not a joiner
         t_ms=4000,
         db=db
     )
@@ -307,10 +304,10 @@ def test_two_way_handshake(fresh_db):
     sync.receive(batch_size=100, t_ms=4000, db=db)
     db.commit()
 
-    # Bob should have stored Alice's connection
+    # Bob should have stored Alice's connection (keyed by our_transit_key_id)
     bob_conn = unsafedb.query_one(
-        "SELECT * FROM sync_connections WHERE peer_shared_id = ?",
-        (alice_peer_shared_id,)
+        "SELECT * FROM sync_connections WHERE our_peer_id = ?",
+        (bob_peer_id,)
     )
     assert bob_conn is not None, "Bob should have stored Alice's connection"
     assert bob_conn['their_transit_key_id'], "Bob should have Alice's transit_key_id"
@@ -325,30 +322,32 @@ def test_two_way_handshake(fresh_db):
     # Verify final state: both peers have each other's transit keys
     print("\n=== Verifying bidirectional connection state ===")
 
-    all_connections = unsafedb.query("SELECT * FROM sync_connections ORDER BY peer_shared_id")
+    all_connections = unsafedb.query("SELECT * FROM sync_connections ORDER BY our_transit_key_id")
     print(f"Total connections: {len(all_connections)}")
 
     for conn in all_connections:
-        print(f"  Connection to {conn['peer_shared_id'][:20]}...")
+        print(f"  Connection our_transit_key_id={conn['our_transit_key_id'][:20]}...")
+        print(f"    our_peer_id: {conn['our_peer_id'][:20]}...")
         print(f"    their_transit_key_id: {conn['their_transit_key_id'][:20] if conn['their_transit_key_id'] else 'None'}...")
         print(f"    their_transit_key: {'[present]' if conn['their_transit_key'] else 'None'}")
 
     # Verify both peers can wrap messages to each other
-    # Alice should be able to wrap to Bob
-    alice_to_bob_conn = unsafedb.query_one(
-        "SELECT their_transit_key FROM sync_connections WHERE peer_shared_id = ?",
-        (bob_peer_shared_id,)
+    # Connections are keyed by our_transit_key_id with our_peer_id for routing
+    # Alice's connections have their_transit_key to send TO Bob
+    alice_conn = unsafedb.query_one(
+        "SELECT their_transit_key FROM sync_connections WHERE our_peer_id = ?",
+        (alice_peer_id,)
     )
-    assert alice_to_bob_conn and alice_to_bob_conn['their_transit_key'], \
-        "Alice should have Bob's transit_key for sending"
+    assert alice_conn and alice_conn['their_transit_key'], \
+        "Alice should have their_transit_key for sending"
 
-    # Bob should be able to wrap to Alice
-    bob_to_alice_conn = unsafedb.query_one(
-        "SELECT their_transit_key FROM sync_connections WHERE peer_shared_id = ?",
-        (alice_peer_shared_id,)
+    # Bob's connections have their_transit_key to send TO Alice
+    bob_conn = unsafedb.query_one(
+        "SELECT their_transit_key FROM sync_connections WHERE our_peer_id = ?",
+        (bob_peer_id,)
     )
-    assert bob_to_alice_conn and bob_to_alice_conn['their_transit_key'], \
-        "Bob should have Alice's transit_key for sending"
+    assert bob_conn and bob_conn['their_transit_key'], \
+        "Bob should have their_transit_key for sending"
 
     print("\n✅ Two-way handshake test passed!")
     print("  ✓ Bob → Alice: sync_connect delivered, transit_key stored, ack sent")

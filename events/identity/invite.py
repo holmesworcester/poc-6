@@ -653,7 +653,7 @@ def create_bootstrap_user_invite(
     channel_id: str,
     key_id: str,
     peer_id: str,
-    peer_shared_id: str,
+    peer_shared_id: str | None,
     t_ms: int,
     db: Any
 ) -> tuple[str, bytes, bytes]:
@@ -670,7 +670,7 @@ def create_bootstrap_user_invite(
         channel_id: Default channel ID
         key_id: Group key ID
         peer_id: Local peer ID (for recording)
-        peer_shared_id: Public peer ID of the bootstrap peer (for inviter_peer_shared_id)
+        peer_shared_id: Public peer ID of inviter (None for bootstrap self-invite)
         t_ms: Timestamp
         db: Database connection
 
@@ -681,7 +681,6 @@ def create_bootstrap_user_invite(
     invite_private_key, invite_pubkey = crypto.generate_keypair()
 
     # Create bootstrap user invite event
-    # For bootstrap, the creator IS the inviter (self-invite)
     event_data = {
         'type': 'invite',
         'mode': 'user',
@@ -691,9 +690,12 @@ def create_bootstrap_user_invite(
         'key_id': key_id,
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': network_id,  # Bootstrap: signed by network key
-        'inviter_peer_shared_id': peer_shared_id,  # For bootstrap, inviter is self
         'created_at': t_ms
     }
+
+    # Only include inviter_peer_shared_id if provided (None for bootstrap self-invite)
+    if peer_shared_id:
+        event_data['inviter_peer_shared_id'] = peer_shared_id
 
     # Sign with network's private key
     signed_event = crypto.sign_event(event_data, network_private_key)

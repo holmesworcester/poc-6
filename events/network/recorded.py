@@ -182,7 +182,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             continue
 
         # Skip special placeholder values (used during bootstrap)
-        if dep_id in ('SELF', 'PENDING'):
+        # Note: PENDING has been eliminated - only SELF remains for network events
+        if dep_id == 'SELF':
             log.debug(f"recorded.check_deps() skipping special value: {field}={dep_id}")
             continue
 
