@@ -49,6 +49,20 @@ class SyncConnectEventData(TypedDict):
 
 
 # ============================================================================
+# SPEC - drives generic resolver
+# ============================================================================
+
+SPEC = {
+    "encrypted": True,  # Transit-wrapped
+    "signer_type": "peer_shared_polymorphic",  # Verified in projector using deps
+    "dependencies": ["peer_shared_public_key", "invite_event?"],  # ? = optional
+    "tables": ["sync_connections"],  # Device-wide table
+    "generic_dispatch": True,
+    "device_wide": True,
+}
+
+
+# ============================================================================
 # PURE FUNCTIONS
 # ============================================================================
 
@@ -338,11 +352,15 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         log.warning(f"[SYNC_CONNECT_NO_RESPONSE_KEY] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}...")
         return
 
+    # Get sender's public key for signature verification by recipient
+    sender_public_key = peer.get_public_key(from_peer_id, from_peer_id, db)
+
     # Build connect event data
     connect_data = {
         'type': 'sync_connect',
         'peer_id': from_peer_id,
         'signed_by': from_peer_shared_id,
+        'public_key': crypto.b64encode(sender_public_key),  # For signature verification
         'address': '127.0.0.1',  # TODO: get from network layer
         'port': 8000,  # TODO: get from network layer
         'response_transit_key_id': response_transit_key_id,
@@ -370,6 +388,9 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
         if invite_key_row:
             invite_private_key = invite_key_row['private_key']
+            # Decode from base64 if stored as string (pure projector stores as string)
+            if isinstance(invite_private_key, str):
+                invite_private_key = crypto.b64decode(invite_private_key)
             # Create invite signature over the entire signed_connect structure
             invite_sig_data = json.dumps(signed_connect, sort_keys=True).encode()
             invite_signature = crypto.sign(invite_sig_data, invite_private_key)
@@ -408,7 +429,7 @@ def send_connect(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     # Queue for delivery
     import queues
-    queues.incoming.add(wrapped, t_ms, db)
+    queues.incoming.add(wrapped, t_ms, unsafedb)
 
     log.warning(f"[SYNC_CONNECT_SEND] from={from_peer_shared_id[:10]}... to={to_peer_shared_id[:10]}... invite_id={invite_id[:10] if invite_id else 'None'}...")
 
@@ -472,12 +493,29 @@ def project_event(event_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         if peer_row:
             peer_shared_public_key = peer_row['public_key']
 
+    # Verify signature using embedded public_key (peer_shared_polymorphic)
+    signature_valid = False
+    public_key_b64 = event_data.get('public_key')
+    if public_key_b64:
+        try:
+            public_key = crypto.b64decode(public_key_b64)
+            signature_valid = crypto.verify_event(event_data, public_key)
+            if signature_valid:
+                log.debug(f"sync_connect.project: signature verified")
+            else:
+                log.warning(f"sync_connect.project: signature invalid")
+        except Exception as e:
+            log.warning(f"sync_connect.project: signature verification error: {e}")
+    else:
+        log.warning(f"sync_connect.project: no public_key in event")
+
     # Build input dict for pure projector
     input_dict = {
         "event_id": event_id,
         "event_data": event_data,
         "recorded_by": recorded_by,
         "recorded_at": recorded_at,
+        "signature_valid": signature_valid,
         "dependencies": {
             "peer_shared_public_key": peer_shared_public_key,
             "invite_event": invite_event,

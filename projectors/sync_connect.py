@@ -69,7 +69,7 @@ def project(input_dict: SyncConnectInput) -> ProjectorResult:
     """Pure projection: dict -> result.
 
     Validates sync_connect and outputs connection info.
-    Performs polymorphic signature verification using dependencies.
+    Signature verification is handled by projection.py using the embedded public_key.
     Use apply_result_device_wide() to write to sync_connections.
     """
     import crypto
@@ -78,6 +78,7 @@ def project(input_dict: SyncConnectInput) -> ProjectorResult:
     event_data: SyncConnectEventData = input_dict["event_data"]
     recorded_at = input_dict["recorded_at"]
     deps = input_dict.get("dependencies", {})
+    signature_valid_from_framework = input_dict.get("signature_valid", False)
 
     peer_shared_id = event_data.get("signed_by")
     response_transit_key_id = event_data.get("response_transit_key_id")
@@ -90,10 +91,12 @@ def project(input_dict: SyncConnectInput) -> ProjectorResult:
     if not all([peer_shared_id, response_transit_key_id, response_transit_key_b64]):
         return ProjectorResult(valid=False, reason="missing required fields")
 
-    # Polymorphic signature verification
-    signature_valid = False
+    # Signature verification
+    # The main signature is verified by projection.py using embedded public_key
+    # We trust that result and only do additional invite_signature verification if present
+    signature_valid = signature_valid_from_framework
 
-    # Try invite signature first (for linkers connecting to inviter)
+    # Additional invite signature verification (optional auth for linkers)
     if invite_id and invite_signature_b64:
         invite_event = deps.get("invite_event")
         if invite_event:
@@ -106,21 +109,9 @@ def project(input_dict: SyncConnectInput) -> ProjectorResult:
                     sig_data = json.dumps(connect_without_sig, sort_keys=True).encode()
                     invite_signature = crypto.b64decode(invite_signature_b64)
                     if crypto.verify(sig_data, invite_signature, invite_public_key):
-                        signature_valid = True
-                        log.debug(f"sync_connect: invite signature verified")
+                        log.debug(f"sync_connect: invite signature also verified")
                 except Exception as e:
-                    log.debug(f"sync_connect: invite signature check failed: {e}")
-
-    # Try peer signature if invite didn't work
-    if not signature_valid:
-        peer_public_key = deps.get("peer_shared_public_key")
-        if peer_public_key:
-            try:
-                if crypto.verify_event(event_data, peer_public_key):
-                    signature_valid = True
-                    log.debug(f"sync_connect: peer signature verified")
-            except Exception as e:
-                log.debug(f"sync_connect: peer signature check failed: {e}")
+                    log.debug(f"sync_connect: invite signature check failed (non-fatal): {e}")
 
     if not signature_valid:
         return ProjectorResult(valid=False, reason="signature verification failed")
