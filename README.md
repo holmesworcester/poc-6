@@ -1,6 +1,6 @@
 # Quiet Protocol - POC #6
 
-A proof-of-concept implementation of the Quiet Protocol: an end-to-end encrypted, peer-to-peer protocol for team chat (like Slack), designed to be simple enough to implement as a "weekend project."
+A proof-of-concept implementation of the [Quiet Protocol](./docs/quiet-protocol-specification.md): an end-to-end encrypted, peer-to-peer protocol for team chat (like Slack), designed to be simple enough to implement as a "weekend project."
 
 ## Overview
 
@@ -22,15 +22,7 @@ This codebase implements an event-sourced, eventually-consistent messaging syste
 ### Running the CLI
 
 ```bash
-# Interactive mode
 python cli.py
-
-# Example session
-> new-network --name alice --device desktop
-> create-invite
-> new-account --name bob --device laptop --invite <invite_url>
-> sync
-> send "Hello, Bob!"
 ```
 
 ### Running Tests
@@ -45,19 +37,21 @@ python cli.py
 
 ```
 events/                 # Event types and projectors
-  identity/             # Network, user, peer, invite events
+  identity/             # Network, users, peers, invites, admins
   group/                # Group membership and keys
-  content/              # Messages, channels, files
-  sync/                 # Sync protocol events
+  content/              # Messages, channels, files, reactions
+  network/              # Sync protocol, transit keys, addressing
+
+simulator/              # Network simulation for testing
 
 tests/
   scenario_tests/       # End-to-end API tests
-  unit_tests/           # Component tests
+  cli/                  # CLI command tests
 
 docs/
-  ideal_protocol_design.md   # Protocol specification
-  planning/                  # Design docs and plans
-  archive/                   # Historical documents
+  quiet-protocol-specification.md  # Protocol specification
+  planning/                        # Design docs and plans
+  archive/                         # Historical documents
 ```
 
 ### Key Concepts
@@ -72,7 +66,7 @@ docs/
 
 ## Documentation
 
-- **[Protocol Specification](./docs/ideal_protocol_design.md)** - Complete protocol design
+- **[Protocol Specification](./docs/quiet-protocol-specification.md)** - Complete protocol design
 - **[Documentation Index](./docs/README.md)** - All docs organized by topic
 
 ## Design Principles
