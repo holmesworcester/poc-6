@@ -46,15 +46,27 @@ def create(
     Returns:
         intro_id: Event ID of the created intro event
     """
+    # Get initiator's peer_shared_id for signing (this is the public identity)
+    safedb = create_safe_db(db, recorded_by=initiator_peer_id)
+    peer_self = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (initiator_peer_id, initiator_peer_id)
+    )
+    if not peer_self or not peer_self['peer_shared_id']:
+        log.warning(f"intro.create() no peer_shared_id for initiator {initiator_peer_id[:20]}...")
+        raise ValueError(f"No peer_shared_id for initiator")
+
+    initiator_peer_shared_id = peer_self['peer_shared_id']
+
     log.info(
-        f"intro.create() {initiator_peer_id[:20]}... introducing "
+        f"intro.create() {initiator_peer_shared_id[:20]}... introducing "
         f"{peer1_id[:20]}... and {peer2_id[:20]}..."
     )
 
-    # Create event data
+    # Create event data - use peer_shared_id as signed_by (consistent with verification)
     event_data = {
         'type': 'network_intro',
-        'signed_by': initiator_peer_id,
+        'signed_by': initiator_peer_shared_id,
         'peer1_id': peer1_id,
         'peer2_id': peer2_id,
         'created_at': t_ms
