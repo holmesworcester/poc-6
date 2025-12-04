@@ -74,16 +74,6 @@ class Job(ABC):
         pass
 
 
-class SyncSendJob(Job):
-    """Send sync requests to all known peers."""
-
-    def __init__(self):
-        super().__init__('sync_send', every_ms=100)
-
-    def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import sync
-        sync.send_request_to_all(t_ms=t_ms, db=db)
-        return {}
 
 
 class SyncReceiveJob(Job):
@@ -95,6 +85,22 @@ class SyncReceiveJob(Job):
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync
         sync.receive(batch_size=2000, t_ms=t_ms, db=db)
+        return {}
+
+
+class FileSyncJob(Job):
+    """Send file sync requests for pending file downloads."""
+
+    def __init__(self):
+        super().__init__('file_sync', every_ms=100)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.network import sync
+        from db import create_unsafe_db
+        unsafedb = create_unsafe_db(db)
+        local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+        for peer_row in local_peers:
+            sync.send_file_sync_requests(peer_row['peer_id'], t_ms, db)
         return {}
 
 
@@ -186,27 +192,27 @@ class GroupPrekeyReplenishmentJob(Job):
         return group_prekey.replenish_for_all_peers(t_ms, db)
 
 
-class SyncConnectSendJob(Job):
-    """Send connection announcements to establish/refresh connections."""
+class ConnectionSendJob(Job):
+    """Send connection requests to establish/refresh connections."""
 
     def __init__(self):
-        super().__init__('sync_connect_send', every_ms=1_000)  # 1 second
+        super().__init__('connection_send', every_ms=1_000)  # 1 second
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import sync_connect
-        sync_connect.send_connect_to_all(t_ms=t_ms, db=db)
+        from events.network import connection
+        connection.send_to_all(t_ms=t_ms, db=db)
         return {}
 
 
-class SyncConnectPurgeJob(Job):
-    """Purge expired sync connections."""
+class ConnectionPurgeJob(Job):
+    """Purge expired connections."""
 
     def __init__(self):
-        super().__init__('sync_connect_purge', every_ms=60_000)  # 1 minute
+        super().__init__('connection_purge', every_ms=60_000)  # 1 minute
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import sync_connect
-        sync_connect.purge_expired(t_ms=t_ms, db=db)
+        from events.network import connection
+        connection.purge_expired(t_ms=t_ms, db=db)
         return {}
 
 
@@ -221,12 +227,24 @@ class SelfAddressAnnounceJob(Job):
         return self_address.announce_for_all_peers(t_ms, db)
 
 
+class NegentropySyncJob(Job):
+    """Send negentropy sync messages to all established connections."""
+
+    def __init__(self):
+        super().__init__('negentropy_sync', every_ms=1_000)  # 1 second
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.network import negentropy
+        return negentropy.sync_all_connections(t_ms=t_ms, db=db)
+
+
 # Registry of job instances
 JOBS = [
-    SyncConnectSendJob(),
+    ConnectionSendJob(),
     SyncReceiveJob(),
-    SyncSendJob(),
-    SyncConnectPurgeJob(),
+    FileSyncJob(),
+    NegentropySyncJob(),
+    ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),

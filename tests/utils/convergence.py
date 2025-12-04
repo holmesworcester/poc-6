@@ -368,7 +368,8 @@ def _get_projection_tables(db: Any) -> list[str]:
         AND name NOT IN (
             'store', 'incoming_blobs', 'sync_connections', 'sqlite_sequence',
             'pre_keys', 'transit_keys', 'job_state',
-            'pending_name_updates', 'pending_name_decrypts'
+            'pending_name_updates', 'pending_name_decrypts',
+            'negentropy_buckets', 'negentropy_events', 'negentropy_sync_state', 'negentropy_checkpoints'
         )
         AND name NOT LIKE '%_ephemeral'
         ORDER BY name

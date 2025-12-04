@@ -565,12 +565,18 @@ To share data between peers, peers must first connect to each other. A "connecti
 
 ## Handshake Protocol
 
+Connections are established via a unified `connection` event type with two modes: `req` (request) and `ack` (acknowledgement).
+
 **Step 1: Connect (Bob → Alice)**
 
-Bob sends `sync_connect` to Alice, sealed to Alice's `transit_prekey_shared`:
+Bob sends `connection(mode=req)` to Alice, sealed to Alice's `transit_prekey_shared`:
 
-* `transit_key` - symmetric key for Alice → Bob communication
-* `created_at_ms`, `ttl_ms` - timing and expiry
+* `mode: 'req'` - connection request
+* `connection_id` - the event hash (universal identifier for this connection)
+* `key` - symmetric key for Alice → Bob communication
+* `to_peer_shared_id` - remote peer we're connecting to
+* `invite_id` - (optional) for bootstrap connections
+* `created_at`, `ttl_ms` - timing and expiry
 * `signed_by` - either `invite_id` (new joiner) or `peer_shared_id` (established peer)
 * `sig` - signature by the corresponding private key
 
@@ -578,50 +584,252 @@ This unified `signed_by` pattern matches other events in the protocol — the si
 
 **Step 2: Acknowledge (Alice → Bob)**
 
-Alice validates the connect (see Verification below), then sends `sync_connect_ack` **wrapped to Bob's transit_key**:
+Alice validates the request (see Verification below), then sends `connection(mode=ack)` **wrapped to Bob's symmetric key**:
 
-* `transit_key` - symmetric key for Bob → Alice communication
-* `created_at_ms`, `ttl_ms` - timing and expiry
+* `mode: 'ack'` - connection acknowledgement
+* `connection_id` - this ack's event hash
+* `for_connection_id` - references Bob's request ID
+* `key` - symmetric key for Bob → Alice communication
+* `created_at`, `ttl_ms` - timing and expiry
 
 The ack requires no signature — Bob authenticates it implicitly: he sent to Alice's prekey, so whoever decrypted and responded must possess Alice's prekey private key.
 
 **Result:**
-- Alice has `bob_transit_key` → uses it to send to Bob
-- Bob has `alice_transit_key` → uses it to send to Alice
-- Bidirectional channel established
+- Alice has Bob's `key` from the request → uses it to send to Bob
+- Bob has Alice's `key` from the ack → uses it to send to Alice
+- Bidirectional channel established, identified by `connection_id`
 
-## Verification (Connect only)
+## Verification (Request only)
 
 Verify the `sig` using the public key for `signed_by`:
 - **`signed_by: invite_id`** → verify with `invite_pubkey` from the invite event
 - **`signed_by: peer_shared_id`** → verify with `public_key` from the peer_shared event
 
-The ack needs no verification — if Bob can decrypt it, it came from whoever received his connect (authenticated by Alice's transit_prekey).
+The ack needs no verification — if Bob can decrypt it, it came from whoever received his request (authenticated by Alice's transit_prekey).
 
-## Connection Table
+## Connection Attempts Table
 
-Upon successful handshake, store:
+When sending `connection(mode=req)`, we don't yet have the remote peer's symmetric key. We track pending handshakes separately:
 
 ```
-sync_connections (
-    our_transit_key_id,     -- PRIMARY KEY: key ID we sent (for matching acks)
-    our_peer_id,            -- local peer that owns this connection
-    their_transit_key_id,   -- key ID they provided (for routing responses)
-    their_transit_key,      -- symmetric key to send TO them
-    origin_ip, origin_port,
-    last_seen_ms, ttl_ms
+connection_attempts (
+    connection_id,          -- our request's connection_id (for matching ack)
+    recorded_by,            -- local peer who initiated
+
+    -- Target identity
+    to_peer_shared_id,      -- who we're trying to connect to
+    invite_id,              -- invite used (for bootstrap)
+
+    -- Our key (stored here until ack promotes to connection)
+    our_key,                -- symmetric key we included in request
+
+    -- Lifecycle
+    created_at,
+    ttl_ms DEFAULT 300000,
+
+    PRIMARY KEY (connection_id, recorded_by),
+    CHECK (to_peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
 )
 ```
 
-The connection table is **key-based** rather than peer-based:
-- **Primary key**: `our_transit_key_id` uniquely identifies each connection
-- **No direct `peer_shared_id`**: Remote peer identity is looked up via `their_transit_key_id` → `transit_prekeys_shared.peer_id`
-- **Multi-account routing**: `our_peer_id` identifies which local peer owns this connection
+This is **not** a connection — we can't send to them yet. When we receive their `connection(mode=ack)`:
+1. Look up attempt by `for_connection_id`
+2. Create real connection with their key from the ack
+3. Delete the attempt
 
-This design enables:
-1. **Ack matching**: When receiving `sync_connect_ack`, match `for_transit_key_id` to find the connection
-2. **Removed peer enforcement**: When a peer is removed, delete connections where `their_transit_key_id` maps to the removed peer's transit keys
-3. **Bootstrap flexibility**: Connections can be established before full peer_shared projection
+## Connection Table
+
+A connection entry is only created when we have `their_key` — meaning we can actually send to them. Connections are created when:
+- **Receiving `connection(mode=req)`**: We extract their key from the event
+- **Receiving `connection(mode=ack)`**: We extract their key from the ack
+
+```
+connections (
+    connection_id,          -- our request's event ID (for routing lookups)
+    recorded_by,            -- local peer who owns this connection
+
+    -- Identity labels (at least one required)
+    peer_shared_id,         -- remote peer's public identity (NULL until synced)
+    invite_id,              -- invite used for this connection (for bootstrap)
+
+    -- Keys
+    our_key NOT NULL,                -- symmetric key we created (they send to us)
+    their_connection_id,             -- their request's ID (for wrapping hint)
+    their_key,                       -- symmetric key they created (we send to them)
+
+    -- Lifecycle
+    created_at,
+    last_handshake_ms,    -- Updated when req/ack received (NOT on traffic)
+    last_traffic_ms,      -- STUB: Future - updated when traffic flows
+    ttl_ms,               -- Expiry based on last_handshake_ms + ttl_ms
+
+    PRIMARY KEY (connection_id, recorded_by),
+    CHECK (peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
+)
+```
+
+### Connection Lifecycle Timestamps
+
+Connections track two separate time concepts:
+
+- **`last_handshake_ms`**: Updated only when a connection request or ack is received. This timestamp determines TTL expiry. Connections expire `ttl_ms` after the last handshake, forcing periodic key rotation (forward secrecy).
+
+- **`last_traffic_ms`** (STUB): Will be updated when any traffic flows on the connection. Not yet implemented. Future use: detecting "gone dark" peers even when handshakes are recent.
+
+The key insight: connections expire based on **handshake age**, not traffic. This is a deliberate security choice - even if sync traffic flows constantly, connections expire after TTL (default: 5 minutes) forcing key rotation.
+
+The `connections` table is **peer-scoped** (subjective), enabling SafeDB access:
+
+```python
+# Sync gets only this peer's connections
+safedb = create_safe_db(db, recorded_by=peer_id)
+my_connections = safedb.query(
+    "SELECT * FROM connections WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?",
+    (peer_id, t_ms)
+)
+
+# Look up connection by remote peer identity (when we have it)
+conn = safedb.query_one(
+    "SELECT * FROM connections WHERE peer_shared_id = ? AND recorded_by = ?",
+    (remote_peer_id, peer_id)
+)
+
+# During bootstrap, look up by invite_id instead
+conn = safedb.query_one(
+    "SELECT * FROM connections WHERE invite_id = ? AND recorded_by = ?",
+    (invite_id, peer_id)
+)
+```
+
+Indexes support both lookup patterns:
+```sql
+CREATE INDEX idx_connections_peer ON connections(peer_shared_id, recorded_by)
+    WHERE peer_shared_id IS NOT NULL;  -- partial index, only when we have it
+CREATE INDEX idx_connections_invite ON connections(invite_id, recorded_by)
+    WHERE invite_id IS NOT NULL;
+```
+
+The `connection_id` enables:
+1. **Routing**: Look up connection by hint (via device-wide `connection_inbox`)
+2. **Ack matching**: When receiving `connection(mode=ack)`, match `for_connection_id` to `connection_attempts.connection_id` to find the pending handshake, then create the real connection
+
+The `recorded_by` identifies the local peer who owns this connection.
+
+## Connection Identity and Bootstrap
+
+Connections are keyed by `connection_id` — the event hash of our connection request. This ID appears as the hint in the first 16 bytes of incoming blobs, enabling routing before decryption.
+
+### Identity Labels
+
+Each connection has one or both identity labels:
+
+- **`peer_shared_id`**: The remote peer's public identity. Set after their `peer_shared` event syncs and validates.
+- **`invite_id`**: The invite used to establish this connection. Set when `connection(mode=req)` includes an `invite_id` field (indicating the sender is a new joiner).
+
+During bootstrap, before `peer_shared` has synced:
+1. Joiner sends `connection(mode=req)` with `signed_by: invite_id` and includes `invite_id` field
+2. Inviter validates the invite signature and stores `invite_id` as the connection label
+3. Connection is usable for sync immediately
+4. When joiner's `peer_shared` arrives and validates, connection upgrades to include `peer_shared_id`
+
+This allows bidirectional sync to begin before the DAG knowledge catches up.
+
+### Label Upgrade
+
+When a `peer_shared` event projects that corresponds to an existing connection (matching by invite lineage or direct observation), update the connection:
+
+```
+UPDATE connections
+SET peer_shared_id = :peer_shared_id
+WHERE invite_id = :invite_id AND peer_shared_id IS NULL
+```
+
+The `invite_id` is retained for audit and debugging purposes.
+
+## Connection Inbox and Routing
+
+The `connection_inbox` table is **device-wide** (not peer-scoped) to enable routing by connection ID hint before we know which peer owns the connection.
+
+### Inbox Table
+
+```
+connection_inbox (
+    id PRIMARY KEY,
+    connection_id,          -- routes to connection (hint from blob)
+    blob,                   -- raw transit-wrapped blob
+    received_at
+)
+-- Device-wide: no recorded_by, no foreign key to subjective connections table
+```
+
+### Connection Interface
+
+The connection layer provides three methods:
+
+```python
+# Send to a specific connection
+connection.send(connection_id, blob)
+
+# Receive for a specific peer (SafeDB-scoped)
+connection.receive(peer_id)  # peer_id provides the scoping
+
+# Process the device-wide inbox, routing to receive()
+connection.process_inbox()
+```
+
+### process_inbox()
+
+Routes blobs from the device-wide inbox to peer-scoped `receive()`:
+
+```python
+def process_inbox(t_ms: int, db: Database) -> None:
+    """Drain inbox, route by connection_id to receive(peer_id)."""
+    unsafedb = create_unsafe_db(db)
+
+    entries = unsafedb.query(
+        "SELECT id, connection_id, blob FROM connection_inbox ORDER BY received_at"
+    )
+
+    for entry in entries:
+        # Look up connection to find owner peer
+        conn_row = unsafedb.query_one(
+            "SELECT recorded_by FROM connections WHERE connection_id = ?",
+            (entry['connection_id'],)
+        )
+
+        if conn_row:
+            # Route to peer-scoped receive
+            receive(conn_row['recorded_by'], entry['connection_id'], entry['blob'], t_ms, db)
+
+        # Delete processed (or orphaned) entry
+        unsafedb.execute("DELETE FROM connection_inbox WHERE id = ?", (entry['id'],))
+```
+
+### receive(peer_id, ...)
+
+Peer-scoped receive - SafeDB because `peer_id` is passed in:
+
+```python
+def receive(peer_id: str, connection_id: str, blob: bytes, t_ms: int, db: Database) -> None:
+    """Process blob for this peer. SafeDB-scoped."""
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    conn = safedb.query_one(
+        "SELECT * FROM connections WHERE connection_id = ? AND recorded_by = ?",
+        (connection_id, peer_id)
+    )
+
+    if conn:
+        # Unwrap using our_key (the key we gave them)
+        unwrapped = unwrap_blob(blob, conn['our_key'])
+        create_recorded_event(unwrapped, peer_id, t_ms, db)
+        # Normal projection handles the rest
+```
+
+This keeps the scoping clean:
+- `process_inbox()` is device-wide (UnsafeDB) — just routing
+- `receive(peer_id)` is peer-scoped (SafeDB) — all the real work
+- Callers like sync only use `send()` and don't worry about receive
 
 ## Lifecycle
 
@@ -640,22 +848,60 @@ This design enables:
 
 ## Multi-Account Routing
 
-On devices with multiple local peers (linked accounts), incoming messages must be routed to the correct local peer. This is handled by the transit key:
+On devices with multiple local peers (linked accounts), incoming messages must be routed to the correct local peer. Routing happens in two stages:
 
-1. Each `transit_key` and `transit_prekey` has an `owner_peer_id` (the local peer that created it)
-2. When receiving a wrapped message, try decryption with available transit keys
-3. The key that successfully decrypts identifies the target local peer via `owner_peer_id`
-4. Process the message under that peer's context (`recorded_by = owner_peer_id`)
+### Stage 1: Route to Connection (by hint)
 
-This avoids requiring explicit peer routing in the protocol — the transit key implicitly encodes which local account should handle the message.
+The first 16 bytes of every transit-wrapped blob is a hint matching `connection_id`. This routes the blob to the correct connection's inbox without decryption.
 
-# Sync 
+### Stage 2: Route to Local Peer (by connection ownership)
 
-To sync data, peers periodically send `sync` events to all connections. 
+When processing a connection's inbox:
+
+1. Unwrap blob using `our_key` (the key we gave them, stored in connections table)
+2. Look up `connections.recorded_by` to identify the owner peer
+3. The `recorded_by` identifies which local peer should process this blob
+4. Process under that peer's context (`recorded_by = peer_id`)
+
+This two-stage routing means:
+- Blobs reach the right connection immediately (no decryption needed)
+- Local peer assignment is determined by connection ownership
+- Connections are peer-scoped but routing hint lookup is device-wide
+
+# Sync
+
+To sync data, peers periodically send `sync` events to all connections.
+
+## Connection Interface
+
+Sync sends requests through the connection abstraction:
+
+```
+# Sending sync requests
+for connection in get_all_connections():
+    sync_request = build_sync_request(local_peer, connection.label)
+    connection.send(sync_request)
+```
+
+Sync does not have a special receive path. When responses arrive:
+
+1. Connection receives blob from its inbox
+2. Connection unwraps and determines `local_peer_id` from key ownership
+3. Connection creates a `recorded` event for that peer
+4. Normal projection handles the rest
+
+This means sync is purely about *requesting* events via bloom filters. Responses flow through the standard `recorded` → projection path like any other incoming event.
+
+Benefits:
+- **Single receive path**: All incoming events use the same projection flow
+- **Separation of concerns**: Sync only sends; connections handle receiving
+- **Identity context**: `connection.label` provides `peer_shared_id` or `invite_id` for sync state tracking
+
+## Bloom Filter Protocol
 
 First they create a sync event containing a "window" describing a range of ~100 events and a small bloom filter. (Bloom filters have false positive rates, so some events could fail to sync forever if we did not limit our search).
 
-The sync event and all responses are symmetrically encrypted to the `transit_key` for that connection (see: [Connection](#connection)), with the `transit_key_id` as the hint. On the wire, sync events are `transit_key_id`, `ciphertext`. The `transit_key_id` also enables multi-account routing (see: [Multi-Account Routing](#multi-account-routing)).
+The sync event and all responses are symmetrically encrypted using the connection's symmetric key (see: [Connection](#connection)), with the `connection_id` as the hint. On the wire, sync events are `connection_id`, `ciphertext`. The `connection_id` also enables multi-account routing (see: [Multi-Account Routing](#multi-account-routing)).
 
 The responder replies, to the address for that connection, with all events in the window that fail to match the bloom filter. Dropped or duplicate events affect performance but not reliability. Events sync eventually. 
 
@@ -973,9 +1219,7 @@ The following events use JSON format for storage and event-sourcing. They are ca
 | **observed_address** | `type`, `observed_peer_id`, `observed_by_peer_id`, `ip`, `port`, `created_at` | Yes | No | Peer observes another peer's endpoint |
 | **self_address** | `type`, `peer_id`, `signed_by`, `ip`, `port`, `created_at` | Yes | No | Peer announces own endpoint |
 | **invite_accepted** | `type`, `invite_link_data` (complete invite link), `signed_by`, `created_at` | No | No | Trust anchor for joining; contains raw invite link data. Projection marks `network_id` valid and triggers cascade. See [Invite Acceptance and Trust Anchoring](#invite-acceptance-and-trust-anchoring). |
-| **sync_connect** | `type`, `transit_key`, `signed_by` (invite_id or peer_shared_id), `sig`, `created_at`, `ttl_ms` | No | Wrapped | Connection handshake step 1; includes symmetric key for reverse direction. See [Connection](#connection). |
-| **sync_connect_ack** | `type`, `transit_key`, `created_at`, `ttl_ms` | No | Wrapped | Connection handshake step 2; no signature needed (implicit auth via decryption). See [Connection](#connection). |
-| **transit_key** | `type`, `key`, `signed_by`, `created_at` | No | No | Ephemeral symmetric key for sync responses |
+| **connection** | `type`, `mode` (req/ack), `key`, `to_peer_shared_id`, `invite_id`, `for_connection_id` (ack only), `signed_by`, `sig` (req only), `created_at`, `ttl_ms` | No | Wrapped | Unified connection event. mode=req is handshake step 1; mode=ack is step 2. See [Connection](#connection). |
 | **transit_prekey** | `type`, `public_key`, `private_key`, `signed_by`, `created_at` | No | No | Local prekey for receiving sync requests |
 | **transit_prekey_shared** | `type`, `transit_prekey_id`, `peer_id`, `public_key`, `signed_by`, `created_at` | Yes | No | Public transit prekey shared for initial sync wrapping |
 
