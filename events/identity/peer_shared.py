@@ -431,7 +431,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     invite_accepted_id = invite_accepted.create(
         invite_link_data=peer_invite_link_data,
         peer_id=peer_id,
-        t_ms=t_ms + 1,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"peer_shared.join() created invite_accepted: {invite_accepted_id[:20]}...")
@@ -440,7 +440,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     from events.network import transit_prekey, transit_prekey_shared
     transit_prekey_id, transit_prekey_private = transit_prekey.create(
         peer_id=peer_id,
-        t_ms=t_ms + 2,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
 
@@ -448,14 +448,14 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         prekey_id=transit_prekey_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 3,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"peer_shared.join() created transit prekey_shared: {transit_prekey_shared_id[:20]}...")
 
     # 4. Project peer_shared immediately (establishes peer↔user link, updates peer_self)
     from events.network import recorded
-    peer_shared_recorded_id = recorded.create(peer_shared_id, peer_id, t_ms + 4, db, return_dupes=True)
+    peer_shared_recorded_id = recorded.create(peer_shared_id, peer_id, t_ms, db, return_dupes=True)
     recorded.project_ids([peer_shared_recorded_id], db)
     log.info(f"peer_shared.join() projected peer_shared, peer_self updated with user_id")
 
@@ -476,7 +476,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
             name=device_name,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 5,
+            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db
         )
         log.info(f"peer_shared.join() created peer_name_update: {peer_name_update_id[:20]}...")
@@ -484,13 +484,13 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         # Key not available yet - store for later creation when group_key_shared arrives
         log.info(f"peer_shared.join() key not available yet, storing device name intent in pending_name_updates")
         import hashlib
-        pending_id = hashlib.sha256(f"{peer_shared_id}:peer_name:{t_ms + 5}".encode()).hexdigest()[:20]
+        pending_id = hashlib.sha256(f"{peer_shared_id}:peer_name:{t_ms}".encode()).hexdigest()[:20]
         safedb.execute(
             """INSERT OR IGNORE INTO pending_name_updates
                (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (pending_id, 'peer_name', peer_shared_id, device_name, peer_id, peer_shared_id,
-             'waiting_for_key', t_ms + 5, peer_id, t_ms + 5)
+             'waiting_for_key', t_ms, peer_id, t_ms)
         )
         log.info(f"peer_shared.join() stored pending device name for peer {peer_shared_id[:20]}...")
 

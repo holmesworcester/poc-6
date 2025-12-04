@@ -149,7 +149,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
                 recipient_peer_id=member_peer['peer_shared_id'],
-                t_ms=t_ms + 1,
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 db=db
             )
             log.info(f"group_member.create() shared key with new member {user_id}")
@@ -168,7 +168,6 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         (user_id, peer_id, member_peer['peer_shared_id'] if member_peer else None)
     )
 
-    key_share_ts = t_ms + 2
     for device_row in other_devices:
         other_peer_shared_id = device_row['peer_shared_id']
         try:
@@ -178,11 +177,10 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
                 recipient_peer_id=other_peer_shared_id,
-                t_ms=key_share_ts,
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 db=db
             )
             log.info(f"group_member.create() shared key to device link {other_peer_shared_id[:20]}...")
-            key_share_ts += 1
         except Exception as e:
             log.warning(f"group_member.create() failed to share key to device link {other_peer_shared_id[:20]}...: {e}")
 

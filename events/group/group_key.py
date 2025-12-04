@@ -270,7 +270,7 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
         group_id=group_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 1,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         exclude_user_id=removed_user_id
     )
