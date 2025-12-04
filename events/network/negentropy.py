@@ -34,15 +34,9 @@ log = logging.getLogger(__name__)
 # Hierarchy levels from coarsest to finest
 LEVELS = ['root', 'year', 'month', 'day', 'hour', 'ten_min', 'one_min']
 
-# When bucket has this many events or fewer, send blobs instead of drilling down
-# Stub mode: set very high (1000000) to always send all blobs
-# Production: set to 100 for efficiency
-EVENTS_THRESHOLD = 1000000  # Stub mode
-
-# For testing: which level to stop drilling at in stub mode
-# 'year' = stop at year level (send events immediately)
-# 'one_min' = drill all the way down (normal behavior)
-STUB_THRESHOLD = 'one_min'
+# When bucket has this many events or fewer, send event IDs instead of drilling down
+# Production value: 100 events per bucket is efficient for comparison
+EVENTS_THRESHOLD = 100
 
 # Root bucket sentinel value
 ROOT_BUCKET_START = 0
@@ -403,16 +397,60 @@ def get_hashes_at_level(
 def get_events_in_bucket(
     db,
     recorded_by: str,
-    bucket_start_ms: int
+    bucket_start_ms: int,
+    level: str = 'one_min'
 ) -> list[str]:
-    """Get all event IDs in a 1-minute bucket."""
+    """Get all event IDs in a bucket at any level.
+
+    For one_min buckets, returns events with exact bucket_start_ms match.
+    For higher levels, returns all events within the bucket's time range.
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
-    rows = safedb.query("""
-        SELECT event_id FROM negentropy_events
-        WHERE recorded_by = ? AND bucket_start_ms = ?
-        ORDER BY event_id
-    """, (recorded_by, bucket_start_ms))
+
+    if level == 'one_min':
+        # Leaf bucket - exact match
+        rows = safedb.query("""
+            SELECT event_id FROM negentropy_events
+            WHERE recorded_by = ? AND bucket_start_ms = ?
+            ORDER BY event_id
+        """, (recorded_by, bucket_start_ms))
+    else:
+        # Higher level - range query based on created_at
+        bucket_end_ms = get_bucket_end_ms(bucket_start_ms, level)
+        rows = safedb.query("""
+            SELECT event_id FROM negentropy_events
+            WHERE recorded_by = ? AND created_at >= ? AND created_at < ?
+            ORDER BY event_id
+        """, (recorded_by, bucket_start_ms, bucket_end_ms))
+
     return [r['event_id'] for r in rows]
+
+
+def get_event_count_in_bucket(
+    db,
+    recorded_by: str,
+    bucket_start_ms: int,
+    level: str
+) -> int:
+    """Get count of events in a bucket at any level.
+
+    Used to decide whether to drill down or send events.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    if level == 'one_min':
+        row = safedb.query_one("""
+            SELECT COUNT(*) as cnt FROM negentropy_events
+            WHERE recorded_by = ? AND bucket_start_ms = ?
+        """, (recorded_by, bucket_start_ms))
+    else:
+        bucket_end_ms = get_bucket_end_ms(bucket_start_ms, level)
+        row = safedb.query_one("""
+            SELECT COUNT(*) as cnt FROM negentropy_events
+            WHERE recorded_by = ? AND created_at >= ? AND created_at < ?
+        """, (recorded_by, bucket_start_ms, bucket_end_ms))
+
+    return row['cnt'] if row else 0
 
 
 def get_total_event_count(db, recorded_by: str) -> int:
@@ -542,64 +580,68 @@ def handle_range_request(
             'total_events': total_events,
         })
 
-    elif level == 'one_min' or LEVELS.index(level) >= LEVELS.index(STUB_THRESHOLD):
-        # At leaf level or stub threshold: send event IDs AND blobs
-        safedb.execute("""
-            UPDATE negentropy_sync_state
-            SET status = 'events_sent', updated_at = ?
-            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-        """, (t_ms, recorded_by, connection_id, range_id))
-
-        event_ids = get_events_in_bucket(db, recorded_by, bucket_start_ms)
-
-        # Send actual event blobs - they'll dedupe on their side
-        if event_ids:
-            sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-            log.info(f"negentropy: stub mode - sent {sent} event blobs at {level} level")
-
-        # Also send the event IDs so they know what we have (for bidirectional sync)
-        responses.append({
-            'type': 'range_events',
-            'range_id': range_id,
-            'bucket_start_ms': bucket_start_ms,
-            'event_ids': event_ids,
-            'our_hash': our_hash.hex() if our_hash else '',
-            'root_hash': root_hash.hex() if root_hash else '',
-            'total_events': total_events,
-        })
-
     else:
-        # Drill down: send child hashes
-        child_level = get_child_level(level)
-        child_hashes = get_hashes_at_level(db, recorded_by, child_level, bucket_start_ms, level)
+        # Hashes differ - check if we should send events or drill down
+        event_count = get_event_count_in_bucket(db, recorded_by, bucket_start_ms, level)
 
-        safedb.execute("""
-            UPDATE negentropy_sync_state
-            SET status = 'diverged', updated_at = ?
-            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-        """, (t_ms, recorded_by, connection_id, range_id))
-
-        # Create child ranges
-        for child_start, child_hash in child_hashes.items():
-            child_range_id = generate_range_id()
-
+        # At leaf level OR bucket has few enough events to send directly
+        if level == 'one_min' or event_count <= EVENTS_THRESHOLD:
             safedb.execute("""
-                INSERT INTO negentropy_sync_state
-                (recorded_by, connection_id, range_id, level, bucket_start_ms,
-                 our_hash, their_hash, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-            """, (recorded_by, connection_id, child_range_id, child_level, child_start, child_hash, t_ms, t_ms))
+                UPDATE negentropy_sync_state
+                SET status = 'events_sent', updated_at = ?
+                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+            """, (t_ms, recorded_by, connection_id, range_id))
 
+            event_ids = get_events_in_bucket(db, recorded_by, bucket_start_ms, level)
+
+            # Send actual event blobs - they'll dedupe on their side
+            if event_ids:
+                sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+                log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events in bucket)")
+
+            # Also send the event IDs so they know what we have (for bidirectional sync)
             responses.append({
-                'type': 'range_request',
-                'range_id': child_range_id,
-                'level': child_level,
-                'bucket_start_ms': child_start,
-                'hash': child_hash.hex() if child_hash else '',
-                'parent_range_id': range_id,
+                'type': 'range_events',
+                'range_id': range_id,
+                'bucket_start_ms': bucket_start_ms,
+                'event_ids': event_ids,
+                'our_hash': our_hash.hex() if our_hash else '',
                 'root_hash': root_hash.hex() if root_hash else '',
                 'total_events': total_events,
             })
+
+        else:
+            # Drill down: send child hashes
+            child_level = get_child_level(level)
+            child_hashes = get_hashes_at_level(db, recorded_by, child_level, bucket_start_ms, level)
+
+            safedb.execute("""
+                UPDATE negentropy_sync_state
+                SET status = 'diverged', updated_at = ?
+                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+            """, (t_ms, recorded_by, connection_id, range_id))
+
+            # Create child ranges
+            for child_start, child_hash in child_hashes.items():
+                child_range_id = generate_range_id()
+
+                safedb.execute("""
+                    INSERT INTO negentropy_sync_state
+                    (recorded_by, connection_id, range_id, level, bucket_start_ms,
+                     our_hash, their_hash, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+                """, (recorded_by, connection_id, child_range_id, child_level, child_start, child_hash, t_ms, t_ms))
+
+                responses.append({
+                    'type': 'range_request',
+                    'range_id': child_range_id,
+                    'level': child_level,
+                    'bucket_start_ms': child_start,
+                    'hash': child_hash.hex() if child_hash else '',
+                    'parent_range_id': range_id,
+                    'root_hash': root_hash.hex() if root_hash else '',
+                    'total_events': total_events,
+                })
 
     return responses
 
@@ -611,7 +653,10 @@ def _log_checkpoint(
     root_hash: bytes,
     t_ms: int
 ) -> None:
-    """Log a sync checkpoint when root hashes match."""
+    """Log a sync checkpoint when root hashes match.
+
+    Also updates connection.last_synced_root_hash for skip-if-unchanged optimization.
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get sync stats
@@ -631,6 +676,13 @@ def _log_checkpoint(
     """, (recorded_by, connection_id, t_ms, root_hash,
           stats['events_sent'] if stats else 0,
           stats['ranges_checked'] if stats else 0))
+
+    # Update connection's last_synced_root_hash for skip-if-unchanged optimization
+    safedb.execute("""
+        UPDATE connections
+        SET last_synced_root_hash = ?
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (root_hash, connection_id, recorded_by))
 
 
 def handle_range_matched(
@@ -863,6 +915,9 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     established connections, sending negentropy root hashes to initiate
     or continue sync.
 
+    Optimization: Skip connections where our root hash hasn't changed since
+    last successful sync. This avoids sending redundant messages when idle.
+
     Returns:
         Stats dict with counts
     """
@@ -874,9 +929,13 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
 
     total_connections = 0
     total_messages = 0
+    skipped_unchanged = 0
 
     for peer_row in local_peers:
         peer_id = peer_row['peer_id']
+
+        # Get our current root hash once per peer
+        our_root_hash = get_root_hash(db, peer_id)
 
         # Get all active connections using connection module interface
         connections = conn_module.get_connections(peer_id, t_ms, db)
@@ -891,11 +950,17 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
                 continue
 
             total_connections += 1
+
+            # Optimization: Skip if our root hasn't changed since last sync
+            if conn.last_synced_root_hash and conn.last_synced_root_hash == our_root_hash:
+                skipped_unchanged += 1
+                continue
+
             sent = sync_connection(db, peer_id, conn, t_ms)
             total_messages += sent
 
-    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} messages sent")
-    return {'connections': total_connections, 'messages_sent': total_messages}
+    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} sent, {skipped_unchanged} skipped (unchanged)")
+    return {'connections': total_connections, 'messages_sent': total_messages, 'skipped_unchanged': skipped_unchanged}
 
 
 def get_sync_status(

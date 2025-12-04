@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS connections (
     last_traffic_ms INTEGER,                -- STUB: Future - updated when traffic flows on connection
     ttl_ms INTEGER NOT NULL DEFAULT 300000, -- Time-to-live in ms (default: 5 minutes)
 
+    -- Sync optimization
+    last_synced_root_hash BLOB,             -- Root hash at last successful sync (skip if unchanged)
+
     PRIMARY KEY (connection_id, recorded_by),
     CHECK (peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
 );
