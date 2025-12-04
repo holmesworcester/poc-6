@@ -161,6 +161,10 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # The cryptographic trust comes from signed_by (the invite)
     elif event_type == 'user':
         dep_fields = ['signed_by', 'invite_id']
+    # For group events, check signed_by (peer_shared or network_id) and key_id
+    # signed_by is critical - must be valid before we can verify the group signature
+    elif event_type == 'group':
+        dep_fields = ['signed_by', 'key_id']
     else:
         # DEFAULT: Find all fields ending in '_id' plus known reference fields
         dep_fields = []

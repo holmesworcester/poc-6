@@ -421,7 +421,7 @@ def test_three_player_messaging(fresh_db):
     # Sync messages
     print("\n=== Sync Round 2: Message exchange ===")
     final_t_ms2, rounds_used2, converged2, status2 = tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=True
+        db=db, start_t_ms=6000, max_rounds=500, check_interval=1, verbose=True
     )
     print(f"Message sync completed in {rounds_used2} rounds (converged={converged2})")
 

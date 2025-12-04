@@ -411,6 +411,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'inviter_transit_prekey_id': inviter_prekey_id,
     }
 
+    # For mode='peer', include user_id so acceptor knows which user to link to
+    if mode == 'peer':
+        invite_link_data['user_id'] = user_id
+
     # Encode invite link as base64-urlsafe JSON
     import base64
     invite_json = json.dumps(invite_link_data, separators=(',', ':'), sort_keys=True)
@@ -802,6 +806,10 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
         'invite_private_key': invite_private_key,
         'inviter_peer_shared_id': inviter_peer_shared_id,
     }
+
+    # For mode='peer', include user_id from link data
+    if 'user_id' in link_data:
+        result['user_id'] = link_data['user_id']
 
     log.info(f"invite.accept() completed for mode={mode}, peer={peer_id[:20]}...")
     return result
