@@ -221,27 +221,9 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         log.warning(f"group_member.project() signature verification FAILED for member_id={member_id}")
         return None  # Reject unsigned or invalid signature
 
-    # Check if group exists
-    group = safedb.query_one(
-        "SELECT signed_by FROM groups WHERE group_id = ? AND recorded_by = ?",
-        (event_data['group_id'], recorded_by)
-    )
-
-    if not group:
-        log.info(f"group_member.project() blocking: group {event_data['group_id']} not found")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
-        return None
-
-    # Check if user being added exists
-    user = safedb.query_one(
-        "SELECT 1 FROM users WHERE user_id = ? AND recorded_by = ?",
-        (event_data['user_id'], recorded_by)
-    )
-
-    if not user:
-        log.info(f"group_member.project() blocking: user {event_data['user_id']} not found")
-        # Don't block here - let recorded.project() handle blocking with recorded_id
-        return None
+    # Note: group_id and user_id dependencies are checked by recorded.check_deps()
+    # before dispatch. If we get here, they're guaranteed to be in valid_events,
+    # which means their projection succeeded and table rows exist.
 
     # Check authorization via explicit admin_grant chain
     # Per spec: admin_grant is the explicit dependency that proves admin status

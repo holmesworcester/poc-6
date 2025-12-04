@@ -154,17 +154,26 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     invite_private_key_b64 = invite_link_data.get('invite_private_key')
     invite_private_key = crypto.b64decode(invite_private_key_b64) if invite_private_key_b64 else None
 
+    # Extract inviter's transit prekey for initial connection
+    inviter_transit_prekey_id = invite_link_data.get('inviter_transit_prekey_id')
+    inviter_transit_prekey_public_key = None
+    if invite_link_data.get('inviter_transit_prekey_public_key'):
+        inviter_transit_prekey_public_key = crypto.b64decode(invite_link_data['inviter_transit_prekey_public_key'])
+
     safedb.execute("""
         INSERT OR IGNORE INTO invite_accepteds
         (invite_id, inviter_peer_shared_id, address, port, network_id,
+         inviter_transit_prekey_id, inviter_transit_prekey_public_key,
          invite_private_key, created_at, recorded_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         invite_id,
         inviter_peer_shared_id,
         address,
         port,
         network_id,
+        inviter_transit_prekey_id,
+        inviter_transit_prekey_public_key,
         invite_private_key,
         event_data['created_at'],
         recorded_by

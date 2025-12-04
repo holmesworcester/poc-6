@@ -38,9 +38,9 @@ def test_bootstrap_user_invite_signed_by_network():
     assert 'network_pubkey' in network_event, "Network event should have network_pubkey"
     print(f"Network has network_pubkey: {network_event['network_pubkey'][:20]}...")
 
-    # Verify network is self-signed (network is root of trust)
-    assert network_event.get('signed_by') == 'SELF', f"Network should be self-signed, got {network_event.get('signed_by')}"
-    print("✓ Network is self-signed (signed_by='SELF')")
+    # Verify network is self-signed (no signed_by field - self-signed is implicit for root of trust)
+    assert 'signed_by' not in network_event, f"Network should not have signed_by (self-signed), got {network_event.get('signed_by')}"
+    print("✓ Network is self-signed (no signed_by field - root of trust)")
 
     # Verify signature using network_pubkey
     network_pubkey_bytes = crypto.b64decode(network_event['network_pubkey'])

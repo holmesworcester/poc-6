@@ -653,9 +653,9 @@ def create_peer_invite(
 def create_bootstrap_user_invite(
     network_id: str,
     network_private_key: bytes,
-    group_id: str,
-    channel_id: str,
-    key_id: str,
+    group_id: str | None,
+    channel_id: str | None,
+    key_id: str | None,
     peer_id: str,
     peer_shared_id: str | None,
     t_ms: int,
@@ -689,15 +689,19 @@ def create_bootstrap_user_invite(
         'type': 'invite',
         'mode': 'user',
         'network_id': network_id,
-        'group_id': group_id,
-        'channel_id': channel_id,
-        'key_id': key_id,
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': network_id,  # Bootstrap: signed by network key
         'created_at': t_ms
     }
 
-    # Only include inviter_peer_shared_id if provided (None for bootstrap self-invite)
+    # Only include optional fields if provided (not empty string or None)
+    # Bootstrap invites may not have group/channel/key yet - they're created later
+    if group_id:
+        event_data['group_id'] = group_id
+    if channel_id:
+        event_data['channel_id'] = channel_id
+    if key_id:
+        event_data['key_id'] = key_id
     if peer_shared_id:
         event_data['inviter_peer_shared_id'] = peer_shared_id
 
@@ -776,19 +780,8 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     invite_private_key = crypto.b64decode(link_data['invite_private_key'])
     inviter_peer_shared_id = link_data['inviter_peer_shared_id']
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
-    # Store inviter's transit prekey so we can encrypt sync_connect to them
-    if 'inviter_transit_prekey_public_key' in link_data and 'inviter_transit_prekey_shared_id' in link_data and 'inviter_transit_prekey_id' in link_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(link_data['inviter_transit_prekey_public_key'])
-
-        log.info(f"invite.accept() storing inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (link_data['inviter_transit_prekey_shared_id'], link_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, t_ms, peer_id)
-        )
-
     # Create invite_accepted event (event-sources invite secrets for reprojection)
+    # This stores inviter's transit prekey in invite_accepteds table via projection
     from events.identity import invite_accepted as invite_accepted_module
     invite_accepted_id = invite_accepted_module.create(
         invite_link_data=link_data,
