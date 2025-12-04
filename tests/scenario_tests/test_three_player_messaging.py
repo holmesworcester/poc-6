@@ -433,6 +433,14 @@ def test_three_player_messaging(fresh_db):
     alice_message_contents = [msg['content'] for msg in alice_messages]
     print(f"Alice sees {len(alice_messages)} messages: {alice_message_contents}")
 
+    # Verify author names are populated correctly
+    for msg in alice_messages:
+        assert msg.get('author_name'), f"Message should have author_name populated: {msg}"
+    alice_author_names = {msg['author_name'] for msg in alice_messages}
+    print(f"Alice sees authors: {alice_author_names}")
+    assert 'Alice' in alice_author_names, "Alice should see her own name as author"
+    assert 'Bob' in alice_author_names, "Alice should see Bob's name as author"
+
     assert "Hello from Alice!" in alice_message_contents, \
         "Alice should see her own message"
     assert "Hello from Bob!" in alice_message_contents, \
