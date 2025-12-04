@@ -91,6 +91,7 @@ from events.network import sync_file
 import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 import os
+import network_config
 
 
 class EventLog:
@@ -1725,6 +1726,129 @@ def cmd_list_reactions(session: CLISession, message_num: int):
 
 
 # ============================================================================
+# NETWORK SIMULATION COMMANDS
+# ============================================================================
+
+def cmd_network_show(session: CLISession):
+    """Show current network simulation configuration."""
+    cfg = network_config.get_network_config()
+
+    print("NETWORK SIMULATION:")
+    print(f"  latency:      {cfg.latency_ms}ms")
+    print(f"  jitter:       {cfg.jitter_ms}ms (stddev)")
+    print(f"  packet_loss:  {cfg.packet_loss_rate * 100:.1f}%")
+    print(f"  burst_loss:   {cfg.burst_loss_probability * 100:.1f}% (length: {cfg.burst_loss_length})")
+    print(f"  max_packet:   {cfg.max_packet_size} bytes")
+
+    if cfg.partitioned_peers:
+        print(f"  partitioned:  {', '.join(sorted(cfg.partitioned_peers))}")
+    else:
+        print(f"  partitioned:  (none)")
+    print()
+
+
+def cmd_network_set(session: CLISession, latency: int = None, jitter: int = None,
+                    loss: float = None, burst_prob: float = None, burst_len: int = None):
+    """Set network simulation parameters."""
+    cfg = network_config.get_network_config()
+
+    changes = []
+
+    if latency is not None:
+        if latency < 0:
+            print("✗ latency cannot be negative")
+            return
+        cfg.latency_ms = latency
+        changes.append(f"latency={latency}ms")
+
+    if jitter is not None:
+        if jitter < 0:
+            print("✗ jitter cannot be negative")
+            return
+        cfg.jitter_ms = jitter
+        changes.append(f"jitter={jitter}ms")
+
+    if loss is not None:
+        if not (0 <= loss <= 100):
+            print("✗ loss must be 0-100%")
+            return
+        cfg.packet_loss_rate = loss / 100.0
+        changes.append(f"loss={loss}%")
+
+    if burst_prob is not None:
+        if not (0 <= burst_prob <= 100):
+            print("✗ burst probability must be 0-100%")
+            return
+        cfg.burst_loss_probability = burst_prob / 100.0
+        changes.append(f"burst_prob={burst_prob}%")
+
+    if burst_len is not None:
+        if burst_len < 1:
+            print("✗ burst length must be >= 1")
+            return
+        cfg.burst_loss_length = burst_len
+        changes.append(f"burst_len={burst_len}")
+
+    if changes:
+        print(f"✓ network config: {', '.join(changes)}")
+    else:
+        print("✗ no parameters specified")
+        print("  usage: net-set --latency <ms> --jitter <ms> --loss <percent> --burst-prob <percent> --burst-len <n>")
+
+
+def cmd_network_preset(session: CLISession, preset: str):
+    """Apply a network condition preset."""
+    presets = {
+        'lan': (0, 0, 0, 0, 3),           # Perfect local network
+        'broadband': (50, 20, 1, 0, 3),    # Good home internet
+        'mobile-4g': (100, 40, 3, 5, 3),   # Mobile 4G
+        'mobile-3g': (200, 80, 8, 10, 4),  # Mobile 3G / poor
+        'satellite': (300, 50, 2, 5, 3),   # Satellite internet
+        'lossy': (50, 20, 15, 20, 5),      # Very lossy network
+    }
+
+    if preset not in presets:
+        print(f"✗ unknown preset: {preset}")
+        print(f"  available: {', '.join(presets.keys())}")
+        return
+
+    latency, jitter, loss, burst_prob, burst_len = presets[preset]
+    cfg = network_config.get_network_config()
+    cfg.latency_ms = latency
+    cfg.jitter_ms = jitter
+    cfg.packet_loss_rate = loss / 100.0
+    cfg.burst_loss_probability = burst_prob / 100.0
+    cfg.burst_loss_length = burst_len
+
+    print(f"✓ applied preset '{preset}':")
+    print(f"  latency={latency}ms, jitter={jitter}ms, loss={loss}%, burst={burst_prob}%/{burst_len}")
+
+
+def cmd_partition(session: CLISession, account_num: int):
+    """Partition an account (block all network traffic)."""
+    account = session.get_account_by_number(account_num)
+    if not account:
+        print(f"✗ account #{account_num} not found")
+        return
+
+    network_config.partition_peer(account.peer_id)
+    print(f"✓ partitioned account #{account_num}: {account.full_name}")
+    print(f"  (all network traffic blocked)")
+
+
+def cmd_unpartition(session: CLISession, account_num: int):
+    """Unpartition an account (restore network traffic)."""
+    account = session.get_account_by_number(account_num)
+    if not account:
+        print(f"✗ account #{account_num} not found")
+        return
+
+    network_config.unpartition_peer(account.peer_id)
+    print(f"✓ unpartitioned account #{account_num}: {account.full_name}")
+    print(f"  (network traffic restored)")
+
+
+# ============================================================================
 # COMMAND EXECUTION
 # ============================================================================
 
@@ -1961,6 +2085,48 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "time":
             cmd_time(session)
 
+        elif cmd == "net":
+            cmd_network_show(session)
+
+        elif cmd == "net-set":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--latency", type=int)
+            parser.add_argument("--jitter", type=int)
+            parser.add_argument("--loss", type=float)
+            parser.add_argument("--burst-prob", type=float)
+            parser.add_argument("--burst-len", type=int)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_network_set(session, latency=args.latency, jitter=args.jitter,
+                               loss=args.loss, burst_prob=args.burst_prob, burst_len=args.burst_len)
+            except SystemExit:
+                print("usage: net-set --latency <ms> --jitter <ms> --loss <percent> --burst-prob <percent> --burst-len <n>")
+
+        elif cmd == "net-preset":
+            if len(parts) < 2:
+                print("usage: net-preset <preset>")
+                print("  presets: lan, broadband, mobile-4g, mobile-3g, satellite, lossy")
+            else:
+                cmd_network_preset(session, parts[1])
+
+        elif cmd == "partition":
+            if len(parts) < 2:
+                print("usage: partition <account_num>")
+            else:
+                try:
+                    cmd_partition(session, int(parts[1]))
+                except ValueError:
+                    print("error: account number must be an integer")
+
+        elif cmd == "unpartition":
+            if len(parts) < 2:
+                print("usage: unpartition <account_num>")
+            else:
+                try:
+                    cmd_unpartition(session, int(parts[1]))
+                except ValueError:
+                    print("error: account number must be an integer")
+
         elif cmd == "log":
             cmd_toggle_log(session)
 
@@ -2037,6 +2203,15 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    tick <n>")
             print("    sync --ticks <n>")
             print("    auto-tick <n>")
+            print()
+            print("  Network simulation:")
+            print("    net                            Show network simulation config")
+            print("    net-set --latency <ms> --jitter <ms> --loss <percent>")
+            print("            --burst-prob <percent> --burst-len <n>")
+            print("    net-preset <preset>            Apply preset (lan, broadband, mobile-4g,")
+            print("                                   mobile-3g, satellite, lossy)")
+            print("    partition <n>                  Block network traffic for account #n")
+            print("    unpartition <n>                Restore network traffic for account #n")
             print()
             print("  Other:")
             print("    status")

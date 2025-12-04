@@ -269,3 +269,189 @@ def test_network_config_global_state(db):
     received = queues.incoming.drain(10, current_time_ms=2100, unsafedb=unsafedb)
     assert len(received) == 1
     assert received[0] == b"packet_2"
+
+
+# ===== New Network Features Tests =====
+
+def test_jitter_adds_variation_to_latency(db):
+    """Test that jitter adds variation to packet delivery times."""
+    # Setup: 100ms base latency with 20ms jitter (stddev)
+    network_config.set_network_config(
+        network_config.NetworkConfig(latency_ms=100, jitter_ms=20)
+    )
+    unsafedb = create_unsafe_db(db)
+
+    # Send 100 packets at same time, collect delivery times
+    delivery_times = []
+    for i in range(100):
+        random.seed(i)  # Different seed for each to get variation
+        latency = network_config.calculate_latency()
+        delivery_times.append(latency)
+
+    # Check that we have variation in delivery times
+    min_latency = min(delivery_times)
+    max_latency = max(delivery_times)
+
+    # With 20ms jitter, expect range of at least 30ms (1.5 stddev on each side)
+    assert max_latency - min_latency >= 30, f"Expected variation, got range {max_latency - min_latency}ms"
+
+    # Mean should be close to base latency
+    mean_latency = sum(delivery_times) / len(delivery_times)
+    assert 80 <= mean_latency <= 120, f"Mean latency {mean_latency}ms should be near 100ms"
+
+
+def test_jitter_latency_never_negative(db):
+    """Test that jittered latency is always non-negative."""
+    # Setup: low base latency with high jitter (could go negative without clamping)
+    network_config.set_network_config(
+        network_config.NetworkConfig(latency_ms=10, jitter_ms=50)
+    )
+
+    # Calculate many latencies, ensure none are negative
+    for i in range(100):
+        random.seed(i)
+        latency = network_config.calculate_latency()
+        assert latency >= 0, f"Latency should never be negative, got {latency}"
+
+
+def test_network_partition_blocks_source(db):
+    """Test that partitioned source peers cannot send packets."""
+    unsafedb = create_unsafe_db(db)
+
+    # Partition peer "alice"
+    network_config.partition_peer("alice")
+
+    # Try to send from alice - should be dropped
+    result = queues.incoming.add(b"from_alice", t_ms=1000, unsafedb=unsafedb, from_peer="alice")
+    assert result is False
+
+    # Bob can still send
+    result = queues.incoming.add(b"from_bob", t_ms=1000, unsafedb=unsafedb, from_peer="bob")
+    assert result is True
+
+    db.commit()
+    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    assert len(received) == 1
+    assert received[0] == b"from_bob"
+
+
+def test_network_partition_blocks_destination(db):
+    """Test that partitioned destination peers cannot receive packets."""
+    unsafedb = create_unsafe_db(db)
+
+    # Partition peer "charlie"
+    network_config.partition_peer("charlie")
+
+    # Try to send to charlie - should be dropped
+    result = queues.incoming.add(b"to_charlie", t_ms=1000, unsafedb=unsafedb, to_peer="charlie")
+    assert result is False
+
+    # Can send to dave
+    result = queues.incoming.add(b"to_dave", t_ms=1000, unsafedb=unsafedb, to_peer="dave")
+    assert result is True
+
+    db.commit()
+    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    assert len(received) == 1
+    assert received[0] == b"to_dave"
+
+
+def test_network_partition_can_be_restored(db):
+    """Test that unpartitioning a peer restores connectivity."""
+    unsafedb = create_unsafe_db(db)
+
+    # Partition alice
+    network_config.partition_peer("alice")
+    assert network_config.is_partitioned("alice")
+
+    # Can't send from alice
+    result = queues.incoming.add(b"blocked", t_ms=1000, unsafedb=unsafedb, from_peer="alice")
+    assert result is False
+
+    # Unpartition alice
+    network_config.unpartition_peer("alice")
+    assert not network_config.is_partitioned("alice")
+
+    # Now alice can send
+    result = queues.incoming.add(b"restored", t_ms=1000, unsafedb=unsafedb, from_peer="alice")
+    assert result is True
+
+    db.commit()
+    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    assert len(received) == 1
+    assert received[0] == b"restored"
+
+
+def test_burst_loss_drops_consecutive_packets(db):
+    """Test that burst loss drops consecutive packets."""
+    # Setup: high burst probability with burst length of 3
+    network_config.set_network_config(
+        network_config.NetworkConfig(burst_loss_probability=1.0, burst_loss_length=3)
+    )
+    unsafedb = create_unsafe_db(db)
+
+    # First packet should trigger burst, next 2 should also be dropped
+    random.seed(42)
+    result1 = queues.incoming.add(b"packet_1", t_ms=1000, unsafedb=unsafedb)
+    result2 = queues.incoming.add(b"packet_2", t_ms=1000, unsafedb=unsafedb)
+    result3 = queues.incoming.add(b"packet_3", t_ms=1000, unsafedb=unsafedb)
+
+    # All 3 should be dropped (burst of 3)
+    assert result1 is False
+    assert result2 is False
+    assert result3 is False
+
+    db.commit()
+    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    assert len(received) == 0
+
+
+def test_burst_loss_probabilistic_entry(db):
+    """Test that burst loss entry is probabilistic."""
+    # Setup: low burst probability
+    network_config.set_network_config(
+        network_config.NetworkConfig(burst_loss_probability=0.1, burst_loss_length=2)
+    )
+    unsafedb = create_unsafe_db(db)
+
+    # Send 100 packets
+    delivered = 0
+    for i in range(100):
+        random.seed(i * 100)  # Vary seeds
+        if queues.incoming.add(f"packet_{i}".encode(), t_ms=1000, unsafedb=unsafedb):
+            delivered += 1
+
+    db.commit()
+    received = queues.incoming.drain(100, current_time_ms=1000, unsafedb=unsafedb)
+
+    # With 10% burst probability and burst length 2, expect ~80% delivery
+    # Allow wide variance
+    assert 60 <= len(received) <= 95, f"Expected ~80 packets, got {len(received)}"
+
+
+def test_add_returns_false_on_drop(db):
+    """Test that add() returns False when packet is dropped."""
+    unsafedb = create_unsafe_db(db)
+
+    # Test oversized packet
+    network_config.set_network_config(network_config.NetworkConfig(max_packet_size=10))
+    result = queues.incoming.add(b"x" * 100, t_ms=1000, unsafedb=unsafedb)
+    assert result is False
+
+    # Test partition drop
+    network_config.reset_network_config()
+    network_config.partition_peer("blocked_peer")
+    result = queues.incoming.add(b"test", t_ms=1000, unsafedb=unsafedb, from_peer="blocked_peer")
+    assert result is False
+
+
+def test_add_returns_true_on_success(db):
+    """Test that add() returns True when packet is enqueued."""
+    unsafedb = create_unsafe_db(db)
+
+    result = queues.incoming.add(b"test_packet", t_ms=1000, unsafedb=unsafedb)
+    assert result is True
+
+    db.commit()
+    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    assert len(received) == 1
