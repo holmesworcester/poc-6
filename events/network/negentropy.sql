@@ -1,14 +1,14 @@
--- Negentropy-style time-based sync protocol
+-- Negentropy-style HASH-ONLY sync protocol
 --
 -- Deterministic sync with finality, designed for UI inspection.
--- Uses time-based hierarchical hashes instead of bloom filters.
+-- Uses hash-prefix based hierarchical buckets instead of time-based buckets.
 --
 -- Key design:
 -- - Tracks sync state per connection (not per peer)
--- - Range requests narrow down until we reach leaf buckets
--- - Leaf buckets send actual events
+-- - Range requests narrow down by hash prefix until bucket has ≤EVENTS_THRESHOLD events
+-- - At threshold: send actual events
 -- - Finality: when ranges match, sync is complete
--- - Buckets identified by Unix timestamp (ms), not human-readable strings
+-- - Buckets identified by hash prefix (e.g., 'a', 'ab', 'abc', 'abcd')
 
 -- ============================================================================
 -- negentropy_buckets table (SUBJECTIVE - cached hashes per local peer)
@@ -18,43 +18,44 @@
 
 CREATE TABLE IF NOT EXISTS negentropy_buckets (
     recorded_by TEXT NOT NULL,              -- Local peer who owns this state
-    level TEXT NOT NULL,                    -- root|year|month|day|hour|ten_min|one_min
-    bucket_start_ms INTEGER NOT NULL,       -- Start of bucket period (0 for root)
+    level TEXT NOT NULL,                    -- root|hash_4bit|hash_8bit|hash_12bit|hash_16bit
+    prefix TEXT NOT NULL DEFAULT '',        -- Hash prefix ('' for root, 'a' for 4bit, 'ab' for 8bit, etc.)
     hash BLOB,                              -- 16-byte BLAKE2b hash (NULL if needs recompute)
     event_count INTEGER NOT NULL DEFAULT 0, -- Number of events in this bucket (for leaves)
     updated_at INTEGER NOT NULL,
 
-    PRIMARY KEY (recorded_by, level, bucket_start_ms)
+    PRIMARY KEY (recorded_by, level, prefix)
 );
 
--- Index for finding children by timestamp range
-CREATE INDEX IF NOT EXISTS idx_negentropy_buckets_level
-ON negentropy_buckets(recorded_by, level, bucket_start_ms);
+-- Index for finding children by prefix
+CREATE INDEX IF NOT EXISTS idx_negentropy_buckets_prefix
+ON negentropy_buckets(recorded_by, level, prefix);
 
 -- ============================================================================
 -- negentropy_events table (SUBJECTIVE - event to bucket mapping)
 -- ============================================================================
--- Maps events to their 1-minute bucket for hash computation.
+-- Maps events to their hash prefix bucket for hash computation.
 -- This is the source of truth for what we're syncing.
 
 CREATE TABLE IF NOT EXISTS negentropy_events (
     recorded_by TEXT NOT NULL,
     event_id TEXT NOT NULL,
-    bucket_start_ms INTEGER NOT NULL,       -- Start of 1-minute bucket containing this event
-    created_at INTEGER NOT NULL,            -- Event timestamp (ms since epoch)
+    prefix TEXT NOT NULL,                   -- 16-bit hash prefix (4 hex chars, e.g., 'a1b2')
+    created_at INTEGER NOT NULL,            -- Event timestamp (ms since epoch) - for reference only
 
     PRIMARY KEY (recorded_by, event_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_negentropy_events_bucket
-ON negentropy_events(recorded_by, bucket_start_ms);
+-- Index for efficient bucket lookups
+CREATE INDEX IF NOT EXISTS idx_negentropy_events_prefix
+ON negentropy_events(recorded_by, prefix);
 
 -- ============================================================================
 -- negentropy_sync_state table (SUBJECTIVE - per-connection sync state)
 -- ============================================================================
 -- Tracks ongoing sync with each connection.
 -- Each row represents a range we're negotiating.
--- When range_level reaches 'leaf' and hashes match, that range is done.
+-- When range hashes match, that range is done.
 
 CREATE TABLE IF NOT EXISTS negentropy_sync_state (
     recorded_by TEXT NOT NULL,
@@ -62,8 +63,8 @@ CREATE TABLE IF NOT EXISTS negentropy_sync_state (
     range_id TEXT NOT NULL,                 -- Unique ID for this range negotiation
 
     -- Current range we're syncing
-    level TEXT NOT NULL,                    -- root|year|month|day|hour|ten_min|one_min
-    bucket_start_ms INTEGER NOT NULL,       -- Start timestamp of bucket we're negotiating
+    level TEXT NOT NULL,                    -- root|hash_4bit|hash_8bit|hash_12bit|hash_16bit
+    prefix TEXT NOT NULL DEFAULT '',        -- Hash prefix we're negotiating
 
     -- State
     our_hash BLOB,                          -- What we computed for this range
@@ -99,4 +100,3 @@ CREATE TABLE IF NOT EXISTS negentropy_checkpoints (
 
 CREATE INDEX IF NOT EXISTS idx_negentropy_checkpoints_connection
 ON negentropy_checkpoints(connection_id, completed_at);
-
