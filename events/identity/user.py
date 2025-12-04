@@ -10,7 +10,6 @@ import base64
 import logging
 import crypto
 import store
-from events.network import transit_key
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 
@@ -226,12 +225,7 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
             )
             log.info(f"user.project() added user {user_id[:20]}... to group {group_id[:20]}...")
 
-    # Mark user event as valid for this peer
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (user_id, recorded_by)
-    )
-
+    # NOTE: validity is handled by recorded.project() after successful projection
     return user_id
 
 def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", network_name: str | None = None) -> dict[str, Any]:
@@ -308,11 +302,11 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     invite_id, invite_private_key, invite_pubkey = invite.create_bootstrap_user_invite(
         network_id=network_id,
         network_private_key=network_private_key,
-        group_id='',  # Not available yet - content created after peer_shared
-        channel_id='',  # Not available yet - content created after peer_shared
-        key_id='',  # Not available yet - content created after peer_shared
+        group_id=None,  # Not available yet - content created after peer_shared
+        channel_id=None,  # Not available yet - content created after peer_shared
+        key_id=None,  # Not available yet - content created after peer_shared
         peer_id=peer_id,
-        peer_shared_id='PENDING',  # Will be set to peer_shared_id after it's created
+        peer_shared_id=None,  # Bootstrap: no inviter (self-invite)
         t_ms=t_ms + 20,
         db=db
     )
@@ -331,7 +325,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         'invite_id': invite_id,
         'invite_prekey_id': bootstrap_invite_prekey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
-        'inviter_peer_shared_id': 'PENDING',  # Will connect to self after peer_shared created
+        'inviter_peer_shared_id': None,  # Bootstrap: no inviter (self-invite)
         'ip': '127.0.0.1',
         'port': 6100,
     }
@@ -340,15 +334,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     invite_link = f"quiet://invite/{invite_code}"
     log.info(f"new_network() built invite_link with invite_prekey_id={bootstrap_invite_prekey_id[:20]}...")
 
-    # 4. Join using own invite (creates user_id)
-    # Note: join() expects peer to already have peer_self entry
-    # We need to create a temporary peer_self entry for the join to work
-    safedb.execute(
-        "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
-        (peer_id, 'PENDING', None, peer_id, t_ms)
-    )
-
     # 4. Create user via bootstrap invite (isomorphic with join() flow)
+    # Note: peer_self is populated later by peer_shared.project() - no PENDING entry needed
     user_id, user_private_key = create(
         peer_id=peer_id,
         name=name,
@@ -372,8 +359,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     )
     log.info(f"new_network() created peer invite: {peer_invite_id[:20]}... signed by user_id")
 
-    # Project the peer invite so it's in invites table
-    invite.project(peer_invite_id, peer_id, t_ms + 41, db)
+    # NOTE: invite projection happens via store.event() -> recorded.project() cascade
+    # No direct invite.project() call needed
 
     # Delegate to peer_shared.join() - the canonical peer-joining operation
     # (reused by both user.join() and user.new_network())
@@ -606,36 +593,21 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
             'peer_id': str,
             'peer_shared_id': str,
             'user_id': str,
-            'group_id': str,
             'invite_data': dict,
         }
     """
     log.info(f"join() user '{name}' joining via invite at t_ms={t_ms} with peer_id={peer_id[:20]}...")
 
-    # Get peer_shared_id from existing peer or create PENDING entry
+    from events.identity import invite
+
+    # Verify peer was created (check local_peers table)
     from db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row:
-        # Verify peer was created (check local_peers table)
-        unsafedb = create_unsafe_db(db)
-        peer_exists = unsafedb.query_one("SELECT 1 FROM local_peers WHERE peer_id = ?", (peer_id,))
-        if not peer_exists:
-            raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
-
-        # Create PENDING peer_self entry - will be updated after peer_shared is created
-        # This follows the same pattern as new_network() bootstrap
-        safedb.execute(
-            "INSERT OR REPLACE INTO peer_self (peer_id, peer_shared_id, user_id, recorded_by, recorded_at) VALUES (?, ?, ?, ?, ?)",
-            (peer_id, 'PENDING', None, peer_id, t_ms)
-        )
-        peer_shared_id = 'PENDING'
-        log.info(f"join() created PENDING peer_self entry for peer {peer_id[:20]}...")
-    else:
-        peer_shared_id = peer_self_row['peer_shared_id']
+    unsafedb = create_unsafe_db(db)
+    peer_exists = unsafedb.query_one("SELECT 1 FROM local_peers WHERE peer_id = ?", (peer_id,))
+    if not peer_exists:
+        raise ValueError(f"Peer {peer_id} not found. Create peer with peer.create() before calling join().")
+    # Note: peer_self is populated later by peer_shared.project() - no PENDING entry needed
 
     # Parse invite link
     import base64
@@ -655,73 +627,40 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     except Exception as e:
         raise ValueError(f"Failed to decode invite link: {e}")
 
-    # Extract and store invite event blob (with recorded wrapper for projection)
-    invite_blob_b64 = invite_data['invite_blob']
-    invite_blob = base64.urlsafe_b64decode(invite_blob_b64 + '===')  # Add padding
-    invite_id = store.event(invite_blob, peer_id, t_ms, db)
-
-    # Note: invite is now marked as valid via invite_accepted.project() for reprojection
-    # During initial join, we'll mark it valid after creating invite_accepted event below
-
-    # Project inviter's peer_shared FIRST (before invite)
-    # This ensures the creator's public key is available when validating the invite signature
-    if 'inviter_peer_shared_blob' in invite_data:
-        inviter_peer_shared_blob_b64 = invite_data['inviter_peer_shared_blob']
-        inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64 + '===')
-
-        # Store the blob and create recorded event
-        from events.network import recorded
-        unsafedb = create_unsafe_db(db)
-        inviter_peer_shared_id = store.blob(inviter_peer_shared_blob, t_ms, return_dupes=True, unsafedb=unsafedb)
-
-        # Create recorded event for this peer
-        recorded_id = recorded.create(inviter_peer_shared_id, peer_id, t_ms, db, return_dupes=True)
-
-        # Project it immediately
-        recorded.project_ids([recorded_id], db)
-
-        log.info(f"join() projected inviter's peer_shared: {inviter_peer_shared_id[:20]}... for peer {peer_id[:20]}...")
-
-    # Project inviter's transit prekey from invite link (slim invite moved these from event to link)
-    # This allows the joiner to contact the inviter for sync
-    if 'inviter_transit_prekey_public_key' in invite_data and 'inviter_transit_prekey_shared_id' in invite_data and 'inviter_transit_prekey_id' in invite_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(invite_data['inviter_transit_prekey_public_key'])
-        inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
-        prekey_created_at = t_ms  # Use join timestamp for prekey
-
-        log.info(f"join() projecting inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (invite_data['inviter_transit_prekey_shared_id'], invite_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, peer_id)
-        )
-
-    # Now project invite (after peer_shared, so creator's public key is available for validation)
-    # Skip admin check for out-of-band invites - the joiner trusts the invite link they received
-    from events.identity import invite
-    invite.project(invite_id, peer_id, t_ms, db, skip_admin_check=True)
-    log.info(f"join() projected invite: {invite_id[:20]}...")
-
-    # Extract secrets from invite link (all b64 encoded)
+    # Extract metadata from link (no blobs - those sync after connection)
+    invite_id = invite_data['invite_id']
     invite_prekey_id = invite_data['invite_prekey_id']
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
+    inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
+    channel_id = invite_data.get('channel_id')
+    key_id = invite_data.get('key_id')
 
-    log.info(f"join() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite link")
+    log.info(f"join() extracted invite_id={invite_id[:20]}... from invite link")
 
-    # Get metadata from invite event and link
-    # Slim invite: group_id in event, channel_id/key_id in link (for immediate access)
-    invite_event_data = crypto.parse_json(invite_blob)
-    group_id = invite_event_data['group_id']
-    channel_id = invite_data.get('channel_id')  # From link (moved from event)
-    key_id = invite_data.get('key_id')  # From link (moved from event)
+    # Create group_prekey event from invite key material so we can decrypt group_key_shared events
+    # The invite_prekey_id was used by Alice when wrapping group_key_shared to us
+    # Since group_prekey blobs are deterministic (same key material = same hash),
+    # this produces the SAME prekey_id that Alice created
+    from nacl.signing import SigningKey
+    from events.group import group_prekey
+    signing_key = SigningKey(invite_private_key)
+    invite_pubkey = bytes(signing_key.verify_key)
+    created_prekey_id = group_prekey.create_from_material(
+        public_key=invite_pubkey,
+        private_key=invite_private_key,
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db
+    )
+    log.info(f"join() created group_prekey from invite material: {created_prekey_id[:20]}... (should match invite_prekey_id={invite_prekey_id[:20]}...)")
 
-    # Create invite_accepted event FIRST to capture ALL invite link data for event-sourcing
-    # This restores the invite private key via projection BEFORE user.create() is called
-    # This allows reprojection to work without the original invite link
+    # Create invite_accepted event to capture invite link data for event-sourcing
+    # This stores inviter's transit prekey in invite_accepteds table via projection
+    # invite_private_key is stored in invite_accepteds table via projection
+    # sync_connect.send() queries invite_accepteds by invite_id to get the signing key
     from events.identity import invite_accepted
     invite_accepted_id = invite_accepted.create(
-        invite_id=invite_id,
-        invite_prekey_id=invite_prekey_id,
-        invite_private_key=invite_private_key,
+        invite_link_data=invite_data,  # Complete raw invite link data
         peer_id=peer_id,
         t_ms=t_ms + 1,  # Before user creation
         db=db
@@ -740,7 +679,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     # invite_proof removed - proof IS the signature on user event (signed_by=invite_id)
 
-    log.info(f"join() user '{name}' joined: peer={peer_id[:20]}..., group={group_id[:20]}...")
+    log.info(f"join() user '{name}' joined: peer={peer_id[:20]}...")
 
     # =========================================================================
     # Complete isomorphic bootstrap - delegate to peer_shared.join()
@@ -758,8 +697,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     )
     log.info(f"join() created peer invite: {peer_invite_id[:20]}... signed by user_id")
 
-    # Project the peer invite so it's in invites table
-    invite.project(peer_invite_id, peer_id, t_ms + 11, db)
+    # NOTE: invite projection happens via store.event() -> recorded.project() cascade
+    # No direct invite.project() call needed
 
     # 6. Delegate to peer_shared.join() for peer_shared creation and transit keys
     # This is the canonical operation reused for both first peer and device linking
@@ -815,7 +754,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         'prekey_id': prekey_id,
         'transit_prekey_shared_id': transit_prekey_shared_id,
         'network_id': invite_data.get('network_id'),  # From invite
-        'group_id': group_id,
         'channel_id': channel_id,
         'key_id': key_id,
         'invite_data': invite_data,

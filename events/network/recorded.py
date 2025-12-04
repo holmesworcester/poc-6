@@ -63,7 +63,7 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
 
     # Schema: key events have signed_by referencing creator's local peer (not peer_shared_id)
     # peer_shared events have peer_id referencing creator's local peer
-    LOCAL_CREATOR_TYPES = {'transit_key', 'group_key', 'transit_prekey', 'group_prekey'}
+    LOCAL_CREATOR_TYPES = {'group_key', 'transit_prekey', 'group_prekey'}
 
     if event_type in LOCAL_CREATOR_TYPES and field == 'signed_by':
         # Local events have signed_by=peer_id (local). Skip if we're not the creator (foreign local)
@@ -78,10 +78,6 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
 
     # Sync events have peer_id referencing requester's local peer (always foreign)
     if event_type == 'sync' and field == 'peer_id':
-        return True
-
-    # sync_connect events have peer_id referencing sender's local peer (always foreign)
-    if event_type == 'sync_connect' and field == 'peer_id':
         return True
 
     # transit_prekey_shared.transit_prekey_id references creator's local transit_prekey
@@ -138,12 +134,13 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
         'peer_shared',      # Self-signed, peer_id is foreign local
-        'sync_connect',     # Ephemeral, auth handled in projection
+        'connection',       # Ephemeral, auth handled in projection
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
-        'transit_key',      # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
+    # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
+    # and must wait for that invite to be valid before projecting
 
     if event_type in NO_DEPS_TYPES:
         return []
@@ -155,8 +152,14 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
     # For user events, check invite (which contains group/channel stubs) not group/channel directly
+    # Note: peer_id is NOT a dependency - it's metadata about which local peer created this user
+    # The cryptographic trust comes from signed_by (the invite)
     elif event_type == 'user':
-        dep_fields = ['signed_by', 'peer_id', 'invite_id']
+        dep_fields = ['signed_by', 'invite_id']
+    # For group events, check signed_by (peer_shared or network_id) and key_id
+    # signed_by is critical - must be valid before we can verify the group signature
+    elif event_type == 'group':
+        dep_fields = ['signed_by', 'key_id']
     else:
         # DEFAULT: Find all fields ending in '_id' plus known reference fields
         dep_fields = []
@@ -177,10 +180,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         if not dep_id:
             continue
 
-        # Skip special placeholder values (used during bootstrap)
-        if dep_id in ('SELF', 'PENDING'):
-            log.debug(f"recorded.check_deps() skipping special value: {field}={dep_id}")
-            continue
+        # Note: PENDING and SELF placeholders have been eliminated from the codebase
+        # Network events (which were self-signed with SELF) are in NO_DEPS_TYPES
 
         # Skip foreign local deps (creator's local state we'll never have)
         if is_foreign_local_dep(field, event_data, recorded_by):

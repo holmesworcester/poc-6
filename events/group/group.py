@@ -116,22 +116,24 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Polymorphic signature verification
     # Check if signed_by is a network_id or a peer_shared_id
+    # Use store-based lookups to avoid timing issues with projection tables
     signed_by = event_data['signed_by']
 
-    # Try network first (for network-signed all_users groups)
-    network_row = safedb.query_one(
-        "SELECT network_pubkey FROM networks WHERE network_id = ? AND recorded_by = ?",
-        (signed_by, recorded_by)
-    )
+    # Try network first (from store - avoids timing issues with projection tables)
+    from events.identity import network
+    public_key = network.get_public_key_from_store(signed_by, db)
 
-    if network_row:
-        # Signed by network - verify with network's public key
-        public_key = crypto.b64decode(network_row['network_pubkey'])
+    if public_key:
         log.debug(f"group.project() verifying network-signed group {event_id[:20]}...")
     else:
-        # Signed by peer_shared - verify with peer's public key
+        # Try peer_shared (from store)
         from events.identity import peer_shared
-        public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
+        public_key = peer_shared.get_public_key_from_store(signed_by, db)
+        if public_key:
+            log.debug(f"group.project() verifying peer-signed group {event_id[:20]}...")
+        else:
+            log.warning(f"group.project() signed_by={signed_by[:20]}... not found as network or peer_shared")
+            return None
 
     if not crypto.verify_event(event_data, public_key):
         log.warning(f"group.project() signature verification FAILED for group_id={event_id}")

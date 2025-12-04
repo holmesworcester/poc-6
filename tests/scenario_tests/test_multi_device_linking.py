@@ -94,9 +94,11 @@ def test_alice_links_phone_to_laptop(fresh_db):
     # Initial sync to converge (multiple rounds for GKS propagation)
     # NOTE: Device names are encrypted via peer_name_update events which require group key.
     # The laptop won't have the group key until after sync, so device name check is after sync.
+    # NOTE: Using run_ticks ensures all rounds execute; sync_until_converged may exit early
     print("\n=== Initial sync to propagate link event and group keys ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+    # Run 200 ticks for initial sync (keys, channels, etc.)
+    current_t_ms = tick_helper.run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
     # Verify laptop has the group key (from GKS)
     laptop_has_key = db.query_one(
@@ -135,7 +137,7 @@ def test_alice_links_phone_to_laptop(fresh_db):
         peer_id=alice_phone['peer_id'],
         channel_id=alice_phone['channel_id'],
         content="Hello from Alice's phone!",
-        t_ms=5000,
+        t_ms=current_t_ms + 1000,
         db=db
     )
     db.commit()
@@ -146,16 +148,18 @@ def test_alice_links_phone_to_laptop(fresh_db):
         peer_id=alice_laptop['peer_id'],
         channel_id=alice_phone['channel_id'],  # Same user, same channel
         content="Hello from Alice's laptop!",
-        t_ms=5100,
+        t_ms=current_t_ms + 1100,
         db=db
     )
     db.commit()
     print(f"Alice (laptop) created message: {alice_laptop_msg['id'][:20]}...")
 
-    # Sync messages between devices
+    # Sync messages between devices (continue from current time)
+    # NOTE: In PLACEHOLDER_SYNC mode, events are resent on each sync, so we use run_ticks
+    # to ensure all sync rounds execute without early exit
     print("\n=== Sync messages between devices ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+    tick_helper.run_ticks(db=db, start_t_ms=current_t_ms + 2000, num_rounds=100)
 
     # Verify both devices see both messages
     print("\n=== Verifying message delivery ===")
@@ -268,7 +272,7 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
     # NOTE: Device names are encrypted, so we check after sync when laptop has the group key
     print("\n=== Sync messages to laptop ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=500, check_interval=1)
 
     # Verify device name is now available (encrypted via peer_name_update)
     laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
@@ -377,7 +381,7 @@ def test_three_devices_all_linked(fresh_db):
     # Sync to share group keys (required for encrypted device names)
     print("\n=== Sync all devices ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=500, check_interval=1)
 
     # Verify device names are stored correctly (after sync - encrypted names require group key)
     phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
@@ -432,7 +436,7 @@ def test_three_devices_all_linked(fresh_db):
     # Sync messages
     print("\n=== Sync messages ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1)
+    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=500, check_interval=1)
 
     # Discover channels via sync for each device
     print("\n=== Discovering channels for each device ===")

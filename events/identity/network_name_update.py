@@ -37,20 +37,13 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
 
     Raises:
         KeyNotAvailableError: If all_members group key is not available yet
-        ValueError: If network doesn't exist
     """
     log.info(f"network_name_update.create() creating network name for network_id={network_id[:20]}..., name='{name}'")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Check: Does the network event exist?
-    network_event = safedb.query_one(
-        "SELECT network_id FROM networks WHERE network_id = ? AND recorded_by = ? LIMIT 1",
-        (network_id, peer_id)
-    )
-    if not network_event:
-        log.warning(f"network_name_update.create() network not found: {network_id[:20]}...")
-        raise ValueError(f"Network {network_id} not found")
+    # NOTE: network_id is passed as param - no need to check networks table
+    # The event will have network_id as a dependency and will block until network is valid
 
     # Get main group (all_members) - use is_main flag since name varies
     main_group = safedb.query_one(

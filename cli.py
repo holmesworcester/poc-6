@@ -89,6 +89,7 @@ from events.identity import user, peer, invite, network, user_removed, peer_shar
 from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update
 import purge_expired
 from events.group import group_member, group_key, group_prekey, group
+from events.network import connection
 
 
 class EventLog:
@@ -1276,6 +1277,100 @@ def cmd_purge_keys(session: CLISession):
     display_state(session)
 
 
+def cmd_connections(session: CLISession, verbose: bool = False):
+    """Display connections for the selected account."""
+    account = session.get_selected_account()
+
+    data = connection.list_all_for_display(account.peer_id, session.current_time_ms, session.db)
+
+    active = data['active']
+    pending = data['pending']
+    bootstrap = data['bootstrap']
+
+    total = len(active) + len(pending) + len(bootstrap)
+
+    print(f"CONNECTIONS for {account.user_name} ({account.peer_shared_id[:8]}...)")
+    print("─" * 72)
+    print()
+
+    idx = 1
+
+    # Active connections
+    if active:
+        print(f"ACTIVE ({len(active)})")
+        for conn in active:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            if verbose:
+                print(f"  #{idx} ACTIVE: {conn.short_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                print(f"       their_connection_id: {conn.their_connection_id[:20] if conn.their_connection_id else 'NULL'}...")
+                if conn.peer_shared_id:
+                    print(f"       peer_shared_id:      {conn.peer_shared_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       last_handshake:      {time_ago}")
+                print(f"       last_traffic:        ?  (not yet implemented)")
+                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print()
+            else:
+                label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
+                print(f"  {idx}. {label}...    conn: {conn.short_connection_id}    handshake {time_ago}")
+            idx += 1
+        print()
+
+    # Pending connections
+    if pending:
+        print(f"PENDING ({len(pending)})")
+        for conn in pending:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            if verbose:
+                print(f"  #{idx} PENDING: {conn.short_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                if conn.peer_shared_id:
+                    print(f"       to_peer_shared_id:   {conn.peer_shared_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       created:             {time_ago}")
+                print(f"       status:              awaiting ack")
+                print()
+            else:
+                label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
+                print(f"  {idx}. → {label}...    conn: {conn.short_connection_id}    sent {time_ago}")
+            idx += 1
+        print()
+
+    # Bootstrap connections
+    if bootstrap:
+        print(f"BOOTSTRAP ({len(bootstrap)})")
+        for conn in bootstrap:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            # For bootstrap, show [inviter] or [invitee] based on context
+            # If peer_shared_id is unknown, show the role
+            if conn.peer_shared_id:
+                role_label = conn.peer_shared_id[:8] + "..."
+            else:
+                role_label = "[inviter] (unknown)"
+
+            if verbose:
+                print(f"  #{idx} BOOTSTRAP: {role_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                if conn.their_connection_id:
+                    print(f"       their_connection_id: {conn.their_connection_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       last_handshake:      {time_ago}")
+                print(f"       last_traffic:        ?  (not yet implemented)")
+                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print()
+            else:
+                print(f"  {idx}. {role_label:24}    conn: {conn.short_connection_id}    handshake {time_ago}")
+            idx += 1
+        print()
+
+    print("─" * 72)
+    print(f"{len(active)} active, {len(pending)} pending, {len(bootstrap)} bootstrap")
+
+
 def cmd_remove_user(session: CLISession, user_num: int):
     """Remove a user from the network (admin only)."""
     account = session.get_selected_account()
@@ -1583,6 +1678,10 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             summary = "--summary" in parts
             cmd_keys(session, summary=summary)
 
+        elif cmd == "connections":
+            verbose = "-v" in parts or "--verbose" in parts
+            cmd_connections(session, verbose=verbose)
+
         elif cmd == "delete":
             if len(parts) < 2:
                 print("usage: delete <n>")
@@ -1712,6 +1811,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Admin:")
             print("    ban <n>")
+            print()
+            print("  Network/connections:")
+            print("    connections [-v]               Show all connections (active/pending/bootstrap)")
             print()
             print("  Keys/sync:")
             print("    keys [--summary]")

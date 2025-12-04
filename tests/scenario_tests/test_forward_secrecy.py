@@ -12,7 +12,7 @@ from db import create_safe_db, create_unsafe_db
 import crypto
 from events.identity import user, invite, peer
 from events.content import message, message_deletion
-from events.network import transit_prekey, transit_key
+from events.network import transit_prekey
 from events.group import group_prekey
 from tests.utils import tick_helper, assertions
 import purge_expired

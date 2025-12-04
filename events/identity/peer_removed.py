@@ -122,12 +122,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # DELETE ALL CONNECTIONS with this peer (enforcement mechanism)
     # No connections = no sync possible
-    # This is the primary enforcement point per the protocol design
-    cursor = unsafe_db.execute(
-        """DELETE FROM sync_connections WHERE peer_shared_id = ?""",
-        (removed_peer_shared_id,)
-    )
-    deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+    # Uses connection module API which handles per-peer connection removal
+    from events.network import connection
+    deleted_count = connection.remove_connections_for_peer(removed_peer_shared_id, db)
     log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
 
     # Rotate group keys when ANY peer is removed
