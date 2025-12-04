@@ -397,9 +397,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     )
     log.info(f"new_network() created admin_grant: {admin_grant_id[:20]}...")
 
-    # Project admin_grant
-    recorded_id = recorded.create(admin_grant_id, peer_id, t_ms, db, return_dupes=True)
-    recorded.project_ids([recorded_id], db)
+    # NOTE: admin.create() calls store.event() which already projects via recorded.project()
+    # No explicit projection needed - deps (user_id, signed_by=network_id) are valid
 
     # 8. Create ALL_USERS group (main group for all users)
     # NETWORK-SIGNED: This group is signed by network_id (using network_private_key)
@@ -429,9 +428,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
             t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db
         )
-        # Project the username_update immediately
-        recorded_id = recorded.create(username_update_id, peer_id, t_ms, db, return_dupes=True)
-        recorded.project_ids([recorded_id], db)
+        # NOTE: username_update.create() calls store.event() which already projects
         log.info(f"new_network() created username_update: {username_update_id[:20]}...")
     except username_update.KeyNotAvailableError:
         # This shouldn't happen during bootstrap since we just created the key
@@ -449,8 +446,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
                 t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 db=db
             )
-            recorded_id = recorded.create(network_name_update_id, peer_id, t_ms, db, return_dupes=True)
-            recorded.project_ids([recorded_id], db)
+            # NOTE: network_name_update.create() calls store.event() which already projects
             log.info(f"new_network() created network_name_update: {network_name_update_id[:20]}...")
         except network_name_update.KeyNotAvailableError:
             log.warning(f"new_network() key not available for network_name_update - unexpected during bootstrap")
