@@ -47,10 +47,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest
 
-      - name: Run network simulator tests
+      - name: Run network simulator unit tests
         run: |
-          PYTHONPATH=. pytest tests/test_network_simulator.py tests/test_nat_engine.py -v --tb=short
+          PYTHONPATH=. pytest tests/test_network_simulator.py tests/test_nat_engine.py tests/test_network_scenarios.py -v --tb=short
 
-      - name: Run scenario tests with realistic network conditions
+      - name: Run network conditions integration tests
+        run: |
+          PYTHONPATH=. pytest tests/scenario_tests/test_network_conditions_sync.py -v --tb=short
+
+      - name: Run scenario tests
         run: |
           PYTHONPATH=. pytest tests/scenario_tests/ -v --tb=short -k "not slow"
