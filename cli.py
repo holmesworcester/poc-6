@@ -1446,6 +1446,51 @@ def cmd_list_reactions(session: CLISession, message_num: int):
 # NETWORK SIMULATION COMMANDS
 # ============================================================================
 
+def cmd_nat(session: CLISession, account_num: int, mode: str = 'port_restricted', off: bool = False):
+    """Put an account behind NAT or remove from NAT."""
+    account = session.get_account_by_number(account_num)
+    if not account:
+        print(f"✗ account #{account_num} not found")
+        return
+
+    valid_modes = ['full_cone', 'restricted', 'port_restricted', 'symmetric']
+
+    if off:
+        network_config.set_peer_nat(account.peer_id, behind_nat=False)
+        print(f"✓ account #{account_num} ({account.full_name}) removed from NAT")
+        print(f"  (direct connectivity)")
+    else:
+        if mode not in valid_modes:
+            print(f"✗ invalid NAT mode: {mode}")
+            print(f"  valid modes: {', '.join(valid_modes)}")
+            return
+
+        network_config.set_peer_nat(account.peer_id, behind_nat=True, nat_mode=mode)
+        punchable = mode != 'symmetric'
+        print(f"✓ account #{account_num} ({account.full_name}) behind {mode} NAT")
+        print(f"  mapping TTL: 120s, punchable: {'yes' if punchable else 'no (needs relay)'}")
+
+
+def cmd_nat_status(session: CLISession):
+    """Show NAT status for all accounts."""
+    print("NAT STATUS:")
+
+    account_list = list(session.accounts.values())
+    for i, account in enumerate(account_list, 1):
+        nat_config = network_config.get_peer_nat(account.peer_id)
+
+        if nat_config:
+            mappings = network_config.get_nat_mappings_for_peer(account.peer_id)
+            punchable = nat_config.nat_mode != 'symmetric'
+            print(f"  {i}. {account.full_name:<15} {nat_config.nat_mode} NAT, {len(mappings)} mappings, punchable: {'yes' if punchable else 'no'}")
+        else:
+            print(f"  {i}. {account.full_name:<15} direct (no NAT)")
+
+    if not account_list:
+        print("  (no accounts)")
+    print()
+
+
 def cmd_network_show(session: CLISession):
     """Show current network simulation configuration."""
     cfg = network_config.get_network_config()
@@ -1816,6 +1861,24 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: account number must be an integer")
 
+        elif cmd == "nat":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("account_num", type=int, nargs='?')
+            parser.add_argument("--mode", type=str, default='port_restricted')
+            parser.add_argument("--off", action='store_true')
+            try:
+                args = parser.parse_args(parts[1:])
+                if args.account_num is None:
+                    print("usage: nat <account_num> [--mode <mode>] [--off]")
+                    print("  modes: full_cone, restricted, port_restricted (default), symmetric")
+                else:
+                    cmd_nat(session, args.account_num, mode=args.mode, off=args.off)
+            except SystemExit:
+                print("usage: nat <account_num> [--mode <mode>] [--off]")
+
+        elif cmd == "nat-status":
+            cmd_nat_status(session)
+
         elif cmd == "log":
             cmd_toggle_log(session)
 
@@ -1894,6 +1957,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("                                   mobile-3g, satellite, lossy)")
             print("    partition <n>                  Block network traffic for account #n")
             print("    unpartition <n>                Restore network traffic for account #n")
+            print()
+            print("  NAT simulation:")
+            print("    nat <n>                        Put account #n behind NAT (port-restricted)")
+            print("    nat <n> --mode <mode>          Specify NAT mode (full_cone, restricted,")
+            print("                                   port_restricted, symmetric)")
+            print("    nat <n> --off                  Remove account from NAT")
+            print("    nat-status                     Show NAT status for all accounts")
             print()
             print("  Other:")
             print("    status")
