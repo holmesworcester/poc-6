@@ -284,7 +284,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     # Network is minimal - just identity with its own keypair
     network_id, network_private_key = network.create(
         peer_id=peer_id,
-        t_ms=t_ms + 10,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"new_network() created self-signed network: {network_id[:20]}...")
@@ -308,7 +308,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         key_id=None,  # Not available yet - content created after peer_shared
         peer_id=peer_id,
         peer_shared_id=None,  # Bootstrap: no inviter (self-invite)
-        t_ms=t_ms + 20,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"new_network() created bootstrap user invite: {invite_id[:20]}...")
@@ -340,7 +340,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     user_id, user_private_key = create(
         peer_id=peer_id,
         name=name,
-        t_ms=t_ms + 30,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         invite_id=invite_id,
         invite_private_key=invite_private_key
@@ -355,7 +355,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         signer_id=user_id,  # First peer: signed by user
         signer_private_key=user_private_key,
         peer_id=peer_id,
-        t_ms=t_ms + 40,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"new_network() created peer invite: {peer_invite_id[:20]}... signed by user_id")
@@ -372,7 +372,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         peer_invite_private_key=peer_invite_private_key,
         user_id=user_id,
         prekey_id=bootstrap_invite_prekey_id,  # Bootstrap user invite's prekey ID
-        t_ms=t_ms + 50,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         device_name=device_name
     )
@@ -391,14 +391,14 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         network_id=network_id,
         signed_by=network_id,
         signer_private_key=network_private_key,
-        t_ms=t_ms + 60,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         peer_id=peer_id,
         db=db
     )
     log.info(f"new_network() created admin_grant: {admin_grant_id[:20]}...")
 
     # Project admin_grant
-    recorded_id = recorded.create(admin_grant_id, peer_id, t_ms + 61, db, return_dupes=True)
+    recorded_id = recorded.create(admin_grant_id, peer_id, t_ms, db, return_dupes=True)
     recorded.project_ids([recorded_id], db)
 
     # 8. Create ALL_USERS group (main group for all users)
@@ -408,7 +408,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         name=f"{name}",
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 70,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         is_main=True,
         network_id=network_id,
@@ -426,11 +426,11 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
             name=name,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 80,
+            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db
         )
         # Project the username_update immediately
-        recorded_id = recorded.create(username_update_id, peer_id, t_ms + 81, db, return_dupes=True)
+        recorded_id = recorded.create(username_update_id, peer_id, t_ms, db, return_dupes=True)
         recorded.project_ids([recorded_id], db)
         log.info(f"new_network() created username_update: {username_update_id[:20]}...")
     except username_update.KeyNotAvailableError:
@@ -446,10 +446,10 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
                 name=network_name,
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
-                t_ms=t_ms + 82,
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 db=db
             )
-            recorded_id = recorded.create(network_name_update_id, peer_id, t_ms + 83, db, return_dupes=True)
+            recorded_id = recorded.create(network_name_update_id, peer_id, t_ms, db, return_dupes=True)
             recorded.project_ids([recorded_id], db)
             log.info(f"new_network() created network_name_update: {network_name_update_id[:20]}...")
         except network_name_update.KeyNotAvailableError:
@@ -463,7 +463,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         name='general',
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 90,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         is_main=True,
         admin_grant=admin_grant_id  # Explicit dependency for convergence
@@ -474,14 +474,14 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     from events.network import transit_prekey, transit_prekey_shared
     prekey_id, prekey_private = transit_prekey.create(
         peer_id=peer_id,
-        t_ms=t_ms + 100,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     transit_prekey_shared_id = transit_prekey_shared.create(
         prekey_id=prekey_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 101,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"new_network() created transit prekey: {prekey_id[:20]}..., shared={transit_prekey_shared_id[:20]}...")
@@ -494,7 +494,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         user_id=user_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
-        t_ms=t_ms + 110,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         skip_admin_check=True,  # Bootstrap: first user adds themselves
         admin_grant=admin_grant_id  # Explicit dependency for convergence
@@ -663,7 +663,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     invite_accepted_id = invite_accepted.create(
         invite_link_data=invite_data,  # Complete raw invite link data
         peer_id=peer_id,
-        t_ms=t_ms + 1,  # Before user creation
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
 
@@ -672,7 +672,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     user_id, user_private_key = create(
         peer_id=peer_id,
         name=name,
-        t_ms=t_ms + 2,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         invite_id=invite_id,
         invite_private_key=invite_private_key
@@ -693,7 +693,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         signer_id=user_id,  # For first peer, user signs the peer invite
         signer_private_key=user_private_key,
         peer_id=peer_id,
-        t_ms=t_ms + 10,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"join() created peer invite: {peer_invite_id[:20]}... signed by user_id")
@@ -710,7 +710,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         peer_invite_private_key=peer_invite_private_key,
         user_id=user_id,
         prekey_id=invite_prekey_id,  # From user invite (for dependency tracking)
-        t_ms=t_ms + 20,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         device_name=device_name
     )
@@ -728,7 +728,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
             name=name,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 25,
+            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db
         )
         log.info(f"join() created username_update: {username_update_id[:20]}...")
@@ -736,13 +736,13 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         # Key not available yet - store for later creation when group_key_shared arrives
         log.info(f"join() key not available yet, storing username intent in pending_name_updates")
         import hashlib
-        pending_id = hashlib.sha256(f"{user_id}:username:{t_ms + 25}".encode()).hexdigest()[:20]
+        pending_id = hashlib.sha256(f"{user_id}:username:{t_ms}".encode()).hexdigest()[:20]
         safedb.execute(
             """INSERT OR IGNORE INTO pending_name_updates
                (id, type, entity_id, name, peer_id, peer_shared_id, status, created_at, recorded_by, recorded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (pending_id, 'username', user_id, name, peer_id, peer_shared_id,
-             'waiting_for_key', t_ms + 25, peer_id, t_ms + 25)
+             'waiting_for_key', t_ms, peer_id, t_ms)
         )
         log.info(f"join() stored pending username for user {user_id[:20]}...")
 

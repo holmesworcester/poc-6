@@ -210,7 +210,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     from events.group import group_prekey, group_prekey_shared
 
     # Create local prekey with keypair
-    local_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms + 1, db)
+    local_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms, db)  # No offset needed
 
     # Get the public key from the created prekey for the invite event
     prekey_blob = store.get(local_prekey_id, unsafedb)
@@ -227,7 +227,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             prekey_id=local_prekey_id,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 2,
+            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db,
             user_id=user_id  # User context for device linking
         )
@@ -237,7 +237,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             prekey_id=local_prekey_id,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
-            t_ms=t_ms + 2,
+            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db,
             group_id=all_users_group_id,
             key_id=key_id
@@ -318,7 +318,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
-        t_ms=t_ms + 3,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
 
@@ -346,7 +346,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
             invite_id=invite_id,
-            t_ms=t_ms + 4,
+            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
             db=db
         )
         log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
@@ -369,7 +369,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
         log.info(f"invite.create() found {len(group_rows)} groups for user {user_id[:20]}...")
 
-        ts = t_ms + 5
         for group_row in group_rows:
             group_id = group_row['group_id']
             key_id_for_group = group_row['key_id']
@@ -384,10 +383,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
                 invite_id=invite_id,
-                t_ms=ts,
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 db=db
             )
-            ts += 1
             log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
 
     # Get inviter's peer_shared blob to include in invite link
@@ -786,7 +784,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     invite_accepted_id = invite_accepted_module.create(
         invite_link_data=link_data,
         peer_id=peer_id,
-        t_ms=t_ms + 1,
+        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
     log.info(f"invite.accept() created invite_accepted_id={invite_accepted_id[:20]}...")

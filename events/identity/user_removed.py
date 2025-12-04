@@ -235,7 +235,6 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
 
     # Rotate key for each group
     from events.group import group_key
-    share_timestamp = t_ms + 1000  # Space out key creation from removal events
 
     for group_row in group_memberships:
         group_id = group_row['group_id']
@@ -244,11 +243,10 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
                 group_id=group_id,
                 peer_id=recorded_by,
                 peer_shared_id=peer_shared_id,
-                t_ms=share_timestamp,
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 removed_user_id=removed_user_id,
                 db=db
             )
-            share_timestamp += 100  # Space out timestamps for multiple groups
             log.info(f"user_removed._rotate_keys_for_removed_user() rotated key for group {group_id[:20]}...")
         except Exception as e:
             log.warning(f"user_removed._rotate_keys_for_removed_user() failed to rotate key for group {group_id[:20]}...: {e}")

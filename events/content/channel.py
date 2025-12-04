@@ -143,7 +143,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
         # Track which users we've already added
         added_user_ids = set()
-        member_timestamp = t_ms + 10  # Space out timestamps to avoid collisions
 
         # Add creator first
         try:
@@ -152,12 +151,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
                 user_id=creator_user_id,
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
-                t_ms=member_timestamp,
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 db=db
             )
             log.info(f"channel.create() added creator {creator_user_id} to private channel group")
             added_user_ids.add(creator_user_id)
-            member_timestamp += 10
         except Exception as e:
             log.warning(f"channel.create() warning: could not add creator {creator_user_id}: {e}")
 
@@ -172,12 +170,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
                     user_id=user_id,
                     peer_id=peer_id,
                     peer_shared_id=peer_shared_id,
-                    t_ms=member_timestamp,
+                    t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                     db=db
                 )
                 log.info(f"channel.create() added member {user_id} to private channel group")
                 added_user_ids.add(user_id)
-                member_timestamp += 10
             except Exception as e:
                 log.warning(f"channel.create() warning: could not immediately add member {user_id} (may need key sharing later): {e}")
                 # Don't raise - members can be added later via add_member_to_channel()
@@ -194,12 +191,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
                     user_id=admin_user_id,
                     peer_id=peer_id,
                     peer_shared_id=peer_shared_id,
-                    t_ms=member_timestamp,
+                    t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                     db=db
                 )
                 log.info(f"channel.create() added admin {admin_user_id} to private channel group")
                 added_user_ids.add(admin_user_id)
-                member_timestamp += 10
             except Exception as e:
                 log.warning(f"channel.create() warning: could not add admin {admin_user_id} (may need key sharing later): {e}")
     else:
