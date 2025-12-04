@@ -37,21 +37,13 @@ def create(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int
 
     Raises:
         KeyNotAvailableError: If all_members group key is not available yet
-        ValueError: If user doesn't exist
     """
     log.info(f"username_update.create() creating username for user_id={user_id[:20]}..., name='{name}'")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Check: Does the user event exist?
-    # We do this just for validation - the actual validation gate will happen in validate()
-    user_event = safedb.query_one(
-        "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, peer_id)
-    )
-    if not user_event:
-        log.warning(f"username_update.create() user not found: {user_id[:20]}...")
-        raise ValueError(f"User {user_id} not found")
+    # NOTE: user_id is passed as param - no need to check users table
+    # The event will have user_id as a dependency and will block until user is valid
 
     # Get main group (all_members) - use is_main flag since name varies
     main_group = safedb.query_one(
