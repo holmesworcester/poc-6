@@ -7,7 +7,6 @@ EPHEMERAL = False
 PROJECTION_TABLE = ('invites', 'invite_id')
 
 from typing import Any
-import secrets
 import json
 import logging
 import crypto
@@ -63,35 +62,6 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     return admin_row is not None
 
 
-def validate(inviter_user_id: str, admins_group_id: str, recorded_by: str, db: Any) -> bool:
-    """Validate that inviter has authorization to create invites.
-
-    DEPRECATED: Not used internally. Use is_admin() instead.
-    This function checks group_members, while is_admin() checks the admins table.
-
-    Authorization rule:
-    - inviter_user_id must be a member of the network's admins group
-
-    Args:
-        inviter_user_id: User attempting to create invite (user event ID)
-        admins_group_id: The network's admins group ID
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        True if authorized, False otherwise
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Check if inviter is in admin group
-    is_admin_check = safedb.query_one(
-        "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ? AND recorded_by = ? LIMIT 1",
-        (admins_group_id, inviter_user_id, recorded_by)
-    )
-
-    return is_admin_check is not None
-
-
 def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
@@ -101,10 +71,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     Note: Bootstrap invites use create_bootstrap_user_invite() instead, which is
     signed by network_id and doesn't require admin check.
 
-    SECURITY: This function trusts that peer_id is correct and owned by the caller.
-    In production, the API authentication layer should validate that the authenticated session
-    owns this peer_id before calling this function. This is safe for local-only apps where
-    the user controls all peers on the device.
+    Note: peer_id ownership is validated by the caller (CLI session or API layer).
 
     Args:
         peer_id: Local peer ID of the inviter
@@ -272,7 +239,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_transit_prekey_shared_id = inviter_prekey_shared_row['transit_prekey_shared_id']
     inviter_transit_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
 
-    # Address info (hardcoded for now, would come from address table in production)
+    # TODO: Address info should come from an address table or network discovery
+    # Currently hardcoded for local testing; production needs proper address resolution
     inviter_ip = '127.0.0.1'
     inviter_port = 6100
 
@@ -323,33 +291,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for all_users group key")
 
-    # Share admins group key (so all users can see who admins are)
-    # Get admins group - find by querying groups with network_id that are NOT signed by network
-    # (admins group is peer-signed, not network-signed like all_users)
-    admin_key_id = None
-    admins_group_row = safedb.query_one(
-        """SELECT group_id, key_id FROM groups
-           WHERE network_id = ? AND signed_by != ? AND recorded_by = ?
-           AND name LIKE '% - Admins'
-           LIMIT 1""",
-        (network_id, network_id, peer_id)
-    )
-
-    if admins_group_row:
-        admins_group_id = admins_group_row['group_id']
-        admin_key_id = admins_group_row['key_id']
-
-        # Share admin group key
-        admin_key_shared_id = group_key_shared.create_for_invite(
-            key_id=admin_key_id,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            invite_id=invite_id,
-            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-            db=db
-        )
-        log.info(f"invite.create() created group_key_shared {admin_key_shared_id[:20]}... for admins group key")
-
     # For mode='peer', share keys for ALL groups this user is a member of
     # This ensures the new device can decrypt all groups the user belongs to
     if mode == 'peer':
@@ -372,8 +313,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             group_id = group_row['group_id']
             key_id_for_group = group_row['key_id']
 
-            # Skip if we already created it above (all_users or admins)
-            if key_id_for_group == key_id or (admin_key_id and key_id_for_group == admin_key_id):
+            # Skip if we already created it above (all_users)
+            if key_id_for_group == key_id:
                 continue
 
             # Create group_key_shared sealed to invite_prekey
