@@ -48,6 +48,17 @@ class incoming:
             log.debug(f"queues.incoming.add() dropping packet: dest peer {to_peer[:20]}... is partitioned")
             return False
 
+        # NAT enforcement (if peer IDs provided)
+        # If sender is behind NAT, create/refresh outbound mapping
+        if from_peer and network_config.is_behind_nat(from_peer) and to_peer:
+            network_config.create_nat_mapping(from_peer, to_peer, t_ms)
+
+        # If recipient is behind NAT, check for valid inbound mapping
+        if to_peer and network_config.is_behind_nat(to_peer):
+            if from_peer and not network_config.has_nat_mapping(to_peer, from_peer, t_ms):
+                log.debug(f"queues.incoming.add() dropping packet: {to_peer[:12]}... behind NAT, no hole punch from {from_peer[:12]}...")
+                return False
+
         # Check packet size limit
         if len(blob) > cfg.max_packet_size:
             log.error(f"queues.incoming.add() dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")

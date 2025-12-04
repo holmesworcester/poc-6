@@ -227,6 +227,90 @@ class SelfAddressAnnounceJob(Job):
         return self_address.announce_for_all_peers(t_ms, db)
 
 
+class IntroProcessJob(Job):
+    """Process pending intro events and trigger hole punching via connection requests.
+
+    When Alice introduces Bob and Charlie:
+    - Bob receives intro, sees he needs to connect to Charlie
+    - Bob sends connection request to Charlie
+    - This sends a packet that creates NAT mapping (hole punch)
+    - Charlie does the same
+    - Both peers now have bidirectional NAT mappings
+    """
+
+    def __init__(self):
+        super().__init__('intro_process', every_ms=500)  # Check twice per second
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.network import intro, connection
+        from db import create_safe_db
+        import logging
+
+        log = logging.getLogger(__name__)
+        unsafedb = create_unsafe_db(db)
+
+        # Get all local peers
+        local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+        processed_count = 0
+
+        for peer_row in local_peers:
+            peer_id = peer_row['peer_id']
+            safedb = create_safe_db(db, recorded_by=peer_id)
+
+            # Get our peer_shared_id for matching
+            peer_self = safedb.query_one(
+                "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+                (peer_id, peer_id)
+            )
+            our_peer_shared_id = peer_self['peer_shared_id'] if peer_self else None
+
+            if not our_peer_shared_id:
+                continue
+
+            # Get pending intros where we're involved (check both peer1_id and peer2_id)
+            # Intros use peer_shared_id or peer_id depending on how they were created
+            pending = intro.get_pending_intros(peer_id, db)
+
+            for intro_data in pending:
+                peer1_id = intro_data['peer1_id']
+                peer2_id = intro_data['peer2_id']
+
+                # Determine if we're peer1 or peer2, and find the other peer
+                other_peer_id = None
+                if peer1_id == our_peer_shared_id or peer1_id == peer_id:
+                    other_peer_id = peer2_id
+                elif peer2_id == our_peer_shared_id or peer2_id == peer_id:
+                    other_peer_id = peer1_id
+
+                if not other_peer_id:
+                    # This intro doesn't involve us, skip
+                    continue
+
+                # Try to establish connection to the other peer (hole punch)
+                # The other_peer_id might be a peer_shared_id
+                log.info(f"IntroProcessJob: {peer_id[:10]}... processing intro to {other_peer_id[:10]}...")
+
+                try:
+                    # Send connection request - this creates the NAT mapping
+                    connection._send_request(
+                        to_peer_shared_id=other_peer_id,
+                        from_peer_id=peer_id,
+                        from_peer_shared_id=our_peer_shared_id,
+                        invite_id=None,
+                        t_ms=t_ms,
+                        db=db
+                    )
+                except Exception as e:
+                    log.warning(f"IntroProcessJob: failed to send to {other_peer_id[:10]}...: {e}")
+
+                # Mark intro as processed regardless of send success
+                # (we attempted the hole punch, don't retry endlessly)
+                intro.mark_processed(intro_data['intro_id'], peer_id, db)
+                processed_count += 1
+
+        return {'processed': processed_count}
+
+
 class NegentropySyncJob(Job):
     """Send negentropy sync messages to all established connections."""
 
@@ -246,6 +330,7 @@ JOBS = [
     NegentropySyncJob(),
     ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),
+    IntroProcessJob(),
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),
     TransitPrekeyReplenishmentJob(),
