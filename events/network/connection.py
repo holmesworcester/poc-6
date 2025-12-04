@@ -659,6 +659,9 @@ class Connection:
     last_handshake_ms: int
     ttl_ms: int
 
+    # Sync optimization
+    last_synced_root_hash: bytes | None = None  # Skip sync if our root unchanged
+
     @classmethod
     def from_row(cls, row: dict) -> 'Connection':
         """Create Connection from database row."""
@@ -673,6 +676,7 @@ class Connection:
             created_at=row['created_at'],
             last_handshake_ms=row['last_handshake_ms'],
             ttl_ms=row['ttl_ms'],
+            last_synced_root_hash=row.get('last_synced_root_hash'),
         )
 
     @property

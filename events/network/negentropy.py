@@ -653,7 +653,10 @@ def _log_checkpoint(
     root_hash: bytes,
     t_ms: int
 ) -> None:
-    """Log a sync checkpoint when root hashes match."""
+    """Log a sync checkpoint when root hashes match.
+
+    Also updates connection.last_synced_root_hash for skip-if-unchanged optimization.
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get sync stats
@@ -673,6 +676,13 @@ def _log_checkpoint(
     """, (recorded_by, connection_id, t_ms, root_hash,
           stats['events_sent'] if stats else 0,
           stats['ranges_checked'] if stats else 0))
+
+    # Update connection's last_synced_root_hash for skip-if-unchanged optimization
+    safedb.execute("""
+        UPDATE connections
+        SET last_synced_root_hash = ?
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (root_hash, connection_id, recorded_by))
 
 
 def handle_range_matched(
@@ -905,6 +915,9 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     established connections, sending negentropy root hashes to initiate
     or continue sync.
 
+    Optimization: Skip connections where our root hash hasn't changed since
+    last successful sync. This avoids sending redundant messages when idle.
+
     Returns:
         Stats dict with counts
     """
@@ -916,9 +929,13 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
 
     total_connections = 0
     total_messages = 0
+    skipped_unchanged = 0
 
     for peer_row in local_peers:
         peer_id = peer_row['peer_id']
+
+        # Get our current root hash once per peer
+        our_root_hash = get_root_hash(db, peer_id)
 
         # Get all active connections using connection module interface
         connections = conn_module.get_connections(peer_id, t_ms, db)
@@ -933,11 +950,17 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
                 continue
 
             total_connections += 1
+
+            # Optimization: Skip if our root hasn't changed since last sync
+            if conn.last_synced_root_hash and conn.last_synced_root_hash == our_root_hash:
+                skipped_unchanged += 1
+                continue
+
             sent = sync_connection(db, peer_id, conn, t_ms)
             total_messages += sent
 
-    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} messages sent")
-    return {'connections': total_connections, 'messages_sent': total_messages}
+    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} sent, {skipped_unchanged} skipped (unchanged)")
+    return {'connections': total_connections, 'messages_sent': total_messages, 'skipped_unchanged': skipped_unchanged}
 
 
 def get_sync_status(
