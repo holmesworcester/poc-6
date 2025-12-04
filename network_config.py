@@ -133,8 +133,12 @@ def calculate_delivery_time(size_bytes: int, t_ms: int) -> int:
     if cfg.bandwidth_bytes_per_sec is None:
         return t_ms + latency
 
-    # Refill tokens since last packet
-    if _bandwidth_last_refill_ms > 0:
+    # Initialize tokens on first use (full bucket = 1 second burst allowance)
+    if _bandwidth_last_refill_ms == 0:
+        _bandwidth_tokens = cfg.bandwidth_bytes_per_sec
+        _bandwidth_last_refill_ms = t_ms
+    else:
+        # Refill tokens since last packet
         elapsed_ms = t_ms - _bandwidth_last_refill_ms
         if elapsed_ms > 0:
             refill = int(cfg.bandwidth_bytes_per_sec * elapsed_ms / 1000)
@@ -143,7 +147,7 @@ def calculate_delivery_time(size_bytes: int, t_ms: int) -> int:
                 _bandwidth_tokens + refill,
                 cfg.bandwidth_bytes_per_sec
             )
-    _bandwidth_last_refill_ms = t_ms
+        _bandwidth_last_refill_ms = t_ms
 
     # Calculate wait time if not enough tokens
     if size_bytes <= _bandwidth_tokens:
