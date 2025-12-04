@@ -1,21 +1,31 @@
 """Network simulator configuration.
 
-Controls packet loss, latency, and other network characteristics for testing.
+This module provides the public API for configuring and controlling the
+network simulator. It delegates to the ns.py-based NetworkSimulator.
 """
 from dataclasses import dataclass, field
-from typing import Set, Optional, Dict, Tuple
+from typing import Set, Optional, Dict
 import logging
+
+from simulator.nspy_network import (
+    NetworkSimulator,
+    NetworkConfig as NspyNetworkConfig,
+)
+from simulator.nat import NatConfig
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class NetworkConfig:
-    """Configuration for network simulation."""
+    """Configuration for network simulation.
+
+    This is the public-facing config that gets translated to NspyNetworkConfig.
+    """
     # Basic settings
     packet_loss_rate: float = 0.0  # 0.0 to 1.0 - probability of dropping packets
     latency_ms: int = 0             # Base latency in milliseconds
-    max_packet_size: int = 10000    # Maximum packet size in bytes (lower to ~600 for realistic UDP simulation)
+    max_packet_size: int = 10000    # Maximum packet size in bytes
 
     # Jitter: adds random variation to latency (normal distribution)
     jitter_ms: int = 0              # Standard deviation of latency jitter in ms
@@ -27,118 +37,49 @@ class NetworkConfig:
     burst_loss_probability: float = 0.0  # Probability of entering burst loss state
     burst_loss_length: int = 3           # Number of consecutive packets lost in burst
 
-    # Bandwidth limiting (global across all peers)
+    # Bandwidth limiting
     bandwidth_bytes_per_sec: Optional[int] = None  # None = unlimited
 
 
-# Global network configuration
+# Global simulator instance
+_simulator: Optional[NetworkSimulator] = None
+
+
+def get_simulator() -> NetworkSimulator:
+    """Get the global simulator instance, creating if needed."""
+    global _simulator
+    if _simulator is None:
+        _simulator = NetworkSimulator()
+    return _simulator
+
+
+def _to_nspy_config(config: NetworkConfig) -> NspyNetworkConfig:
+    """Convert public NetworkConfig to internal NspyNetworkConfig."""
+    return NspyNetworkConfig(
+        latency_ms=float(config.latency_ms),
+        jitter_ms=float(config.jitter_ms),
+        packet_loss_rate=config.packet_loss_rate,
+        burst_loss_probability=config.burst_loss_probability,
+        burst_loss_length=config.burst_loss_length,
+        bandwidth_bps=config.bandwidth_bytes_per_sec * 8 if config.bandwidth_bytes_per_sec else None,
+        max_packet_size=config.max_packet_size,
+    )
+
+
+# Current config (for partitioned_peers which is mutable)
 _config = NetworkConfig()
-
-
-# ============================================================================
-# BANDWIDTH LIMITING
-# ============================================================================
-
-# Bandwidth tracking state
-_bandwidth_window_start_ms: int = 0  # Start of current 1-second window
-_bandwidth_bytes_used: int = 0        # Bytes used in current window
-
-
-def reset_bandwidth_tracking() -> None:
-    """Reset bandwidth tracking state (for testing)."""
-    global _bandwidth_window_start_ms, _bandwidth_bytes_used
-    _bandwidth_window_start_ms = 0
-    _bandwidth_bytes_used = 0
-
-
-def get_available_bandwidth(t_ms: int) -> int:
-    """Get available bandwidth in bytes for the current window.
-
-    Args:
-        t_ms: Current timestamp in milliseconds
-
-    Returns:
-        Available bytes (0 to bandwidth_bytes_per_sec), or -1 if unlimited
-    """
-    global _bandwidth_window_start_ms, _bandwidth_bytes_used
-
-    cfg = get_network_config()
-    if cfg.bandwidth_bytes_per_sec is None:
-        return -1  # Unlimited
-
-    # Check if we've moved to a new 1-second window
-    if t_ms - _bandwidth_window_start_ms >= 1000:
-        _bandwidth_window_start_ms = t_ms
-        _bandwidth_bytes_used = 0
-
-    return max(0, cfg.bandwidth_bytes_per_sec - _bandwidth_bytes_used)
-
-
-def consume_bandwidth(bytes_count: int, t_ms: int) -> bool:
-    """Attempt to consume bandwidth for sending bytes.
-
-    Args:
-        bytes_count: Number of bytes to send
-        t_ms: Current timestamp in milliseconds
-
-    Returns:
-        True if bandwidth was available and consumed, False if over limit
-    """
-    global _bandwidth_window_start_ms, _bandwidth_bytes_used
-
-    cfg = get_network_config()
-    if cfg.bandwidth_bytes_per_sec is None:
-        return True  # Unlimited
-
-    # Check if we've moved to a new 1-second window
-    if t_ms - _bandwidth_window_start_ms >= 1000:
-        _bandwidth_window_start_ms = t_ms
-        _bandwidth_bytes_used = 0
-
-    # Check if we have enough bandwidth
-    if _bandwidth_bytes_used + bytes_count > cfg.bandwidth_bytes_per_sec:
-        log.debug(f"bandwidth: throttled - used {_bandwidth_bytes_used}B + {bytes_count}B > {cfg.bandwidth_bytes_per_sec}B limit")
-        return False
-
-    _bandwidth_bytes_used += bytes_count
-    return True
-
-
-def get_bandwidth_stats(t_ms: int) -> dict:
-    """Get current bandwidth usage statistics.
-
-    Args:
-        t_ms: Current timestamp in milliseconds
-
-    Returns:
-        Dict with limit, used, available, and utilization
-    """
-    cfg = get_network_config()
-
-    if cfg.bandwidth_bytes_per_sec is None:
-        return {
-            'limit': None,
-            'used': 0,
-            'available': None,
-            'utilization': 0.0,
-            'window_start_ms': 0
-        }
-
-    available = get_available_bandwidth(t_ms)
-
-    return {
-        'limit': cfg.bandwidth_bytes_per_sec,
-        'used': _bandwidth_bytes_used,
-        'available': available,
-        'utilization': _bandwidth_bytes_used / cfg.bandwidth_bytes_per_sec if cfg.bandwidth_bytes_per_sec > 0 else 0.0,
-        'window_start_ms': _bandwidth_window_start_ms
-    }
 
 
 def set_network_config(config: NetworkConfig) -> None:
     """Set the global network configuration."""
     global _config
     _config = config
+    sim = get_simulator()
+    sim.configure(_to_nspy_config(config))
+
+    # Apply partitions
+    for peer_id in config.partitioned_peers:
+        sim.partition_peer(peer_id)
 
 
 def get_network_config() -> NetworkConfig:
@@ -146,249 +87,136 @@ def get_network_config() -> NetworkConfig:
     return _config
 
 
-# Burst loss state: tracks how many more packets should be dropped in current burst
-_burst_loss_remaining = 0
-
-# Bandwidth limiting state (token bucket)
-_bandwidth_tokens = 0
-_bandwidth_last_refill_ms = 0
-
-
-def check_burst_loss() -> bool:
-    """Check if current packet should be dropped due to burst loss.
-
-    Returns True if packet should be dropped.
-    Manages burst state: enters burst mode probabilistically, then drops
-    consecutive packets until burst ends.
-    """
-    global _burst_loss_remaining
-    cfg = get_network_config()
-
-    # If in burst mode, drop packet and decrement counter
-    if _burst_loss_remaining > 0:
-        _burst_loss_remaining -= 1
-        return True
-
-    # Check if we should enter burst mode
-    import random
-    if random.random() < cfg.burst_loss_probability:
-        _burst_loss_remaining = cfg.burst_loss_length - 1  # -1 because we drop this one
-        return True
-
-    return False
-
+# ============================================================================
+# PARTITIONS
+# ============================================================================
 
 def partition_peer(peer_id: str) -> None:
     """Add a peer to the partition (block all traffic to/from)."""
     get_network_config().partitioned_peers.add(peer_id)
+    get_simulator().partition_peer(peer_id)
 
 
 def unpartition_peer(peer_id: str) -> None:
     """Remove a peer from the partition (restore traffic)."""
     get_network_config().partitioned_peers.discard(peer_id)
+    get_simulator().unpartition_peer(peer_id)
 
 
 def is_partitioned(peer_id: str) -> bool:
     """Check if a peer is partitioned."""
-    return peer_id in get_network_config().partitioned_peers
-
-
-def calculate_latency() -> int:
-    """Calculate latency with jitter applied.
-
-    Returns base latency +/- random jitter (clamped to >= 0).
-    """
-    import random
-    cfg = get_network_config()
-
-    if cfg.jitter_ms == 0:
-        return cfg.latency_ms
-
-    # Normal distribution with mean=latency_ms, stddev=jitter_ms
-    jittered = int(random.gauss(cfg.latency_ms, cfg.jitter_ms))
-    return max(0, jittered)  # Clamp to non-negative
-
-
-def calculate_delivery_time(size_bytes: int, t_ms: int) -> int:
-    """Calculate when a packet should be delivered, accounting for bandwidth.
-
-    Uses a token bucket algorithm: tokens refill at the configured bandwidth rate,
-    and packets wait until enough tokens accumulate. This simulates realistic
-    bandwidth constraints where large packets take longer to transmit.
-
-    Args:
-        size_bytes: Size of the packet in bytes
-        t_ms: Current simulation time in milliseconds
-
-    Returns:
-        Delivery time in milliseconds (t_ms + latency + bandwidth_delay)
-    """
-    global _bandwidth_tokens, _bandwidth_last_refill_ms
-    cfg = get_network_config()
-
-    # Base latency with jitter
-    latency = calculate_latency()
-
-    # If no bandwidth limit, just use latency
-    if cfg.bandwidth_bytes_per_sec is None:
-        return t_ms + latency
-
-    # Initialize tokens on first use (full bucket = 1 second burst allowance)
-    if _bandwidth_last_refill_ms == 0:
-        _bandwidth_tokens = cfg.bandwidth_bytes_per_sec
-        _bandwidth_last_refill_ms = t_ms
-    else:
-        # Refill tokens since last packet
-        elapsed_ms = t_ms - _bandwidth_last_refill_ms
-        if elapsed_ms > 0:
-            refill = int(cfg.bandwidth_bytes_per_sec * elapsed_ms / 1000)
-            # Cap at 1 second worth of tokens (burst allowance)
-            _bandwidth_tokens = min(
-                _bandwidth_tokens + refill,
-                cfg.bandwidth_bytes_per_sec
-            )
-        _bandwidth_last_refill_ms = t_ms
-
-    # Calculate wait time if not enough tokens
-    if size_bytes <= _bandwidth_tokens:
-        _bandwidth_tokens -= size_bytes
-        bandwidth_delay = 0
-    else:
-        # Need to wait for more tokens to accumulate
-        bytes_needed = size_bytes - _bandwidth_tokens
-        bandwidth_delay = int(bytes_needed * 1000 / cfg.bandwidth_bytes_per_sec)
-        _bandwidth_tokens = 0
-
-    return t_ms + latency + bandwidth_delay
+    return get_simulator().is_partitioned(peer_id)
 
 
 # ============================================================================
 # NAT SIMULATION
 # ============================================================================
 
-@dataclass
 class PeerNatConfig:
-    """NAT configuration for a specific peer."""
-    behind_nat: bool = False
-    nat_mode: str = 'port_restricted'  # 'full_cone', 'restricted', 'port_restricted', 'symmetric'
-    mapping_ttl_ms: int = 120_000  # 2 minutes - conservative for testing
+    """NAT configuration for a specific peer.
 
+    Setting mapping_ttl_ms updates the underlying NAT engine config.
+    """
 
-@dataclass
-class NatMapping:
-    """Active NAT mapping for a peer."""
-    from_peer: str
-    to_peer: str
-    created_at_ms: int
-    last_used_ms: int
+    def __init__(self, behind_nat: bool = False, nat_mode: str = 'port_restricted'):
+        self.behind_nat = behind_nat
+        self.nat_mode = nat_mode
+        self._sim = None  # Set when returned from get_peer_nat
 
-    def is_expired(self, current_time_ms: int, ttl_ms: int) -> bool:
-        """Check if mapping has expired."""
-        return (current_time_ms - self.last_used_ms) > ttl_ms
+    @property
+    def mapping_ttl_ms(self) -> int:
+        if self._sim:
+            return self._sim.nat_engine.config.mapping_ttl_ms
+        return 120_000
 
-
-# Per-peer NAT configs: peer_id -> PeerNatConfig
-_peer_nat_configs: Dict[str, PeerNatConfig] = {}
-
-# NAT mappings: (from_peer, to_peer) -> NatMapping
-_nat_mappings: Dict[Tuple[str, str], NatMapping] = {}
+    @mapping_ttl_ms.setter
+    def mapping_ttl_ms(self, value: int) -> None:
+        if self._sim:
+            # Update the NAT engine config
+            from simulator.nat import NatConfig
+            old_config = self._sim.nat_engine.config
+            self._sim.nat_engine.config = NatConfig(
+                mode=old_config.mode,
+                mapping_ttl_ms=value,
+                hairpinning=old_config.hairpinning
+            )
 
 
 def set_peer_nat(peer_id: str, behind_nat: bool, nat_mode: str = 'port_restricted') -> None:
-    """Put a peer behind NAT or remove from NAT.
+    """Put a peer behind NAT or remove from NAT."""
+    sim = get_simulator()
 
-    Args:
-        peer_id: The peer ID
-        behind_nat: True to put behind NAT, False to remove
-        nat_mode: NAT mode ('full_cone', 'restricted', 'port_restricted', 'symmetric')
-    """
     if behind_nat:
-        _peer_nat_configs[peer_id] = PeerNatConfig(
-            behind_nat=True,
-            nat_mode=nat_mode
-        )
+        # Register peer with NAT engine
+        sim.register_peer(peer_id, behind_nat=True)
         log.info(f"nat: peer {peer_id[:20]}... now behind {nat_mode} NAT")
     else:
-        if peer_id in _peer_nat_configs:
-            del _peer_nat_configs[peer_id]
+        # Register as direct peer
+        sim.register_peer(peer_id, behind_nat=False)
         log.info(f"nat: peer {peer_id[:20]}... removed from NAT (direct)")
 
 
 def get_peer_nat(peer_id: str) -> Optional[PeerNatConfig]:
-    """Get NAT config for a peer, or None if not behind NAT."""
-    return _peer_nat_configs.get(peer_id)
+    """Get NAT config for a peer, or None if not behind NAT.
 
-
-def is_behind_nat(peer_id: str) -> bool:
-    """Check if a peer is behind NAT."""
-    config = _peer_nat_configs.get(peer_id)
-    return config is not None and config.behind_nat
+    Returns a PeerNatConfig with mapping_ttl_ms that can be modified.
+    Note: Modifying it affects the underlying NatEngine config.
+    """
+    sim = get_simulator()
+    endpoint = sim.nat_engine.get_endpoint(peer_id)
+    if endpoint and endpoint.behind_nat:
+        # Return a wrapper that allows setting TTL
+        config = PeerNatConfig(behind_nat=True)
+        # Link to the actual TTL (modifications affect engine config)
+        config._sim = sim  # type: ignore
+        return config
+    return None
 
 
 def get_all_nat_peers() -> Dict[str, PeerNatConfig]:
     """Get all peers behind NAT."""
-    return dict(_peer_nat_configs)
+    sim = get_simulator()
+    result = {}
+    for peer_id, endpoint in sim.nat_engine.peer_endpoints.items():
+        if endpoint.behind_nat:
+            result[peer_id] = PeerNatConfig(behind_nat=True)
+    return result
+
+
+def is_behind_nat(peer_id: str) -> bool:
+    """Check if a peer is behind NAT."""
+    sim = get_simulator()
+    endpoint = sim.nat_engine.get_endpoint(peer_id)
+    return endpoint is not None and endpoint.behind_nat
 
 
 def create_nat_mapping(from_peer: str, to_peer: str, t_ms: int) -> None:
-    """Create or refresh a NAT mapping (outbound connection).
-
-    When a peer behind NAT sends a packet, it creates a mapping that allows
-    the destination to send packets back.
-
-    Args:
-        from_peer: Peer sending the packet (behind NAT)
-        to_peer: Destination peer
-        t_ms: Current timestamp
-    """
-    key = (from_peer, to_peer)
-
-    if key in _nat_mappings:
-        # Refresh existing mapping
-        _nat_mappings[key].last_used_ms = t_ms
-        log.debug(f"nat: refreshed mapping {from_peer[:12]}... -> {to_peer[:12]}...")
-    else:
-        # Create new mapping
-        _nat_mappings[key] = NatMapping(
-            from_peer=from_peer,
-            to_peer=to_peer,
-            created_at_ms=t_ms,
-            last_used_ms=t_ms
-        )
-        log.info(f"nat: created mapping {from_peer[:12]}... -> {to_peer[:12]}...")
+    """Create or refresh a NAT mapping (outbound connection)."""
+    sim = get_simulator()
+    sim.nat_engine.create_outbound_mapping(from_peer, to_peer, t_ms)
 
 
-def has_nat_mapping(from_peer: str, to_peer: str, t_ms: int) -> bool:
+def has_nat_mapping(to_peer: str, from_peer: str, t_ms: int) -> bool:
     """Check if there's a valid (non-expired) NAT mapping.
 
-    For packet from to_peer to reach from_peer (who is behind NAT),
-    from_peer must have previously sent to to_peer (creating the mapping).
-
-    Args:
-        from_peer: Peer behind NAT (destination of incoming packet)
-        to_peer: Peer sending the packet (source)
-        t_ms: Current timestamp
-
-    Returns:
-        True if there's a valid mapping allowing the packet through
+    For packet from from_peer to reach to_peer (who is behind NAT),
+    to_peer must have previously sent to from_peer (creating the mapping).
     """
-    nat_config = get_peer_nat(from_peer)
-    if not nat_config:
-        return True  # Not behind NAT, always allow
+    sim = get_simulator()
 
-    key = (from_peer, to_peer)
-    mapping = _nat_mappings.get(key)
+    # Check if to_peer has a mapping to from_peer
+    mappings = sim.nat_engine.nat_mappings.get(to_peer, [])
+    for mapping in mappings:
+        if mapping.dest_peer_id == from_peer:
+            if not mapping.is_expired(t_ms, sim.nat_engine.config.mapping_ttl_ms):
+                return True
+    return False
 
-    if not mapping:
-        return False  # No mapping exists
 
-    if mapping.is_expired(t_ms, nat_config.mapping_ttl_ms):
-        # Mapping expired - remove it
-        del _nat_mappings[key]
-        log.debug(f"nat: mapping expired {from_peer[:12]}... -> {to_peer[:12]}...")
-        return False
-
-    return True
+def cleanup_expired_mappings(t_ms: int) -> int:
+    """Remove all expired NAT mappings."""
+    sim = get_simulator()
+    return sim.nat_engine.cleanup_expired_mappings(t_ms)
 
 
 def get_nat_mappings_for_peer(peer_id: str) -> list:
@@ -397,49 +225,60 @@ def get_nat_mappings_for_peer(peer_id: str) -> list:
     Returns:
         List of (to_peer, mapping) tuples
     """
-    result = []
-    for (from_peer, to_peer), mapping in _nat_mappings.items():
-        if from_peer == peer_id:
-            result.append((to_peer, mapping))
-    return result
-
-
-def cleanup_expired_mappings(t_ms: int) -> int:
-    """Remove all expired NAT mappings.
-
-    Returns:
-        Number of mappings removed
-    """
-    expired = []
-    for key, mapping in _nat_mappings.items():
-        nat_config = get_peer_nat(mapping.from_peer)
-        ttl = nat_config.mapping_ttl_ms if nat_config else 120_000
-        if mapping.is_expired(t_ms, ttl):
-            expired.append(key)
-
-    for key in expired:
-        del _nat_mappings[key]
-
-    if expired:
-        log.debug(f"nat: cleaned up {len(expired)} expired mappings")
-
-    return len(expired)
+    sim = get_simulator()
+    mappings = sim.nat_engine.nat_mappings.get(peer_id, [])
+    return [(m.dest_peer_id, m) for m in mappings]
 
 
 def reset_nat_state() -> None:
     """Reset all NAT state (for testing)."""
-    global _peer_nat_configs, _nat_mappings
-    _peer_nat_configs = {}
-    _nat_mappings = {}
+    sim = get_simulator()
+    sim.nat_engine.peer_endpoints.clear()
+    sim.nat_engine.nat_mappings.clear()
 
+
+# ============================================================================
+# BANDWIDTH (for stats compatibility)
+# ============================================================================
+
+def get_bandwidth_stats(t_ms: int) -> dict:
+    """Get current bandwidth usage statistics."""
+    cfg = get_network_config()
+    sim = get_simulator()
+    stats = sim.get_stats()
+
+    if cfg.bandwidth_bytes_per_sec is None:
+        return {
+            'limit': None,
+            'used': 0,
+            'available': None,
+            'utilization': 0.0,
+        }
+
+    return {
+        'limit': cfg.bandwidth_bytes_per_sec,
+        'used': 0,  # Token bucket doesn't track cumulative usage the same way
+        'available': cfg.bandwidth_bytes_per_sec,
+        'utilization': 0.0,
+    }
+
+
+def consume_bandwidth(bytes_count: int, t_ms: int) -> bool:
+    """Bandwidth is now handled by token bucket in simulator.
+
+    This always returns True - actual limiting happens during send().
+    """
+    return True
+
+
+# ============================================================================
+# RESET
+# ============================================================================
 
 def reset_network_config() -> None:
     """Reset to default configuration (for testing)."""
-    global _config, _burst_loss_remaining, _bandwidth_tokens, _bandwidth_last_refill_ms, _peer_nat_configs, _nat_mappings
+    global _config, _simulator
     _config = NetworkConfig()
-    _burst_loss_remaining = 0
-    _bandwidth_tokens = 0
-    _bandwidth_last_refill_ms = 0
-    _peer_nat_configs = {}
-    _nat_mappings = {}
-    reset_bandwidth_tracking()
+    if _simulator is not None:
+        _simulator.reset()
+    _simulator = None

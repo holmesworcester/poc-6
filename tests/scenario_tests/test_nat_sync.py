@@ -209,9 +209,10 @@ class TestNatStatusTracking:
 
         db.commit()
 
-        # Put Bob and Charlie behind NAT with different modes
-        network_config.set_peer_nat(bob['peer_id'], behind_nat=True, nat_mode='port_restricted')
-        network_config.set_peer_nat(charlie['peer_id'], behind_nat=True, nat_mode='symmetric')
+        # Put Bob and Charlie behind NAT
+        # Note: NAT mode is global (per-engine), not per-peer
+        network_config.set_peer_nat(bob['peer_id'], behind_nat=True)
+        network_config.set_peer_nat(charlie['peer_id'], behind_nat=True)
 
         print("\n=== NAT Status ===")
         all_nat_peers = network_config.get_all_nat_peers()
@@ -222,15 +223,17 @@ class TestNatStatusTracking:
         assert charlie['peer_id'] in all_nat_peers
         assert alice['peer_id'] not in all_nat_peers
 
-        # Check modes
+        # Check that we can query NAT config
         bob_config = network_config.get_peer_nat(bob['peer_id'])
         charlie_config = network_config.get_peer_nat(charlie['peer_id'])
 
-        assert bob_config.nat_mode == 'port_restricted'
-        assert charlie_config.nat_mode == 'symmetric'
+        assert bob_config is not None
+        assert bob_config.behind_nat is True
+        assert charlie_config is not None
+        assert charlie_config.behind_nat is True
 
-        print(f"Bob: {bob_config.nat_mode}")
-        print(f"Charlie: {charlie_config.nat_mode}")
+        print(f"Bob behind NAT: {bob_config.behind_nat}")
+        print(f"Charlie behind NAT: {charlie_config.behind_nat}")
 
 
 class TestBidirectionalHolePunch:

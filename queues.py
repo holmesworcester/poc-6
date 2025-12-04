@@ -2,7 +2,6 @@
 from typing import Any
 import json
 import logging
-import random
 from db import UnsafeDB, SafeDB
 import network_config
 
@@ -12,103 +11,75 @@ log = logging.getLogger(__name__)
 # ===== Incoming Queue =====
 
 class incoming:
-    """Queue for incoming transit blobs."""
+    """Queue for incoming transit blobs.
+
+    Uses the ns.py-based NetworkSimulator for realistic network simulation
+    with proper token bucket bandwidth limiting and pluggable loss models.
+    """
 
     @staticmethod
     def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB, from_peer: str = None, to_peer: str = None) -> bool:
-        """Add an incoming transit blob to the queue with packet loss and latency simulation.
+        """Add an incoming transit blob to the queue with network simulation.
 
         Packets may be dropped based on:
         - Configured packet loss rate (random)
         - Burst loss (correlated consecutive drops)
         - Network partitions (blocked peers)
         - Oversized packets
+        - Bandwidth limits (token bucket)
 
         Delivery is delayed by the configured latency with optional jitter.
 
         Args:
             blob: The packet data
             t_ms: Current simulation time in milliseconds
-            unsafedb: Database connection
-            from_peer: Source peer ID (for partition checking)
-            to_peer: Destination peer ID (for partition checking)
+            unsafedb: Database connection (not used for packet queue, kept for API compat)
+            from_peer: Source peer ID (for partition/NAT checking)
+            to_peer: Destination peer ID (for partition/NAT checking)
 
         Returns:
             True if packet was enqueued, False if dropped
         """
-        cfg = network_config.get_network_config()
-
         log.debug(f"queues.incoming.add() adding blob size={len(blob)}B, t_ms={t_ms}")
 
-        # Check network partitions (if peer IDs provided)
-        if from_peer and network_config.is_partitioned(from_peer):
-            log.debug(f"queues.incoming.add() dropping packet: source peer {from_peer[:20]}... is partitioned")
-            return False
-        if to_peer and network_config.is_partitioned(to_peer):
-            log.debug(f"queues.incoming.add() dropping packet: dest peer {to_peer[:20]}... is partitioned")
-            return False
+        sim = network_config.get_simulator()
 
-        # NAT enforcement (if peer IDs provided)
-        # IMPORTANT: Check recipient NAT FIRST, before creating sender's outbound mapping
-        # Otherwise a rejected packet would still create a mapping allowing reply traffic
+        # Ensure peers are registered (use defaults if not already registered)
+        if from_peer and not sim.nat_engine.get_endpoint(from_peer):
+            sim.register_peer(from_peer, behind_nat=False)
+        if to_peer and not sim.nat_engine.get_endpoint(to_peer):
+            sim.register_peer(to_peer, behind_nat=False)
 
-        # If recipient is behind NAT, check for valid inbound mapping
-        if to_peer and network_config.is_behind_nat(to_peer):
-            if from_peer and not network_config.has_nat_mapping(to_peer, from_peer, t_ms):
-                log.debug(f"queues.incoming.add() dropping packet: {to_peer[:12]}... behind NAT, no hole punch from {from_peer[:12]}...")
-                return False
+        # Send through simulator (handles partitions, NAT, loss, bandwidth, latency)
+        result = sim.send(from_peer or "unknown", to_peer or "unknown", blob, t_ms)
 
-        # If sender is behind NAT, create/refresh outbound mapping
-        # (only if packet wasn't rejected above)
-        if from_peer and network_config.is_behind_nat(from_peer) and to_peer:
-            network_config.create_nat_mapping(from_peer, to_peer, t_ms)
+        if result:
+            log.debug(f"queues.incoming.add() enqueued blob")
+        else:
+            log.debug(f"queues.incoming.add() dropped blob")
 
-        # Check packet size limit
-        if len(blob) > cfg.max_packet_size:
-            log.error(f"queues.incoming.add() dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")
-            return False
-
-        # Check bandwidth limit
-        if not network_config.consume_bandwidth(len(blob), t_ms):
-            log.debug(f"queues.incoming.add() dropping packet due to bandwidth limit: {len(blob)}B")
-            return False
-
-        # Check burst loss first (correlated loss)
-        if network_config.check_burst_loss():
-            log.debug(f"queues.incoming.add() dropping packet due to burst loss")
-            return False
-
-        # Apply random packet loss
-        if random.random() < cfg.packet_loss_rate:
-            log.debug(f"queues.incoming.add() dropping packet due to loss simulation")
-            return False
-
-        # Calculate delivery time with latency, jitter, and bandwidth
-        deliver_at = network_config.calculate_delivery_time(len(blob), t_ms)
-
-        # Insert with delivery time
-        unsafedb.execute(
-            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at, dropped) VALUES (?, ?, ?, ?)",
-            (blob, t_ms, deliver_at, False)
-        )
-        return True
+        return result
 
     @staticmethod
     def drain(batch_size: int, current_time_ms: int, unsafedb: UnsafeDB) -> list[bytes]:
-        """Drain (select and delete) incoming transit blobs that are ready for delivery.
+        """Drain incoming transit blobs that are ready for delivery.
 
         Only blobs where deliver_at <= current_time_ms are returned.
+
+        Args:
+            batch_size: Maximum number of packets to return
+            current_time_ms: Current simulation time
+            unsafedb: Database connection (not used, kept for API compat)
+
+        Returns:
+            List of packet payloads
         """
         log.debug(f"queues.incoming.drain() draining up to {batch_size} blobs at t_ms={current_time_ms}")
-        blobs = unsafedb.query(
-            "SELECT blob FROM incoming_blobs WHERE deliver_at <= ? AND dropped = FALSE LIMIT ?",
-            (current_time_ms, batch_size)
-        )
-        unsafedb.execute(
-            "DELETE FROM incoming_blobs WHERE id IN (SELECT id FROM incoming_blobs WHERE deliver_at <= ? LIMIT ?)",
-            (current_time_ms, batch_size)
-        )
-        result = [row['blob'] for row in blobs]
+
+        sim = network_config.get_simulator()
+        sim.advance_to(current_time_ms)
+
+        result = sim.drain(batch_size)
         log.info(f"queues.incoming.drain() drained {len(result)} blobs")
         return result
 
@@ -324,15 +295,6 @@ class blocked:
         # Deletion should only happen AFTER confirming successful projection.
         # For now, we keep the event in blocked_events_ephemeral with deps_remaining=0.
         # The convergence test and sync protocol will handle cleaning up truly unblocked events.
-        #
-        # Previous code that deleted immediately:
-        # if unblocked:
-        #     log.info(f"queues.blocked.notify_event_valid() UNBLOCKING {len(unblocked)} events: {unblocked}")
-        #     placeholders_del = ','.join(['?' for _ in unblocked])
-        #     safedb.execute(f"""
-        #         DELETE FROM blocked_events_ephemeral
-        #         WHERE recorded_id IN ({placeholders_del}) AND recorded_by = ?
-        #     """, tuple(unblocked) + (recorded_by,))
 
         # ADDITIONAL FIX: Also check for any events that already have deps_remaining=0
         # (they may have reached 0 in a previous call but weren't re-projected successfully)
