@@ -258,33 +258,59 @@ class TestSyncProtocol:
         assert 'root_hash' in responses[0]
         assert 'total_events' in responses[0]
 
-    def test_stub_mode_sends_events_at_threshold(self, db):
-        """In stub mode, events sent at threshold level."""
-        original_threshold = negentropy.STUB_THRESHOLD
-        negentropy.STUB_THRESHOLD = 'year'  # Always send events
+    def test_sends_events_when_below_threshold(self, db):
+        """When bucket has few events (≤ EVENTS_THRESHOLD), send events directly."""
+        peer_id = 'peer1'
+        conn_id = 'conn1'
+        ts_ms = 1718451045000
 
-        try:
-            peer_id = 'peer1'
-            conn_id = 'conn1'
-            ts_ms = 1718451045000
+        # Add just 2 events - well below EVENTS_THRESHOLD (100)
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
+        negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 1000)
 
-            negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
-            negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 1000)
+        # Receive request at year level with different hash
+        msg = {
+            'type': 'range_request',
+            'range_id': 'remote_1',
+            'level': 'year',
+            'bucket_start_ms': negentropy.get_bucket_start_ms(ts_ms, 'year'),
+            'hash': 'deadbeef',  # Different hash
+        }
+        responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
-            # Receive request with different hash
-            msg = {
-                'type': 'range_request',
-                'range_id': 'remote_1',
-                'level': 'year',
-                'bucket_start_ms': negentropy.get_bucket_start_ms(ts_ms, 'year'),
-                'hash': 'deadbeef',  # Different hash
-            }
-            responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
+        # With only 2 events, should send events directly instead of drilling down
+        assert any(r['type'] == 'range_events' for r in responses)
+        # Should NOT drill down since event count is below threshold
+        assert not any(r['type'] == 'range_request' for r in responses)
 
-            # In stub mode, should send events directly
-            assert any(r['type'] == 'range_events' for r in responses)
-        finally:
-            negentropy.STUB_THRESHOLD = original_threshold
+    def test_drills_down_when_above_threshold(self, db):
+        """When bucket has many events (> EVENTS_THRESHOLD), drill down instead."""
+        peer_id = 'peer1'
+        conn_id = 'conn1'
+        base_ts = 1718451045000  # Some point in 2024
+
+        # Add more events than EVENTS_THRESHOLD (100)
+        for i in range(150):
+            # Spread across different minutes to ensure they're in the year bucket
+            negentropy.add_event_to_sync(db, peer_id, f'evt{i}', base_ts + i * 60000)
+
+        # Receive request at year level with different hash
+        msg = {
+            'type': 'range_request',
+            'range_id': 'remote_1',
+            'level': 'year',
+            'bucket_start_ms': negentropy.get_bucket_start_ms(base_ts, 'year'),
+            'hash': 'deadbeef',  # Different hash
+        }
+        responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
+
+        # With 150 events (> 100 threshold), should drill down to child level
+        assert any(r['type'] == 'range_request' for r in responses)
+        # Should NOT send events directly at this level
+        assert not any(r['type'] == 'range_events' for r in responses)
+        # Child requests should be at 'month' level
+        child_requests = [r for r in responses if r['type'] == 'range_request']
+        assert all(r['level'] == 'month' for r in child_requests)
 
 
 class TestSyncStatus:
