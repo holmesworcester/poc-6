@@ -704,34 +704,28 @@ def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
 
 
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
-    """Send sync requests to all active connections.
+    """Send all shareable events to all active connections.
 
-<<<<<<< HEAD
+    STUB IMPLEMENTATION: Sends ALL shareable events on each sync tick.
+    Future: Replace with negentropy range-based set reconciliation.
+
     Uses the connection module for peer-scoped connection lookups.
-    This follows the two-layer architecture: connections are established first via sync_connect,
+    This follows the two-layer architecture: connections are established first,
     then sync operates on those established connections.
-=======
-    Uses the connection layer (sync_connections) instead of querying peers_shared directly.
-    Connections are key-based - we identify by transit keys, not peer_shared_id.
-
-    TODO: Window state tracking currently uses random windows. Should track progress
-    per-connection (keyed by their_transit_key_id) for efficiency.
->>>>>>> master
     """
-    import random
-
     # Standardize encoding for logging
     if isinstance(from_peer_id, bytes):
         peer_id_str = crypto.b64encode(from_peer_id)
     else:
         peer_id_str = from_peer_id
 
-<<<<<<< HEAD
     # Query active connections (peer-scoped via connection module)
     connections = conn_module.get_connections(from_peer_id, t_ms, db)
 
     connection_labels = [conn.label[:10] + '...' for conn in connections]
     log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(connections)} ids={connection_labels}")
+
+    unsafedb = create_unsafe_db(db)
 
     for conn in connections:
         # Skip connections without peer_shared_id (bootstrap-only connections)
@@ -740,52 +734,65 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
             continue
 
         peer_shared_id = conn.peer_shared_id
-=======
-    # Query active connections with completed handshake (have their_transit_key)
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=from_peer_id)
-    connection_rows = unsafedb.query(
-        """SELECT their_transit_key_id, their_transit_key, our_peer_id
-           FROM sync_connections
-           WHERE last_seen_ms + ttl_ms > ?
-             AND their_transit_key IS NOT NULL""",
-        (t_ms,)
-    )
 
-    # Only process connections for OUR peer
-    our_connections = [row for row in connection_rows if row['our_peer_id'] == from_peer_id]
-
-    connection_ids = [row['their_transit_key_id'][:10] + '...' for row in our_connections]
-    log.warning(f"[SYNC_SEND] from_peer={peer_id_str[:10]}... connections={len(our_connections)} keys={connection_ids}")
->>>>>>> master
-
-    for row in our_connections:
-        their_transit_key_id = row['their_transit_key_id']
-        their_transit_key = row['their_transit_key']
-
-        # Check if this connection is to a removed peer (look up via transit_prekeys_shared)
-        peer_lookup = safedb.query_one(
-            """SELECT peer_id
-               FROM transit_prekeys_shared
-               WHERE transit_prekey_id = ? AND recorded_by = ?
-               LIMIT 1""",
-            (their_transit_key_id, from_peer_id)
+        # Check if this connection is to a removed peer
+        removed_check = unsafedb.query_one(
+            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+            (peer_shared_id,)
         )
-        if peer_lookup:
-            their_peer_shared_id = peer_lookup['peer_id']
-            removed_check = unsafedb.query_one(
-                "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
-                (their_peer_shared_id,)
-            )
-            if removed_check:
-                log.info(f"[SYNC_SKIP_REMOVED] skipping sync to removed peer {their_peer_shared_id[:20]}...")
-                continue
+        if removed_check:
+            log.info(f"[SYNC_SKIP_REMOVED] skipping sync to removed peer {peer_shared_id[:20]}...")
+            continue
 
-        # Send sync request using their transit key
-        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to_key={their_transit_key_id[:10]}...")
-        send_request_to_connection(their_transit_key_id, their_transit_key, from_peer_id, from_peer_shared_id, t_ms, db)
+        # Skip if we can't send to this connection (no their_key)
+        if not conn.can_send():
+            log.debug(f"[SYNC_SEND] skipping connection without their_key (peer={peer_shared_id[:20]}...)")
+            continue
+
+        # Send sync request on this connection
+        log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to_peer={peer_shared_id[:10]}...")
+        send_sync_request_on_connection(conn, from_peer_id, from_peer_shared_id, t_ms, db)
 
     db.commit()
+
+
+def send_sync_request_on_connection(conn: conn_module.Connection, from_peer_id: str,
+                                     from_peer_shared_id: str, t_ms: int, db: Any) -> None:
+    """Send sync request event on a connection.
+
+    STUB IMPLEMENTATION: Request triggers response that sends ALL events.
+    Future: Replace with negentropy range-based set reconciliation.
+
+    Args:
+        conn: Connection object with active bidirectional keys
+        from_peer_id: Local peer ID sending request
+        from_peer_shared_id: Local peer's public identity
+        t_ms: Current timestamp
+        db: Database connection
+    """
+    # Build sync request event
+    request_data = {
+        'type': 'sync',
+        'signed_by': from_peer_shared_id,
+        'peer_id': from_peer_id,
+        'from_connection_id': conn.connection_id,  # So responder knows where to send back
+        'created_at': t_ms
+    }
+
+    # Sign the request
+    private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
+    signed_request = crypto.sign_event(request_data, private_key)
+    request_blob = crypto.canonicalize_json(signed_request)
+
+    # Store as event (for projection/tracking)
+    unsafedb = create_unsafe_db(db)
+    event_id = store.blob(request_blob, t_ms, return_dupes=True, unsafedb=unsafedb)
+
+    # Send via connection
+    if conn_module.send(from_peer_id, conn.connection_id, request_blob, t_ms, db):
+        log.info(f"[SYNC_REQUEST] sent {event_id[:20]}... on connection {conn.connection_id[:20]}...")
+    else:
+        log.warning(f"[SYNC_REQUEST] failed to send on connection {conn.connection_id[:20]}...")
 
 
 def send_request_to_connection(their_transit_key_id: str, their_transit_key: bytes,
@@ -832,13 +839,10 @@ def send_request_to_connection(their_transit_key_id: str, their_transit_key: byt
     salt = derive_salt(requester_public_key, window_id)
     bloom_filter = create_bloom(event_id_bytes_list, salt)
 
-    # Create transit key for response
-    response_transit_key_id = transit_key.create(from_peer_id, t_ms, db)
-    unsafedb = create_unsafe_db(db)
-    key_row = unsafedb.query_one("SELECT key FROM transit_keys WHERE key_id = ?", (response_transit_key_id,))
-    if not key_row:
-        raise ValueError(f"transit key not found: {response_transit_key_id}")
-    response_transit_key_bytes = key_row['key']
+    # Create transit key for response (inline - no separate transit_key table)
+    # Generate a fresh symmetric key for the response
+    response_transit_key_bytes = crypto.generate_secret()
+    response_transit_key_id = crypto.b64encode(crypto.sha256(response_transit_key_bytes)[:16])
 
     # Build request - include public key so receiver can derive same bloom salt
     # even before peer_shared is validated (key-based connection bootstrap)
@@ -1007,118 +1011,87 @@ def project(sync_event_id: str, recorded_by: str, recorded_at: int, db: Any, syn
 
 
 def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Internal function to handle sync request logic (shared between ephemeral and stored)."""
+    """Internal function to handle sync request logic (shared between ephemeral and stored).
+
+    STUB IMPLEMENTATION: Responds with ALL shareable events via connection.send().
+    Future: Replace with negentropy range-based set reconciliation.
+    """
     log.debug(f"[SYNC_PROJECT] sync_id={sync_event_id[:20]}... recorded_by={recorded_by[:10]}...")
 
-    # Authentication: try signature first, fall back to implicit auth via transit key
+    # Authentication: try signature first, fall back to implicit auth via connection
     sig_verified = crypto.verify_signed_by_peer_shared(sync_data, recorded_by, db)
 
     if not sig_verified:
-        # Signature verification failed - this is OK if they authenticated via transit key.
-        # With key-based connections, if they decrypted our transit_key to send this request,
-        # they're implicitly authenticated. We accept the request without peer_shared verification.
-        log.debug(f"[SYNC_PROJECT] signature verification failed, accepting via implicit auth (transit key decryption)")
+        # Signature verification failed - this is OK if they authenticated via connection.
+        # With connections, if they decrypted our key to send this request,
+        # they're implicitly authenticated.
+        log.debug(f"[SYNC_PROJECT] signature verification failed, accepting via implicit auth (connection)")
 
     # Extract requester info
     requester_peer_id = sync_data.get('peer_id')
     requester_peer_shared_id = sync_data.get('signed_by')
-    response_transit_key_id = sync_data.get('response_transit_key_id')
-    response_transit_key_b64 = sync_data.get('response_transit_key')
-    window_id = sync_data.get('window_id')
-    window_min = sync_data.get('window_min')
-    window_max = sync_data.get('window_max')
-    bloom_b64 = sync_data.get('bloom')
+    from_connection_id = sync_data.get('from_connection_id')
 
-    log.info(f"sync.project() processing sync request: window_id={window_id}, window_range={window_min}-{window_max}")
+    log.info(f"sync.project() processing sync request from connection={from_connection_id[:20] if from_connection_id else 'None'}...")
 
-    if not requester_peer_id or not requester_peer_shared_id or not response_transit_key_id or not response_transit_key_b64:
+    if not requester_peer_id or not requester_peer_shared_id:
         log.info(f"Invalid sync request: missing requester info")
-        return  # Invalid sync request
+        return
 
-    if window_id is None or window_min is None or window_max is None or not bloom_b64:
-        log.info(f"Missing bloom/window data in sync request")
-        return  # Invalid bloom-based sync request
-
-    # Log acceptance (for debugging)
+    # Find the connection to respond on
+    # The from_connection_id is their connection_id, which is our their_connection_id
     safedb = create_safe_db(db, recorded_by=recorded_by)
-    requester_known = safedb.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
-        (requester_peer_shared_id, recorded_by)
-    )
-<<<<<<< HEAD
-    if not requester_known:
-        # Fallback: allow if we have an active connection for this requester
-        conn_ok = conn_module.get_connection_by_peer(recorded_by, requester_peer_shared_id, recorded_at, db)
-        if not conn_ok:
-            log.debug(f"[SYNC_PROJECT] result=REJECTED requester={requester_peer_shared_id[:20]}... not_recognized_by={recorded_by[:10]}... no_active_connection")
-            return
-        else:
-            log.debug(f"[SYNC_PROJECT] ACCEPT via connection requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
-=======
-    if requester_known:
-        log.debug(f"[SYNC_PROJECT] ACCEPT via known peer_shared requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
+
+    if from_connection_id:
+        # New style: use from_connection_id to find our connection
+        conn_row = safedb.query_one("""
+            SELECT connection_id, their_key FROM connections
+            WHERE their_connection_id = ? AND recorded_by = ?
+        """, (from_connection_id, recorded_by))
     else:
-        log.debug(f"[SYNC_PROJECT] ACCEPT via implicit auth requester={requester_peer_shared_id[:20]}... recorded_by={recorded_by[:10]}...")
->>>>>>> master
+        # Fallback: find connection by peer_shared_id
+        conn_row = safedb.query_one("""
+            SELECT connection_id, their_key FROM connections
+            WHERE peer_shared_id = ? AND recorded_by = ? AND their_key IS NOT NULL
+            ORDER BY last_handshake_ms DESC LIMIT 1
+        """, (requester_peer_shared_id, recorded_by))
 
-    log.debug(f"[SYNC_PROJECT] result=ACCEPTED requester={requester_peer_shared_id[:20]}... recognized_by={recorded_by[:10]}... window={window_id}")
+    if not conn_row or not conn_row['their_key']:
+        log.warning(f"[SYNC_PROJECT] no active connection to respond on for {requester_peer_shared_id[:20]}...")
+        return
 
-    # Check if we've synced with this peer before
+    our_connection_id = conn_row['connection_id']
+    log.debug(f"[SYNC_PROJECT] found connection {our_connection_id[:20]}... to respond on")
+
+    # STUB: Send ALL shareable events
+    shareable_rows = safedb.query(
+        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
+        (recorded_by,)
+    )
+
+    log.info(f"[SYNC_RESPONSE_STUB] sending {len(shareable_rows)} events to {requester_peer_shared_id[:20]}...")
+
+    sent_count = 0
+    for row in shareable_rows:
+        event_id = row['event_id']
+        try:
+            event_blob = safedb.get_shareable_blob(event_id)
+            if conn_module.send(recorded_by, our_connection_id, event_blob, recorded_at, db):
+                sent_count += 1
+        except Exception as e:
+            log.warning(f"sync_response: failed to send {event_id[:20]}...: {e}")
+
+    log.info(f"[SYNC_RESPONSE_STUB] sent {sent_count}/{len(shareable_rows)} events")
+
+    # Update sync state
     unsafedb = create_unsafe_db(db)
     sync_state_exists = unsafedb.query_one(
         "SELECT 1 FROM sync_state_ephemeral WHERE from_peer_id = ? AND to_peer_id = ?",
         (recorded_by, requester_peer_shared_id)
     )
-
-    # Build transit_key dict for wrapping responses
-    # response_transit_key_id is already base64 string (key ID from DB)
-    # Decode it to bytes for crypto hint
-    transit_key_id_bytes = crypto.b64decode(response_transit_key_id)
-    transit_key_dict = {
-        'id': transit_key_id_bytes,
-        'key': crypto.b64decode(response_transit_key_b64),
-        'type': 'symmetric'
-    }
-    log.debug(f"[SYNC_PROJECT] extracted transit_key_id={response_transit_key_id} (len={len(response_transit_key_id)} chars, decoded to {len(transit_key_id_bytes)} bytes)")
-
-    # Decode bloom filter
-    bloom_filter = crypto.b64decode(bloom_b64)
-
-    # Get requester's public key (for deriving bloom salt)
-    # First try to use public key from request (needed for key-based bootstrap before peer_shared is validated)
-    # Fall back to looking up from peers_shared if not in request
-    requester_public_key_b64 = sync_data.get('requester_public_key')
-    if requester_public_key_b64:
-        requester_public_key = crypto.b64decode(requester_public_key_b64)
-        log.debug(f"[SYNC_PROJECT] using requester_public_key from request")
-    else:
-        # Legacy path: lookup from peer_shared (requires peer_shared to be validated)
-        from events.identity import peer_shared
-        try:
-            requester_public_key = peer_shared.get_public_key(requester_peer_shared_id, recorded_by, db)
-        except ValueError:
-            log.warning(f"[SYNC_PROJECT] peer_shared not available and no requester_public_key in request, cannot derive bloom salt")
-            return
-
-    # Always use normal bloom-filtered sync response (single window)
-    log.debug(f"[SYNC_PROJECT] calling send_response with transit_key_hint={crypto.b64encode(transit_key_dict['id'])} ({len(crypto.b64encode(transit_key_dict['id']))} chars)")
-    send_response(
-        requester_peer_id,
-        requester_peer_shared_id,
-        recorded_by,
-        transit_key_dict,
-        window_id,
-        window_min,
-        window_max,
-        bloom_filter,
-        requester_public_key,
-        recorded_at,
-        db
-    )
-
-    # Initialize sync state if this is first sync
     if not sync_state_exists:
         update_sync_state(recorded_by, requester_peer_shared_id, 0, 1, 0, recorded_at, db)
+
 
 
 def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, transit_key_dict: dict[str, Any],

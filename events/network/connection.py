@@ -316,7 +316,7 @@ def _project_ack(
         SET their_connection_id = ?,
             their_key = ?,
             peer_shared_id = COALESCE(peer_shared_id, ?),
-            last_seen_ms = ?
+            last_handshake_ms = ?
         WHERE connection_id = ? AND recorded_by = ?
     """, (
         event_id, their_key, peer_shared_id,
@@ -366,7 +366,7 @@ def _send_ack_for_request(
             UPDATE connections
             SET their_key = ?,
                 their_connection_id = ?,
-                last_seen_ms = ?
+                last_handshake_ms = ?
             WHERE connection_id = ? AND recorded_by = ?
         """, (their_key, request_id, t_ms, existing['connection_id'], local_peer_id))
 
@@ -410,7 +410,7 @@ def _send_ack_for_request(
         INSERT OR REPLACE INTO connections (
             connection_id, recorded_by, peer_shared_id, invite_id,
             our_key, their_connection_id, their_key,
-            created_at, last_seen_ms, ttl_ms
+            created_at, last_handshake_ms, ttl_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         ack_id, local_peer_id, remote_peer_shared_id, None,
@@ -469,19 +469,33 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
         peer_shared_id = peer_self_row['peer_shared_id']
 
-        # Get all known peers from peers_shared table only
-        # This ensures we only connect to verified, synced peers
+        # Get all known peers from peers_shared table
         all_peer_ids = set()
 
         for row in safedb.query("SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?", (peer_id,)):
             all_peer_ids.add(row['peer_shared_id'])
 
-        # Get invite_id if joiner
+        # BOOTSTRAP: Also include peers we have transit_prekeys_shared for
+        for row in safedb.query(
+            "SELECT peer_id FROM transit_prekeys_shared WHERE recorded_by = ?",
+            (peer_id,)
+        ):
+            all_peer_ids.add(row['peer_id'])
+
+        # Get invite data if joiner - includes inviter's peer_shared_id and transit prekey
         invite_row = safedb.query_one(
-            "SELECT invite_id FROM invite_accepteds WHERE recorded_by = ? LIMIT 1",
+            """SELECT invite_id, inviter_peer_shared_id,
+                      inviter_transit_prekey_id, inviter_transit_prekey_public_key
+               FROM invite_accepteds WHERE recorded_by = ? LIMIT 1""",
             (peer_id,)
         )
         invite_id = invite_row['invite_id'] if invite_row else None
+
+        # BOOTSTRAP: Add inviter's peer_shared_id from invite_accepteds
+        # This is how a joiner knows about the inviter before sync
+        if invite_row and invite_row['inviter_peer_shared_id']:
+            all_peer_ids.add(invite_row['inviter_peer_shared_id'])
+            log.debug(f"connection.send_to_all: added inviter {invite_row['inviter_peer_shared_id'][:20]}... from invite_accepteds")
 
         # Send to each peer
         for to_peer_shared_id in all_peer_ids:
@@ -493,7 +507,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
             existing = safedb.query_one("""
                 SELECT 1 FROM connections
                 WHERE peer_shared_id = ? AND recorded_by = ?
-                  AND last_seen_ms + ttl_ms > ?
+                  AND last_handshake_ms + ttl_ms > ?
             """, (to_peer_shared_id, peer_id, t_ms))
 
             if existing:
@@ -540,7 +554,7 @@ def _send_request(
         INSERT OR REPLACE INTO connections (
             connection_id, recorded_by, peer_shared_id, invite_id,
             our_key, their_connection_id, their_key,
-            created_at, last_seen_ms, ttl_ms
+            created_at, last_handshake_ms, ttl_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         connection_id, from_peer_id, to_peer_shared_id, invite_id,
@@ -550,6 +564,24 @@ def _send_request(
 
     # Get recipient's connection_prekey
     to_key = connection_prekey.get_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+
+    # BOOTSTRAP FALLBACK: Check invite_accepteds for inviter's transit prekey
+    if not to_key:
+        inviter_row = safedb.query_one("""
+            SELECT inviter_transit_prekey_id, inviter_transit_prekey_public_key
+            FROM invite_accepteds
+            WHERE inviter_peer_shared_id = ? AND recorded_by = ?
+            LIMIT 1
+        """, (to_peer_shared_id, from_peer_id))
+
+        if inviter_row and inviter_row['inviter_transit_prekey_public_key']:
+            to_key = {
+                'id': crypto.b64decode(inviter_row['inviter_transit_prekey_id'])[:16],
+                'public_key': inviter_row['inviter_transit_prekey_public_key'],
+                'type': 'asymmetric'
+            }
+            log.info(f"connection._send_request: using inviter transit prekey from invite_accepteds for {to_peer_shared_id[:20]}...")
+
     if not to_key:
         log.warning(f"connection._send_request: no prekey for {to_peer_shared_id[:20]}...")
         return
@@ -584,14 +616,14 @@ def purge_expired(t_ms: int, db: Any) -> int:
         safedb = create_safe_db(db, recorded_by=peer_id)
 
         count_row = safedb.query_one(
-            "SELECT COUNT(*) as cnt FROM connections WHERE recorded_by = ? AND last_seen_ms + ttl_ms < ?",
+            "SELECT COUNT(*) as cnt FROM connections WHERE recorded_by = ? AND last_handshake_ms + ttl_ms < ?",
             (peer_id, t_ms)
         )
         count = count_row['cnt'] if count_row else 0
 
         if count > 0:
             safedb.execute(
-                "DELETE FROM connections WHERE recorded_by = ? AND last_seen_ms + ttl_ms < ?",
+                "DELETE FROM connections WHERE recorded_by = ? AND last_handshake_ms + ttl_ms < ?",
                 (peer_id, t_ms)
             )
             total_count += count
@@ -624,7 +656,7 @@ class Connection:
 
     # Lifecycle
     created_at: int
-    last_seen_ms: int
+    last_handshake_ms: int
     ttl_ms: int
 
     @classmethod
@@ -639,7 +671,7 @@ class Connection:
             their_connection_id=row.get('their_connection_id'),
             their_key=row.get('their_key'),
             created_at=row['created_at'],
-            last_seen_ms=row['last_seen_ms'],
+            last_handshake_ms=row['last_handshake_ms'],
             ttl_ms=row['ttl_ms'],
         )
 
@@ -661,7 +693,7 @@ class Connection:
 
     def is_active(self, t_ms: int) -> bool:
         """Check if connection is still valid (not expired)."""
-        return self.last_seen_ms + self.ttl_ms > t_ms
+        return self.last_handshake_ms + self.ttl_ms > t_ms
 
     def can_send(self) -> bool:
         """Check if we have their key to send to them."""
@@ -679,13 +711,18 @@ class Connection:
         """Check if this is a bootstrap connection (via invite)."""
         return self.invite_id is not None
 
-    def time_since_seen(self, t_ms: int) -> int:
-        """Milliseconds since last seen."""
-        return t_ms - self.last_seen_ms
+    def time_since_handshake(self, t_ms: int) -> int:
+        """Milliseconds since last handshake (req/ack)."""
+        return t_ms - self.last_handshake_ms
+
+    def time_since_traffic(self, t_ms: int) -> int | None:
+        """Milliseconds since last traffic. STUB: returns None until implemented."""
+        # TODO: Implement when last_traffic_ms is populated
+        return None
 
     def time_until_expiry(self, t_ms: int) -> int:
         """Milliseconds until expiry."""
-        return (self.last_seen_ms + self.ttl_ms) - t_ms
+        return (self.last_handshake_ms + self.ttl_ms) - t_ms
 
 
 def list_all_for_display(peer_id: str, t_ms: int, db: Any) -> dict:
@@ -706,8 +743,8 @@ def list_all_for_display(peer_id: str, t_ms: int, db: Any) -> dict:
 
     rows = safedb.query("""
         SELECT * FROM connections
-        WHERE recorded_by = ? AND last_seen_ms + ttl_ms > ?
-        ORDER BY last_seen_ms DESC
+        WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?
+        ORDER BY last_handshake_ms DESC
     """, (peer_id, t_ms))
 
     connections = [Connection.from_row(row) for row in rows]
@@ -739,8 +776,8 @@ def get_active_connection(peer_id: str, remote_peer_shared_id: str, t_ms: int, d
           AND recorded_by = ?
           AND their_connection_id IS NOT NULL
           AND their_key IS NOT NULL
-          AND last_seen_ms + ttl_ms > ?
-        ORDER BY last_seen_ms DESC
+          AND last_handshake_ms + ttl_ms > ?
+        ORDER BY last_handshake_ms DESC
     """, (remote_peer_shared_id, peer_id, t_ms))
 
     return Connection.from_row(row) if row else None
@@ -892,7 +929,7 @@ def get_connections(peer_id: str, t_ms: int, db: Any) -> list[Connection]:
 
     rows = safedb.query("""
         SELECT * FROM connections
-        WHERE recorded_by = ? AND last_seen_ms + ttl_ms > ?
+        WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?
     """, (peer_id, t_ms))
 
     return [Connection.from_row(row) for row in rows]
@@ -917,8 +954,8 @@ def get_connection_by_peer(peer_id: str, remote_peer_shared_id: str, t_ms: int, 
     # Prefer connections with their_key (can send)
     row = safedb.query_one("""
         SELECT * FROM connections
-        WHERE peer_shared_id = ? AND recorded_by = ? AND last_seen_ms + ttl_ms > ?
-        ORDER BY (their_key IS NOT NULL) DESC, last_seen_ms DESC
+        WHERE peer_shared_id = ? AND recorded_by = ? AND last_handshake_ms + ttl_ms > ?
+        ORDER BY (their_key IS NOT NULL) DESC, last_handshake_ms DESC
     """, (remote_peer_shared_id, peer_id, t_ms))
 
     return Connection.from_row(row) if row else None
@@ -940,7 +977,66 @@ def get_connection_by_invite(peer_id: str, invite_id: str, t_ms: int, db: Any) -
 
     row = safedb.query_one("""
         SELECT * FROM connections
-        WHERE invite_id = ? AND recorded_by = ? AND last_seen_ms + ttl_ms > ?
+        WHERE invite_id = ? AND recorded_by = ? AND last_handshake_ms + ttl_ms > ?
     """, (invite_id, peer_id, t_ms))
 
     return Connection.from_row(row) if row else None
+
+
+# ============================================================================
+# Sending on connections
+# ============================================================================
+
+def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) -> bool:
+    """Send a blob on an established connection.
+
+    THE interface for all outbound traffic on connections. Handles:
+    - Looking up connection by connection_id
+    - Wrapping blob with their_key (symmetric)
+    - Adding hint (their_connection_id[:16])
+    - Queuing to incoming
+
+    Args:
+        recorded_by: Local peer ID
+        connection_id: Our connection_id for this connection
+        blob: Raw blob to send (event data)
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        True if sent, False if connection not ready (no their_key)
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    conn = safedb.query_one("""
+        SELECT their_connection_id, their_key
+        FROM connections
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (connection_id, recorded_by))
+
+    if not conn:
+        log.warning(f"connection.send: no connection {connection_id[:20]}...")
+        return False
+
+    their_connection_id = conn['their_connection_id']
+    their_key = conn['their_key']
+
+    if not their_key or not their_connection_id:
+        log.debug(f"connection.send: connection {connection_id[:20]}... not ready (no their_key)")
+        return False
+
+    # Wrap with their key using their_connection_id as hint
+    to_key = {
+        'id': crypto.b64decode(their_connection_id)[:16],
+        'key': their_key,
+        'type': 'symmetric'
+    }
+
+    wrapped = crypto.wrap(blob, to_key, db)
+
+    unsafedb = create_unsafe_db(db)
+    import queues
+    queues.incoming.add(wrapped, t_ms, unsafedb)
+
+    log.debug(f"connection.send: sent {len(blob)}B on {connection_id[:20]}...")
+    return True

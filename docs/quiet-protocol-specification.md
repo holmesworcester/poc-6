@@ -658,12 +658,25 @@ connections (
     their_key,                       -- symmetric key they created (we send to them)
 
     -- Lifecycle
-    created_at, last_seen_ms, ttl_ms,
+    created_at,
+    last_handshake_ms,    -- Updated when req/ack received (NOT on traffic)
+    last_traffic_ms,      -- STUB: Future - updated when traffic flows
+    ttl_ms,               -- Expiry based on last_handshake_ms + ttl_ms
 
     PRIMARY KEY (connection_id, recorded_by),
     CHECK (peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
 )
 ```
+
+### Connection Lifecycle Timestamps
+
+Connections track two separate time concepts:
+
+- **`last_handshake_ms`**: Updated only when a connection request or ack is received. This timestamp determines TTL expiry. Connections expire `ttl_ms` after the last handshake, forcing periodic key rotation (forward secrecy).
+
+- **`last_traffic_ms`** (STUB): Will be updated when any traffic flows on the connection. Not yet implemented. Future use: detecting "gone dark" peers even when handshakes are recent.
+
+The key insight: connections expire based on **handshake age**, not traffic. This is a deliberate security choice - even if sync traffic flows constantly, connections expire after TTL (default: 5 minutes) forcing key rotation.
 
 The `connections` table is **peer-scoped** (subjective), enabling SafeDB access:
 
@@ -671,7 +684,7 @@ The `connections` table is **peer-scoped** (subjective), enabling SafeDB access:
 # Sync gets only this peer's connections
 safedb = create_safe_db(db, recorded_by=peer_id)
 my_connections = safedb.query(
-    "SELECT * FROM connections WHERE recorded_by = ? AND last_seen_ms + ttl_ms > ?",
+    "SELECT * FROM connections WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?",
     (peer_id, t_ms)
 )
 

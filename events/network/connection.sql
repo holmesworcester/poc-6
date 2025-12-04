@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS connections (
 
     -- Lifecycle
     created_at INTEGER NOT NULL,            -- When we sent the request
-    last_seen_ms INTEGER NOT NULL,          -- Updated when ack received
+    last_handshake_ms INTEGER NOT NULL,     -- Updated when req/ack received (NOT on traffic)
+    last_traffic_ms INTEGER,                -- STUB: Future - updated when traffic flows on connection
     ttl_ms INTEGER NOT NULL DEFAULT 300000, -- Time-to-live in ms (default: 5 minutes)
 
     PRIMARY KEY (connection_id, recorded_by),
@@ -49,9 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_connections_invite
 ON connections(invite_id, recorded_by)
 WHERE invite_id IS NOT NULL;
 
--- Index for expiry cleanup
+-- Index for expiry cleanup (TTL is based on last_handshake_ms, not traffic)
 CREATE INDEX IF NOT EXISTS idx_connections_ttl
-ON connections(last_seen_ms, ttl_ms);
+ON connections(last_handshake_ms, ttl_ms);
 
 
 -- ============================================================================
