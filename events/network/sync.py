@@ -7,10 +7,10 @@ EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any, Iterator
-from events.network import recorded, transit_key, transit_prekey, sync_window
+from events.network import recorded, transit_prekey, sync_window
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
-import connection as conn_module
+from events.network import connection as conn_module
 import queues
 import crypto
 import store
@@ -26,7 +26,7 @@ BLOOM_SIZE_BYTES = 64
 K_HASHES = 5  # Number of hash functions
 
 # Event types that are sync protocol infrastructure (not stored in event log)
-EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file'}
+EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file', 'connection'}
 
 # Window parameters
 DEFAULT_W = 12  # Default window parameter: 2^12 = 4096 windows
@@ -244,8 +244,8 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
 def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     """Device-wide routing: determine which local peers can decrypt this blob.
 
-    Checks transit keys (symmetric) and transit prekeys (asymmetric) to find
-    all local peers who have the decryption key for this blob.
+    Checks connections (symmetric), transit keys (symmetric), and transit prekeys
+    (asymmetric) to find all local peers who have the decryption key for this blob.
 
     Args:
         blob: Transit-wrapped blob with hint in first 16 bytes
@@ -258,11 +258,26 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     hint = blob[:16]
     hint_b64 = crypto.b64encode(hint)
 
-    # Try transit keys first (symmetric)
-    recorded_by_peers = transit_key.get_peer_ids_for_key(hint_b64, db)
-    if recorded_by_peers:
-        log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_key")
-        return recorded_by_peers
+    # Try connections first (symmetric keys from connection handshake)
+    # The hint is first 16 bytes of connection_id hash
+    try:
+        cursor = db._conn.execute(
+            "SELECT DISTINCT connection_id, recorded_by FROM connections"
+        )
+        recorded_by_peers = []
+        for row in cursor.fetchall():
+            conn_id = row[0]
+            try:
+                conn_id_bytes = crypto.b64decode(conn_id)
+                if conn_id_bytes[:16] == hint:
+                    recorded_by_peers.append(row[1])
+            except Exception:
+                continue
+        if recorded_by_peers:
+            log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via connection")
+            return recorded_by_peers
+    except Exception as e:
+        log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
     # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
     try:
@@ -292,6 +307,9 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
     elif event_type == 'sync_file':
         from events.network import sync_file
         sync_file.project(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
+    elif event_type == 'connection':
+        from events.network import connection
+        connection.project(event_id, recorded_by, t_ms, db)
 
     # Mark ephemeral event as valid (for sync protocol tracking)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -631,20 +649,26 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
     bits_set = bin(int.from_bytes(bloom_filter, 'big')).count('1')
     log.debug(f"[SEND_REQUEST_BLOOM] from={from_peer_id[:10]}... window={window_id} events_in_bloom={len(event_id_bytes_list)} bits_set={bits_set}/512")
 
-    # Create a transit key for the response (owned by requester so they can decrypt response)
-    response_transit_key_id = transit_key.create(from_peer_id, t_ms, db)
+    # Get established connection - sync uses the connection module's keys
+    conn = conn_module.get_connection_by_peer(from_peer_id, to_peer_shared_id, t_ms, db)
 
-    # Get the raw key bytes from DB (don't use get_key() to avoid encoding round-trip)
-    from db import create_unsafe_db
-    unsafedb = create_unsafe_db(db)
-    key_row = unsafedb.query_one("SELECT key FROM transit_keys WHERE key_id = ?", (response_transit_key_id,))
-    if not key_row:
-        raise ValueError(f"transit key not found after creation: {response_transit_key_id}")
-    response_transit_key_bytes = key_row['key']
+    if conn and conn.can_send():
+        # Use established connection - our_key for responses, their_key for sending
+        response_key_id = conn.connection_id
+        response_key_bytes = conn.our_key
+        to_key = {
+            'id': crypto.b64decode(conn.their_connection_id)[:16],
+            'key': conn.their_key,
+            'type': 'symmetric'
+        }
+        log.info(f"send_request: using established connection with {to_peer_shared_id[:20]}...")
+    else:
+        # No established connection - can't sync yet
+        # Connection module will establish connections, then we can sync
+        log.debug(f"send_request: no established connection to {to_peer_shared_id[:20]}..., skipping")
+        return
 
-    log.debug(f"[SEND_REQUEST] from={from_peer_id[:10]}... created response_transit_key_id={response_transit_key_id} (len={len(response_transit_key_id)} chars)")
-
-    # Flatten transit key fields for JSON serialization (recipient needs the actual key to wrap responses)
+    # Build sync request with connection's response key info
     request_data = {
         'type': 'sync',
         'peer_id': from_peer_id,
@@ -654,11 +678,10 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         'window_min': window_min,  # Concrete storage window range start
         'window_max': window_max,  # Concrete storage window range end
         'bloom': crypto.b64encode(bloom_filter),  # Bloom of events requester HAS
-        'response_transit_key_id': response_transit_key_id,  # Base64 key ID for crypto hint
-        'response_transit_key': crypto.b64encode(response_transit_key_bytes),  # Base64 key material
+        'response_transit_key_id': response_key_id,  # Connection ID for routing responses
+        'response_transit_key': crypto.b64encode(response_key_bytes),  # Key for wrapping responses
         'created_at': t_ms
     }
-    log.debug(f"[SEND_REQUEST] serializing transit_key_id into request: {response_transit_key_id} (len={len(response_transit_key_id)})")
 
     # Sign the request
     private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
@@ -666,26 +689,6 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     # Store as signed plaintext
     canonical = crypto.canonicalize_json(signed_request)
-
-    # Try to get established connection first (uses symmetric transit key they provided)
-    conn = conn_module.get_connection_by_peer(from_peer_id, to_peer_shared_id, t_ms, db)
-
-    if conn and conn.can_send():
-        # Use established connection's transit key (the key they sent us)
-        to_key = {
-            'id': crypto.b64decode(conn.their_transit_key_id),
-            'key': conn.their_transit_key,
-            'type': 'symmetric'
-        }
-        log.info(f"send_request: using established connection with {to_peer_shared_id[:20]}...")
-    else:
-        # Fall back to transit prekey for initial contact (asymmetric)
-        to_key = transit_prekey.get_transit_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
-        if to_key:
-            log.info(f"send_request: falling back to prekey for {to_peer_shared_id[:20]}...")
-        else:
-            log.warning(f"send_request: NO CONNECTION OR PREKEY for {to_peer_shared_id[:20]}...")
-            return
 
     request_blob = crypto.wrap(canonical, to_key, db)
 

@@ -157,7 +157,62 @@ connection.upgrade_identity(peer_shared_id)
 
 ## Schema Changes
 
-### connections table (SUBJECTIVE - peer-scoped)
+### connection_attempts table (SUBJECTIVE - pending handshakes)
+
+Tracks outgoing `sync_connect` messages waiting for acknowledgement. This is **not** a connection yet — we don't have their transit key, so we can't send to them.
+
+```sql
+-- Add to SUBJECTIVE_TABLES in db.py
+CREATE TABLE connection_attempts (
+    our_transit_key_id TEXT NOT NULL,   -- Key we sent them
+    recorded_by TEXT NOT NULL,          -- Local peer who initiated
+
+    -- Target identity
+    to_peer_shared_id TEXT,             -- Who we're trying to connect to
+    invite_id TEXT,                     -- Invite used (for bootstrap)
+
+    -- Lifecycle
+    created_at INTEGER NOT NULL,
+    ttl_ms INTEGER NOT NULL DEFAULT 300000,
+
+    PRIMARY KEY (our_transit_key_id, recorded_by),
+    CHECK (to_peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
+);
+
+CREATE INDEX idx_connection_attempts_recorded_by ON connection_attempts(recorded_by);
+```
+
+**Key insight**: A "connection" requires both directions — we can send to them AND they can send to us. Before receiving their transit key, we only have half the channel. The `connection_attempts` table tracks these pending half-channels.
+
+### Handshake Flow with connection_attempts
+
+```
+send_connect(to_peer):
+  1. Create transit_key (our key for them to send to us)
+  2. Insert into connection_attempts (our_transit_key_id, to_peer_shared_id)
+  3. Wrap sync_connect with their prekey/connection, queue for delivery
+  4. NO connection entry yet - we can't send to them
+
+receive sync_connect (their connect to us):
+  1. Extract their transit_key from event
+  2. Create connection entry WITH their_transit_key (we can now send to them)
+  3. Send sync_connect_ack back with OUR transit_key
+
+receive sync_connect_ack (response to our connect):
+  1. Look up connection_attempt by for_transit_key_id (the key we sent)
+  2. Extract their transit_key from ack
+  3. Create connection entry WITH their_transit_key
+  4. Delete the connection_attempt (handshake complete)
+```
+
+This ensures:
+- `connections` only contains usable bidirectional channels
+- `connection_attempts` is clearly ephemeral/pending state
+- We never have a "connection" we can't actually use
+
+### connections table (SUBJECTIVE - established bidirectional channels)
+
+Only contains entries where we have `their_transit_key` — meaning we can actually send to them.
 
 ```sql
 -- Add to SUBJECTIVE_TABLES in db.py (enables SafeDB access)
@@ -169,9 +224,9 @@ CREATE TABLE connections (
     peer_shared_id TEXT,            -- NULL until peer_shared syncs
     invite_id TEXT,                 -- For bootstrap connections
 
-    -- Their key (we send to them)
-    their_transit_key_id TEXT,
-    their_transit_key BLOB,
+    -- Their key (we send to them) - REQUIRED for a real connection
+    their_transit_key_id TEXT NOT NULL,
+    their_transit_key BLOB NOT NULL,
 
     -- State
     last_seen_ms INTEGER,

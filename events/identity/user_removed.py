@@ -185,12 +185,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         )
 
         # DELETE ALL CONNECTIONS for this peer (enforcement mechanism)
-        # This mirrors the enforcement in peer_removed.project()
-        cursor = unsafe_db.execute(
-            """DELETE FROM sync_connections WHERE peer_shared_id = ?""",
-            (peer_shared_id,)
-        )
-        deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+        # Uses connection module API which handles per-peer connection removal
+        from events.network import connection
+        deleted_count = connection.remove_connections_for_peer(peer_shared_id, db)
         log.info(f"user_removed.project() deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
 
     # Rotate group keys for all groups this user was a member of
