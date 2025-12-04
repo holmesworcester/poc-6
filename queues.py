@@ -15,34 +15,64 @@ class incoming:
     """Queue for incoming transit blobs."""
 
     @staticmethod
-    def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB) -> None:
+    def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB, from_peer: str = None, to_peer: str = None) -> bool:
         """Add an incoming transit blob to the queue with packet loss and latency simulation.
 
-        Packets may be dropped based on configured packet loss rate.
-        Delivery is delayed by the configured latency.
+        Packets may be dropped based on:
+        - Configured packet loss rate (random)
+        - Burst loss (correlated consecutive drops)
+        - Network partitions (blocked peers)
+        - Oversized packets
+
+        Delivery is delayed by the configured latency with optional jitter.
+
+        Args:
+            blob: The packet data
+            t_ms: Current simulation time in milliseconds
+            unsafedb: Database connection
+            from_peer: Source peer ID (for partition checking)
+            to_peer: Destination peer ID (for partition checking)
+
+        Returns:
+            True if packet was enqueued, False if dropped
         """
         cfg = network_config.get_network_config()
 
         log.debug(f"queues.incoming.add() adding blob size={len(blob)}B, t_ms={t_ms}")
 
+        # Check network partitions (if peer IDs provided)
+        if from_peer and network_config.is_partitioned(from_peer):
+            log.debug(f"queues.incoming.add() dropping packet: source peer {from_peer[:20]}... is partitioned")
+            return False
+        if to_peer and network_config.is_partitioned(to_peer):
+            log.debug(f"queues.incoming.add() dropping packet: dest peer {to_peer[:20]}... is partitioned")
+            return False
+
         # Check packet size limit
         if len(blob) > cfg.max_packet_size:
             log.error(f"queues.incoming.add() dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")
-            return
+            return False
 
-        # Apply packet loss
+        # Check burst loss first (correlated loss)
+        if network_config.check_burst_loss():
+            log.debug(f"queues.incoming.add() dropping packet due to burst loss")
+            return False
+
+        # Apply random packet loss
         if random.random() < cfg.packet_loss_rate:
             log.debug(f"queues.incoming.add() dropping packet due to loss simulation")
-            return
+            return False
 
-        # Calculate delivery time
-        deliver_at = t_ms + cfg.latency_ms
+        # Calculate delivery time with jitter
+        latency = network_config.calculate_latency()
+        deliver_at = t_ms + latency
 
         # Insert with delivery time
         unsafedb.execute(
             "INSERT INTO incoming_blobs (blob, sent_at, deliver_at, dropped) VALUES (?, ?, ?, ?)",
             (blob, t_ms, deliver_at, False)
         )
+        return True
 
     @staticmethod
     def drain(batch_size: int, current_time_ms: int, unsafedb: UnsafeDB) -> list[bytes]:
