@@ -230,6 +230,94 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
 
 
 # ============================================================================
+# Connection Management Functions
+# ============================================================================
+
+
+def remove_connections_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> int:
+    """Remove all sync connections to a specific peer.
+
+    Finds all transit prekeys belonging to the peer and deletes any
+    sync_connections using those keys.
+
+    Args:
+        peer_shared_id: The peer_shared_id to remove connections for
+        recorded_by: The local peer's perspective
+        db: Database connection
+
+    Returns:
+        Number of connections deleted
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
+
+    # Find all transit prekey IDs belonging to this peer
+    transit_keys = safedb.query(
+        """SELECT transit_prekey_id
+           FROM transit_prekeys_shared
+           WHERE peer_id = ? AND recorded_by = ?""",
+        (peer_shared_id, recorded_by)
+    )
+
+    if not transit_keys:
+        log.debug(f"remove_connections_for_peer: no transit keys found for peer {peer_shared_id[:20]}...")
+        return 0
+
+    # Delete connections using those transit keys
+    key_ids = [row['transit_prekey_id'] for row in transit_keys]
+    placeholders = ','.join(['?'] * len(key_ids))
+    cursor = unsafedb.execute(
+        f"DELETE FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
+        key_ids
+    )
+    deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+    log.info(f"remove_connections_for_peer: deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
+    return deleted_count
+
+
+def remove_connections_for_user(user_id: str, recorded_by: str, db: Any) -> int:
+    """Remove all sync connections to all peers belonging to a user.
+
+    Finds all peers belonging to the user, then removes connections for each.
+
+    Args:
+        user_id: The user_id whose peers should have connections removed
+        recorded_by: The local peer's perspective
+        db: Database connection
+
+    Returns:
+        Total number of connections deleted
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
+
+    # Find all transit prekey IDs belonging to peers of this user
+    transit_keys = safedb.query(
+        """SELECT tps.transit_prekey_id
+           FROM transit_prekeys_shared tps
+           JOIN peers_shared ps ON tps.peer_id = ps.peer_shared_id
+                               AND tps.recorded_by = ps.recorded_by
+           WHERE ps.user_id = ? AND ps.recorded_by = ?""",
+        (user_id, recorded_by)
+    )
+
+    if not transit_keys:
+        log.debug(f"remove_connections_for_user: no transit keys found for user {user_id[:20]}...")
+        return 0
+
+    # Delete connections using those transit keys
+    key_ids = [row['transit_prekey_id'] for row in transit_keys]
+    placeholders = ','.join(['?'] * len(key_ids))
+    cursor = unsafedb.execute(
+        f"DELETE FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
+        key_ids
+    )
+    deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+    log.info(f"remove_connections_for_user: deleted {deleted_count} connection(s) for user {user_id[:20]}...")
+    return deleted_count
+
+
+# ============================================================================
 # Core Sync Functions
 # ============================================================================
 
