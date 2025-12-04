@@ -45,7 +45,7 @@ BLOOM_SIZE_BYTES = 64
 K_HASHES = 5  # Number of hash functions
 
 # Event types that are sync protocol infrastructure (not stored in event log)
-EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file', 'connection'}
+EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file', 'connection', 'negentropy'}
 
 # Window parameters
 DEFAULT_W = 12  # Default window parameter: 2^12 = 4096 windows
@@ -231,112 +231,42 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
 
 
 # ============================================================================
-# Connection Management Functions
+# Connection Management Functions (delegate to connection module)
 # ============================================================================
 
 
 def remove_connections_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> int:
-    """Remove all sync connections to/from a specific peer.
+    """Remove all connections to a specific peer.
 
-    Deletes connections in both directions:
-    1. Connections TO this peer (their_transit_key_id matches peer's transit keys)
-    2. Connections FROM this peer (our_peer_id matches peer's local peer_id)
+    Delegated to connection module which manages the connections table.
 
     Args:
         peer_shared_id: The peer_shared_id to remove connections for
-        recorded_by: The local peer's perspective
+        recorded_by: The local peer's perspective (unused - connection module iterates all)
         db: Database connection
 
     Returns:
         Number of connections deleted
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    unsafedb = create_unsafe_db(db)
-    total_deleted = 0
-
-    # Direction 1: Delete connections TO this peer (using their transit keys)
-    transit_keys = safedb.query(
-        """SELECT transit_prekey_id
-           FROM transit_prekeys_shared
-           WHERE peer_id = ? AND recorded_by = ?""",
-        (peer_shared_id, recorded_by)
-    )
-
-    if transit_keys:
-        key_ids = [row['transit_prekey_id'] for row in transit_keys]
-        placeholders = ','.join(['?'] * len(key_ids))
-        cursor = unsafedb.execute(
-            f"DELETE FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-            key_ids
-        )
-        deleted = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
-        total_deleted += deleted
-        log.info(f"remove_connections_for_peer: deleted {deleted} outbound connection(s) to peer {peer_shared_id[:20]}...")
-
-    # Direction 2: Delete connections FROM this peer (using their local peer_id)
-    # Look up the peer's local peer_id from peers_shared (use recorded_by perspective)
-    peer_ids = safedb.query(
-        """SELECT DISTINCT peer_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?""",
-        (peer_shared_id, recorded_by)
-    )
-
-    if peer_ids:
-        local_peer_ids = [row['peer_id'] for row in peer_ids]
-        placeholders = ','.join(['?'] * len(local_peer_ids))
-        cursor = unsafedb.execute(
-            f"DELETE FROM sync_connections WHERE our_peer_id IN ({placeholders})",
-            local_peer_ids
-        )
-        deleted = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
-        total_deleted += deleted
-        log.info(f"remove_connections_for_peer: deleted {deleted} inbound connection(s) from peer {peer_shared_id[:20]}...")
-
-    if total_deleted == 0:
-        log.debug(f"remove_connections_for_peer: no connections found for peer {peer_shared_id[:20]}...")
-
-    return total_deleted
+    from events.network import connection
+    return connection.remove_connections_for_peer(peer_shared_id, db)
 
 
 def remove_connections_for_user(user_id: str, recorded_by: str, db: Any) -> int:
-    """Remove all sync connections to all peers belonging to a user.
+    """Remove all connections to all peers belonging to a user.
 
-    Finds all peers belonging to the user, then removes connections for each.
+    Delegated to connection module which manages the connections table.
 
     Args:
         user_id: The user_id whose peers should have connections removed
-        recorded_by: The local peer's perspective
+        recorded_by: The local peer's perspective (unused - connection module iterates all)
         db: Database connection
 
     Returns:
         Total number of connections deleted
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    unsafedb = create_unsafe_db(db)
-
-    # Find all transit prekey IDs belonging to peers of this user
-    transit_keys = safedb.query(
-        """SELECT tps.transit_prekey_id
-           FROM transit_prekeys_shared tps
-           JOIN peers_shared ps ON tps.peer_id = ps.peer_shared_id
-                               AND tps.recorded_by = ps.recorded_by
-           WHERE ps.user_id = ? AND ps.recorded_by = ?""",
-        (user_id, recorded_by)
-    )
-
-    if not transit_keys:
-        log.debug(f"remove_connections_for_user: no transit keys found for user {user_id[:20]}...")
-        return 0
-
-    # Delete connections using those transit keys
-    key_ids = [row['transit_prekey_id'] for row in transit_keys]
-    placeholders = ','.join(['?'] * len(key_ids))
-    cursor = unsafedb.execute(
-        f"DELETE FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-        key_ids
-    )
-    deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
-    log.info(f"remove_connections_for_user: deleted {deleted_count} connection(s) for user {user_id[:20]}...")
-    return deleted_count
+    from events.network import connection
+    return connection.remove_connections_for_user(user_id, db)
 
 
 # ============================================================================
@@ -438,6 +368,16 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
     elif event_type == 'connection':
         from events.network import connection
         connection.project(event_id, recorded_by, t_ms, db)
+    elif event_type == 'negentropy':
+        from events.network import negentropy
+        # The envelope contains:
+        # - connection_id: sender's connection_id (for our reply_connection_id)
+        # - reply_connection_id: OUR connection_id to use for responses
+        our_connection_id = event_data.get('reply_connection_id')
+        if our_connection_id:
+            negentropy.handle_incoming(db, recorded_by, our_connection_id, event_data, t_ms)
+        else:
+            log.warning(f"negentropy: no reply_connection_id in envelope")
 
     # Mark ephemeral event as valid (for sync protocol tracking)
     safedb = create_safe_db(db, recorded_by=recorded_by)

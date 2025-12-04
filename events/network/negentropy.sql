@@ -87,16 +87,16 @@ ON negentropy_sync_state(recorded_by, connection_id, status);
 -- Not "final" since sets keep changing - just a point-in-time observation.
 
 CREATE TABLE IF NOT EXISTS negentropy_checkpoints (
-    id INTEGER PRIMARY KEY,
     recorded_by TEXT NOT NULL,
     connection_id TEXT NOT NULL,
     completed_at INTEGER NOT NULL,          -- When root hashes matched
     root_hash BLOB NOT NULL,                -- The matching root hash
     events_sent INTEGER NOT NULL DEFAULT 0,
     events_received INTEGER NOT NULL DEFAULT 0,
-    ranges_checked INTEGER NOT NULL DEFAULT 0
+    ranges_checked INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (recorded_by, connection_id, completed_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_negentropy_checkpoints_connection
-ON negentropy_checkpoints(recorded_by, connection_id, completed_at);
+ON negentropy_checkpoints(connection_id, completed_at);
 

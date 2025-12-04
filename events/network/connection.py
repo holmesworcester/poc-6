@@ -983,6 +983,32 @@ def get_connection_by_invite(peer_id: str, invite_id: str, t_ms: int, db: Any) -
     return Connection.from_row(row) if row else None
 
 
+def get_connection_by_their_id(peer_id: str, their_connection_id: str, t_ms: int, db: Any) -> Connection | None:
+    """Get connection by the remote party's connection_id.
+
+    When receiving a message from a connection, the sender's connection_id
+    is in the message envelope. We need to find OUR connection where
+    their_connection_id matches the sender's connection_id.
+
+    Args:
+        peer_id: Local peer ID
+        their_connection_id: Remote party's connection_id (from received message)
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        Connection if found and active, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    row = safedb.query_one("""
+        SELECT * FROM connections
+        WHERE their_connection_id = ? AND recorded_by = ? AND last_handshake_ms + ttl_ms > ?
+    """, (their_connection_id, peer_id, t_ms))
+
+    return Connection.from_row(row) if row else None
+
+
 # ============================================================================
 # Sending on connections
 # ============================================================================

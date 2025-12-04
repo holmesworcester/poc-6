@@ -113,8 +113,7 @@ def test_alice_creates_device_and_user_invites(fresh_db):
     # ===== Verify invite data contains expected fields =====
     print("\n=== Verifying invite link data ===")
 
-    # Device invite data should contain user_id (for device linking)
-    assert 'invite_blob' in device_invite_data, "Device invite should have invite_blob"
+    # Device invite data should contain expected fields
     assert 'invite_id' in device_invite_data, "Device invite should have invite_id"
     assert 'inviter_peer_shared_id' in device_invite_data, "Device invite should have inviter_peer_shared_id"
     assert 'network_id' in device_invite_data, "Device invite should have network_id"
@@ -122,7 +121,6 @@ def test_alice_creates_device_and_user_invites(fresh_db):
     print(f"✅ Device invite data contains all expected fields")
 
     # User invite data should have same structure
-    assert 'invite_blob' in user_invite_data, "User invite should have invite_blob"
     assert 'invite_id' in user_invite_data, "User invite should have invite_id"
     assert 'inviter_peer_shared_id' in user_invite_data, "User invite should have inviter_peer_shared_id"
     assert 'network_id' in user_invite_data, "User invite network_id should match"

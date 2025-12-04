@@ -26,6 +26,9 @@ from typing import Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
+from db import create_safe_db
+import crypto
+
 log = logging.getLogger(__name__)
 
 # Hierarchy levels from coarsest to finest
@@ -251,10 +254,11 @@ def add_event_to_sync(
     Called when a new event is created or received.
     Marks all ancestor buckets as needing hash recomputation.
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     bucket_start_ms = get_bucket_start_ms(created_at, 'one_min')
 
     # Insert event -> bucket mapping
-    db.execute("""
+    safedb.execute("""
         INSERT OR IGNORE INTO negentropy_events
         (recorded_by, event_id, bucket_start_ms, created_at)
         VALUES (?, ?, ?, ?)
@@ -262,7 +266,7 @@ def add_event_to_sync(
 
     # Mark leaf bucket hash as stale (NULL)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    db.execute("""
+    safedb.execute("""
         INSERT INTO negentropy_buckets
         (recorded_by, level, bucket_start_ms, hash, event_count, updated_at)
         VALUES (?, 'one_min', ?, NULL, 1, ?)
@@ -275,7 +279,7 @@ def add_event_to_sync(
     # Mark all ancestor buckets as needing recompute
     for level in ['ten_min', 'hour', 'day', 'month', 'year', 'root']:
         ancestor_start = get_bucket_start_ms(created_at, level)
-        db.execute("""
+        safedb.execute("""
             INSERT INTO negentropy_buckets
             (recorded_by, level, bucket_start_ms, hash, event_count, updated_at)
             VALUES (?, ?, ?, NULL, 0, ?)
@@ -296,8 +300,10 @@ def recompute_bucket_hash(
     For leaf buckets: hash of sorted event IDs.
     For parent buckets: hash of sorted (child_start_ms, child_hash) pairs.
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Check if already computed
-    row = db.query_one("""
+    row = safedb.query_one("""
         SELECT hash FROM negentropy_buckets
         WHERE recorded_by = ? AND level = ? AND bucket_start_ms = ?
     """, (recorded_by, level, bucket_start_ms))
@@ -308,7 +314,7 @@ def recompute_bucket_hash(
     # Compute hash
     if level == 'one_min':
         # Leaf: hash of event IDs
-        events = db.query("""
+        events = safedb.query("""
             SELECT event_id FROM negentropy_events
             WHERE recorded_by = ? AND bucket_start_ms = ?
             ORDER BY event_id
@@ -321,7 +327,7 @@ def recompute_bucket_hash(
         bucket_end_ms = get_bucket_end_ms(bucket_start_ms, level)
 
         # Find children within this bucket's time range
-        children = db.query("""
+        children = safedb.query("""
             SELECT bucket_start_ms, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
             AND bucket_start_ms >= ? AND bucket_start_ms < ?
@@ -340,7 +346,7 @@ def recompute_bucket_hash(
 
     # Store computed hash
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    db.execute("""
+    safedb.execute("""
         INSERT INTO negentropy_buckets
         (recorded_by, level, bucket_start_ms, hash, event_count, updated_at)
         VALUES (?, ?, ?, ?, 0, ?)
@@ -366,17 +372,19 @@ def get_hashes_at_level(
     Returns:
         Dict mapping bucket_start_ms -> hash
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     if parent_start_ms is not None and parent_level is not None:
         # Children within parent's time range
         parent_end_ms = get_bucket_end_ms(parent_start_ms, parent_level)
-        rows = db.query("""
+        rows = safedb.query("""
             SELECT bucket_start_ms, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
             AND bucket_start_ms >= ? AND bucket_start_ms < ?
         """, (recorded_by, level, parent_start_ms, parent_end_ms))
     else:
         # All buckets at this level
-        rows = db.query("""
+        rows = safedb.query("""
             SELECT bucket_start_ms, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
         """, (recorded_by, level))
@@ -398,7 +406,8 @@ def get_events_in_bucket(
     bucket_start_ms: int
 ) -> list[str]:
     """Get all event IDs in a 1-minute bucket."""
-    rows = db.query("""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    rows = safedb.query("""
         SELECT event_id FROM negentropy_events
         WHERE recorded_by = ? AND bucket_start_ms = ?
         ORDER BY event_id
@@ -408,7 +417,8 @@ def get_events_in_bucket(
 
 def get_total_event_count(db, recorded_by: str) -> int:
     """Get total number of events being synced."""
-    row = db.query_one("""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one("""
         SELECT COUNT(*) as cnt FROM negentropy_events
         WHERE recorded_by = ?
     """, (recorded_by,))
@@ -441,6 +451,8 @@ def init_sync_for_connection(
     Returns a root-level range request to start sync.
     Includes root_hash and total_events for progress tracking.
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get root hash
     root_hash = get_root_hash(db, recorded_by)
     total_events = get_total_event_count(db, recorded_by)
@@ -452,7 +464,7 @@ def init_sync_for_connection(
     range_id = generate_range_id()
 
     # Record sync state
-    db.execute("""
+    safedb.execute("""
         INSERT INTO negentropy_sync_state
         (recorded_by, connection_id, range_id, level, bucket_start_ms,
          our_hash, their_hash, status, created_at, updated_at)
@@ -482,6 +494,8 @@ def handle_range_request(
     Compares our hash with theirs and returns appropriate response.
     All responses include root_hash and total_events for progress tracking.
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     range_id = msg['range_id']
     level = msg['level']
     bucket_start_ms = msg['bucket_start_ms']
@@ -493,9 +507,10 @@ def handle_range_request(
 
     # Compute our hash for this bucket
     our_hash = recompute_bucket_hash(db, recorded_by, level, bucket_start_ms)
+    log.info(f"negentropy.handle_range_request: level={level} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'} match={our_hash == their_hash}")
 
     # Record the range
-    db.execute("""
+    safedb.execute("""
         INSERT INTO negentropy_sync_state
         (recorded_by, connection_id, range_id, level, bucket_start_ms,
          our_hash, their_hash, status, created_at, updated_at)
@@ -514,7 +529,7 @@ def handle_range_request(
 
     if our_hash == their_hash:
         # Hashes match - this range is synced!
-        db.execute("""
+        safedb.execute("""
             UPDATE negentropy_sync_state
             SET status = 'matched', updated_at = ?
             WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
@@ -528,14 +543,21 @@ def handle_range_request(
         })
 
     elif level == 'one_min' or LEVELS.index(level) >= LEVELS.index(STUB_THRESHOLD):
-        # At leaf level or stub threshold: send events
-        db.execute("""
+        # At leaf level or stub threshold: send event IDs AND blobs
+        safedb.execute("""
             UPDATE negentropy_sync_state
             SET status = 'events_sent', updated_at = ?
             WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
         """, (t_ms, recorded_by, connection_id, range_id))
 
         event_ids = get_events_in_bucket(db, recorded_by, bucket_start_ms)
+
+        # Send actual event blobs - they'll dedupe on their side
+        if event_ids:
+            sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+            log.info(f"negentropy: stub mode - sent {sent} event blobs at {level} level")
+
+        # Also send the event IDs so they know what we have (for bidirectional sync)
         responses.append({
             'type': 'range_events',
             'range_id': range_id,
@@ -551,7 +573,7 @@ def handle_range_request(
         child_level = get_child_level(level)
         child_hashes = get_hashes_at_level(db, recorded_by, child_level, bucket_start_ms, level)
 
-        db.execute("""
+        safedb.execute("""
             UPDATE negentropy_sync_state
             SET status = 'diverged', updated_at = ?
             WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
@@ -561,7 +583,7 @@ def handle_range_request(
         for child_start, child_hash in child_hashes.items():
             child_range_id = generate_range_id()
 
-            db.execute("""
+            safedb.execute("""
                 INSERT INTO negentropy_sync_state
                 (recorded_by, connection_id, range_id, level, bucket_start_ms,
                  our_hash, their_hash, status, created_at, updated_at)
@@ -590,8 +612,10 @@ def _log_checkpoint(
     t_ms: int
 ) -> None:
     """Log a sync checkpoint when root hashes match."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Get sync stats
-    stats = db.query_one("""
+    stats = safedb.query_one("""
         SELECT
             COUNT(CASE WHEN status = 'events_sent' THEN 1 END) as events_sent,
             COUNT(*) as ranges_checked
@@ -599,8 +623,8 @@ def _log_checkpoint(
         WHERE recorded_by = ? AND connection_id = ?
     """, (recorded_by, connection_id))
 
-    db.execute("""
-        INSERT INTO negentropy_checkpoints
+    safedb.execute("""
+        INSERT OR REPLACE INTO negentropy_checkpoints
         (recorded_by, connection_id, completed_at, root_hash,
          events_sent, events_received, ranges_checked)
         VALUES (?, ?, ?, ?, ?, 0, ?)
@@ -617,9 +641,10 @@ def handle_range_matched(
     t_ms: int
 ) -> list[dict]:
     """Handle confirmation that a range matches."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     range_id = msg['range_id']
 
-    db.execute("""
+    safedb.execute("""
         UPDATE negentropy_sync_state
         SET status = 'complete', updated_at = ?
         WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
@@ -634,6 +659,42 @@ def handle_range_matched(
     return []  # No response needed
 
 
+def _send_event_blobs(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    event_ids: list[str],
+    t_ms: int
+) -> int:
+    """Send actual event blobs over the connection.
+
+    Args:
+        db: Database connection
+        recorded_by: Local peer ID
+        connection_id: Connection to send on
+        event_ids: Event IDs to send blobs for
+        t_ms: Current timestamp
+
+    Returns:
+        Number of blobs sent
+    """
+    from events.network import connection as conn_module
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    sent = 0
+
+    for event_id in event_ids:
+        try:
+            event_blob = safedb.get_shareable_blob(event_id)
+            if conn_module.send(recorded_by, connection_id, event_blob, t_ms, db):
+                sent += 1
+                log.debug(f"negentropy: sent blob for {event_id[:20]}...")
+        except Exception as e:
+            log.warning(f"negentropy: failed to send blob for {event_id[:20]}...: {e}")
+
+    return sent
+
+
 def handle_range_events(
     db,
     recorded_by: str,
@@ -643,8 +704,10 @@ def handle_range_events(
 ) -> list[dict]:
     """Handle incoming events for a bucket.
 
-    Returns events we have that they might not.
+    Sends actual event blobs for events they need.
     """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     range_id = msg['range_id']
     bucket_start_ms = msg['bucket_start_ms']
     their_event_ids = set(msg['event_ids'])
@@ -662,36 +725,25 @@ def handle_range_events(
     our_event_ids = set(get_events_in_bucket(db, recorded_by, bucket_start_ms))
 
     # Events they have that we don't -> we need to request/store
-    # (The actual event blobs would come through the normal event channel)
     events_we_need = their_event_ids - our_event_ids
 
-    # Events we have that they don't -> send back
+    # Events we have that they don't -> send blobs
     events_they_need = our_event_ids - their_event_ids
 
     # Mark range complete
-    db.execute("""
+    safedb.execute("""
         UPDATE negentropy_sync_state
         SET status = 'complete', updated_at = ?
         WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
     """, (t_ms, recorded_by, connection_id, range_id))
 
-    responses = []
-
+    # Send actual event blobs they need
     if events_they_need:
-        responses.append({
-            'type': 'range_events',
-            'range_id': range_id,
-            'bucket_start_ms': bucket_start_ms,
-            'event_ids': list(events_they_need),
-            'final': True,  # This completes the exchange
-            'root_hash': root_hash.hex() if root_hash else '',
-            'total_events': total_events,
-        })
+        sent = _send_event_blobs(db, recorded_by, connection_id, list(events_they_need), t_ms)
+        log.info(f"negentropy: sent {sent} event blobs to connection {connection_id[:20]}...")
 
-    # Note: events_we_need would trigger event requests through normal channels
-    # The sync protocol just identifies WHAT to sync, not the actual event content
-
-    return responses
+    # No protocol response needed - we sent the blobs directly
+    return []
 
 
 def handle_sync_message(
@@ -721,41 +773,129 @@ def handle_sync_message(
 # Public API
 # ============================================================================
 
-def sync(
+def sync_connection(
     db,
     recorded_by: str,
-    connection,  # Must have .id and .send(event)
+    conn: 'Connection',
     t_ms: int
-) -> None:
-    """Start sync with a peer over a connection.
+) -> int:
+    """Start/continue negentropy sync over a connection.
 
     Sends root hash to initiate negotiation.
-    Call this when a connection is established.
 
-    Incoming negentropy events are handled by project().
+    Args:
+        db: Database connection
+        recorded_by: Local peer ID
+        conn: Connection object (must have their_connection_id set)
+        t_ms: Current timestamp
+
+    Returns:
+        Number of messages sent
     """
-    events = init_sync_for_connection(db, recorded_by, connection.id, t_ms)
-    for event in events:
-        connection.send(event)
+    from events.network import connection as conn_module
+
+    msgs = init_sync_for_connection(db, recorded_by, conn.connection_id, t_ms)
+    sent = 0
+    for msg in msgs:
+        # Wrap in negentropy envelope for ephemeral detection
+        # Include reply_connection_id so receiver knows which connection_id to use
+        envelope = {
+            'type': 'negentropy',
+            'connection_id': conn.connection_id,
+            'reply_connection_id': conn.their_connection_id,  # Receiver's connection_id
+            'data': msg,
+        }
+        blob = crypto.canonicalize_json(envelope)
+        if conn_module.send(recorded_by, conn.connection_id, blob, t_ms, db):
+            sent += 1
+    return sent
 
 
-def project(
+def handle_incoming(
     db,
     recorded_by: str,
-    event: dict,
-    t_ms: int,
-    get_connection,  # callable: connection_id -> connection
-) -> None:
-    """Project an incoming negentropy event.
+    connection_id: str,
+    envelope: dict,
+    t_ms: int
+) -> int:
+    """Handle incoming negentropy message and send responses.
 
-    Processes the event, updates sync state, and sends responses
-    on the connection the event arrived on.
+    Args:
+        db: Database connection
+        recorded_by: Local peer ID
+        connection_id: Our connection_id (from envelope['reply_connection_id'])
+        envelope: Parsed negentropy envelope (has 'type': 'negentropy' and 'data')
+        t_ms: Current timestamp
+
+    Returns:
+        Number of response messages sent
     """
-    connection_id = event['connection_id']
-    connection = get_connection(connection_id)
-    responses = handle_sync_message(db, recorded_by, connection_id, event, t_ms)
+    from events.network import connection as conn_module
+
+    # Unwrap the inner message
+    msg = envelope.get('data', envelope)
+    log.info(f"negentropy.handle_incoming: peer={recorded_by[:20]}... conn={connection_id[:20]}... msg_type={msg.get('type')}")
+
+    # Extract sender's connection_id for reply_connection_id in responses
+    sender_connection_id = envelope.get('connection_id')
+
+    responses = handle_sync_message(db, recorded_by, connection_id, msg, t_ms)
+    sent = 0
     for response in responses:
-        connection.send(response)
+        # Wrap response in envelope
+        # Include reply_connection_id so receiver knows which connection_id to use
+        response_envelope = {
+            'type': 'negentropy',
+            'connection_id': connection_id,
+            'reply_connection_id': sender_connection_id,  # Original sender's connection_id
+            'data': response,
+        }
+        blob = crypto.canonicalize_json(response_envelope)
+        if conn_module.send(recorded_by, connection_id, blob, t_ms, db):
+            sent += 1
+    return sent
+
+
+def sync_all_connections(t_ms: int, db: Any) -> dict:
+    """Sync all active connections for all local peers.
+
+    Called by NegentropySyncJob. Iterates all local peers and their
+    established connections, sending negentropy root hashes to initiate
+    or continue sync.
+
+    Returns:
+        Stats dict with counts
+    """
+    from db import create_unsafe_db
+    from events.network import connection as conn_module
+
+    unsafedb = create_unsafe_db(db)
+    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    total_connections = 0
+    total_messages = 0
+
+    for peer_row in local_peers:
+        peer_id = peer_row['peer_id']
+
+        # Get all active connections using connection module interface
+        connections = conn_module.get_connections(peer_id, t_ms, db)
+
+        for conn in connections:
+            # Only sync on established bidirectional connections
+            if not conn.can_send():
+                continue
+
+            # Skip bootstrap connections without peer identity
+            if not conn.peer_shared_id:
+                continue
+
+            total_connections += 1
+            sent = sync_connection(db, peer_id, conn, t_ms)
+            total_messages += sent
+
+    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} messages sent")
+    return {'connections': total_connections, 'messages_sent': total_messages}
 
 
 def get_sync_status(
@@ -767,7 +907,8 @@ def get_sync_status(
 
     Returns counts of ranges in each state.
     """
-    rows = db.query("""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    rows = safedb.query("""
         SELECT status, COUNT(*) as cnt FROM negentropy_sync_state
         WHERE recorded_by = ? AND connection_id = ?
         GROUP BY status

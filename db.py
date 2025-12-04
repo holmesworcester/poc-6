@@ -60,10 +60,10 @@ SUBJECTIVE_TABLES = {
     'message_reaction_deletions',  # Message reaction deletions (peer-scoped)
     'message_updates',             # Message updates/edits (peer-scoped)
     'connections',                 # Peer connections (peer-scoped, keyed by connection_id + recorded_by)
-    'connection_attempts',         # Pending handshakes waiting for ack (peer-scoped)
     'negentropy_buckets',          # Negentropy sync: bucket hashes (peer-scoped)
     'negentropy_events',           # Negentropy sync: event-to-bucket mapping (peer-scoped)
     'negentropy_sync_state',       # Negentropy sync: per-connection sync state (peer-scoped)
+    'negentropy_checkpoints',      # Negentropy sync: completion checkpoints (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

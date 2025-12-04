@@ -1,10 +1,10 @@
-"""Unit tests for sync connection removal functions."""
+"""Unit tests for connection removal functions."""
 import pytest
 import sqlite3
-from db import Database
+from db import Database, create_safe_db
 import schema
-from events.identity import user, peer, invite, peer_shared
-from events.network import sync, transit_prekey, transit_prekey_shared
+from events.identity import user, peer, invite
+from events.network import connection
 from tests.utils import tick_helper
 
 
@@ -47,7 +47,11 @@ def test_remove_connections_for_peer(fresh_db):
     db.commit()
 
     # Check that connections exist
-    connections_before = db.query_all("SELECT * FROM sync_connections")
+    safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    connections_before = safedb.query(
+        "SELECT * FROM connections WHERE recorded_by = ?",
+        (alice['peer_id'],)
+    )
     print(f"Connections before removal: {len(connections_before)}")
     assert len(connections_before) > 0, "Should have connections after sync"
 
@@ -55,25 +59,16 @@ def test_remove_connections_for_peer(fresh_db):
     bob_peer_shared_id = bob['peer_shared_id']
 
     # Remove connections for Bob
-    deleted_count = sync.remove_connections_for_peer(bob_peer_shared_id, alice['peer_id'], db)
+    deleted_count = connection.remove_connections_for_peer(bob_peer_shared_id, db)
     db.commit()
     print(f"Deleted {deleted_count} connections for Bob")
 
     # Check that Bob's connections are gone (from Alice's perspective)
-    # We need to verify that connections using Bob's transit keys are deleted
-    bob_transit_keys = db.query_all(
-        "SELECT transit_prekey_id FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ?",
+    remaining_connections = safedb.query(
+        "SELECT * FROM connections WHERE peer_shared_id = ? AND recorded_by = ?",
         (bob_peer_shared_id, alice['peer_id'])
     )
-    bob_key_ids = [r['transit_prekey_id'] for r in bob_transit_keys]
-
-    if bob_key_ids:
-        placeholders = ','.join(['?'] * len(bob_key_ids))
-        remaining_connections = db.query_all(
-            f"SELECT * FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-            bob_key_ids
-        )
-        assert len(remaining_connections) == 0, "Bob's connections should be deleted"
+    assert len(remaining_connections) == 0, "Bob's connections should be deleted"
 
 
 def test_remove_connections_for_user(fresh_db):
@@ -106,7 +101,11 @@ def test_remove_connections_for_user(fresh_db):
     db.commit()
 
     # Check that connections exist
-    connections_before = db.query_all("SELECT * FROM sync_connections")
+    safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    connections_before = safedb.query(
+        "SELECT * FROM connections WHERE recorded_by = ?",
+        (alice['peer_id'],)
+    )
     print(f"Connections before removal: {len(connections_before)}")
     assert len(connections_before) > 0, "Should have connections after sync"
 
@@ -114,36 +113,28 @@ def test_remove_connections_for_user(fresh_db):
     bob_user_id = bob['user_id']
 
     # Remove connections for Bob's user
-    deleted_count = sync.remove_connections_for_user(bob_user_id, alice['peer_id'], db)
+    deleted_count = connection.remove_connections_for_user(bob_user_id, db)
     db.commit()
     print(f"Deleted {deleted_count} connections for user")
 
     # Verify connections to Bob are gone
     # Find Bob's peer_shared_ids
-    bob_peers = db.query_all(
+    bob_peers = safedb.query(
         "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
         (bob_user_id, alice['peer_id'])
     )
 
     for peer_row in bob_peers:
         bob_peer_shared_id = peer_row['peer_shared_id']
-        bob_transit_keys = db.query_all(
-            "SELECT transit_prekey_id FROM transit_prekeys_shared WHERE peer_id = ? AND recorded_by = ?",
+        remaining_connections = safedb.query(
+            "SELECT * FROM connections WHERE peer_shared_id = ? AND recorded_by = ?",
             (bob_peer_shared_id, alice['peer_id'])
         )
-        bob_key_ids = [r['transit_prekey_id'] for r in bob_transit_keys]
-
-        if bob_key_ids:
-            placeholders = ','.join(['?'] * len(bob_key_ids))
-            remaining_connections = db.query_all(
-                f"SELECT * FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-                bob_key_ids
-            )
-            assert len(remaining_connections) == 0, f"Connections to Bob's peer {bob_peer_shared_id[:20]}... should be deleted"
+        assert len(remaining_connections) == 0, f"Connections to Bob's peer {bob_peer_shared_id[:20]}... should be deleted"
 
 
 def test_remove_connections_no_transit_keys(fresh_db):
-    """Test removing connections when peer has no transit keys."""
+    """Test removing connections when peer has no connections."""
     db = fresh_db
 
     # Create Alice
@@ -151,12 +142,12 @@ def test_remove_connections_no_transit_keys(fresh_db):
     db.commit()
 
     # Try to remove connections for a non-existent peer
-    deleted_count = sync.remove_connections_for_peer("nonexistent_peer_id", alice['peer_id'], db)
-    assert deleted_count == 0, "Should return 0 when no transit keys found"
+    deleted_count = connection.remove_connections_for_peer("nonexistent_peer_id", db)
+    assert deleted_count == 0, "Should return 0 when no connections found"
 
     # Try to remove connections for a non-existent user
-    deleted_count = sync.remove_connections_for_user("nonexistent_user_id", alice['peer_id'], db)
-    assert deleted_count == 0, "Should return 0 when no transit keys found"
+    deleted_count = connection.remove_connections_for_user("nonexistent_user_id", db)
+    assert deleted_count == 0, "Should return 0 when no connections found"
 
 
 def test_user_removal_deletes_connections(fresh_db):
@@ -196,30 +187,20 @@ def test_user_removal_deletes_connections(fresh_db):
     db.commit()
 
     # Check connections before removal
-    connections_before = db.query_all("SELECT * FROM sync_connections")
+    safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    connections_before = safedb.query(
+        "SELECT * FROM connections WHERE recorded_by = ?",
+        (alice['peer_id'],)
+    )
     print(f"Connections before removal: {len(connections_before)}")
     assert len(connections_before) > 0, "Should have connections after sync"
 
-    # Find Bob's transit key IDs (to verify deletion later)
-    bob_transit_keys = db.query_all(
-        """SELECT tps.transit_prekey_id
-           FROM transit_prekeys_shared tps
-           JOIN peers_shared ps ON tps.peer_id = ps.peer_shared_id
-                               AND tps.recorded_by = ps.recorded_by
-           WHERE ps.user_id = ? AND ps.recorded_by = ?""",
-        (bob['user_id'], alice['peer_id'])
-    )
-    bob_key_ids = [r['transit_prekey_id'] for r in bob_transit_keys]
-    print(f"Bob has {len(bob_key_ids)} transit key(s)")
-
     # Count connections to Bob before removal
-    if bob_key_ids:
-        placeholders = ','.join(['?'] * len(bob_key_ids))
-        bob_connections_before = db.query_all(
-            f"SELECT * FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-            bob_key_ids
-        )
-        print(f"Connections to Bob before removal: {len(bob_connections_before)}")
+    bob_connections_before = safedb.query(
+        "SELECT * FROM connections WHERE peer_shared_id = ? AND recorded_by = ?",
+        (bob['peer_shared_id'], alice['peer_id'])
+    )
+    print(f"Connections to Bob before removal: {len(bob_connections_before)}")
 
     # Remove Bob
     print("\n=== Alice removes Bob ===")
@@ -234,16 +215,15 @@ def test_user_removal_deletes_connections(fresh_db):
     print("Bob removed")
 
     # Verify connections to Bob are deleted
-    if bob_key_ids:
-        bob_connections_after = db.query_all(
-            f"SELECT * FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-            bob_key_ids
-        )
-        print(f"Connections to Bob after removal: {len(bob_connections_after)}")
-        assert len(bob_connections_after) == 0, "Connections to removed user should be deleted"
+    bob_connections_after = safedb.query(
+        "SELECT * FROM connections WHERE peer_shared_id = ? AND recorded_by = ?",
+        (bob['peer_shared_id'], alice['peer_id'])
+    )
+    print(f"Connections to Bob after removal: {len(bob_connections_after)}")
+    assert len(bob_connections_after) == 0, "Connections to removed user should be deleted"
 
     # Verify Bob is in removed_users table
-    removed_users = db.query_all(
+    removed_users = safedb.query(
         "SELECT * FROM removed_users WHERE user_id = ? AND recorded_by = ?",
         (bob['user_id'], alice['peer_id'])
     )
