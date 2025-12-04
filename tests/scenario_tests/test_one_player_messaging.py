@@ -61,10 +61,10 @@ def test_alice_sends_to_herself(fresh_db):
         db=db
     )
 
-    # Verify both messages appear in latest
+    # Verify both messages appear in latest (chronological order - oldest first)
     assert len(result2['latest']) == 2
-    assert result2['latest'][0]['content'] == 'World'  # Most recent first
-    assert result2['latest'][1]['content'] == 'Hello'
+    assert result2['latest'][0]['content'] == 'Hello'  # Oldest first
+    assert result2['latest'][1]['content'] == 'World'
 
     # Create a second channel for realism
     random_channel_id = channel.create(
@@ -90,11 +90,11 @@ def test_alice_sends_to_herself(fresh_db):
     assert len(result3['latest']) == 1
     assert result3['latest'][0]['content'] == 'Random thoughts'
 
-    # Query messages from general channel
+    # Query messages from general channel (chronological order - oldest first)
     general_messages = message.list(alice['channel_id'], alice['peer_id'], db)
     assert len(general_messages) == 2
-    assert general_messages[0]['content'] == 'World'
-    assert general_messages[1]['content'] == 'Hello'
+    assert general_messages[0]['content'] == 'Hello'  # Oldest first
+    assert general_messages[1]['content'] == 'World'
     assert all(m['channel_id'] == alice['channel_id'] for m in general_messages)
 
     # Query messages from random channel

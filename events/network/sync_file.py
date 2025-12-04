@@ -405,16 +405,35 @@ def send_request(file_id: str, to_peer: str, from_peer_id: str, t_ms: int, db: A
     }
 
     # Sign with our private key
+    from events.identity import peer
     private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Canonicalize
     canonical = crypto.canonicalize_json(signed_event)
 
-    # Store as plain event (not wrapped, sync_file is ephemeral)
-    sync_file_event_id = store.event(canonical, from_peer_id, t_ms, db)
+    # Get target peer's transit prekey for wrapping
+    from events.network import transit_prekey
+    import queues
 
-    log.info(f"sync_file.send_request() created sync_file event {sync_file_event_id[:20]}...")
+    target_prekey = transit_prekey.get_prekey_for_peer(to_peer, from_peer_id, t_ms, db)
+    if not target_prekey:
+        log.warning(f"sync_file.send_request() no transit prekey for target {to_peer[:20]}...")
+        return
+
+    # Wrap with target's transit prekey
+    target_prekey_dict = {
+        'id': target_prekey['prekey_id'],
+        'key': target_prekey['public_key'],
+        'type': 'transit'
+    }
+    wrapped = crypto.wrap(canonical, target_prekey_dict, db)
+
+    # Queue for delivery
+    unsafedb = create_unsafe_db(db)
+    queues.incoming.add(wrapped, t_ms, unsafedb)
+
+    log.info(f"sync_file.send_request() sent sync_file request to {to_peer[:20]}...")
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_file_data: dict[str, Any] | None = None) -> None:

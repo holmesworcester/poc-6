@@ -40,7 +40,7 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
-           skip_admin_check: bool = False, admin_grant: str | None = None) -> str:
+           admin_grant: str | None = None) -> str:
     """Create a group_member event to add a user to a group.
 
     Only admins can add new members to groups.
@@ -53,7 +53,6 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
-        skip_admin_check: If True, skip admin authorization check (for internal use only)
         admin_grant: Optional admin_id that grants authority to add members.
                     If provided, used directly. If None, looked up from admins table.
 
@@ -73,8 +72,8 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     if not group:
         raise ValueError(f"Group {group_id} not found")
 
-    # Check authorization using shared validate() function
-    if not skip_admin_check and not validate(group_id, peer_shared_id, peer_id, db):
+    # Check authorization - caller must be admin to add members
+    if not validate(group_id, peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id} (only admins can add members)")
 
     # Get admin_grant for the adding user (explicit dependency for convergence)

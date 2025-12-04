@@ -51,6 +51,9 @@ import sys
 import argparse
 import logging
 import shlex
+import readline
+import atexit
+import os
 from typing import Optional, Dict, List, Any
 
 # Configure logging BEFORE importing any modules that use logging
@@ -86,10 +89,163 @@ import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed, peer_shared
-from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update
+from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update, message_attachment
+from events.network import sync_file
 import purge_expired
 from events.group import group_member, group_key, group_prekey, group
+import os
 import network_config
+from events.network import connection
+
+
+# ============================================================================
+# READLINE / TAB COMPLETION
+# ============================================================================
+
+# All available commands for tab completion
+COMMANDS = [
+    'new-network', 'switch', 'send', 'tick', 'sync', 'auto-tick',
+    'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
+    'status', 'accounts', 'channels', 'users', 'messages', 'keys',
+    'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
+    'time', 'log', 'disappear', 'fast-forward', 'help', 'quit', 'exit'
+]
+
+# Command argument hints for context-aware completion
+COMMAND_ARGS = {
+    'new-network': ['--name', '--username', '--devicename'],
+    'accept-invite': ['--username', '--devicename', '--invite'],
+    'accept-link': ['--devicename', '--invite'],
+    'sync': ['--ticks'],
+    'disappear': ['--days', '--time', '--off'],
+    'fast-forward': ['--days'],
+    'keys': ['--summary'],
+}
+
+
+class CLICompleter:
+    """Tab completer for CLI commands."""
+
+    def __init__(self, session: 'CLISession' = None):
+        self.session = session
+        self.matches = []
+
+    def complete(self, text: str, state: int) -> str | None:
+        """Return the next possible completion for 'text'.
+
+        Called by readline with state=0, 1, 2, ... until it returns None.
+        """
+        if state == 0:
+            # First call - compute all matches
+            line = readline.get_line_buffer()
+            begin = readline.get_begidx()
+
+            if begin == 0:
+                # Completing the command itself
+                self.matches = [cmd for cmd in COMMANDS if cmd.startswith(text)]
+            else:
+                # Completing an argument
+                parts = line[:begin].split()
+                if parts:
+                    cmd = parts[0]
+                    self.matches = self._complete_args(cmd, text, parts)
+                else:
+                    self.matches = []
+
+        if state < len(self.matches):
+            return self.matches[state]
+        return None
+
+    def _complete_args(self, cmd: str, text: str, parts: list) -> list:
+        """Complete arguments for a given command."""
+        matches = []
+
+        # Complete --flags
+        if text.startswith('-') or text == '':
+            if cmd in COMMAND_ARGS:
+                flags = COMMAND_ARGS[cmd]
+                matches.extend(f for f in flags if f.startswith(text))
+
+        # Context-aware completions
+        if self.session:
+            last_flag = parts[-1] if len(parts) > 1 else ''
+
+            # Complete account numbers for 'switch'
+            if cmd == 'switch' and not text.startswith('-'):
+                account_nums = [str(i) for i in range(1, len(self.session.accounts) + 1)]
+                matches.extend(n for n in account_nums if n.startswith(text))
+
+            # Complete channel numbers for 'channel'
+            if cmd == 'channel' and not text.startswith('-'):
+                if self.session.selected_account:
+                    account = self.session.accounts[self.session.selected_account]
+                    channels = channel.list_channels(recorded_by=account.peer_id, db=self.session.db)
+                    channel_nums = [str(i) for i in range(1, len(channels) + 1)]
+                    matches.extend(n for n in channel_nums if n.startswith(text))
+
+            # Complete invite numbers for --invite
+            if last_flag == '--invite':
+                invite_nums = [str(i) for i in range(1, len(self.session.invites) + 1)]
+                matches.extend(n for n in invite_nums if n.startswith(text))
+
+            # Complete message numbers for delete/edit/react/unreact/reactions
+            if cmd in ('delete', 'edit', 'react', 'unreact', 'reactions') and not text.startswith('-'):
+                if self.session.selected_account and self.session.selected_channel_id:
+                    account = self.session.accounts[self.session.selected_account]
+                    messages_list = message.list(self.session.selected_channel_id, account.peer_id, self.session.db)
+                    msg_nums = [str(i) for i in range(1, len(messages_list) + 1)]
+                    matches.extend(n for n in msg_nums if n.startswith(text))
+
+            # Complete user numbers for 'ban'
+            if cmd == 'ban' and not text.startswith('-'):
+                if self.session.selected_account:
+                    account = self.session.accounts[self.session.selected_account]
+                    network_id = account.network_id
+                    if network_id:
+                        all_users_group_id = network.get_all_users_group_id(network_id, account.peer_id, self.session.db)
+                        members = group_member.list_members(all_users_group_id, account.peer_id, self.session.db)
+                        user_nums = [str(i) for i in range(1, len(members) + 1)]
+                        matches.extend(n for n in user_nums if n.startswith(text))
+
+        return matches
+
+
+def setup_readline(session: 'CLISession' = None, history_file: str = None):
+    """Configure readline for command history and tab completion."""
+    # Set up tab completion
+    completer = CLICompleter(session)
+    readline.set_completer(completer.complete)
+
+    # Remove hyphen from word delimiters so commands like "new-network" complete fully
+    # Default delimiters include: " \t\n`~!@#$%^&*()-=+[{]}\\|;:'\",<>./?"
+    delims = readline.get_completer_delims()
+    readline.set_completer_delims(delims.replace('-', ''))
+
+    # Use tab for completion (works on most systems)
+    # Different binding syntax for different readline implementations
+    if readline.__doc__ and 'libedit' in readline.__doc__:
+        # macOS uses libedit
+        readline.parse_and_bind('bind ^I rl_complete')
+    else:
+        # GNU readline (Linux)
+        readline.parse_and_bind('tab: complete')
+
+    # Set up history file
+    if history_file is None:
+        history_file = os.path.expanduser('~/.poc6_cli_history')
+
+    try:
+        readline.read_history_file(history_file)
+    except FileNotFoundError:
+        pass
+
+    # Set history length
+    readline.set_history_length(1000)
+
+    # Save history on exit
+    atexit.register(readline.write_history_file, history_file)
+
+    return completer
 
 
 class EventLog:
@@ -248,6 +404,25 @@ def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
     if hours > 0:
         return f"(expires in: {hours}h {minutes}m)"
     return f"(expires in: {minutes}m)"
+
+
+def _format_size_short(num_bytes: int) -> str:
+    """Format bytes as short size: 200KB, 1.0GB"""
+    if num_bytes < 1024:
+        return f"{num_bytes}B"
+    elif num_bytes < 1024 * 1024:
+        return f"{num_bytes // 1024}KB"
+    elif num_bytes < 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.1f}MB"
+    else:
+        return f"{num_bytes / (1024 * 1024 * 1024):.1f}GB"
+
+
+def _format_progress_bar(percentage: int, width: int = 10) -> str:
+    """Format a progress bar: [████░░░░░░]"""
+    filled = int(width * percentage / 100)
+    empty = width - filled
+    return f"[{'█' * filled}{'░' * empty}]"
 
 
 # ============================================================================
@@ -423,6 +598,39 @@ def display_main(session: CLISession):
 
         print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}{expires_indicator}")
 
+        # Display attachments if any
+        attachments = msg.get('attachments', [])
+        for attachment in attachments:
+            file_id = attachment.get('file_id')
+            mime_type = attachment.get('mime_type', '')
+            blob_bytes = attachment.get('blob_bytes', 0)
+
+            # Get download progress
+            progress = message_attachment.get_file_download_progress(file_id, account.peer_id, session.db)
+
+            # Determine type indicator
+            if mime_type and mime_type.startswith('image/'):
+                type_ind = 'img'
+            else:
+                type_ind = 'bin'
+
+            # Format size
+            size_str = _format_size_short(blob_bytes)
+
+            # Format progress
+            if progress:
+                pct = progress.get('percentage_complete', 0)
+                if progress.get('is_complete'):
+                    print(f"     [{type_ind} {size_str} 100%]")
+                else:
+                    speed = progress.get('speed_human', '')
+                    eta = progress.get('eta_seconds')
+                    eta_str = f" ETA {eta}s" if eta is not None else ""
+                    speed_str = f" {speed}" if speed and speed != "0 B/s" else ""
+                    print(f"     [{type_ind} {size_str} {pct}%{speed_str}{eta_str}]")
+            else:
+                print(f"     [{type_ind} {size_str} ???]")
+
         # Display reactions if any
         reactions = msg.get('reactions', [])
         if reactions:
@@ -531,6 +739,102 @@ def cmd_send(session: CLISession, msg: str):
 
     print("✓ sent message")
     session.event_log.display()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_send_with_image(session: CLISession, msg: str):
+    """Send a message with a 200KB image-sized attachment."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Create message first
+    result = message.create(
+        peer_id=account.peer_id,
+        channel_id=session.selected_channel_id,
+        content=msg if msg else "Check out this image!",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+    message_id = result['id']
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Generate 200KB of random data
+    file_size = 200 * 1024  # 200KB
+    print(f"⟳ generating {_format_size_short(file_size)} random data...")
+    file_data = os.urandom(file_size)
+
+    # Attach to message
+    print(f"⟳ creating file attachment...")
+    file_result = message_attachment.create(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        file_data=file_data,
+        filename=f"demo-image-{session.current_time_ms}.png",
+        mime_type="image/png",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    slice_count = file_result['slice_count']
+    print(f"✓ sent message with {_format_size_short(file_size)} image ({slice_count} slices)")
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_send_with_gb(session: CLISession):
+    """Send a message with a 1GB file attachment."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Create message first
+    result = message.create(
+        peer_id=account.peer_id,
+        channel_id=session.selected_channel_id,
+        content="Sending a large file...",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+    message_id = result['id']
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Generate 1GB of random data
+    file_size = 1024 * 1024 * 1024  # 1GB
+    print(f"⟳ generating {_format_size_short(file_size)} random data (this may take a moment)...")
+    file_data = os.urandom(file_size)
+
+    # Attach to message
+    print(f"⟳ creating file attachment ({file_size // 450:,} slices)...")
+    file_result = message_attachment.create(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        file_data=file_data,
+        filename=f"demo-large-{session.current_time_ms}.bin",
+        mime_type="application/octet-stream",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    slice_count = file_result['slice_count']
+    print(f"✓ sent message with {_format_size_short(file_size)} file ({slice_count:,} slices)")
 
     session.run_auto_tick()
     display_state(session)
@@ -1001,6 +1305,139 @@ def cmd_list_messages(session: CLISession):
         print(f"  {i}. {author_name}: {content}")
 
 
+def cmd_files(session: CLISession):
+    """List all file attachments with download progress."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+
+    # Query all attachments visible to this peer
+    from db import create_safe_db
+    safedb = create_safe_db(session.db, recorded_by=account.peer_id)
+
+    attachments = safedb.query_all(
+        """SELECT ma.file_id, ma.filename, ma.mime_type, ma.blob_bytes, ma.total_slices,
+                  m.content as message_content
+           FROM message_attachments ma
+           JOIN messages m ON ma.message_id = m.message_id AND m.recorded_by = ma.recorded_by
+           WHERE ma.recorded_by = ?
+           ORDER BY ma.recorded_at DESC""",
+        (account.peer_id,)
+    )
+
+    if not attachments:
+        print("FILES: (no files)")
+        return
+
+    # Separate in-progress from complete
+    in_progress = []
+    complete = []
+
+    # Store file list in session for pause/resume commands
+    session.file_list = []
+
+    for att in attachments:
+        file_id = att['file_id']
+        progress = message_attachment.get_file_download_progress(file_id, account.peer_id, session.db)
+
+        file_info = {
+            'file_id': file_id,
+            'filename': att['filename'] or 'untitled',
+            'mime_type': att['mime_type'] or '',
+            'blob_bytes': att['blob_bytes'],
+            'total_slices': att['total_slices'],
+            'progress': progress,
+            'message_preview': (att['message_content'] or '')[:30]
+        }
+        session.file_list.append(file_info)
+
+        if progress and progress.get('is_complete'):
+            complete.append(file_info)
+        else:
+            in_progress.append(file_info)
+
+    print("FILES:")
+
+    if in_progress:
+        print("  In Progress:")
+        for i, f in enumerate(in_progress, 1):
+            prog = f['progress']
+            pct = prog.get('percentage_complete', 0) if prog else 0
+            bar = _format_progress_bar(pct)
+            speed = prog.get('speed_human', '') if prog else ''
+            eta = prog.get('eta_seconds') if prog else None
+
+            speed_str = f" | {speed}" if speed and speed != "0 B/s" else ""
+            eta_str = f" | ETA {eta}s" if eta is not None else ""
+
+            filename = f['filename'][:20]
+            size_str = _format_size_short(f['blob_bytes'])
+            print(f"    {i}. ↓ {filename:20} {bar} {pct:3d}%{speed_str}{eta_str}")
+
+    if complete:
+        print("  Complete:")
+        start_num = len(in_progress) + 1
+        for i, f in enumerate(complete, start_num):
+            filename = f['filename'][:20]
+            size_str = _format_size_short(f['blob_bytes'])
+            print(f"    {i}. ✓ {filename:20} {size_str}")
+
+    print()
+    print(f"  Total: {len(in_progress)} in progress, {len(complete)} complete")
+
+
+def cmd_pause_file(session: CLISession, file_num: int):
+    """Pause a file download."""
+    account = session.get_selected_account()
+
+    if not hasattr(session, 'file_list') or not session.file_list:
+        print("✗ run 'files' first to see file list")
+        return
+
+    if not (1 <= file_num <= len(session.file_list)):
+        print(f"✗ file #{file_num} not found (must be 1-{len(session.file_list)})")
+        return
+
+    file_info = session.file_list[file_num - 1]
+    file_id = file_info['file_id']
+
+    sync_file.pause_file_sync(
+        file_id=file_id,
+        peer_id=account.peer_id,
+        db=session.db
+    )
+
+    session.db.commit()
+    print(f"✓ paused download: {file_info['filename']}")
+
+
+def cmd_resume_file(session: CLISession, file_num: int):
+    """Resume a paused file download."""
+    account = session.get_selected_account()
+
+    if not hasattr(session, 'file_list') or not session.file_list:
+        print("✗ run 'files' first to see file list")
+        return
+
+    if not (1 <= file_num <= len(session.file_list)):
+        print(f"✗ file #{file_num} not found (must be 1-{len(session.file_list)})")
+        return
+
+    file_info = session.file_list[file_num - 1]
+    file_id = file_info['file_id']
+
+    sync_file.resume_file_sync(
+        file_id=file_id,
+        peer_id=account.peer_id,
+        db=session.db
+    )
+
+    session.db.commit()
+    print(f"✓ resumed download: {file_info['filename']}")
+
+
 def cmd_time(session: CLISession):
     """Show current simulation time."""
     print(f"{session.current_time_ms}ms")
@@ -1275,6 +1712,100 @@ def cmd_purge_keys(session: CLISession):
 
     session.run_auto_tick()
     display_state(session)
+
+
+def cmd_connections(session: CLISession, verbose: bool = False):
+    """Display connections for the selected account."""
+    account = session.get_selected_account()
+
+    data = connection.list_all_for_display(account.peer_id, session.current_time_ms, session.db)
+
+    active = data['active']
+    pending = data['pending']
+    bootstrap = data['bootstrap']
+
+    total = len(active) + len(pending) + len(bootstrap)
+
+    print(f"CONNECTIONS for {account.user_name} ({account.peer_shared_id[:8]}...)")
+    print("─" * 72)
+    print()
+
+    idx = 1
+
+    # Active connections
+    if active:
+        print(f"ACTIVE ({len(active)})")
+        for conn in active:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            if verbose:
+                print(f"  #{idx} ACTIVE: {conn.short_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                print(f"       their_connection_id: {conn.their_connection_id[:20] if conn.their_connection_id else 'NULL'}...")
+                if conn.peer_shared_id:
+                    print(f"       peer_shared_id:      {conn.peer_shared_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       last_handshake:      {time_ago}")
+                print(f"       last_traffic:        ?  (not yet implemented)")
+                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print()
+            else:
+                label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
+                print(f"  {idx}. {label}...    conn: {conn.short_connection_id}    handshake {time_ago}")
+            idx += 1
+        print()
+
+    # Pending connections
+    if pending:
+        print(f"PENDING ({len(pending)})")
+        for conn in pending:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            if verbose:
+                print(f"  #{idx} PENDING: {conn.short_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                if conn.peer_shared_id:
+                    print(f"       to_peer_shared_id:   {conn.peer_shared_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       created:             {time_ago}")
+                print(f"       status:              awaiting ack")
+                print()
+            else:
+                label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
+                print(f"  {idx}. → {label}...    conn: {conn.short_connection_id}    sent {time_ago}")
+            idx += 1
+        print()
+
+    # Bootstrap connections
+    if bootstrap:
+        print(f"BOOTSTRAP ({len(bootstrap)})")
+        for conn in bootstrap:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            # For bootstrap, show [inviter] or [invitee] based on context
+            # If peer_shared_id is unknown, show the role
+            if conn.peer_shared_id:
+                role_label = conn.peer_shared_id[:8] + "..."
+            else:
+                role_label = "[inviter] (unknown)"
+
+            if verbose:
+                print(f"  #{idx} BOOTSTRAP: {role_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                if conn.their_connection_id:
+                    print(f"       their_connection_id: {conn.their_connection_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       last_handshake:      {time_ago}")
+                print(f"       last_traffic:        ?  (not yet implemented)")
+                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print()
+            else:
+                print(f"  {idx}. {role_label:24}    conn: {conn.short_connection_id}    handshake {time_ago}")
+            idx += 1
+        print()
+
+    print("─" * 72)
+    print(f"{len(active)} active, {len(pending)} pending, {len(bootstrap)} bootstrap")
 
 
 def cmd_remove_user(session: CLISession, user_num: int):
@@ -1663,6 +2194,34 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 msg = " ".join(parts[1:]).strip('"')
                 cmd_send(session, msg)
 
+        elif cmd == "send-with-image":
+            msg = " ".join(parts[1:]).strip('"') if len(parts) > 1 else ""
+            cmd_send_with_image(session, msg)
+
+        elif cmd == "send-with-gb":
+            cmd_send_with_gb(session)
+
+        elif cmd == "files":
+            cmd_files(session)
+
+        elif cmd == "pause":
+            if len(parts) < 2:
+                print("usage: pause <file_num>")
+            else:
+                try:
+                    cmd_pause_file(session, int(parts[1]))
+                except ValueError:
+                    print("error: file number must be an integer")
+
+        elif cmd == "resume":
+            if len(parts) < 2:
+                print("usage: resume <file_num>")
+            else:
+                try:
+                    cmd_resume_file(session, int(parts[1]))
+                except ValueError:
+                    print("error: file number must be an integer")
+
         elif cmd == "tick":
             if len(parts) < 2:
                 print("usage: tick <n>")
@@ -1751,6 +2310,10 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "keys":
             summary = "--summary" in parts
             cmd_keys(session, summary=summary)
+
+        elif cmd == "connections":
+            verbose = "-v" in parts or "--verbose" in parts
+            cmd_connections(session, verbose=verbose)
 
         elif cmd == "delete":
             if len(parts) < 2:
@@ -1931,6 +2494,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Messaging:")
             print("    send <message>")
+            print("    send-with-image [message]      Send message with 200KB demo image")
+            print("    send-with-gb                   Send message with 1GB demo file")
             print("    messages")
             print("    delete <n>")
             print("    edit <n> <new_content>")
@@ -1939,8 +2504,16 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    reactions <n>")
             print("    disappear --days <n> | --time <ms> | --off")
             print()
+            print("  Files:")
+            print("    files                          List all files with download progress")
+            print("    pause <n>                      Pause file download")
+            print("    resume <n>                     Resume file download")
+            print()
             print("  Admin:")
             print("    ban <n>")
+            print()
+            print("  Network/connections:")
+            print("    connections [-v]               Show all connections (active/pending/bootstrap)")
             print()
             print("  Keys/sync:")
             print("    keys [--summary]")
@@ -1995,8 +2568,12 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
 def run_interactive(session: CLISession):
     """Run interactive REPL mode."""
+    # Set up readline for history and tab completion
+    completer = setup_readline(session)
+
     print("welcome to poc-6 cli (interactive mode)")
     print("type 'help' for commands, 'quit' to exit")
+    print("use TAB for completion, UP/DOWN for history")
     print()
 
     display_state(session)

@@ -53,45 +53,50 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 
 ---
 
-## 4. Hardcoded Timestamp Offsets
+## 4. Hardcoded Timestamp Offsets ✅ FIXED
 
 **Pattern**: Using `t_ms + N` to force event ordering instead of relying on dependency resolution.
 
-| Location | Offsets Used |
-|----------|--------------|
-| `user.py:287-500` | `+10, +20, +30, +40, +50, +60, +61, +70, +80, +81, +82, +83, +90, +100, +101` |
-| `peer_shared.py:384-443` | `+1, +2, +3, +4, +5` |
-| `invite.py:213-372` | `+1, +2, +3, +4, +5` |
+| Location | Offsets Used | Status |
+|----------|--------------|--------|
+| ~~`user.py:287-500`~~ | ~~`+10, +20, +30, +40, +50, +60, +61, +70, +80, +81, +82, +83, +90, +100, +101`~~ | ✅ Removed |
+| ~~`peer_shared.py:384-443`~~ | ~~`+1, +2, +3, +4, +5`~~ | ✅ Removed |
+| ~~`invite.py:213-372`~~ | ~~`+1, +2, +3, +4, +5`~~ | ✅ Removed |
+| ~~`group_member.py`~~ | ~~`+1, +2`~~ | ✅ Removed |
+| ~~`group_key.py`~~ | ~~`+1`~~ | ✅ Removed |
+| ~~`channel.py`~~ | ~~`+10, loop increments`~~ | ✅ Removed |
+| ~~`peer_removed.py`~~ | ~~`+1000, +100`~~ | ✅ Removed |
+| ~~`user_removed.py`~~ | ~~`+1000, +100`~~ | ✅ Removed |
 
-**Problem**: Fragile ordering assumptions, doesn't scale, hides implicit dependencies.
+**Resolution**: All timestamp offsets removed. DAG-based `check_deps()` handles event ordering through explicit dependencies (signed_by, invite_id, group_id, etc.).
 
 ---
 
-## 5. Direct project_ids() Calls
+## 5. Direct project_ids() Calls ✅ FIXED
 
 **Pattern**: Forcing immediate projection instead of letting the cascade happen naturally.
 
-| Location | Notes |
-|----------|-------|
-| `user.py:409` | `recorded.project_ids([recorded_id], db)` for admin_grant |
-| `user.py:441` | `recorded.project_ids([recorded_id], db)` for username_update |
-| `user.py:460` | `recorded.project_ids([recorded_id], db)` for network_name_update |
+| Location | Notes | Status |
+|----------|-------|--------|
+| ~~`user.py:409`~~ | ~~`recorded.project_ids([recorded_id], db)` for admin_grant~~ | ✅ Removed |
+| ~~`user.py:441`~~ | ~~`recorded.project_ids([recorded_id], db)` for username_update~~ | ✅ Removed |
+| ~~`user.py:460`~~ | ~~`recorded.project_ids([recorded_id], db)` for network_name_update~~ | ✅ Removed |
 
-**Problem**: Bypasses natural event cascade, tightly couples code.
+**Resolution**: These calls were redundant. `store.event()` already calls `recorded.project()` which projects events when deps are satisfied. The bootstrap flow creates events in dependency order (network → invite → user → admin), so all deps are valid when each event is created.
 
 ---
 
-## 6. skip_admin_check Bypass
+## 6. skip_admin_check Bypass ✅ FIXED
 
 **Pattern**: Boolean flag to skip authorization checks.
 
-| Location | Notes |
-|----------|-------|
-| `user.py:506` | `skip_admin_check=True` - "Bootstrap: first user adds themselves" |
-| `group_member.py:43,56,77` | `skip_admin_check` parameter definition and usage |
-| `invite.py:430,438` | `skip_admin_check` for invite projections |
+| Location | Notes | Status |
+|----------|-------|--------|
+| ~~`user.py:506`~~ | ~~`skip_admin_check=True` - "Bootstrap: first user adds themselves"~~ | ✅ Removed |
+| ~~`group_member.py:43,56,77`~~ | ~~`skip_admin_check` parameter definition and usage~~ | ✅ Parameter removed |
+| ~~`invite.py:430,438`~~ | ~~`skip_admin_check` for invite projections~~ | ✅ Dead parameter removed |
 
-**Problem**: Security bypass that could be misused; should be modeled differently.
+**Resolution**: The skip was unnecessary. At bootstrap time, admin_grant is already projected before group_member.create() is called, so is_admin() returns True. Admin validation now always runs.
 
 ---
 
@@ -211,20 +216,20 @@ SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared'}
 
 ---
 
-## 16. Timestamp Spacing for Key Rotation
+## 16. Timestamp Spacing for Key Rotation ✅ FIXED
 
 **Pattern**: Using large timestamp offsets (+1000) to "space out" key operations.
 
-| Location | Code |
-|----------|------|
-| `peer_removed.py:188` | `share_timestamp = t_ms + 1000  # Space out key creation from removal events` |
-| `peer_removed.py:201` | `share_timestamp += 100  # Space out timestamps for multiple groups` |
-| `user_removed.py:241` | `share_timestamp = t_ms + 1000  # Space out key creation from removal events` |
-| `user_removed.py:254` | `share_timestamp += 100  # Space out timestamps for multiple groups` |
-| `peer_shared.py:229` | `key_share_ts = recorded_at + 1000  # Space out timestamps` |
-| `channel.py:146` | `member_timestamp = t_ms + 10  # Space out timestamps to avoid collisions` |
+| Location | Code | Status |
+|----------|------|--------|
+| ~~`peer_removed.py:188`~~ | ~~`share_timestamp = t_ms + 1000`~~ | ✅ Removed |
+| ~~`peer_removed.py:201`~~ | ~~`share_timestamp += 100`~~ | ✅ Removed |
+| ~~`user_removed.py:241`~~ | ~~`share_timestamp = t_ms + 1000`~~ | ✅ Removed |
+| ~~`user_removed.py:254`~~ | ~~`share_timestamp += 100`~~ | ✅ Removed |
+| ~~`peer_shared.py:229`~~ | ~~`key_share_ts = recorded_at + 1000`~~ | ✅ Removed |
+| ~~`channel.py:146`~~ | ~~`member_timestamp = t_ms + 10`~~ | ✅ Removed |
 
-**Problem**: Arbitrary spacing hides real ordering requirements.
+**Resolution**: All timestamp spacing removed. See Section 4.
 
 ---
 
@@ -362,8 +367,8 @@ if not authenticated: ...
 
 1. **PENDING cleanup** - Most pervasive; pollutes entire codebase
 2. **Implicit dependency audit** - Ensure `check_deps()` captures all real dependencies
-3. **Direct insert audit** - Replace with proper event flow or document why exceptional
-4. **Timestamp offset removal** - Replace with explicit dependencies
+3. ~~**Direct insert audit**~~ ✅ FIXED - Only 1 acceptable location remains (peer_self)
+4. ~~**Timestamp offset removal**~~ ✅ FIXED - All 30+ occurrences removed
 
 ---
 
@@ -372,7 +377,7 @@ if not authenticated: ...
 - **21+ distinct hack patterns** identified
 - ~~**PENDING**: 6 locations~~ ✅ FIXED: Now uses None
 - ~~**Direct table inserts**: 5 locations~~ ✅ FIXED: Only 1 acceptable location remains (peer_self in peer_shared.py)
-- **Timestamp offsets**: 30+ occurrences
+- ~~**Timestamp offsets**: 30+ occurrences~~ ✅ FIXED: All removed, DAG deps handle ordering
 - **Special case types**: 7 in NO_DEPS_TYPES, 3 in SIGNER_ONLY_TYPES
 - **Fallback patterns**: 3 locations
 - **Silent exception catches**: 5 locations
