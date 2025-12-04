@@ -580,3 +580,91 @@ def test_nat_status_shows_mappings(db):
     # Should have 2 mappings
     mappings = network_config.get_nat_mappings_for_peer("bob_peer_id")
     assert len(mappings) == 2
+
+
+# ===== Bandwidth Limiting Tests =====
+
+def test_bandwidth_unlimited_by_default(db):
+    """Test that bandwidth is unlimited by default."""
+    unsafedb = create_unsafe_db(db)
+
+    # Send many large packets - all should succeed
+    for i in range(100):
+        result = queues.incoming.add(b"x" * 1000, t_ms=1000, unsafedb=unsafedb)
+        assert result is True, f"Packet {i} should succeed with unlimited bandwidth"
+
+    db.commit()
+    received = queues.incoming.drain(100, current_time_ms=1000, unsafedb=unsafedb)
+    assert len(received) == 100
+
+
+def test_bandwidth_limit_enforced(db):
+    """Test that bandwidth limit drops packets over the limit."""
+    # Setup: 1000 bytes per second
+    network_config.set_network_config(
+        network_config.NetworkConfig(bandwidth_bytes_per_sec=1000)
+    )
+    unsafedb = create_unsafe_db(db)
+
+    # Send 500 byte packets - first 2 should succeed (1000 bytes total)
+    result1 = queues.incoming.add(b"x" * 500, t_ms=1000, unsafedb=unsafedb)
+    result2 = queues.incoming.add(b"x" * 500, t_ms=1000, unsafedb=unsafedb)
+    result3 = queues.incoming.add(b"x" * 500, t_ms=1000, unsafedb=unsafedb)  # Should fail
+
+    assert result1 is True, "First packet should succeed"
+    assert result2 is True, "Second packet should succeed (exactly at limit)"
+    assert result3 is False, "Third packet should fail (over limit)"
+
+
+def test_bandwidth_resets_each_second(db):
+    """Test that bandwidth limit resets each second window."""
+    # Setup: 1000 bytes per second
+    network_config.set_network_config(
+        network_config.NetworkConfig(bandwidth_bytes_per_sec=1000)
+    )
+    unsafedb = create_unsafe_db(db)
+
+    # Use up bandwidth at t=1000
+    result1 = queues.incoming.add(b"x" * 1000, t_ms=1000, unsafedb=unsafedb)
+    assert result1 is True
+
+    # Next packet at same time should fail
+    result2 = queues.incoming.add(b"x" * 100, t_ms=1000, unsafedb=unsafedb)
+    assert result2 is False, "Should be over limit in same window"
+
+    # But at t=2000 (new window), bandwidth is available again
+    result3 = queues.incoming.add(b"x" * 1000, t_ms=2000, unsafedb=unsafedb)
+    assert result3 is True, "Should succeed in new window"
+
+
+def test_bandwidth_stats(db):
+    """Test bandwidth statistics reporting."""
+    # Setup: 1000 bytes per second
+    network_config.set_network_config(
+        network_config.NetworkConfig(bandwidth_bytes_per_sec=1000)
+    )
+    unsafedb = create_unsafe_db(db)
+
+    # Check initial stats
+    stats = network_config.get_bandwidth_stats(t_ms=1000)
+    assert stats['limit'] == 1000
+    assert stats['used'] == 0
+    assert stats['available'] == 1000
+    assert stats['utilization'] == 0.0
+
+    # Send 300 bytes
+    queues.incoming.add(b"x" * 300, t_ms=1000, unsafedb=unsafedb)
+
+    stats = network_config.get_bandwidth_stats(t_ms=1000)
+    assert stats['used'] == 300
+    assert stats['available'] == 700
+    assert stats['utilization'] == 0.3
+
+
+def test_bandwidth_unlimited_stats(db):
+    """Test bandwidth stats when unlimited."""
+    # Default config (unlimited)
+    stats = network_config.get_bandwidth_stats(t_ms=1000)
+    assert stats['limit'] is None
+    assert stats['available'] is None
+    assert stats['utilization'] == 0.0
