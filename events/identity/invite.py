@@ -428,17 +428,12 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     return (invite_id, invite_link, invite_link_data)
 
 
-def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
-            skip_admin_check: bool = False) -> str | None:
+def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project invite event into invites table.
 
     Supports polymorphic signed_by:
     - signed_by=network_id (bootstrap): verify with network pubkey
     - signed_by=peer_shared_id (ongoing): verify with peer_shared pubkey
-
-    Args:
-        skip_admin_check: If True, skip admin validation. Used for invites
-            received out-of-band (invite links) where the joiner trusts the invite.
     """
     # Create db wrappers first (consistent with other projectors)
     safedb = create_safe_db(db, recorded_by=recorded_by)

@@ -492,7 +492,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
-        skip_admin_check=True,  # Bootstrap: first user adds themselves
+        # NOTE: skip_admin_check removed - admin_grant is already projected by this point
         admin_grant=admin_grant_id  # Explicit dependency for convergence
     )
     log.info(f"new_network() added user to all_users group: {all_users_member_id[:20]}...")
