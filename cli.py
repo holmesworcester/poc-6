@@ -86,9 +86,11 @@ import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed, peer_shared
-from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update
+from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update, message_attachment
+from events.network import sync_file
 import purge_expired
 from events.group import group_member, group_key, group_prekey, group
+import os
 
 
 class EventLog:
@@ -247,6 +249,25 @@ def format_expires_in(expires_at_ms: int, current_time_ms: int) -> str:
     if hours > 0:
         return f"(expires in: {hours}h {minutes}m)"
     return f"(expires in: {minutes}m)"
+
+
+def _format_size_short(num_bytes: int) -> str:
+    """Format bytes as short size: 200KB, 1.0GB"""
+    if num_bytes < 1024:
+        return f"{num_bytes}B"
+    elif num_bytes < 1024 * 1024:
+        return f"{num_bytes // 1024}KB"
+    elif num_bytes < 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.1f}MB"
+    else:
+        return f"{num_bytes / (1024 * 1024 * 1024):.1f}GB"
+
+
+def _format_progress_bar(percentage: int, width: int = 10) -> str:
+    """Format a progress bar: [████░░░░░░]"""
+    filled = int(width * percentage / 100)
+    empty = width - filled
+    return f"[{'█' * filled}{'░' * empty}]"
 
 
 # ============================================================================
@@ -422,6 +443,39 @@ def display_main(session: CLISession):
 
         print(f"  {i}. [{timestamp}ms] {author_name}: {content}{edit_indicator}{expires_indicator}")
 
+        # Display attachments if any
+        attachments = msg.get('attachments', [])
+        for attachment in attachments:
+            file_id = attachment.get('file_id')
+            mime_type = attachment.get('mime_type', '')
+            blob_bytes = attachment.get('blob_bytes', 0)
+
+            # Get download progress
+            progress = message_attachment.get_file_download_progress(file_id, account.peer_id, session.db)
+
+            # Determine type indicator
+            if mime_type and mime_type.startswith('image/'):
+                type_ind = 'img'
+            else:
+                type_ind = 'bin'
+
+            # Format size
+            size_str = _format_size_short(blob_bytes)
+
+            # Format progress
+            if progress:
+                pct = progress.get('percentage_complete', 0)
+                if progress.get('is_complete'):
+                    print(f"     [{type_ind} {size_str} 100%]")
+                else:
+                    speed = progress.get('speed_human', '')
+                    eta = progress.get('eta_seconds')
+                    eta_str = f" ETA {eta}s" if eta is not None else ""
+                    speed_str = f" {speed}" if speed and speed != "0 B/s" else ""
+                    print(f"     [{type_ind} {size_str} {pct}%{speed_str}{eta_str}]")
+            else:
+                print(f"     [{type_ind} {size_str} ???]")
+
         # Display reactions if any
         reactions = msg.get('reactions', [])
         if reactions:
@@ -530,6 +584,102 @@ def cmd_send(session: CLISession, msg: str):
 
     print("✓ sent message")
     session.event_log.display()
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_send_with_image(session: CLISession, msg: str):
+    """Send a message with a 200KB image-sized attachment."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Create message first
+    result = message.create(
+        peer_id=account.peer_id,
+        channel_id=session.selected_channel_id,
+        content=msg if msg else "Check out this image!",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+    message_id = result['id']
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Generate 200KB of random data
+    file_size = 200 * 1024  # 200KB
+    print(f"⟳ generating {_format_size_short(file_size)} random data...")
+    file_data = os.urandom(file_size)
+
+    # Attach to message
+    print(f"⟳ creating file attachment...")
+    file_result = message_attachment.create(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        file_data=file_data,
+        filename=f"demo-image-{session.current_time_ms}.png",
+        mime_type="image/png",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    slice_count = file_result['slice_count']
+    print(f"✓ sent message with {_format_size_short(file_size)} image ({slice_count} slices)")
+
+    session.run_auto_tick()
+    display_state(session)
+
+
+def cmd_send_with_gb(session: CLISession):
+    """Send a message with a 1GB file attachment."""
+    account = session.get_selected_account()
+
+    if not session.selected_channel_id:
+        print("✗ no channel selected")
+        return
+
+    # Create message first
+    result = message.create(
+        peer_id=account.peer_id,
+        channel_id=session.selected_channel_id,
+        content="Sending a large file...",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+    message_id = result['id']
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Generate 1GB of random data
+    file_size = 1024 * 1024 * 1024  # 1GB
+    print(f"⟳ generating {_format_size_short(file_size)} random data (this may take a moment)...")
+    file_data = os.urandom(file_size)
+
+    # Attach to message
+    print(f"⟳ creating file attachment ({file_size // 450:,} slices)...")
+    file_result = message_attachment.create(
+        peer_id=account.peer_id,
+        message_id=message_id,
+        file_data=file_data,
+        filename=f"demo-large-{session.current_time_ms}.bin",
+        mime_type="application/octet-stream",
+        t_ms=session.current_time_ms,
+        db=session.db
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    slice_count = file_result['slice_count']
+    print(f"✓ sent message with {_format_size_short(file_size)} file ({slice_count:,} slices)")
 
     session.run_auto_tick()
     display_state(session)
@@ -998,6 +1148,139 @@ def cmd_list_messages(session: CLISession):
         author_name = msg.get('author_name', '???')
         content = msg.get('content', '')
         print(f"  {i}. {author_name}: {content}")
+
+
+def cmd_files(session: CLISession):
+    """List all file attachments with download progress."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+
+    # Query all attachments visible to this peer
+    from db import create_safe_db
+    safedb = create_safe_db(session.db, recorded_by=account.peer_id)
+
+    attachments = safedb.query_all(
+        """SELECT ma.file_id, ma.filename, ma.mime_type, ma.blob_bytes, ma.total_slices,
+                  m.content as message_content
+           FROM message_attachments ma
+           JOIN messages m ON ma.message_id = m.message_id AND m.recorded_by = ma.recorded_by
+           WHERE ma.recorded_by = ?
+           ORDER BY ma.recorded_at DESC""",
+        (account.peer_id,)
+    )
+
+    if not attachments:
+        print("FILES: (no files)")
+        return
+
+    # Separate in-progress from complete
+    in_progress = []
+    complete = []
+
+    # Store file list in session for pause/resume commands
+    session.file_list = []
+
+    for att in attachments:
+        file_id = att['file_id']
+        progress = message_attachment.get_file_download_progress(file_id, account.peer_id, session.db)
+
+        file_info = {
+            'file_id': file_id,
+            'filename': att['filename'] or 'untitled',
+            'mime_type': att['mime_type'] or '',
+            'blob_bytes': att['blob_bytes'],
+            'total_slices': att['total_slices'],
+            'progress': progress,
+            'message_preview': (att['message_content'] or '')[:30]
+        }
+        session.file_list.append(file_info)
+
+        if progress and progress.get('is_complete'):
+            complete.append(file_info)
+        else:
+            in_progress.append(file_info)
+
+    print("FILES:")
+
+    if in_progress:
+        print("  In Progress:")
+        for i, f in enumerate(in_progress, 1):
+            prog = f['progress']
+            pct = prog.get('percentage_complete', 0) if prog else 0
+            bar = _format_progress_bar(pct)
+            speed = prog.get('speed_human', '') if prog else ''
+            eta = prog.get('eta_seconds') if prog else None
+
+            speed_str = f" | {speed}" if speed and speed != "0 B/s" else ""
+            eta_str = f" | ETA {eta}s" if eta is not None else ""
+
+            filename = f['filename'][:20]
+            size_str = _format_size_short(f['blob_bytes'])
+            print(f"    {i}. ↓ {filename:20} {bar} {pct:3d}%{speed_str}{eta_str}")
+
+    if complete:
+        print("  Complete:")
+        start_num = len(in_progress) + 1
+        for i, f in enumerate(complete, start_num):
+            filename = f['filename'][:20]
+            size_str = _format_size_short(f['blob_bytes'])
+            print(f"    {i}. ✓ {filename:20} {size_str}")
+
+    print()
+    print(f"  Total: {len(in_progress)} in progress, {len(complete)} complete")
+
+
+def cmd_pause_file(session: CLISession, file_num: int):
+    """Pause a file download."""
+    account = session.get_selected_account()
+
+    if not hasattr(session, 'file_list') or not session.file_list:
+        print("✗ run 'files' first to see file list")
+        return
+
+    if not (1 <= file_num <= len(session.file_list)):
+        print(f"✗ file #{file_num} not found (must be 1-{len(session.file_list)})")
+        return
+
+    file_info = session.file_list[file_num - 1]
+    file_id = file_info['file_id']
+
+    sync_file.pause_file_sync(
+        file_id=file_id,
+        peer_id=account.peer_id,
+        db=session.db
+    )
+
+    session.db.commit()
+    print(f"✓ paused download: {file_info['filename']}")
+
+
+def cmd_resume_file(session: CLISession, file_num: int):
+    """Resume a paused file download."""
+    account = session.get_selected_account()
+
+    if not hasattr(session, 'file_list') or not session.file_list:
+        print("✗ run 'files' first to see file list")
+        return
+
+    if not (1 <= file_num <= len(session.file_list)):
+        print(f"✗ file #{file_num} not found (must be 1-{len(session.file_list)})")
+        return
+
+    file_info = session.file_list[file_num - 1]
+    file_id = file_info['file_id']
+
+    sync_file.resume_file_sync(
+        file_id=file_id,
+        peer_id=account.peer_id,
+        db=session.db
+    )
+
+    session.db.commit()
+    print(f"✓ resumed download: {file_info['filename']}")
 
 
 def cmd_time(session: CLISession):
@@ -1494,6 +1777,34 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 msg = " ".join(parts[1:]).strip('"')
                 cmd_send(session, msg)
 
+        elif cmd == "send-with-image":
+            msg = " ".join(parts[1:]).strip('"') if len(parts) > 1 else ""
+            cmd_send_with_image(session, msg)
+
+        elif cmd == "send-with-gb":
+            cmd_send_with_gb(session)
+
+        elif cmd == "files":
+            cmd_files(session)
+
+        elif cmd == "pause":
+            if len(parts) < 2:
+                print("usage: pause <file_num>")
+            else:
+                try:
+                    cmd_pause_file(session, int(parts[1]))
+                except ValueError:
+                    print("error: file number must be an integer")
+
+        elif cmd == "resume":
+            if len(parts) < 2:
+                print("usage: resume <file_num>")
+            else:
+                try:
+                    cmd_resume_file(session, int(parts[1]))
+                except ValueError:
+                    print("error: file number must be an integer")
+
         elif cmd == "tick":
             if len(parts) < 2:
                 print("usage: tick <n>")
@@ -1702,6 +2013,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Messaging:")
             print("    send <message>")
+            print("    send-with-image [message]      Send message with 200KB demo image")
+            print("    send-with-gb                   Send message with 1GB demo file")
             print("    messages")
             print("    delete <n>")
             print("    edit <n> <new_content>")
@@ -1709,6 +2022,11 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    unreact <n> <emoji>")
             print("    reactions <n>")
             print("    disappear --days <n> | --time <ms> | --off")
+            print()
+            print("  Files:")
+            print("    files                          List all files with download progress")
+            print("    pause <n>                      Pause file download")
+            print("    resume <n>                     Resume file download")
             print()
             print("  Admin:")
             print("    ban <n>")
