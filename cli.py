@@ -103,7 +103,7 @@ import network_config
 
 # All available commands for tab completion
 COMMANDS = [
-    'new-network', 'switch', 'send', 'tick', 'sync', 'auto-tick',
+    'new-network', 'switch', 'send', 'tick', 'sync', 'sync-realtime', 'auto-tick',
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
     'status', 'accounts', 'channels', 'users', 'messages', 'keys',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
@@ -116,6 +116,8 @@ COMMAND_ARGS = {
     'accept-invite': ['--username', '--devicename', '--invite'],
     'accept-link': ['--devicename', '--invite'],
     'sync': ['--ticks'],
+    'sync-realtime': ['--ticks', '--until-file'],
+    'send': ['--repeat'],
     'disappear': ['--days', '--time', '--off'],
     'fast-forward': ['--days'],
     'keys': ['--summary'],
@@ -317,9 +319,33 @@ class CLISession:
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
 
-    def initialize_database(self):
-        """Initialize in-memory database with schema."""
-        conn = sqlite3.Connection(":memory:")
+    def initialize_database(self, use_file: bool = False, db_path: str = None):
+        """Initialize database with schema.
+
+        Args:
+            use_file: If True, use file-based SQLite for realistic I/O
+            db_path: Custom path, or None for temp file
+        """
+        if use_file:
+            if db_path is None:
+                # Create temp file that persists for session
+                import tempfile
+                self._db_temp_file = tempfile.NamedTemporaryFile(
+                    prefix='poc6_cli_',
+                    suffix='.db',
+                    delete=False
+                )
+                db_path = self._db_temp_file.name
+
+            print(f"Using database: {db_path}")
+            conn = sqlite3.connect(db_path)
+            # Performance optimizations
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA cache_size = -64000")  # 64MB cache
+            conn.execute("PRAGMA temp_store = MEMORY")
+        else:
+            conn = sqlite3.Connection(":memory:")
+
         self.db = Database(conn)
         schema.create_all(self.db)
 
@@ -709,8 +735,34 @@ def cmd_switch(session: CLISession, account_num: int):
     display_state(session)
 
 
-def cmd_send(session: CLISession, msg: str):
-    """Send a message to the currently selected channel."""
+def cmd_send(session: CLISession, args: List[str]):
+    """Send a message to the currently selected channel.
+
+    Usage:
+        send <message>              # Send single message
+        send --repeat <n> <message> # Send n messages
+    """
+    if not args:
+        print("usage: send <message> [--repeat N]")
+        return
+
+    # Parse --repeat flag
+    repeat = 1
+    if '--repeat' in args:
+        idx = args.index('--repeat')
+        if idx + 1 < len(args):
+            try:
+                repeat = int(args[idx + 1])
+                args = args[:idx] + args[idx+2:]  # Remove flag and value
+            except ValueError:
+                print("error: --repeat requires an integer")
+                return
+        else:
+            print("error: --repeat requires an integer")
+            return
+
+    msg = ' '.join(args).strip('"')
+
     if not msg or not msg.strip():
         print("✗ message cannot be empty or whitespace-only")
         return
@@ -721,24 +773,33 @@ def cmd_send(session: CLISession, msg: str):
         print("✗ no channel selected")
         return
 
-    result = message.create(
-        peer_id=account.peer_id,
-        channel_id=session.selected_channel_id,
-        content=msg,
-        t_ms=session.current_time_ms,
-        db=session.db
-    )
+    if repeat > 1:
+        print(f"Sending {repeat} message(s)...")
+
+    for i in range(repeat):
+        msg_content = msg if repeat == 1 else f"{msg} [{i+1}/{repeat}]"
+
+        message.create(
+            peer_id=account.peer_id,
+            channel_id=session.selected_channel_id,
+            content=msg_content,
+            t_ms=session.current_time_ms,
+            db=session.db
+        )
+        session.current_time_ms += 10  # Small time increment per message
 
     session.db.commit()
-    session.current_time_ms += 100
 
-    # Log event
+    # Log event (only log once even for bulk)
     channel_name = get_channel_name(session, session.selected_channel_id)
-    session.event_log.log("message", channel=f"<{channel_name}>", author=f"<{account.user_name}>", content=f'"{msg}"')
+    if repeat == 1:
+        session.event_log.log("message", channel=f"<{channel_name}>", author=f"<{account.user_name}>", content=f'"{msg}"')
+        print("✓ sent message")
+    else:
+        session.event_log.log("messages", channel=f"<{channel_name}>", author=f"<{account.user_name}>", count=str(repeat))
+        print(f"✓ sent {repeat} message(s)")
 
-    print("✓ sent message")
     session.event_log.display()
-
     session.run_auto_tick()
     display_state(session)
 
@@ -859,6 +920,103 @@ def cmd_set_auto_tick(session: CLISession, count: int):
         print("✓ auto-tick disabled")
     else:
         print(f"✓ auto-tick set to {count} ticks")
+
+
+def cmd_sync_realtime(session: CLISession, args: List[str]):
+    """Run sync at wall-clock time with after-action report.
+
+    Usage:
+        sync-realtime                   # Sync until converged
+        sync-realtime --ticks <n>       # Run N ticks at wall-clock time
+        sync-realtime --until-file <n>  # Sync until file N is complete
+    """
+    import perf_tick
+
+    # Parse args
+    num_ticks = None
+    file_num = None
+
+    i = 0
+    while i < len(args):
+        if args[i] == '--ticks' and i + 1 < len(args):
+            try:
+                num_ticks = int(args[i + 1])
+            except ValueError:
+                print("error: --ticks requires an integer")
+                return
+            i += 2
+        elif args[i] == '--until-file' and i + 1 < len(args):
+            try:
+                file_num = int(args[i + 1])
+            except ValueError:
+                print("error: --until-file requires an integer")
+                return
+            i += 2
+        else:
+            i += 1
+
+    # Run based on mode
+    if file_num is not None:
+        if not hasattr(session, 'file_list') or not session.file_list:
+            print("error: run 'files' first to see file list")
+            return
+        if not (1 <= file_num <= len(session.file_list)):
+            print(f"error: file #{file_num} not found")
+            return
+
+        file_info = session.file_list[file_num - 1]
+        file_id = file_info['file_id']
+        account = session.get_selected_account()
+
+        print(f"Syncing until file complete: {file_info['filename']}")
+        print("Running at wall-clock time...\n")
+
+        def until_done(t_ms, db):
+            return sync_file.is_file_complete(file_id, account.peer_id, db)
+
+        final_t_ms, report = perf_tick.run_realtime(
+            db=session.db,
+            start_t_ms=session.current_time_ms,
+            until_condition=until_done,
+            max_ticks=100000
+        )
+
+    elif num_ticks is not None:
+        print(f"Running {num_ticks} ticks at wall-clock time...")
+        print(f"(Expected: ~{num_ticks * 0.1:.1f} seconds)\n")
+
+        final_t_ms, report = perf_tick.run_ticks_timed(
+            db=session.db,
+            start_t_ms=session.current_time_ms,
+            num_ticks=num_ticks,
+            realtime=True
+        )
+
+    else:
+        # Default: sync until converged
+        print("Syncing until converged (wall-clock time)...\n")
+
+        from tests.utils.tick_helper import sync_until_converged
+        final_t_ms, rounds, converged, _ = sync_until_converged(
+            db=session.db,
+            start_t_ms=session.current_time_ms,
+            max_rounds=1000
+        )
+
+        # Simple report for convergence mode
+        report = perf_tick.PerfReport()
+        report.total_ticks = rounds
+        report.total_sim_time_ms = final_t_ms - session.current_time_ms
+
+        if not converged:
+            print("Warning: did not fully converge")
+
+    session.current_time_ms = final_t_ms
+
+    # Print report
+    print("=" * 40)
+    print(report.summary())
+    print("=" * 40)
 
 
 def cmd_select_channel(session: CLISession, channel_num: int):
@@ -2049,10 +2207,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "send":
             if len(parts) < 2:
-                print("usage: send <message>")
+                print("usage: send <message> [--repeat N]")
             else:
-                msg = " ".join(parts[1:]).strip('"')
-                cmd_send(session, msg)
+                cmd_send(session, parts[1:])
 
         elif cmd == "send-with-image":
             msg = " ".join(parts[1:]).strip('"') if len(parts) > 1 else ""
@@ -2099,6 +2256,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 cmd_tick(session, args.ticks)
             except SystemExit:
                 print("usage: sync --ticks <n>")
+
+        elif cmd == "sync-realtime":
+            cmd_sync_realtime(session, parts[1:])
 
         elif cmd == "auto-tick":
             if len(parts) < 2:
@@ -2331,7 +2491,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    channels")
             print()
             print("  Messaging:")
-            print("    send <message>")
+            print("    send <message> [--repeat N]    Send message (optionally N times)")
             print("    send-with-image [message]      Send message with 200KB demo image")
             print("    send-with-gb                   Send message with 1GB demo file")
             print("    messages")
@@ -2355,6 +2515,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    purge-keys")
             print("    tick <n>")
             print("    sync --ticks <n>")
+            print("    sync-realtime [--ticks N|--until-file N]  Wall-clock sync with perf report")
             print("    auto-tick <n>")
             print()
             print("  Network simulation:")
@@ -2450,12 +2611,15 @@ def main():
     parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug logging")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress all but critical logs")
+    parser.add_argument("--disk", action="store_true", help="Use file-based SQLite for realistic I/O perf")
+    parser.add_argument("--db-path", type=str, default=None, help="Path to database file (implies --disk)")
     args = parser.parse_args()
 
     # Logging already configured at import time based on sys.argv
 
     session = CLISession()
-    session.initialize_database()
+    use_disk = args.disk or args.db_path is not None
+    session.initialize_database(use_file=use_disk, db_path=args.db_path)
 
     if args.interactive:
         run_interactive(session)

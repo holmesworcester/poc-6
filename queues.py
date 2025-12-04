@@ -63,9 +63,8 @@ class incoming:
             log.debug(f"queues.incoming.add() dropping packet due to loss simulation")
             return False
 
-        # Calculate delivery time with jitter
-        latency = network_config.calculate_latency()
-        deliver_at = t_ms + latency
+        # Calculate delivery time with latency, jitter, and bandwidth
+        deliver_at = network_config.calculate_delivery_time(len(blob), t_ms)
 
         # Insert with delivery time
         unsafedb.execute(
