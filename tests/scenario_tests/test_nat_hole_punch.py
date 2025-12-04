@@ -467,41 +467,43 @@ def test_full_nat_hole_punch_integration(fresh_db):
         print("✓ Bidirectional NAT mappings established!")
     else:
         # The mappings may exist but not be detected by has_nat_mapping
-        # because sync_connect creates connections, not explicit NAT mappings
+        # because connection requests create connections, not explicit NAT mappings
         # Let's check if connections exist
-        from db import create_unsafe_db as create_unsafedb
-        unsafedb = create_unsafedb(db)
-        bob_connections = unsafedb.query(
-            "SELECT our_transit_key_id FROM sync_connections WHERE our_peer_id = ?",
+        from db import create_safe_db
+        bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
+        charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
+        bob_connections = bob_safedb.query(
+            "SELECT connection_id FROM connections WHERE recorded_by = ?",
             (bob['peer_id'],)
         )
-        charlie_connections = unsafedb.query(
-            "SELECT our_transit_key_id FROM sync_connections WHERE our_peer_id = ?",
+        charlie_connections = charlie_safedb.query(
+            "SELECT connection_id FROM connections WHERE recorded_by = ?",
             (charlie['peer_id'],)
         )
-        print(f"Bob sync_connections: {len(bob_connections)}")
-        print(f"Charlie sync_connections: {len(charlie_connections)}")
-        print("(Note: sync_connect creates connections which enable sync, NAT mappings may not be explicit)")
+        print(f"Bob connections: {len(bob_connections)}")
+        print(f"Charlie connections: {len(charlie_connections)}")
+        print("(Note: connection requests create connections which enable sync, NAT mappings may not be explicit)")
 
     print("\n" + "="*60)
     print("PHASE 8: Verify connections established")
     print("="*60)
 
-    # Verify that Bob and Charlie have connections (created by sync_connect from intro processing)
-    from db import create_unsafe_db as create_unsafedb
-    unsafedb = create_unsafedb(db)
+    # Verify that Bob and Charlie have connections (created by connection requests from intro processing)
+    from db import create_safe_db
+    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
+    charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
 
-    bob_conn_count = unsafedb.query_one(
-        "SELECT COUNT(*) as cnt FROM sync_connections WHERE our_peer_id = ?",
+    bob_conn_count = bob_safedb.query_one(
+        "SELECT COUNT(*) as cnt FROM connections WHERE recorded_by = ?",
         (bob['peer_id'],)
     )['cnt']
-    charlie_conn_count = unsafedb.query_one(
-        "SELECT COUNT(*) as cnt FROM sync_connections WHERE our_peer_id = ?",
+    charlie_conn_count = charlie_safedb.query_one(
+        "SELECT COUNT(*) as cnt FROM connections WHERE recorded_by = ?",
         (charlie['peer_id'],)
     )['cnt']
 
-    print(f"Bob's sync_connections: {bob_conn_count}")
-    print(f"Charlie's sync_connections: {charlie_conn_count}")
+    print(f"Bob's connections: {bob_conn_count}")
+    print(f"Charlie's connections: {charlie_conn_count}")
 
     # Both should have at least 1 connection from the intro processing
     assert bob_conn_count >= 1, f"Bob should have at least 1 connection, got {bob_conn_count}"
