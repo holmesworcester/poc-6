@@ -224,6 +224,20 @@ def get_transit_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) 
     )
 
     if not result:
+        # Fallback: check invite_accepteds for bootstrap case (inviter's transit prekey from invite link)
+        result = safedb.query_one(
+            """SELECT inviter_transit_prekey_id as transit_prekey_id,
+                      inviter_transit_prekey_public_key as public_key
+               FROM invite_accepteds
+               WHERE inviter_peer_shared_id = ? AND recorded_by = ?
+               AND inviter_transit_prekey_public_key IS NOT NULL
+               LIMIT 1""",
+            (peer_shared_id, recorded_by)
+        )
+        if result:
+            lookup_log.info(f"get_transit_prekey_for_peer() FOUND via invite_accepteds for peer_shared_id={peer_shared_id[:20]}...")
+
+    if not result:
         lookup_log.warning(f"get_transit_prekey_for_peer() NO PREKEY FOUND for peer_shared_id={peer_shared_id[:20]}...")
         return None
 

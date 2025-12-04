@@ -139,6 +139,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         'group_key',        # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
+    # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
+    # and must wait for that invite to be valid before projecting
 
     if event_type in NO_DEPS_TYPES:
         return []
@@ -150,8 +152,14 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
     # For user events, check invite (which contains group/channel stubs) not group/channel directly
+    # Note: peer_id is NOT a dependency - it's metadata about which local peer created this user
+    # The cryptographic trust comes from signed_by (the invite)
     elif event_type == 'user':
-        dep_fields = ['signed_by', 'peer_id', 'invite_id']
+        dep_fields = ['signed_by', 'invite_id']
+    # For group events, check signed_by (peer_shared or network_id) and key_id
+    # signed_by is critical - must be valid before we can verify the group signature
+    elif event_type == 'group':
+        dep_fields = ['signed_by', 'key_id']
     else:
         # DEFAULT: Find all fields ending in '_id' plus known reference fields
         dep_fields = []
@@ -172,10 +180,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         if not dep_id:
             continue
 
-        # Skip special placeholder values (used during bootstrap)
-        if dep_id in ('SELF', 'PENDING'):
-            log.debug(f"recorded.check_deps() skipping special value: {field}={dep_id}")
-            continue
+        # Note: PENDING and SELF placeholders have been eliminated from the codebase
+        # Network events (which were self-signed with SELF) are in NO_DEPS_TYPES
 
         # Skip foreign local deps (creator's local state we'll never have)
         if is_foreign_local_dep(field, event_data, recorded_by):

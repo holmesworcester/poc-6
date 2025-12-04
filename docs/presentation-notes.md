@@ -1,3 +1,40 @@
+Summary: 
+
+We have: 
+- a database
+- events that are stored in the database 
+- ...and trigger other writes to the database, and sometimes the creation of other events
+- commands (in `events/event_name.py` files) that create these events either in isolation or orchestrated combination
+- cron-like jobs which run commands on tick and track the last times they were run (in the database) 
+- some queues (also in the database)
+
+One of the jobs is a network simulator that moves packets from outgoing to incoming queues adding latency and packet loss optionally.
+
+From our events we build DAGs of content with: 
+- deletion and disappearing messages.
+- identity and authentication
+- groups and encryption with forward secrecy (both transit layer and data layer)
+
+We store events encrypted, because that has to be their canonical form, because we need to be able to refer to things others may not be able to decrypt, like when deleting something.
+
+The tricky part is reasoning about auth and bootstrapping, because the graph is very dense and it's very easy to accidentally create chicken and egg cycles, especially as you add desired features like device lining or encryption with FS. 
+
+Another tricky part is accommodating many different potential accounts on the same device (like slack would have workspaces)
+
+Easy: content, most features
+Medium: encryption, dependency resolution
+Hard: auth, especially bootstrapping, especially as you add features
+
+One important simplification is to couple as few other features or mechanisms as possible with auth and bootstrapping! E.g. you want your connection and syncing bootstrapping to intersect AS LITTLE AS POSSIBLE with your DAG bootstrapping or you get a rat's nest of chicken-and-egg cyclical dependencies, either at the data layer itself or in time.
+
+We have a prototype CLI that works in both interactive mode and non-interactive mode (so LLMs can "see" it and self-QA it). End-to-end tests are trivial because multi accounts can exist and interact in a single instance. 
+
+- Events get recorded by ("seen by") peers (`recorded_by` is an event too)
+- Recorded events get a `recorded_by` event generated for them referencing their event id
+- This is subtle and important: it means the same event can be recorded by multiple peers on a device, which is a possible case if we let users have multiple accounts on a single device, and which is helpful for testing "multiplayer" in a single instance. 
+
+
+
 Key ideas:
 - Everything is an "event"
 - Events are small, content-addressed (event id)

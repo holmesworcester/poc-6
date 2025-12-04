@@ -391,41 +391,28 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Get inviter's peer_shared blob to include in invite link
     # This allows Bob to immediately have Alice in his peers_shared table upon joining
-    inviter_peer_shared_blob = store.get(peer_shared_id, unsafedb)
-    if not inviter_peer_shared_blob:
-        raise ValueError(f"Inviter's peer_shared blob not found: {peer_shared_id}. Cannot create invite.")
-
-    # Build invite link with invite blob + secrets
-    # Group/channel/key metadata is now in the signed blob (not plaintext)
+    # Build invite link - metadata + keys for connection, NO blobs (those sync after connection)
     import base64
-    invite_blob_b64 = base64.urlsafe_b64encode(invite_blob).decode().rstrip('=')
-    inviter_peer_shared_blob_b64 = base64.urlsafe_b64encode(inviter_peer_shared_blob).decode().rstrip('=')
 
     invite_link_data = {
-        'invite_blob': invite_blob_b64,  # Signed invite event (contains group/channel/key + invite prekey_id)
-        'invite_id': invite_id,  # Event ID for reference
-        'invite_prekey_id': invite_prekey_id,  # Crypto hint (where Bob stores the key)
-        'invite_private_key': crypto.b64encode(invite_private_key),  # Key material for GKS decryption + proof
-        'inviter_peer_shared_id': peer_shared_id,  # Alice's peer_shared_id for Bob to send sync requests
-        'inviter_peer_shared_blob': inviter_peer_shared_blob_b64,  # Alice's peer_shared blob for immediate projection
-        'network_id': network_id,  # For joiner to know which network they're joining
-        'channel_id': channel_id,  # Default channel (moved from event to link for immediate access)
-        'key_id': key_id,  # Encryption key (moved from event to link for immediate access)
+        'invite_id': invite_id,
+        'invite_prekey_id': invite_prekey_id,
+        'invite_private_key': crypto.b64encode(invite_private_key),
+        'inviter_peer_shared_id': peer_shared_id,
+        'network_id': network_id,
+        'channel_id': channel_id,
+        'key_id': key_id,
         'ip': inviter_ip,
         'port': inviter_port,
-        # Transit prekey fields moved from invite event (for bootstrap contact only)
+        # Transit prekey for encrypting initial sync_connect to Alice
         'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
         'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
         'inviter_transit_prekey_id': inviter_prekey_id,
     }
 
-    # For mode='peer', also include the existing user blob (for device linking)
-    if mode == 'peer' and user_id:
-        existing_user_blob = store.get(user_id, unsafedb)
-        if existing_user_blob:
-            existing_user_blob_b64 = base64.urlsafe_b64encode(existing_user_blob).decode().rstrip('=')
-            invite_link_data['existing_user_blob'] = existing_user_blob_b64
-            log.info(f"invite.create() added existing_user_blob for mode='link'")
+    # For mode='peer', include user_id so acceptor knows which user to link to
+    if mode == 'peer':
+        invite_link_data['user_id'] = user_id
 
     # Encode invite link as base64-urlsafe JSON
     import base64
@@ -507,14 +494,22 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
                     log.info(f"invite.project() got network_pubkey from store blob")
 
         if not network_pubkey:
-            log.warning(f"invite.project() network_id={network_id[:20]}... not available yet")
-            return None
-
-        if not crypto.verify_event(event_data, network_pubkey):
-            log.warning(f"invite.project() signature verification FAILED using network_pubkey")
-            return None
-
-        log.info(f"invite.project() verified bootstrap invite with network_pubkey")
+            # Network blob not available yet - check if network is valid via trust anchor
+            # If network_id is in valid_events (from invite_accepted), trust is established out-of-band
+            network_valid = safedb.query_one(
+                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (network_id, recorded_by)
+            )
+            if network_valid:
+                log.info(f"invite.project() network_id={network_id[:20]}... valid via trust anchor, skipping signature verification")
+            else:
+                log.warning(f"invite.project() network_id={network_id[:20]}... not available yet")
+                return None
+        else:
+            if not crypto.verify_event(event_data, network_pubkey):
+                log.warning(f"invite.project() signature verification FAILED using network_pubkey")
+                return None
+            log.info(f"invite.project() verified bootstrap invite with network_pubkey")
 
     else:
         # Ongoing invite: signed by peer_shared or user
@@ -597,11 +592,8 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any,
     # Transit prekey fields are now in the invite link and projected by user.join() / invite.accept()
     # This saves ~233 bytes in the synced invite event
 
-    # Mark invite as valid for this peer (required for invite_accepted dependencies)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (invite_id, recorded_by)
-    )
+    # NOTE: Invite validity comes from the cascade - when its signer (network or user) is valid,
+    # the invite unblocks, projects, and becomes valid naturally. No artificial marking needed.
 
     return invite_id
 
@@ -660,11 +652,11 @@ def create_peer_invite(
 def create_bootstrap_user_invite(
     network_id: str,
     network_private_key: bytes,
-    group_id: str,
-    channel_id: str,
-    key_id: str,
+    group_id: str | None,
+    channel_id: str | None,
+    key_id: str | None,
     peer_id: str,
-    peer_shared_id: str,
+    peer_shared_id: str | None,
     t_ms: int,
     db: Any
 ) -> tuple[str, bytes, bytes]:
@@ -681,7 +673,7 @@ def create_bootstrap_user_invite(
         channel_id: Default channel ID
         key_id: Group key ID
         peer_id: Local peer ID (for recording)
-        peer_shared_id: Public peer ID of the bootstrap peer (for inviter_peer_shared_id)
+        peer_shared_id: Public peer ID of inviter (None for bootstrap self-invite)
         t_ms: Timestamp
         db: Database connection
 
@@ -692,19 +684,25 @@ def create_bootstrap_user_invite(
     invite_private_key, invite_pubkey = crypto.generate_keypair()
 
     # Create bootstrap user invite event
-    # For bootstrap, the creator IS the inviter (self-invite)
     event_data = {
         'type': 'invite',
         'mode': 'user',
         'network_id': network_id,
-        'group_id': group_id,
-        'channel_id': channel_id,
-        'key_id': key_id,
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': network_id,  # Bootstrap: signed by network key
-        'inviter_peer_shared_id': peer_shared_id,  # For bootstrap, inviter is self
         'created_at': t_ms
     }
+
+    # Only include optional fields if provided (not empty string or None)
+    # Bootstrap invites may not have group/channel/key yet - they're created later
+    if group_id:
+        event_data['group_id'] = group_id
+    if channel_id:
+        event_data['channel_id'] = channel_id
+    if key_id:
+        event_data['key_id'] = key_id
+    if peer_shared_id:
+        event_data['inviter_peer_shared_id'] = peer_shared_id
 
     # Sign with network's private key
     signed_event = crypto.sign_event(event_data, network_private_key)
@@ -775,86 +773,22 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     except Exception as e:
         raise ValueError(f"Failed to parse invite link: {e}")
 
-    # Extract link data
-    invite_blob_b64 = link_data['invite_blob']
+    # Extract link data (no blobs - those sync after connection)
     invite_id = link_data['invite_id']
     invite_prekey_id = link_data['invite_prekey_id']
-    invite_private_key_b64 = link_data['invite_private_key']
+    invite_private_key = crypto.b64decode(link_data['invite_private_key'])
     inviter_peer_shared_id = link_data['inviter_peer_shared_id']
-    inviter_peer_shared_blob_b64 = link_data['inviter_peer_shared_blob']
 
-    # Decode blobs and keys
-    invite_blob = base64.urlsafe_b64decode(invite_blob_b64 + '=' * (4 - len(invite_blob_b64) % 4))
-    inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64 + '=' * (4 - len(inviter_peer_shared_blob_b64) % 4))
-    invite_private_key = crypto.b64decode(invite_private_key_b64)
-
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
-    # Step 1: Store invite event blob
-    invite_stored_id = store.event(invite_blob, peer_id, t_ms, db)
-    if invite_stored_id != invite_id:
-        # Event already stored (same hash), continue
-        pass
-    log.info(f"invite.accept() stored invite_id={invite_id[:20]}...")
-
-    # Step 2: Project invite event to invites table
-    project(invite_id, peer_id, t_ms, db, skip_admin_check=True)
-    log.info(f"invite.accept() projected invite to invites table")
-
-    # Step 3: Store inviter's peer_shared blob and project it
-    # This makes the inviter's public key available locally
-    inviter_stored_id = store.event(inviter_peer_shared_blob, peer_id, t_ms, db)
-    if inviter_stored_id != inviter_peer_shared_id:
-        # Event already stored (same hash), continue
-        pass
-
-    from events.identity import peer_shared as peer_shared_module
-    peer_shared_module.project(inviter_peer_shared_id, peer_id, t_ms, db)
-    log.info(f"invite.accept() projected inviter's peer_shared {inviter_peer_shared_id[:20]}...")
-
-    # Step 3b: Project inviter's transit prekey from invite link (slim invite moved these from event to link)
-    # This allows the joiner to contact the inviter for sync
-    if 'inviter_transit_prekey_public_key' in link_data and 'inviter_transit_prekey_shared_id' in link_data and 'inviter_transit_prekey_id' in link_data:
-        inviter_prekey_public_key_bytes = crypto.b64decode(link_data['inviter_transit_prekey_public_key'])
-        prekey_created_at = t_ms  # Use accept timestamp for prekey
-
-        log.info(f"invite.accept() projecting inviter's transit prekey for {peer_id[:20]}... to contact {inviter_peer_shared_id[:20]}...")
-        safedb.execute(
-            "INSERT OR IGNORE INTO transit_prekeys_shared (transit_prekey_shared_id, transit_prekey_id, peer_id, public_key, created_at, recorded_by) VALUES (?, ?, ?, ?, ?, ?)",
-            (link_data['inviter_transit_prekey_shared_id'], link_data['inviter_transit_prekey_id'], inviter_peer_shared_id, inviter_prekey_public_key_bytes, prekey_created_at, peer_id)
-        )
-
-    # Step 4: Create invite_accepted event (event-sources invite secrets)
+    # Create invite_accepted event (event-sources invite secrets for reprojection)
+    # This stores inviter's transit prekey in invite_accepteds table via projection
     from events.identity import invite_accepted as invite_accepted_module
     invite_accepted_id = invite_accepted_module.create(
-        invite_id=invite_id,
-        invite_prekey_id=invite_prekey_id,
-        invite_private_key=invite_private_key,
+        invite_link_data=link_data,
         peer_id=peer_id,
         t_ms=t_ms + 1,
         db=db
     )
     log.info(f"invite.accept() created invite_accepted_id={invite_accepted_id[:20]}...")
-
-    # Step 5: Project invite_accepted (projects secrets to group_prekeys, projects invite_accepteds table)
-    invite_accepted_module.project(invite_accepted_id, peer_id, t_ms + 1, db)
-    log.info(f"invite.accept() projected invite_accepted")
-
-    # For mode='peer', also store existing_user_blob if present (for offline bootstrap)
-    user_id = None
-    if mode == 'peer' and 'existing_user_blob' in link_data:
-        existing_user_blob_b64 = link_data['existing_user_blob']
-        existing_user_blob = base64.urlsafe_b64decode(existing_user_blob_b64 + '=' * (4 - len(existing_user_blob_b64) % 4))
-
-        # Store the existing user blob (makes user available locally for offline bootstrap)
-        # Note: Don't project it here - projection happens naturally via event dependencies
-        user_stored_id = store.event(existing_user_blob, peer_id, t_ms, db)
-        log.info(f"invite.accept() stored existing user blob for device linking (bootstrap)")
-
-    # Extract user_id from invite event (for mode='peer', this contains the target user)
-    invite_event = crypto.parse_json(invite_blob)
-    user_id = invite_event.get('user_id')
 
     # Build return dict
     result = {
@@ -865,8 +799,9 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
         'inviter_peer_shared_id': inviter_peer_shared_id,
     }
 
-    if user_id:
-        result['user_id'] = user_id
+    # For mode='peer', include user_id from link data
+    if 'user_id' in link_data:
+        result['user_id'] = link_data['user_id']
 
     log.info(f"invite.accept() completed for mode={mode}, peer={peer_id[:20]}...")
     return result

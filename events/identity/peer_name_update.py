@@ -37,20 +37,13 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
 
     Raises:
         KeyNotAvailableError: If all_members group key is not available yet
-        ValueError: If peer doesn't exist
     """
     log.info(f"peer_name_update.create() creating peer name for peer_target_id={peer_target_id[:20]}..., name='{name}'")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Check: Does the peer_shared event exist?
-    peer_event = safedb.query_one(
-        "SELECT peer_shared_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_target_id, peer_id)
-    )
-    if not peer_event:
-        log.warning(f"peer_name_update.create() peer not found: {peer_target_id[:20]}...")
-        raise ValueError(f"Peer {peer_target_id} not found")
+    # NOTE: peer_shared_id is passed as param - no need to check peers_shared table
+    # The event will have peer_target_id as a dependency and will block until peer_shared is valid
 
     # Get main group (all_members) - use is_main flag since name varies
     main_group = safedb.query_one(
