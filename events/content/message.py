@@ -133,16 +133,16 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer, including attachments, author names, and reactions.
 
     Returns message dicts with 'attachments' field containing list of attached files,
-    'author_name' field from the users table, and 'reactions' field from message_reactions:
+    'author_name' field from the user_names table, and 'reactions' field from message_reactions:
     [{'message_id', 'content', 'author_id', 'author_name', 'created_at', 'attachments': [...], 'reactions': [...]}, ...]
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     messages = safedb.query(
-        """SELECT m.*, u.name as author_name
+        """SELECT m.*, un.name as author_name
            FROM messages m
-           LEFT JOIN users u ON m.author_id = u.user_id AND m.recorded_by = u.recorded_by
+           LEFT JOIN user_names un ON m.author_id = un.user_id AND m.recorded_by = un.recorded_by
            WHERE m.channel_id = ? AND m.recorded_by = ?
-           ORDER BY m.created_at DESC LIMIT 50""",
+           ORDER BY m.created_at ASC LIMIT 50""",
         (channel_id, recorded_by)
     )
 
