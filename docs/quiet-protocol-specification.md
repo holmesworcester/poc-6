@@ -603,19 +603,25 @@ The ack needs no verification — if Bob can decrypt it, it came from whoever re
 Upon successful handshake, store:
 
 ```
-connections (
-    peer_shared_id,         -- remote peer's public identity
-    our_transit_key_id,     -- key ID we sent (for matching acks, routing via owner_peer_id)
-    their_transit_key_id,   -- key ID they provided (for nonce derivation)
+sync_connections (
+    our_transit_key_id,     -- PRIMARY KEY: key ID we sent (for matching acks)
+    our_peer_id,            -- local peer that owns this connection
+    their_transit_key_id,   -- key ID they provided (for routing responses)
     their_transit_key,      -- symmetric key to send TO them
     origin_ip, origin_port,
     last_seen_ms, ttl_ms
 )
 ```
 
-The `our_transit_key_id` serves dual purposes:
+The connection table is **key-based** rather than peer-based:
+- **Primary key**: `our_transit_key_id` uniquely identifies each connection
+- **No direct `peer_shared_id`**: Remote peer identity is looked up via `their_transit_key_id` → `transit_prekeys_shared.peer_id`
+- **Multi-account routing**: `our_peer_id` identifies which local peer owns this connection
+
+This design enables:
 1. **Ack matching**: When receiving `sync_connect_ack`, match `for_transit_key_id` to find the connection
-2. **Multi-account routing**: Look up `transit_keys.owner_peer_id` to determine which local peer owns this connection
+2. **Removed peer enforcement**: When a peer is removed, delete connections where `their_transit_key_id` maps to the removed peer's transit keys
+3. **Bootstrap flexibility**: Connections can be established before full peer_shared projection
 
 ## Lifecycle
 
