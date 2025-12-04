@@ -1,152 +1,117 @@
-# invite_accepted as Trust Anchor
+# Signature Verification Fixes
 
-## Goal
+## Problem
 
-Make `invite_accepted` the trust anchor for joining by:
-1. Storing complete raw invite link data in the event
-2. Moving all interpretation logic to `invite_accepted.project()`
-3. Having projection mark `network_id` as valid, triggering the cascade
+12 shareable event types are missing cryptographic signature verification in their `project()` functions. This is a security vulnerability - a malicious peer could forge events.
 
-## Why
+## Status: IMPLEMENTED
 
-**Event-sourcing principle**: Events are immutable facts containing raw input; projectors interpret those facts into state.
+### HIGH Priority - ✅ DONE
 
-Currently, joining logic is scattered:
-- `user.join()` parses invite link, extracts fields
-- `user.join()` manually projects inviter's peer_shared
-- `invite_accepted` stores only partial data
-- `invite_accepted.project()` does manual table inserts and `notify_event_valid()` calls
+| File | Event Type | Status |
+|------|-----------|--------|
+| `events/content/message_deletion.py` | message_deletion | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/identity/user_removed.py` | user_removed | ✅ Added manual verification (uses `removed_by` field) |
+| `events/identity/peer_removed.py` | peer_removed | ✅ Added manual verification (uses `removed_by` field) |
 
-After this change:
-- `invite_accepted` event contains the complete invite link (raw)
-- `invite_accepted.project()` is the single source of truth for "what accepting means"
-- Natural cascade via standard blocking/unblocking mechanism
-- Complete reprojection works without the original invite link
+### MEDIUM Priority - ✅ DONE (signed events) / ⚠️ DEFERRED (unsigned events)
 
-## Spec Reference
+| File | Event Type | Status |
+|------|-----------|--------|
+| `events/content/message_reaction.py` | message_reaction | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/content/message_reaction_deletion.py` | message_reaction_deletion | ✅ Added manual verification in `project_deletion()` (uses `deleted_by` field) |
+| `events/identity/username_update.py` | username_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/identity/network_name_update.py` | network_name_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/identity/peer_name_update.py` | peer_name_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/content/message_attachment.py` | message_attachment | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/content/message_rekey.py` | message_rekey | ⚠️ Cannot sign - must be deterministic for convergence |
+| `events/network/observed_address.py` | observed_address | ✅ Added signing to create() and verification to project() |
+| `events/content/file_slice.py` | file_slice | ⚠️ SKIPPED - Uses merkle hash for integrity, no signature |
 
-See `docs/quiet-protocol-specification.md`:
-- Section: "Invite Acceptance and Trust Anchoring"
-- Subsections: "Event Structure", "Projection and Trust Cascade", "Why This Architecture"
+### Cannot Be Signed
 
-## Current State
+1. **message_rekey.py** - Must remain unsigned for deterministic convergence. Multiple peers independently rekeying the same message must produce identical events (same content-addressed event_id). Signing would add a random nonce, breaking convergence. Lower risk since rekey only affects forward secrecy (not message content) and the new_ciphertext is validated by successful decryption.
 
-**invite_accepted event** (current):
-```python
-{
-    'type': 'invite_accepted',
-    'invite_id': invite_id,
-    'invite_prekey_id': invite_prekey_id,
-    'invite_private_key': crypto.b64encode(invite_private_key),
-    'signed_by': peer_id,
-    'created_at': t_ms
-}
-```
+## Pattern to Follow
 
-**invite_accepted.project()** (current):
-- Manual insert into `group_prekeys` table
-- Manual `notify_event_valid()` calls
-- Doesn't mark network_id as valid
-
-## Tasks
-
-### 1. Update `invite_accepted.create()` to store raw invite link data
-
-New structure:
-```python
-{
-    'type': 'invite_accepted',
-    'invite_link_data': {
-        'invite_blob': ...,              # Complete signed invite event
-        'invite_private_key': ...,       # For prekey and signing
-        'invite_prekey_id': ...,         # Crypto hint
-        'inviter_peer_shared_blob': ..., # For sync (optional)
-        'inviter_transit_prekey': ...,   # For connection (optional)
-        'network_id': ...,               # Which network
-        # ... all other invite link fields
-    },
-    'signed_by': peer_id,
-    'created_at': t_ms
-}
-```
-
-### 2. Update `invite_accepted.project()` for trust cascade
+Look at existing projectors that DO verify signatures. Example from `message.py`:
 
 ```python
-def project(invite_accepted_id, recorded_by, recorded_at, db):
-    # 1. Parse raw invite link data
-    invite_link_data = event_data['invite_link_data']
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    # ... get blob, unwrap ...
+    event_data = crypto.parse_json(plaintext)
 
-    # 2. Mark network_id as valid (TRUST ANCHOR)
-    network_id = invite_link_data['network_id']
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (network_id, recorded_by)
+    # Get signer's public key
+    signed_by = event_data.get('signed_by')
+    signer_row = safedb.query_one(
+        "SELECT public_key FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (signed_by, recorded_by)
     )
+    if not signer_row:
+        log.warning(f"message.project() signer not found: {signed_by[:20]}...")
+        return None
 
-    # 3. Create deterministic group_prekey from key material
-    # (Depends on deterministic-local-keys branch)
-    prekey_id = group_prekey.create_from_existing(
-        public_key=...,
-        private_key=invite_link_data['invite_private_key'],
-        peer_id=recorded_by,
-        db=db
-    )
-    # This naturally triggers notify_event_valid(prekey_id) via normal projection
+    public_key = signer_row['public_key']
 
-    # 4. Cascade unblock happens automatically via blocking/unblocking mechanism
-    # Events waiting on network_id or prekey_id will now project
+    # Verify signature
+    if not crypto.verify_event(event_data, public_key):
+        log.warning(f"message.project() signature verification failed")
+        return None
+
+    # ... proceed with projection ...
 ```
 
-### 3. Simplify `user.join()` / `invite.accept()`
+## Helper Function
 
-Remove scattered logic:
-- Don't parse invite link in join function
-- Don't manually project inviter's peer_shared
-- Just create `invite_accepted` with raw data and let projection handle it
+There's a helper `crypto.verify_signed_by_peer_shared(event_data, recorded_by, db)` in `crypto.py` that encapsulates the pattern above. Use it where appropriate:
 
 ```python
-def join(peer_id, invite_link, name, t_ms, db):
-    # Parse just enough to validate format
-    invite_link_data = parse_invite_link(invite_link)
-
-    # Create invite_accepted with complete raw data
-    invite_accepted.create(
-        invite_link_data=invite_link_data,
-        peer_id=peer_id,
-        t_ms=t_ms,
-        db=db
-    )
-
-    # Create user event (signed by invite)
-    user.create(...)
-
-    # Create peer_shared event
-    peer_shared.join(...)
-
-    # All projection happens naturally
+if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+    log.warning(f"<event>.project() signature verification failed")
+    return None
 ```
 
-### 4. Update schema if needed
+## Implementation Steps
 
-May need to update `invite_accepteds` table to match new structure, or let projection populate it from the raw data.
+For each event type:
 
-### 5. Update tests
+1. **Read the current project() function** to understand the flow
+2. **Add signature verification** after parsing event_data, before any state changes
+3. **Use verify_signed_by_peer_shared()** for standard peer-signed events
+4. **Handle special cases**:
+   - Network-signed events (check `signed_by == network_id`)
+   - Self-signed events (rare)
+5. **Return None** on verification failure (consistent with other projectors)
+6. **Run tests** after each fix
 
-- Test that network_id becomes valid after invite_accepted.project()
-- Test cascade: blocked events unblock when network_id is valid
-- Test reprojection: drop tables, replay events, same state
+## Order of Implementation
 
-## Dependencies
+1. Start with HIGH priority (message_deletion, user_removed, peer_removed)
+2. Then MEDIUM priority
+3. Run full test suite after each batch
 
-This branch depends on **deterministic-local-keys** for step 3 (creating prekey from existing key material with same ID).
+## Testing
 
-Can be developed in parallel but final integration needs deterministic keys.
+```bash
+PYTHONPATH=/home/hwilson/poc-6-sig-verify pytest /home/hwilson/poc-6-sig-verify/tests/ -v --tb=short
+```
 
-## Files to Modify
+## Notes
 
-- `events/identity/invite_accepted.py`
-- `events/identity/invite_accepted.sql` (if schema changes)
-- `events/identity/user.py` (simplify join)
-- `events/identity/invite.py` (simplify accept)
-- `tests/` - joining and cascade tests
+- `message_attachment.py` and `file_slice.py` have non-standard signatures (take event_data param)
+- They're called from `recorded.py` which doesn't verify before calling
+- May need to add verification in the projector itself OR in recorded.py before dispatch
+- `file_slice` may be lower priority since data integrity is via merkle hash
+
+## Commit Format
+
+```
+Add signature verification to <event_type>.project()
+
+Fixes Gotcha 15 violation - shareable events must verify signatures
+before trusting event data to prevent forgery attacks.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```

@@ -207,6 +207,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"peer_name_update.project() failed to unwrap/parse event: {e}")
         return None
 
+    # Verify signature before trusting event data
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+        log.warning(f"peer_name_update.project() signature verification failed for {event_id[:20]}...")
+        return None
+
     # Extract fields - name is already plaintext after unwrap
     peer_target_id = event_data.get('peer_id')
     name = event_data.get('name')

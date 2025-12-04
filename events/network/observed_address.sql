@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS network_addresses (
     address_id TEXT NOT NULL,
     observed_peer_id TEXT NOT NULL,  -- Which peer was observed
-    observed_by_peer_id TEXT NOT NULL,  -- Which peer made the observation
+    signed_by TEXT NOT NULL,  -- peer_shared_id of who made and signed the observation
     ip TEXT NOT NULL,  -- Observed IP address
     port INTEGER NOT NULL,  -- Observed port
     created_at INTEGER NOT NULL,  -- When observation was made
@@ -18,6 +18,6 @@ CREATE TABLE IF NOT EXISTS network_addresses (
 CREATE INDEX IF NOT EXISTS idx_network_addresses_lookup
     ON network_addresses(recorded_by, observed_peer_id);
 
--- Index for lookups by who made observation
-CREATE INDEX IF NOT EXISTS idx_network_addresses_observed_by
-    ON network_addresses(recorded_by, observed_by_peer_id);
+-- Index for lookups by who signed the observation
+CREATE INDEX IF NOT EXISTS idx_network_addresses_signed_by
+    ON network_addresses(recorded_by, signed_by);

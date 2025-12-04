@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 
 def create(
     observed_peer_id: str,
-    observed_by_peer_id: str,
+    peer_id: str,
+    peer_shared_id: str,
     ip: str,
     port: int,
     t_ms: int,
@@ -37,7 +38,8 @@ def create(
 
     Args:
         observed_peer_id: The peer whose endpoint was observed
-        observed_by_peer_id: The peer making this observation (creator)
+        peer_id: Local peer_id of the observer (for signing/storage)
+        peer_shared_id: peer_shared_id of the observer (for signed_by field)
         ip: Observed IP address
         port: Observed port number
         t_ms: Timestamp
@@ -47,25 +49,28 @@ def create(
         address_id: Event ID of the created address event
     """
     log.info(
-        f"observed_address.create() {observed_by_peer_id[:20]}... observed "
+        f"observed_address.create() {peer_shared_id[:20]}... observed "
         f"{observed_peer_id[:20]}... at {ip}:{port}"
     )
 
-    # Create event blob (plaintext JSON, no signing for now)
-    # TODO: This event should be signed even if not encrypted
+    # Create event data with signed_by field
     event_data = {
         'type': 'observed_address',
         'observed_peer_id': observed_peer_id,
-        'observed_by_peer_id': observed_by_peer_id,
+        'signed_by': peer_shared_id,
         'ip': ip,
         'port': port,
         'created_at': t_ms
     }
 
-    blob = json.dumps(event_data).encode()
+    # Sign the event
+    from events.identity import peer
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    signed_event = crypto.sign_event(event_data, private_key)
 
-    # Store event with recorded wrapper and projection
-    address_id = store.event(blob, observed_by_peer_id, t_ms, db)
+    # Store as signed plaintext (no encryption - addresses are public info)
+    blob = crypto.canonicalize_json(signed_event)
+    address_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"observed_address.create() created address_id={address_id[:20]}...")
     return address_id
@@ -100,7 +105,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
 
     # Parse JSON
     try:
-        event_data = json.loads(blob.decode())
+        event_data = crypto.parse_json(blob)
     except Exception as e:
         log.warning(f"observed_address.project() failed to parse event data: {e}")
         return None
@@ -110,25 +115,30 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
         log.warning(f"observed_address.project() wrong type: {event_data.get('type')}")
         return None
 
+    # Verify signature before trusting event data
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+        log.warning(f"observed_address.project() signature verification failed for {address_id[:20]}...")
+        return None
+
     observed_peer_id = event_data.get('observed_peer_id')
-    observed_by_peer_id = event_data.get('observed_by_peer_id')
+    signed_by = event_data.get('signed_by')
     ip = event_data.get('ip')
     port = event_data.get('port')
     created_at = event_data.get('created_at')
 
-    if not all([observed_peer_id, observed_by_peer_id, ip, port, created_at]):
+    if not all([observed_peer_id, signed_by, ip, port, created_at]):
         log.warning(f"observed_address.project() missing required fields")
         return None
 
     # Insert into network_addresses table
     safedb.execute(
         """INSERT OR REPLACE INTO network_addresses
-           (address_id, observed_peer_id, observed_by_peer_id, ip, port, created_at, recorded_by, recorded_at)
+           (address_id, observed_peer_id, signed_by, ip, port, created_at, recorded_by, recorded_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             address_id,
             observed_peer_id,
-            observed_by_peer_id,
+            signed_by,
             ip,
             port,
             created_at,
@@ -144,7 +154,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
     )
 
     log.info(
-        f"observed_address.project() inserted: {observed_by_peer_id[:20]}... → "
+        f"observed_address.project() inserted: {signed_by[:20]}... observed "
         f"{observed_peer_id[:20]}... at {ip}:{port}"
     )
 
@@ -160,12 +170,12 @@ def get_addresses(peer_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
         db: Database connection
 
     Returns:
-        List of dicts with keys: address_id, ip, port, observed_by_peer_id, created_at
+        List of dicts with keys: address_id, ip, port, signed_by, created_at
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     rows = safedb.query(
-        """SELECT address_id, ip, port, observed_by_peer_id, created_at
+        """SELECT address_id, ip, port, signed_by, created_at
            FROM network_addresses
            WHERE observed_peer_id = ? AND recorded_by = ?
            ORDER BY created_at DESC""",
@@ -177,7 +187,7 @@ def get_addresses(peer_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
             'address_id': row['address_id'],
             'ip': row['ip'],
             'port': row['port'],
-            'observed_by_peer_id': row['observed_by_peer_id'],
+            'signed_by': row['signed_by'],
             'created_at': row['created_at']
         }
         for row in rows

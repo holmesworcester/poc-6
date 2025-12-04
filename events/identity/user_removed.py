@@ -152,6 +152,23 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     event_data = crypto.parse_json(blob)
 
+    # Verify signature before trusting event data
+    # user_removed uses 'removed_by' as the signer field (not 'signed_by')
+    signer_peer_shared_id = event_data.get('removed_by')
+    if not signer_peer_shared_id:
+        log.warning(f"user_removed.project() missing removed_by field for {event_id[:20]}...")
+        return None
+
+    from events.identity import peer_shared
+    try:
+        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
+        if not crypto.verify_event(event_data, public_key):
+            log.warning(f"user_removed.project() signature verification failed for {event_id[:20]}...")
+            return None
+    except ValueError:
+        log.warning(f"user_removed.project() signer peer_shared not found for {event_id[:20]}...")
+        return None
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafe_db = create_unsafe_db(db)
 
