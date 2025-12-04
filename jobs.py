@@ -228,11 +228,11 @@ class SelfAddressAnnounceJob(Job):
 
 
 class IntroProcessJob(Job):
-    """Process pending intro events and trigger hole punching via sync_connect.
+    """Process pending intro events and trigger hole punching via connection requests.
 
     When Alice introduces Bob and Charlie:
     - Bob receives intro, sees he needs to connect to Charlie
-    - Bob calls sync_connect.send() to Charlie
+    - Bob sends connection request to Charlie
     - This sends a packet that creates NAT mapping (hole punch)
     - Charlie does the same
     - Both peers now have bidirectional NAT mappings
@@ -242,7 +242,7 @@ class IntroProcessJob(Job):
         super().__init__('intro_process', every_ms=500)  # Check twice per second
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import intro, sync_connect
+        from events.network import intro, connection
         from db import create_safe_db
         import logging
 
@@ -291,10 +291,12 @@ class IntroProcessJob(Job):
                 log.info(f"IntroProcessJob: {peer_id[:10]}... processing intro to {other_peer_id[:10]}...")
 
                 try:
-                    # Try to send sync_connect - this creates the NAT mapping
-                    sync_connect.send(
+                    # Send connection request - this creates the NAT mapping
+                    connection._send_request(
                         to_peer_shared_id=other_peer_id,
                         from_peer_id=peer_id,
+                        from_peer_shared_id=our_peer_shared_id,
+                        invite_id=None,
                         t_ms=t_ms,
                         db=db
                     )
