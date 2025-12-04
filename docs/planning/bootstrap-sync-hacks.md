@@ -86,17 +86,17 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 
 ---
 
-## 6. skip_admin_check Bypass
+## 6. skip_admin_check Bypass ✅ FIXED
 
 **Pattern**: Boolean flag to skip authorization checks.
 
-| Location | Notes |
-|----------|-------|
-| `user.py:506` | `skip_admin_check=True` - "Bootstrap: first user adds themselves" |
-| `group_member.py:43,56,77` | `skip_admin_check` parameter definition and usage |
-| `invite.py:430,438` | `skip_admin_check` for invite projections |
+| Location | Notes | Status |
+|----------|-------|--------|
+| ~~`user.py:506`~~ | ~~`skip_admin_check=True` - "Bootstrap: first user adds themselves"~~ | ✅ Removed |
+| ~~`group_member.py:43,56,77`~~ | ~~`skip_admin_check` parameter definition and usage~~ | ✅ Parameter removed |
+| ~~`invite.py:430,438`~~ | ~~`skip_admin_check` for invite projections~~ | ✅ Dead parameter removed |
 
-**Problem**: Security bypass that could be misused; should be modeled differently.
+**Resolution**: The skip was unnecessary. At bootstrap time, admin_grant is already projected before group_member.create() is called, so is_admin() returns True. Admin validation now always runs.
 
 ---
 
