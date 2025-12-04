@@ -72,17 +72,17 @@ Inventory of workarounds, shortcuts, and implicit dependencies in the sync, sync
 
 ---
 
-## 5. Direct project_ids() Calls
+## 5. Direct project_ids() Calls ✅ FIXED
 
 **Pattern**: Forcing immediate projection instead of letting the cascade happen naturally.
 
-| Location | Notes |
-|----------|-------|
-| `user.py:409` | `recorded.project_ids([recorded_id], db)` for admin_grant |
-| `user.py:441` | `recorded.project_ids([recorded_id], db)` for username_update |
-| `user.py:460` | `recorded.project_ids([recorded_id], db)` for network_name_update |
+| Location | Notes | Status |
+|----------|-------|--------|
+| ~~`user.py:409`~~ | ~~`recorded.project_ids([recorded_id], db)` for admin_grant~~ | ✅ Removed |
+| ~~`user.py:441`~~ | ~~`recorded.project_ids([recorded_id], db)` for username_update~~ | ✅ Removed |
+| ~~`user.py:460`~~ | ~~`recorded.project_ids([recorded_id], db)` for network_name_update~~ | ✅ Removed |
 
-**Problem**: Bypasses natural event cascade, tightly couples code.
+**Resolution**: These calls were redundant. `store.event()` already calls `recorded.project()` which projects events when deps are satisfied. The bootstrap flow creates events in dependency order (network → invite → user → admin), so all deps are valid when each event is created.
 
 ---
 
