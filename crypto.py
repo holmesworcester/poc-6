@@ -242,7 +242,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     """Get transit decryption key. Only checks LOCAL key tables with our private keys.
 
     Checks:
-    - transit_keys WHERE owner_peer_id == recorded_by
+    - connections WHERE our_key and connection_id hint matches
     - transit_prekeys WHERE owner_peer_id == recorded_by
     - local_peers.private_key WHERE peer_id == recorded_by
 
@@ -266,19 +266,6 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     unsafedb = create_unsafe_db(db)
 
     log.debug(f"get_transit_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
-
-    # Check transit_keys (symmetric)
-    transit_row = unsafedb.query_one(
-        "SELECT key FROM transit_keys WHERE key_id = ? AND owner_peer_id = ?",
-        (key_id, recorded_by)
-    )
-    if transit_row:
-        log.debug(f"get_transit_key_by_id() found transit key for key_id={key_id}")
-        return {
-            'id': id_bytes,
-            'key': transit_row['key'],
-            'type': 'symmetric'
-        }
 
     # Check transit_prekeys (asymmetric) - DIRECT lookup, no _shared table
     transit_prekey_row = unsafedb.query_one(
@@ -306,6 +293,29 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
                 'private_key': peer_row['private_key'],
                 'type': 'asymmetric'
             }
+
+    # Check connections table (symmetric keys from connection handshake)
+    # The hint is first 16 bytes of connection_id hash, so we need to compare
+    from db import create_safe_db
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    conn_rows = safedb.query(
+        "SELECT connection_id, our_key FROM connections WHERE recorded_by = ?",
+        (recorded_by,)
+    )
+    for conn_row in conn_rows:
+        conn_id = conn_row['connection_id']
+        # Decode connection_id, take first 16 bytes, compare with id_bytes
+        try:
+            conn_id_bytes = b64decode(conn_id)
+            if conn_id_bytes[:16] == id_bytes:
+                log.debug(f"get_transit_key_by_id() found connection key for connection_id={conn_id[:20]}...")
+                return {
+                    'id': id_bytes,
+                    'key': conn_row['our_key'],
+                    'type': 'symmetric'
+                }
+        except Exception:
+            continue
 
     log.debug(f"get_transit_key_by_id() NO KEY FOUND for key_id={key_id}, recorded_by={recorded_by[:20]}...")
     return None
@@ -389,19 +399,25 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     log.debug(f"get_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
-    # First try transit keys table (device-wide, check ownership)
-    unsafedb = create_unsafe_db(db)
-    transit_row = unsafedb.query_one(
-        "SELECT key, owner_peer_id FROM transit_keys WHERE key_id = ?",
-        (key_id,)
+    # First try connections table (symmetric keys from connection handshake)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    conn_rows = safedb.query(
+        "SELECT connection_id, our_key FROM connections WHERE recorded_by = ?",
+        (recorded_by,)
     )
-    if transit_row and transit_row['owner_peer_id'] == recorded_by:
-        log.debug(f"get_key_by_id() found transit key for key_id={key_id}")
-        return {
-            'id': id_bytes,
-            'key': transit_row['key'],
-            'type': 'symmetric'
-        }
+    for conn_row in conn_rows:
+        conn_id = conn_row['connection_id']
+        try:
+            conn_id_bytes = b64decode(conn_id)
+            if conn_id_bytes[:16] == id_bytes:
+                log.debug(f"get_key_by_id() found connection key for connection_id={conn_id[:20]}...")
+                return {
+                    'id': id_bytes,
+                    'key': conn_row['our_key'],
+                    'type': 'symmetric'
+                }
+        except Exception:
+            continue
 
     # Then try group keys table (subjective)
     safedb = create_safe_db(db, recorded_by=recorded_by)

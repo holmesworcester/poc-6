@@ -95,6 +95,7 @@ import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 import os
 import network_config
+from events.network import connection
 
 
 # ============================================================================
@@ -1871,6 +1872,100 @@ def cmd_purge_keys(session: CLISession):
     display_state(session)
 
 
+def cmd_connections(session: CLISession, verbose: bool = False):
+    """Display connections for the selected account."""
+    account = session.get_selected_account()
+
+    data = connection.list_all_for_display(account.peer_id, session.current_time_ms, session.db)
+
+    active = data['active']
+    pending = data['pending']
+    bootstrap = data['bootstrap']
+
+    total = len(active) + len(pending) + len(bootstrap)
+
+    print(f"CONNECTIONS for {account.user_name} ({account.peer_shared_id[:8]}...)")
+    print("─" * 72)
+    print()
+
+    idx = 1
+
+    # Active connections
+    if active:
+        print(f"ACTIVE ({len(active)})")
+        for conn in active:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            if verbose:
+                print(f"  #{idx} ACTIVE: {conn.short_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                print(f"       their_connection_id: {conn.their_connection_id[:20] if conn.their_connection_id else 'NULL'}...")
+                if conn.peer_shared_id:
+                    print(f"       peer_shared_id:      {conn.peer_shared_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       last_handshake:      {time_ago}")
+                print(f"       last_traffic:        ?  (not yet implemented)")
+                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print()
+            else:
+                label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
+                print(f"  {idx}. {label}...    conn: {conn.short_connection_id}    handshake {time_ago}")
+            idx += 1
+        print()
+
+    # Pending connections
+    if pending:
+        print(f"PENDING ({len(pending)})")
+        for conn in pending:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            if verbose:
+                print(f"  #{idx} PENDING: {conn.short_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                if conn.peer_shared_id:
+                    print(f"       to_peer_shared_id:   {conn.peer_shared_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       created:             {time_ago}")
+                print(f"       status:              awaiting ack")
+                print()
+            else:
+                label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
+                print(f"  {idx}. → {label}...    conn: {conn.short_connection_id}    sent {time_ago}")
+            idx += 1
+        print()
+
+    # Bootstrap connections
+    if bootstrap:
+        print(f"BOOTSTRAP ({len(bootstrap)})")
+        for conn in bootstrap:
+            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            # For bootstrap, show [inviter] or [invitee] based on context
+            # If peer_shared_id is unknown, show the role
+            if conn.peer_shared_id:
+                role_label = conn.peer_shared_id[:8] + "..."
+            else:
+                role_label = "[inviter] (unknown)"
+
+            if verbose:
+                print(f"  #{idx} BOOTSTRAP: {role_label}")
+                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                if conn.their_connection_id:
+                    print(f"       their_connection_id: {conn.their_connection_id[:20]}...")
+                if conn.invite_id:
+                    print(f"       invite_id:           {conn.invite_id[:20]}...")
+                print(f"       last_handshake:      {time_ago}")
+                print(f"       last_traffic:        ?  (not yet implemented)")
+                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print()
+            else:
+                print(f"  {idx}. {role_label:24}    conn: {conn.short_connection_id}    handshake {time_ago}")
+            idx += 1
+        print()
+
+    print("─" * 72)
+    print(f"{len(active)} active, {len(pending)} pending, {len(bootstrap)} bootstrap")
+
+
 def cmd_remove_user(session: CLISession, user_num: int):
     """Remove a user from the network (admin only)."""
     account = session.get_selected_account()
@@ -2039,6 +2134,51 @@ def cmd_list_reactions(session: CLISession, message_num: int):
 # ============================================================================
 # NETWORK SIMULATION COMMANDS
 # ============================================================================
+
+def cmd_nat(session: CLISession, account_num: int, mode: str = 'port_restricted', off: bool = False):
+    """Put an account behind NAT or remove from NAT."""
+    account = session.get_account_by_number(account_num)
+    if not account:
+        print(f"✗ account #{account_num} not found")
+        return
+
+    valid_modes = ['full_cone', 'restricted', 'port_restricted', 'symmetric']
+
+    if off:
+        network_config.set_peer_nat(account.peer_id, behind_nat=False)
+        print(f"✓ account #{account_num} ({account.full_name}) removed from NAT")
+        print(f"  (direct connectivity)")
+    else:
+        if mode not in valid_modes:
+            print(f"✗ invalid NAT mode: {mode}")
+            print(f"  valid modes: {', '.join(valid_modes)}")
+            return
+
+        network_config.set_peer_nat(account.peer_id, behind_nat=True, nat_mode=mode)
+        punchable = mode != 'symmetric'
+        print(f"✓ account #{account_num} ({account.full_name}) behind {mode} NAT")
+        print(f"  mapping TTL: 120s, punchable: {'yes' if punchable else 'no (needs relay)'}")
+
+
+def cmd_nat_status(session: CLISession):
+    """Show NAT status for all accounts."""
+    print("NAT STATUS:")
+
+    account_list = list(session.accounts.values())
+    for i, account in enumerate(account_list, 1):
+        nat_config = network_config.get_peer_nat(account.peer_id)
+
+        if nat_config:
+            mappings = network_config.get_nat_mappings_for_peer(account.peer_id)
+            punchable = nat_config.nat_mode != 'symmetric'
+            print(f"  {i}. {account.full_name:<15} {nat_config.nat_mode} NAT, {len(mappings)} mappings, punchable: {'yes' if punchable else 'no'}")
+        else:
+            print(f"  {i}. {account.full_name:<15} direct (no NAT)")
+
+    if not account_list:
+        print("  (no accounts)")
+    print()
+
 
 def cmd_network_show(session: CLISession):
     """Show current network simulation configuration."""
@@ -2331,6 +2471,10 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             summary = "--summary" in parts
             cmd_keys(session, summary=summary)
 
+        elif cmd == "connections":
+            verbose = "-v" in parts or "--verbose" in parts
+            cmd_connections(session, verbose=verbose)
+
         elif cmd == "delete":
             if len(parts) < 2:
                 print("usage: delete <n>")
@@ -2440,6 +2584,24 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 except ValueError:
                     print("error: account number must be an integer")
 
+        elif cmd == "nat":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("account_num", type=int, nargs='?')
+            parser.add_argument("--mode", type=str, default='port_restricted')
+            parser.add_argument("--off", action='store_true')
+            try:
+                args = parser.parse_args(parts[1:])
+                if args.account_num is None:
+                    print("usage: nat <account_num> [--mode <mode>] [--off]")
+                    print("  modes: full_cone, restricted, port_restricted (default), symmetric")
+                else:
+                    cmd_nat(session, args.account_num, mode=args.mode, off=args.off)
+            except SystemExit:
+                print("usage: nat <account_num> [--mode <mode>] [--off]")
+
+        elif cmd == "nat-status":
+            cmd_nat_status(session)
+
         elif cmd == "log":
             cmd_toggle_log(session)
 
@@ -2510,6 +2672,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("  Admin:")
             print("    ban <n>")
             print()
+            print("  Network/connections:")
+            print("    connections [-v]               Show all connections (active/pending/bootstrap)")
+            print()
             print("  Keys/sync:")
             print("    keys [--summary]")
             print("    purge-keys")
@@ -2526,6 +2691,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("                                   mobile-3g, satellite, lossy)")
             print("    partition <n>                  Block network traffic for account #n")
             print("    unpartition <n>                Restore network traffic for account #n")
+            print()
+            print("  NAT simulation:")
+            print("    nat <n>                        Put account #n behind NAT (port-restricted)")
+            print("    nat <n> --mode <mode>          Specify NAT mode (full_cone, restricted,")
+            print("                                   port_restricted, symmetric)")
+            print("    nat <n> --off                  Remove account from NAT")
+            print("    nat-status                     Show NAT status for all accounts")
             print()
             print("  Other:")
             print("    status")

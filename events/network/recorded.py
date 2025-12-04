@@ -63,7 +63,7 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
 
     # Schema: key events have signed_by referencing creator's local peer (not peer_shared_id)
     # peer_shared events have peer_id referencing creator's local peer
-    LOCAL_CREATOR_TYPES = {'transit_key', 'group_key', 'transit_prekey', 'group_prekey'}
+    LOCAL_CREATOR_TYPES = {'group_key', 'transit_prekey', 'group_prekey'}
 
     if event_type in LOCAL_CREATOR_TYPES and field == 'signed_by':
         # Local events have signed_by=peer_id (local). Skip if we're not the creator (foreign local)
@@ -78,10 +78,6 @@ def is_foreign_local_dep(field: str, event_data: dict[str, Any], recorded_by: st
 
     # Sync events have peer_id referencing requester's local peer (always foreign)
     if event_type == 'sync' and field == 'peer_id':
-        return True
-
-    # sync_connect events have peer_id referencing sender's local peer (always foreign)
-    if event_type == 'sync_connect' and field == 'peer_id':
         return True
 
     # transit_prekey_shared.transit_prekey_id references creator's local transit_prekey
@@ -137,11 +133,10 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # Event types with NO dependencies (root events or self-signed)
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
-        'sync_connect',     # Ephemeral, auth handled in projection (invite signature)
-        'sync_connect_ack', # Ephemeral, auth via implicit decryption
+        'peer_shared',      # Self-signed, peer_id is foreign local
+        'connection',       # Ephemeral, auth handled in projection
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
-        'transit_key',      # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
     # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
@@ -368,6 +363,12 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             recorded_at=recorded_at,
             db=db
         )
+
+        # Also add to negentropy sync buckets
+        from events.network import negentropy
+        # Use created_at from event_data if available, fall back to recorded_at
+        event_timestamp = (event_data.get('created_at') if event_data else None) or recorded_at
+        negentropy.add_event_to_sync(db, recorded_by, ref_id, event_timestamp)
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync

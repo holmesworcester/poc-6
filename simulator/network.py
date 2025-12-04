@@ -120,11 +120,18 @@ def send_packet(
     unsafedb = __import__('db').create_unsafe_db(db)
 
     # Add packet to incoming queue (will be delivered after latency)
-    queues.incoming.add(blob, t_ms, unsafedb)
-    log.debug(
-        f"network.send_packet: {from_peer_id[:20]}... → {to_peer_id[:20]}... "
-        f"from {source_addr}, enqueued {len(blob)}B"
-    )
+    # Pass peer IDs for NAT enforcement and partition checking
+    result = queues.incoming.add(blob, t_ms, unsafedb, from_peer=from_peer_id, to_peer=to_peer_id)
+    if result:
+        log.debug(
+            f"network.send_packet: {from_peer_id[:20]}... → {to_peer_id[:20]}... "
+            f"from {source_addr}, enqueued {len(blob)}B"
+        )
+    else:
+        log.debug(
+            f"network.send_packet: {from_peer_id[:20]}... → {to_peer_id[:20]}... "
+            f"DROPPED by network layer"
+        )
 
 
 def tick(t_ms: int) -> None:

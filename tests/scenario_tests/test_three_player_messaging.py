@@ -79,9 +79,9 @@ def test_three_player_messaging(fresh_db):
     for qw in sorted(by_qw.keys()):
         print(f"  QW {qw}: {len(by_qw[qw])} events")
 
-    # Check connections BEFORE sync (device-wide table, no per-peer scope)
+    # Check connections BEFORE sync
     print("\n=== Connections BEFORE sync ===")
-    connections_before = db.query("SELECT our_transit_key_id FROM sync_connections")
+    connections_before = db.query("SELECT connection_id FROM connections")
     print(f"Device has {len(connections_before)} connections before sync")
 
     # Initial sync - run enough ticks for random window selection to cover all 16 windows
@@ -93,15 +93,56 @@ def test_three_player_messaging(fresh_db):
     final_t_ms = 4000 + num_rounds * tick_helper.TICK_INTERVAL_MS
     print(f"Initial sync completed after {num_rounds} ticks")
 
-    # Check connections AFTER sync (device-wide table, no per-peer scope)
+    # Check connections AFTER sync
     print("\n=== Connections AFTER sync ===")
-    connections_after = db.query("SELECT our_transit_key_id, our_peer_id FROM sync_connections")
+    connections_after = db.query("SELECT connection_id, recorded_by, peer_shared_id FROM connections")
     print(f"Device has {len(connections_after)} connections after sync")
     for c in connections_after:
-        print(f"  Connection key: {c['our_transit_key_id'][:20]}... for peer: {c['our_peer_id'][:20]}...")
+        peer_label = c['peer_shared_id'] or 'unknown'
+        print(f"  Connection: {c['connection_id'][:20]}... for peer: {peer_label[:20] if peer_label != 'unknown' else peer_label}...")
 
     # Assert connections were established (at least 2 - Alice<->Bob bidirectional)
     assert len(connections_after) >= 1, "At least one connection should be established after sync"
+
+    # Test connection listing API (CLI display)
+    print("\n=== Testing Connection Listing API ===")
+    from events.network import connection as conn_module
+
+    # Test Alice's connections
+    alice_conns = conn_module.list_all_for_display(alice['peer_id'], final_t_ms, db)
+    print(f"Alice connections: {len(alice_conns['active'])} active, {len(alice_conns['pending'])} pending, {len(alice_conns['bootstrap'])} bootstrap")
+
+    # Test Bob's connections
+    bob_conns = conn_module.list_all_for_display(bob['peer_id'], final_t_ms, db)
+    print(f"Bob connections: {len(bob_conns['active'])} active, {len(bob_conns['pending'])} pending, {len(bob_conns['bootstrap'])} bootstrap")
+
+    # Test Charlie's connections (should have none to Alice/Bob's network)
+    charlie_conns = conn_module.list_all_for_display(charlie['peer_id'], final_t_ms, db)
+    print(f"Charlie connections: {len(charlie_conns['active'])} active, {len(charlie_conns['pending'])} pending, {len(charlie_conns['bootstrap'])} bootstrap")
+
+    # Verify Alice has at least one active connection to Bob
+    alice_has_bob_conn = any(
+        c.peer_shared_id == bob_peer_shared_id
+        for c in alice_conns['active']
+    )
+    print(f"Alice has active connection to Bob: {alice_has_bob_conn}")
+
+    # Verify connection details are populated
+    for conn in alice_conns['active']:
+        print(f"  Active: peer={conn.peer_shared_id[:20] if conn.peer_shared_id else 'None'}... conn_id={conn.connection_id[:16]}...")
+        assert conn.their_key is not None, "Active connection should have their_key"
+        assert conn.their_connection_id is not None, "Active connection should have their_connection_id"
+
+    # Assert Alice has at least one active connection
+    assert len(alice_conns['active']) >= 1, "Alice should have at least 1 active connection after sync"
+
+    # Test time formatting helpers
+    time_since = alice_conns['active'][0].time_since_handshake(final_t_ms) if alice_conns['active'] else 0
+    time_until = alice_conns['active'][0].time_until_expiry(final_t_ms) if alice_conns['active'] else 0
+    print(f"Connection time_since_handshake: {conn_module.format_time_ago(time_since)}")
+    print(f"Connection time_until_expiry: {conn_module.format_time_remaining(time_until)}")
+
+    print("✅ Connection listing API works correctly")
 
     # Check what events each peer has AFTER sync
     print("\n=== Events AFTER sync ===")

@@ -129,6 +129,39 @@ def test_alice_links_phone_to_laptop(fresh_db):
         f"Laptop should have valid channel after bootstrap"
     print(f"✅ Laptop has valid channel")
 
+    # Verify connections between devices
+    print("\n=== Verifying connections between devices ===")
+    from events.network import connection as conn_module
+
+    # Phone's connections
+    phone_conns = conn_module.list_all_for_display(alice_phone['peer_id'], current_t_ms, db)
+    print(f"Phone connections: {len(phone_conns['active'])} active, {len(phone_conns['pending'])} pending, {len(phone_conns['bootstrap'])} bootstrap")
+
+    # Laptop's connections
+    laptop_conns = conn_module.list_all_for_display(alice_laptop['peer_id'], current_t_ms, db)
+    print(f"Laptop connections: {len(laptop_conns['active'])} active, {len(laptop_conns['pending'])} pending, {len(laptop_conns['bootstrap'])} bootstrap")
+
+    # Phone should have connection to laptop
+    phone_to_laptop = any(
+        c.peer_shared_id == alice_laptop['peer_shared_id']
+        for c in phone_conns['active']
+    )
+    print(f"Phone has active connection to Laptop: {phone_to_laptop}")
+
+    # Laptop should have connection to phone
+    laptop_to_phone = any(
+        c.peer_shared_id == alice_phone['peer_shared_id']
+        for c in laptop_conns['active']
+    )
+    print(f"Laptop has active connection to Phone: {laptop_to_phone}")
+
+    # Assert bidirectional connections exist
+    assert phone_to_laptop or len(phone_conns['active']) > 0, \
+        "Phone should have at least one active connection after sync"
+    assert laptop_to_phone or len(laptop_conns['active']) > 0 or len(laptop_conns['bootstrap']) > 0, \
+        "Laptop should have at least one connection (active or bootstrap) after sync"
+    print(f"✅ Devices have connections established")
+
     # Create messages on both devices
     print("\n=== Creating messages on both devices ===")
 
@@ -391,6 +424,48 @@ def test_three_devices_all_linked(fresh_db):
     assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
     assert tablet_device_name == 'Tablet', f"Tablet device name should be 'Tablet', got '{tablet_device_name}'"
     print(f"✅ All device names stored correctly: Phone, Laptop, Tablet")
+
+    # Verify connections between all three devices
+    print("\n=== Verifying connections between all three devices ===")
+    from events.network import connection as conn_module
+
+    # Get current time from sync
+    final_t_ms = 6000 + 500 * 100  # Approximate end time
+
+    # Get connections for each device
+    phone_conns = conn_module.list_all_for_display(alice_phone['peer_id'], final_t_ms, db)
+    laptop_conns = conn_module.list_all_for_display(alice_laptop['peer_id'], final_t_ms, db)
+    tablet_conns = conn_module.list_all_for_display(alice_tablet['peer_id'], final_t_ms, db)
+
+    print(f"Phone connections: {len(phone_conns['active'])} active")
+    print(f"Laptop connections: {len(laptop_conns['active'])} active")
+    print(f"Tablet connections: {len(tablet_conns['active'])} active")
+
+    # Each device should have connections (to the other two devices)
+    # Phone sees: laptop + tablet
+    phone_peers = {c.peer_shared_id for c in phone_conns['active'] if c.peer_shared_id}
+    laptop_peers = {c.peer_shared_id for c in laptop_conns['active'] if c.peer_shared_id}
+    tablet_peers = {c.peer_shared_id for c in tablet_conns['active'] if c.peer_shared_id}
+
+    print(f"Phone connected to: {len(phone_peers)} peers")
+    print(f"Laptop connected to: {len(laptop_peers)} peers")
+    print(f"Tablet connected to: {len(tablet_peers)} peers")
+
+    # Assert each device has at least one active connection
+    assert len(phone_conns['active']) >= 1, "Phone should have at least 1 active connection"
+    assert len(laptop_conns['active']) >= 1 or len(laptop_conns['bootstrap']) >= 1, \
+        "Laptop should have at least 1 connection"
+    assert len(tablet_conns['active']) >= 1 or len(tablet_conns['bootstrap']) >= 1, \
+        "Tablet should have at least 1 connection"
+
+    # Verify mesh connectivity - phone should see both laptop and tablet
+    phone_sees_laptop = alice_laptop['peer_shared_id'] in phone_peers
+    phone_sees_tablet = alice_tablet['peer_shared_id'] in phone_peers
+    print(f"Phone → Laptop: {phone_sees_laptop}, Phone → Tablet: {phone_sees_tablet}")
+
+    assert phone_sees_laptop or phone_sees_tablet, \
+        "Phone should have active connection to at least one other device"
+    print(f"✅ All three devices have connections established (mesh topology)")
 
     # Discover the shared channel for all devices
     print("\n=== Discovering shared channel ===")

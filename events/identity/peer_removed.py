@@ -122,9 +122,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # DELETE ALL CONNECTIONS with this peer (enforcement mechanism)
     # No connections = no sync possible
-    # Uses transit_prekey mapping to find connections by their_transit_key_id
-    from events.network import sync
-    deleted_count = sync.remove_connections_for_peer(removed_peer_shared_id, recorded_by, db)
+    # Uses connection module API which handles per-peer connection removal
+    from events.network import connection
+    deleted_count = connection.remove_connections_for_peer(removed_peer_shared_id, db)
     log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
 
     # Rotate group keys when ANY peer is removed

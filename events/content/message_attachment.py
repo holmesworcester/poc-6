@@ -596,6 +596,22 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
     log.debug(f"message_attachment.project() projected attachment "
               f"message={message_id[:20]}... file={file_id[:20]}... slices={total_slices}")
 
+    # Auto-trigger file sync if we don't have all slices
+    # This enables automatic file downloads when receiving attachments
+    our_slices = safedb.query_one(
+        "SELECT COUNT(*) as cnt FROM file_slices WHERE file_id = ? AND recorded_by = ?",
+        (file_id, recorded_by)
+    )
+    have_slices = our_slices['cnt'] if our_slices else 0
+
+    if have_slices < total_slices:
+        log.info(f"message_attachment.project() auto-requesting file sync: have {have_slices}/{total_slices} slices")
+        try:
+            from events.network import sync_file
+            sync_file.request_file_sync(file_id, recorded_by, priority=5, ttl_ms=0, t_ms=recorded_at, db=db)
+        except Exception as e:
+            log.warning(f"message_attachment.project() failed to request sync: {e}")
+
 
 def consolidate_file_slices(file_id: str, recorded_by: str, db: Any) -> bool:
     """Consolidate all file slices into a single blob for fast reads.

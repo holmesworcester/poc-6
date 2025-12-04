@@ -455,3 +455,128 @@ def test_add_returns_true_on_success(db):
     db.commit()
     received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
     assert len(received) == 1
+
+
+# ===== NAT Enforcement Tests =====
+
+def test_nat_blocks_packets_without_mapping(db):
+    """Test that packets to NATed peer are blocked without hole punch."""
+    unsafedb = create_unsafe_db(db)
+
+    # Put bob behind NAT
+    network_config.set_peer_nat("bob_peer_id", behind_nat=True)
+
+    # Alice tries to send to Bob - should be blocked (no mapping)
+    result = queues.incoming.add(
+        b"alice_to_bob",
+        t_ms=1000,
+        unsafedb=unsafedb,
+        from_peer="alice_peer_id",
+        to_peer="bob_peer_id"
+    )
+    assert result is False, "Packet should be blocked - Bob behind NAT, no hole punch"
+
+
+def test_nat_allows_packets_after_hole_punch(db):
+    """Test that packets work after hole punch (bob sends first)."""
+    unsafedb = create_unsafe_db(db)
+
+    # Put bob behind NAT
+    network_config.set_peer_nat("bob_peer_id", behind_nat=True)
+
+    # Bob sends to Alice first (creates mapping)
+    result = queues.incoming.add(
+        b"bob_to_alice",
+        t_ms=1000,
+        unsafedb=unsafedb,
+        from_peer="bob_peer_id",
+        to_peer="alice_peer_id"
+    )
+    assert result is True, "Bob should be able to send (creates NAT mapping)"
+
+    # Now Alice can send to Bob (mapping exists)
+    result = queues.incoming.add(
+        b"alice_to_bob",
+        t_ms=1001,
+        unsafedb=unsafedb,
+        from_peer="alice_peer_id",
+        to_peer="bob_peer_id"
+    )
+    assert result is True, "Alice should now be able to send to Bob (hole punched)"
+
+    db.commit()
+    received = queues.incoming.drain(10, current_time_ms=1100, unsafedb=unsafedb)
+    assert len(received) == 2
+
+
+def test_nat_mapping_expires(db):
+    """Test that NAT mappings expire after TTL."""
+    unsafedb = create_unsafe_db(db)
+
+    # Put bob behind NAT with short TTL (1 second)
+    network_config.set_peer_nat("bob_peer_id", behind_nat=True)
+    network_config.get_peer_nat("bob_peer_id").mapping_ttl_ms = 1000
+
+    # Bob sends to Alice (creates mapping)
+    queues.incoming.add(
+        b"bob_to_alice",
+        t_ms=1000,
+        unsafedb=unsafedb,
+        from_peer="bob_peer_id",
+        to_peer="alice_peer_id"
+    )
+
+    # Alice can send to Bob right away
+    result = queues.incoming.add(
+        b"alice_to_bob_1",
+        t_ms=1500,
+        unsafedb=unsafedb,
+        from_peer="alice_peer_id",
+        to_peer="bob_peer_id"
+    )
+    assert result is True, "Should work within TTL"
+
+    # After TTL expires, Alice can't send anymore
+    result = queues.incoming.add(
+        b"alice_to_bob_2",
+        t_ms=3000,  # 2 seconds later, TTL expired
+        unsafedb=unsafedb,
+        from_peer="alice_peer_id",
+        to_peer="bob_peer_id"
+    )
+    assert result is False, "Should be blocked after TTL expires"
+
+
+def test_nat_allows_direct_peers(db):
+    """Test that peers not behind NAT can receive packets freely."""
+    unsafedb = create_unsafe_db(db)
+
+    # Neither peer is behind NAT
+    result = queues.incoming.add(
+        b"alice_to_bob",
+        t_ms=1000,
+        unsafedb=unsafedb,
+        from_peer="alice_peer_id",
+        to_peer="bob_peer_id"
+    )
+    assert result is True, "Direct peers should communicate freely"
+
+
+def test_nat_status_shows_mappings(db):
+    """Test that NAT mappings are tracked correctly."""
+    unsafedb = create_unsafe_db(db)
+
+    # Put bob behind NAT
+    network_config.set_peer_nat("bob_peer_id", behind_nat=True)
+
+    # Initially no mappings
+    mappings = network_config.get_nat_mappings_for_peer("bob_peer_id")
+    assert len(mappings) == 0
+
+    # Bob sends to Alice and Charlie
+    queues.incoming.add(b"1", t_ms=1000, unsafedb=unsafedb, from_peer="bob_peer_id", to_peer="alice_peer_id")
+    queues.incoming.add(b"2", t_ms=1000, unsafedb=unsafedb, from_peer="bob_peer_id", to_peer="charlie_peer_id")
+
+    # Should have 2 mappings
+    mappings = network_config.get_nat_mappings_for_peer("bob_peer_id")
+    assert len(mappings) == 2
