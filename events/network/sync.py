@@ -275,15 +275,36 @@ def remove_connections_for_user(user_id: str, recorded_by: str, db: Any) -> int:
 
 
 def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any) -> None:
-    """Add shareable event to table with computed window_id.
+    """Add shareable event to both sync tracking tables.
+
+    ARCHITECTURE NOTE: Dual Sync Tables
+    ====================================
+    We maintain two tables for sync tracking:
+
+    1. shareable_events - Used by bloom filter sync protocol
+       - Tracks window_id for hash-based windowing
+       - created_at is always NULL for determinism (encrypted events can't provide it)
+
+    2. negentropy_events - Used by negentropy time-based sync protocol
+       - Tracks bucket_start_ms for time-hierarchy hashing
+       - Uses recorded_at for bucketing (available for all events)
+
+    Both tables track the same set of events. This function is the SINGLE place
+    that adds to both, ensuring they stay synchronized. All paths that create
+    shareable events (recorded.project, file_slice.batch_create_slices) call
+    this function.
+
+    Incoming synced events also flow through recorded.project(), so they
+    automatically get added to both tables on the receiving side.
 
     Args:
         event_id: The event being marked as shareable
-        can_share_peer_id: The peer who recorded/has this event and can share it (typically recorded_by)
-        created_at: When the event was originally created
-        recorded_at: When this peer recorded the event
+        can_share_peer_id: The peer who recorded/has this event and can share it
+        created_at: When event was created (often NULL for encrypted events)
+        recorded_at: When this peer recorded the event (always available)
         db: Database connection
     """
+    from events.network import negentropy
 
     event_id_bytes = crypto.b64decode(event_id)
     # Use SyncWindow to compute storage window
@@ -297,6 +318,9 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
            VALUES (?, ?, ?, ?, ?)""",
         (event_id, can_share_peer_id, created_at, recorded_at, window_id)
     )
+
+    # Add to negentropy sync buckets - use recorded_at for bucketing (always available)
+    negentropy.add_event_to_sync(db, can_share_peer_id, event_id, recorded_at)
 
 
 def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:

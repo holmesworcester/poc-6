@@ -27,12 +27,112 @@ class NetworkConfig:
     burst_loss_probability: float = 0.0  # Probability of entering burst loss state
     burst_loss_length: int = 3           # Number of consecutive packets lost in burst
 
-    # Bandwidth limiting
+    # Bandwidth limiting (global across all peers)
     bandwidth_bytes_per_sec: Optional[int] = None  # None = unlimited
 
 
 # Global network configuration
 _config = NetworkConfig()
+
+
+# ============================================================================
+# BANDWIDTH LIMITING
+# ============================================================================
+
+# Bandwidth tracking state
+_bandwidth_window_start_ms: int = 0  # Start of current 1-second window
+_bandwidth_bytes_used: int = 0        # Bytes used in current window
+
+
+def reset_bandwidth_tracking() -> None:
+    """Reset bandwidth tracking state (for testing)."""
+    global _bandwidth_window_start_ms, _bandwidth_bytes_used
+    _bandwidth_window_start_ms = 0
+    _bandwidth_bytes_used = 0
+
+
+def get_available_bandwidth(t_ms: int) -> int:
+    """Get available bandwidth in bytes for the current window.
+
+    Args:
+        t_ms: Current timestamp in milliseconds
+
+    Returns:
+        Available bytes (0 to bandwidth_bytes_per_sec), or -1 if unlimited
+    """
+    global _bandwidth_window_start_ms, _bandwidth_bytes_used
+
+    cfg = get_network_config()
+    if cfg.bandwidth_bytes_per_sec is None:
+        return -1  # Unlimited
+
+    # Check if we've moved to a new 1-second window
+    if t_ms - _bandwidth_window_start_ms >= 1000:
+        _bandwidth_window_start_ms = t_ms
+        _bandwidth_bytes_used = 0
+
+    return max(0, cfg.bandwidth_bytes_per_sec - _bandwidth_bytes_used)
+
+
+def consume_bandwidth(bytes_count: int, t_ms: int) -> bool:
+    """Attempt to consume bandwidth for sending bytes.
+
+    Args:
+        bytes_count: Number of bytes to send
+        t_ms: Current timestamp in milliseconds
+
+    Returns:
+        True if bandwidth was available and consumed, False if over limit
+    """
+    global _bandwidth_window_start_ms, _bandwidth_bytes_used
+
+    cfg = get_network_config()
+    if cfg.bandwidth_bytes_per_sec is None:
+        return True  # Unlimited
+
+    # Check if we've moved to a new 1-second window
+    if t_ms - _bandwidth_window_start_ms >= 1000:
+        _bandwidth_window_start_ms = t_ms
+        _bandwidth_bytes_used = 0
+
+    # Check if we have enough bandwidth
+    if _bandwidth_bytes_used + bytes_count > cfg.bandwidth_bytes_per_sec:
+        log.debug(f"bandwidth: throttled - used {_bandwidth_bytes_used}B + {bytes_count}B > {cfg.bandwidth_bytes_per_sec}B limit")
+        return False
+
+    _bandwidth_bytes_used += bytes_count
+    return True
+
+
+def get_bandwidth_stats(t_ms: int) -> dict:
+    """Get current bandwidth usage statistics.
+
+    Args:
+        t_ms: Current timestamp in milliseconds
+
+    Returns:
+        Dict with limit, used, available, and utilization
+    """
+    cfg = get_network_config()
+
+    if cfg.bandwidth_bytes_per_sec is None:
+        return {
+            'limit': None,
+            'used': 0,
+            'available': None,
+            'utilization': 0.0,
+            'window_start_ms': 0
+        }
+
+    available = get_available_bandwidth(t_ms)
+
+    return {
+        'limit': cfg.bandwidth_bytes_per_sec,
+        'used': _bandwidth_bytes_used,
+        'available': available,
+        'utilization': _bandwidth_bytes_used / cfg.bandwidth_bytes_per_sec if cfg.bandwidth_bytes_per_sec > 0 else 0.0,
+        'window_start_ms': _bandwidth_window_start_ms
+    }
 
 
 def set_network_config(config: NetworkConfig) -> None:
@@ -342,3 +442,4 @@ def reset_network_config() -> None:
     _bandwidth_last_refill_ms = 0
     _peer_nat_configs = {}
     _nat_mappings = {}
+    reset_bandwidth_tracking()

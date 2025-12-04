@@ -197,6 +197,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         # Mark slices as shareable (sync via regular bloom filter sync)
         # File slices are regular shareable events - they sync like any other event type
         # Access control is enforced at message_attachment level (group-encrypted)
+        # add_shareable_event also adds to negentropy sync buckets
         from events.network import sync
         for event_id in event_ids:
             sync.add_shareable_event(

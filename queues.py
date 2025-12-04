@@ -64,6 +64,11 @@ class incoming:
             log.error(f"queues.incoming.add() dropping oversized packet: {len(blob)}B > {cfg.max_packet_size}B")
             return False
 
+        # Check bandwidth limit
+        if not network_config.consume_bandwidth(len(blob), t_ms):
+            log.debug(f"queues.incoming.add() dropping packet due to bandwidth limit: {len(blob)}B")
+            return False
+
         # Check burst loss first (correlated loss)
         if network_config.check_burst_loss():
             log.debug(f"queues.incoming.add() dropping packet due to burst loss")

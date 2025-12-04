@@ -359,16 +359,10 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         sync.add_shareable_event(
             ref_id,
             recorded_by,
-            created_at=None,
+            created_at=None,  # Always None for determinism (encrypted events don't have created_at)
             recorded_at=recorded_at,
             db=db
         )
-
-        # Also add to negentropy sync buckets
-        from events.network import negentropy
-        # Use created_at from event_data if available, fall back to recorded_at
-        event_timestamp = (event_data.get('created_at') if event_data else None) or recorded_at
-        negentropy.add_event_to_sync(db, recorded_by, ref_id, event_timestamp)
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
