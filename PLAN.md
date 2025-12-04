@@ -4,29 +4,38 @@
 
 12 shareable event types are missing cryptographic signature verification in their `project()` functions. This is a security vulnerability - a malicious peer could forge events.
 
-## Events Requiring Fixes
+## Status: IMPLEMENTED
 
-### HIGH Priority (can forge critical operations)
+### HIGH Priority - ✅ DONE
 
-| File | Event Type | Current Issue |
-|------|-----------|---------------|
-| `events/content/message_deletion.py` | message_deletion | No verify_event() - could forge deletions |
-| `events/identity/user_removed.py` | user_removed | No verify_event() - could forge user removal |
-| `events/identity/peer_removed.py` | peer_removed | No verify_event() - could forge peer removal |
+| File | Event Type | Status |
+|------|-----------|--------|
+| `events/content/message_deletion.py` | message_deletion | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/identity/user_removed.py` | user_removed | ✅ Added manual verification (uses `removed_by` field) |
+| `events/identity/peer_removed.py` | peer_removed | ✅ Added manual verification (uses `removed_by` field) |
 
-### MEDIUM Priority (data integrity issues)
+### MEDIUM Priority - ✅ DONE (signed events) / ⚠️ DEFERRED (unsigned events)
 
-| File | Event Type | Current Issue |
-|------|-----------|---------------|
-| `events/content/message_reaction.py` | message_reaction | No verify_event() - could forge reactions |
-| `events/content/message_rekey.py` | message_rekey | No verify_event() - could forge rekeys |
-| `events/identity/username_update.py` | username_update | No verify_event() - could forge names |
-| `events/identity/network_name_update.py` | network_name_update | No verify_event() - could forge network names |
-| `events/identity/peer_name_update.py` | peer_name_update | No verify_event() - could forge peer names |
-| `events/network/observed_address.py` | observed_address | No verify_event() - could inject bad addresses |
-| `events/content/message_reaction_deletion.py` | message_reaction_deletion | No verify_event() |
-| `events/content/message_attachment.py` | message_attachment | No crypto verify (only signed_by field match) |
-| `events/content/file_slice.py` | file_slice | No crypto verify (data integrity via hash though) |
+| File | Event Type | Status |
+|------|-----------|--------|
+| `events/content/message_reaction.py` | message_reaction | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/content/message_reaction_deletion.py` | message_reaction_deletion | ✅ Added manual verification in `project_deletion()` (uses `deleted_by` field) |
+| `events/identity/username_update.py` | username_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/identity/network_name_update.py` | network_name_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/identity/peer_name_update.py` | peer_name_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/content/message_attachment.py` | message_attachment | ✅ Added `crypto.verify_signed_by_peer_shared()` |
+| `events/content/message_rekey.py` | message_rekey | ⚠️ DEFERRED - Event not signed in create() |
+| `events/network/observed_address.py` | observed_address | ⚠️ DEFERRED - Event not signed in create() |
+| `events/content/file_slice.py` | file_slice | ⚠️ SKIPPED - Uses merkle hash for integrity, no signature |
+
+### Deferred Work
+
+The following events need signing added to `create()` before verification can be added to `project()`:
+
+1. **message_rekey.py** - Uses `peer_id` not `peer_shared_id`, no `crypto.sign_event()` call
+2. **observed_address.py** - Has TODO comment, no signing at all
+
+These are lower risk since message_rekey only affects forward secrecy (not message content), and observed_address just provides peer endpoints.
 
 ## Pattern to Follow
 

@@ -237,6 +237,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Parse event
     event_data = crypto.parse_json(plaintext)
+
+    # Verify signature before trusting event data
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+        log.warning(f"message_reaction.project() signature verification failed for {event_id[:20]}...")
+        return None
+
     message_id = event_data['message_id']
     reactor_id = event_data['reactor_id']
     emoji = event_data['emoji']
@@ -312,6 +318,24 @@ def project_deletion(event_id: str, recorded_by: str, recorded_at: int, db: Any)
 
     # Parse event
     event_data = crypto.parse_json(plaintext)
+
+    # Verify signature before trusting event data
+    # message_reaction_deletion uses 'deleted_by' as the signer field (not 'signed_by')
+    signer_peer_shared_id = event_data.get('deleted_by')
+    if not signer_peer_shared_id:
+        log.warning(f"message_reaction.project_deletion() missing deleted_by field for {event_id[:20]}...")
+        return
+
+    from events.identity import peer_shared
+    try:
+        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
+        if not crypto.verify_event(event_data, public_key):
+            log.warning(f"message_reaction.project_deletion() signature verification failed for {event_id[:20]}...")
+            return
+    except ValueError:
+        log.warning(f"message_reaction.project_deletion() signer peer_shared not found for {event_id[:20]}...")
+        return
+
     reaction_id = event_data['reaction_id']
     deleted_by = event_data['deleted_by']
     created_at = event_data['created_at']
