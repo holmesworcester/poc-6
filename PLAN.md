@@ -24,18 +24,13 @@
 | `events/identity/network_name_update.py` | network_name_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
 | `events/identity/peer_name_update.py` | peer_name_update | ✅ Added `crypto.verify_signed_by_peer_shared()` |
 | `events/content/message_attachment.py` | message_attachment | ✅ Added `crypto.verify_signed_by_peer_shared()` |
-| `events/content/message_rekey.py` | message_rekey | ⚠️ DEFERRED - Event not signed in create() |
-| `events/network/observed_address.py` | observed_address | ⚠️ DEFERRED - Event not signed in create() |
+| `events/content/message_rekey.py` | message_rekey | ⚠️ Cannot sign - must be deterministic for convergence |
+| `events/network/observed_address.py` | observed_address | ✅ Added signing to create() and verification to project() |
 | `events/content/file_slice.py` | file_slice | ⚠️ SKIPPED - Uses merkle hash for integrity, no signature |
 
-### Deferred Work
+### Cannot Be Signed
 
-The following events need signing added to `create()` before verification can be added to `project()`:
-
-1. **message_rekey.py** - Uses `peer_id` not `peer_shared_id`, no `crypto.sign_event()` call
-2. **observed_address.py** - Has TODO comment, no signing at all
-
-These are lower risk since message_rekey only affects forward secrecy (not message content), and observed_address just provides peer endpoints.
+1. **message_rekey.py** - Must remain unsigned for deterministic convergence. Multiple peers independently rekeying the same message must produce identical events (same content-addressed event_id). Signing would add a random nonce, breaking convergence. Lower risk since rekey only affects forward secrecy (not message content) and the new_ciphertext is validated by successful decryption.
 
 ## Pattern to Follow
 

@@ -76,7 +76,8 @@ def test_nat_hole_punch_simple(fresh_db):
     # For testing, we manually create it
     address_id = address_module.create(
         observed_peer_id=bob['peer_id'],
-        observed_by_peer_id=alice['peer_id'],
+        peer_id=alice['peer_id'],
+        peer_shared_id=alice['peer_shared_id'],
         ip='203.0.113.5',
         port=42000,
         t_ms=3250,
