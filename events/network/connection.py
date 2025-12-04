@@ -390,7 +390,8 @@ def _send_ack_for_request(
         wrapped = crypto.wrap(ack_blob, to_key, db)
 
         import queues
-        queues.incoming.add(wrapped, t_ms, unsafedb)
+        # Pass peer IDs for NAT enforcement
+        queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=local_peer_id, to_peer=remote_peer_shared_id)
 
         log.info(f"connection._send_ack: updated existing connection and sent ack {ack_id[:20]}... for request {request_id[:20]}...")
         return
@@ -431,7 +432,8 @@ def _send_ack_for_request(
     wrapped = crypto.wrap(ack_blob, to_key, db)
 
     import queues
-    queues.incoming.add(wrapped, t_ms, unsafedb)
+    # Pass peer IDs for NAT enforcement
+    queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=local_peer_id, to_peer=remote_peer_shared_id)
 
     log.info(f"connection._send_ack: sent ack {ack_id[:20]}... for request {request_id[:20]}...")
 
@@ -592,7 +594,8 @@ def _send_request(
     wrapped = crypto.wrap(request_blob, to_key, db)
 
     import queues
-    queues.incoming.add(wrapped, t_ms, unsafedb)
+    # Pass peer IDs for NAT enforcement
+    queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=from_peer_id, to_peer=to_peer_shared_id)
 
     log.info(f"connection._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}...")
 
@@ -1039,7 +1042,7 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     conn = safedb.query_one("""
-        SELECT their_connection_id, their_key
+        SELECT their_connection_id, their_key, peer_shared_id
         FROM connections
         WHERE connection_id = ? AND recorded_by = ?
     """, (connection_id, recorded_by))
@@ -1050,6 +1053,7 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
 
     their_connection_id = conn['their_connection_id']
     their_key = conn['their_key']
+    to_peer_shared_id = conn['peer_shared_id']
 
     if not their_key or not their_connection_id:
         log.debug(f"connection.send: connection {connection_id[:20]}... not ready (no their_key)")
@@ -1066,7 +1070,8 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
 
     unsafedb = create_unsafe_db(db)
     import queues
-    queues.incoming.add(wrapped, t_ms, unsafedb)
+    # Pass peer IDs for NAT enforcement
+    queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=recorded_by, to_peer=to_peer_shared_id)
 
     log.debug(f"connection.send: sent {len(blob)}B on {connection_id[:20]}...")
     return True

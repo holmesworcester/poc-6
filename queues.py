@@ -49,15 +49,19 @@ class incoming:
             return False
 
         # NAT enforcement (if peer IDs provided)
-        # If sender is behind NAT, create/refresh outbound mapping
-        if from_peer and network_config.is_behind_nat(from_peer) and to_peer:
-            network_config.create_nat_mapping(from_peer, to_peer, t_ms)
+        # IMPORTANT: Check recipient NAT FIRST, before creating sender's outbound mapping
+        # Otherwise a rejected packet would still create a mapping allowing reply traffic
 
         # If recipient is behind NAT, check for valid inbound mapping
         if to_peer and network_config.is_behind_nat(to_peer):
             if from_peer and not network_config.has_nat_mapping(to_peer, from_peer, t_ms):
                 log.debug(f"queues.incoming.add() dropping packet: {to_peer[:12]}... behind NAT, no hole punch from {from_peer[:12]}...")
                 return False
+
+        # If sender is behind NAT, create/refresh outbound mapping
+        # (only if packet wasn't rejected above)
+        if from_peer and network_config.is_behind_nat(from_peer) and to_peer:
+            network_config.create_nat_mapping(from_peer, to_peer, t_ms)
 
         # Check packet size limit
         if len(blob) > cfg.max_packet_size:
