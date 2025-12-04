@@ -174,6 +174,9 @@ def test_authorization_rules(fresh_db):
 
     db.commit()
 
+    # Sync to ensure all events are projected for all perspectives
+    tick_helper.sync_until_converged(db=db, start_t_ms=3500, max_rounds=200, check_interval=1)
+
     print("\n=== Test: Bob can remove himself (self-removal) ===")
     # Bob removes his own user
     try:

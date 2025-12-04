@@ -235,10 +235,11 @@ def mark_window_synced(from_peer_id: str, to_peer_id: str, window_id: int, t_ms:
 
 
 def remove_connections_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> int:
-    """Remove all sync connections to a specific peer.
+    """Remove all sync connections to/from a specific peer.
 
-    Finds all transit prekeys belonging to the peer and deletes any
-    sync_connections using those keys.
+    Deletes connections in both directions:
+    1. Connections TO this peer (their_transit_key_id matches peer's transit keys)
+    2. Connections FROM this peer (our_peer_id matches peer's local peer_id)
 
     Args:
         peer_shared_id: The peer_shared_id to remove connections for
@@ -250,8 +251,9 @@ def remove_connections_for_peer(peer_shared_id: str, recorded_by: str, db: Any) 
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
+    total_deleted = 0
 
-    # Find all transit prekey IDs belonging to this peer
+    # Direction 1: Delete connections TO this peer (using their transit keys)
     transit_keys = safedb.query(
         """SELECT transit_prekey_id
            FROM transit_prekeys_shared
@@ -259,20 +261,39 @@ def remove_connections_for_peer(peer_shared_id: str, recorded_by: str, db: Any) 
         (peer_shared_id, recorded_by)
     )
 
-    if not transit_keys:
-        log.debug(f"remove_connections_for_peer: no transit keys found for peer {peer_shared_id[:20]}...")
-        return 0
+    if transit_keys:
+        key_ids = [row['transit_prekey_id'] for row in transit_keys]
+        placeholders = ','.join(['?'] * len(key_ids))
+        cursor = unsafedb.execute(
+            f"DELETE FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
+            key_ids
+        )
+        deleted = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+        total_deleted += deleted
+        log.info(f"remove_connections_for_peer: deleted {deleted} outbound connection(s) to peer {peer_shared_id[:20]}...")
 
-    # Delete connections using those transit keys
-    key_ids = [row['transit_prekey_id'] for row in transit_keys]
-    placeholders = ','.join(['?'] * len(key_ids))
-    cursor = unsafedb.execute(
-        f"DELETE FROM sync_connections WHERE their_transit_key_id IN ({placeholders})",
-        key_ids
+    # Direction 2: Delete connections FROM this peer (using their local peer_id)
+    # Look up the peer's local peer_id from peers_shared (use recorded_by perspective)
+    peer_ids = safedb.query(
+        """SELECT DISTINCT peer_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?""",
+        (peer_shared_id, recorded_by)
     )
-    deleted_count = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
-    log.info(f"remove_connections_for_peer: deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
-    return deleted_count
+
+    if peer_ids:
+        local_peer_ids = [row['peer_id'] for row in peer_ids]
+        placeholders = ','.join(['?'] * len(local_peer_ids))
+        cursor = unsafedb.execute(
+            f"DELETE FROM sync_connections WHERE our_peer_id IN ({placeholders})",
+            local_peer_ids
+        )
+        deleted = cursor.rowcount if hasattr(cursor, 'rowcount') else 0
+        total_deleted += deleted
+        log.info(f"remove_connections_for_peer: deleted {deleted} inbound connection(s) from peer {peer_shared_id[:20]}...")
+
+    if total_deleted == 0:
+        log.debug(f"remove_connections_for_peer: no connections found for peer {peer_shared_id[:20]}...")
+
+    return total_deleted
 
 
 def remove_connections_for_user(user_id: str, recorded_by: str, db: Any) -> int:
@@ -682,6 +703,7 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
 
     # Query active connections with completed handshake (have their_transit_key)
     unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=from_peer_id)
     connection_rows = unsafedb.query(
         """SELECT their_transit_key_id, their_transit_key, our_peer_id
            FROM sync_connections
@@ -699,6 +721,24 @@ def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: An
     for row in our_connections:
         their_transit_key_id = row['their_transit_key_id']
         their_transit_key = row['their_transit_key']
+
+        # Check if this connection is to a removed peer (look up via transit_prekeys_shared)
+        peer_lookup = safedb.query_one(
+            """SELECT peer_id
+               FROM transit_prekeys_shared
+               WHERE transit_prekey_id = ? AND recorded_by = ?
+               LIMIT 1""",
+            (their_transit_key_id, from_peer_id)
+        )
+        if peer_lookup:
+            their_peer_shared_id = peer_lookup['peer_id']
+            removed_check = unsafedb.query_one(
+                "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+                (their_peer_shared_id,)
+            )
+            if removed_check:
+                log.info(f"[SYNC_SKIP_REMOVED] skipping sync to removed peer {their_peer_shared_id[:20]}...")
+                continue
 
         # Send sync request using their transit key
         log.warning(f"[SYNC_REQUEST] from={peer_id_str[:10]}... to_key={their_transit_key_id[:10]}...")
