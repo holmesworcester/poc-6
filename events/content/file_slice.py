@@ -198,6 +198,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         # File slices are regular shareable events - they sync like any other event type
         # Access control is enforced at message_attachment level (group-encrypted)
         from events.network import sync
+        from events.network import negentropy
         for event_id in event_ids:
             sync.add_shareable_event(
                 event_id=event_id,
@@ -206,6 +207,8 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
                 recorded_at=t_ms,
                 db=db
             )
+            # Also add to negentropy sync buckets for deterministic sync
+            negentropy.add_event_to_sync(db, peer_id, event_id, t_ms)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)
