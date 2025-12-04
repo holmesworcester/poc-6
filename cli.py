@@ -51,6 +51,9 @@ import sys
 import argparse
 import logging
 import shlex
+import readline
+import atexit
+import os
 from typing import Optional, Dict, List, Any
 
 # Configure logging BEFORE importing any modules that use logging
@@ -89,6 +92,156 @@ from events.identity import user, peer, invite, network, user_removed, peer_shar
 from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update
 import purge_expired
 from events.group import group_member, group_key, group_prekey, group
+
+
+# ============================================================================
+# READLINE / TAB COMPLETION
+# ============================================================================
+
+# All available commands for tab completion
+COMMANDS = [
+    'new-network', 'switch', 'send', 'tick', 'sync', 'auto-tick',
+    'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
+    'status', 'accounts', 'channels', 'users', 'messages', 'keys',
+    'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
+    'time', 'log', 'disappear', 'fast-forward', 'help', 'quit', 'exit'
+]
+
+# Command argument hints for context-aware completion
+COMMAND_ARGS = {
+    'new-network': ['--name', '--username', '--devicename'],
+    'accept-invite': ['--username', '--devicename', '--invite'],
+    'accept-link': ['--devicename', '--invite'],
+    'sync': ['--ticks'],
+    'disappear': ['--days', '--time', '--off'],
+    'fast-forward': ['--days'],
+    'keys': ['--summary'],
+}
+
+
+class CLICompleter:
+    """Tab completer for CLI commands."""
+
+    def __init__(self, session: 'CLISession' = None):
+        self.session = session
+        self.matches = []
+
+    def complete(self, text: str, state: int) -> str | None:
+        """Return the next possible completion for 'text'.
+
+        Called by readline with state=0, 1, 2, ... until it returns None.
+        """
+        if state == 0:
+            # First call - compute all matches
+            line = readline.get_line_buffer()
+            begin = readline.get_begidx()
+
+            if begin == 0:
+                # Completing the command itself
+                self.matches = [cmd for cmd in COMMANDS if cmd.startswith(text)]
+            else:
+                # Completing an argument
+                parts = line[:begin].split()
+                if parts:
+                    cmd = parts[0]
+                    self.matches = self._complete_args(cmd, text, parts)
+                else:
+                    self.matches = []
+
+        if state < len(self.matches):
+            return self.matches[state]
+        return None
+
+    def _complete_args(self, cmd: str, text: str, parts: list) -> list:
+        """Complete arguments for a given command."""
+        matches = []
+
+        # Complete --flags
+        if text.startswith('-') or text == '':
+            if cmd in COMMAND_ARGS:
+                flags = COMMAND_ARGS[cmd]
+                matches.extend(f for f in flags if f.startswith(text))
+
+        # Context-aware completions
+        if self.session:
+            last_flag = parts[-1] if len(parts) > 1 else ''
+
+            # Complete account numbers for 'switch'
+            if cmd == 'switch' and not text.startswith('-'):
+                account_nums = [str(i) for i in range(1, len(self.session.accounts) + 1)]
+                matches.extend(n for n in account_nums if n.startswith(text))
+
+            # Complete channel numbers for 'channel'
+            if cmd == 'channel' and not text.startswith('-'):
+                if self.session.selected_account:
+                    account = self.session.accounts[self.session.selected_account]
+                    channels = channel.list_channels(recorded_by=account.peer_id, db=self.session.db)
+                    channel_nums = [str(i) for i in range(1, len(channels) + 1)]
+                    matches.extend(n for n in channel_nums if n.startswith(text))
+
+            # Complete invite numbers for --invite
+            if last_flag == '--invite':
+                invite_nums = [str(i) for i in range(1, len(self.session.invites) + 1)]
+                matches.extend(n for n in invite_nums if n.startswith(text))
+
+            # Complete message numbers for delete/edit/react/unreact/reactions
+            if cmd in ('delete', 'edit', 'react', 'unreact', 'reactions') and not text.startswith('-'):
+                if self.session.selected_account and self.session.selected_channel_id:
+                    account = self.session.accounts[self.session.selected_account]
+                    messages_list = message.list(self.session.selected_channel_id, account.peer_id, self.session.db)
+                    msg_nums = [str(i) for i in range(1, len(messages_list) + 1)]
+                    matches.extend(n for n in msg_nums if n.startswith(text))
+
+            # Complete user numbers for 'ban'
+            if cmd == 'ban' and not text.startswith('-'):
+                if self.session.selected_account:
+                    account = self.session.accounts[self.session.selected_account]
+                    network_id = account.network_id
+                    if network_id:
+                        all_users_group_id = network.get_all_users_group_id(network_id, account.peer_id, self.session.db)
+                        members = group_member.list_members(all_users_group_id, account.peer_id, self.session.db)
+                        user_nums = [str(i) for i in range(1, len(members) + 1)]
+                        matches.extend(n for n in user_nums if n.startswith(text))
+
+        return matches
+
+
+def setup_readline(session: 'CLISession' = None, history_file: str = None):
+    """Configure readline for command history and tab completion."""
+    # Set up tab completion
+    completer = CLICompleter(session)
+    readline.set_completer(completer.complete)
+
+    # Remove hyphen from word delimiters so commands like "new-network" complete fully
+    # Default delimiters include: " \t\n`~!@#$%^&*()-=+[{]}\\|;:'\",<>./?"
+    delims = readline.get_completer_delims()
+    readline.set_completer_delims(delims.replace('-', ''))
+
+    # Use tab for completion (works on most systems)
+    # Different binding syntax for different readline implementations
+    if readline.__doc__ and 'libedit' in readline.__doc__:
+        # macOS uses libedit
+        readline.parse_and_bind('bind ^I rl_complete')
+    else:
+        # GNU readline (Linux)
+        readline.parse_and_bind('tab: complete')
+
+    # Set up history file
+    if history_file is None:
+        history_file = os.path.expanduser('~/.poc6_cli_history')
+
+    try:
+        readline.read_history_file(history_file)
+    except FileNotFoundError:
+        pass
+
+    # Set history length
+    readline.set_history_length(1000)
+
+    # Save history on exit
+    atexit.register(readline.write_history_file, history_file)
+
+    return completer
 
 
 class EventLog:
@@ -1750,8 +1903,12 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
 def run_interactive(session: CLISession):
     """Run interactive REPL mode."""
+    # Set up readline for history and tab completion
+    completer = setup_readline(session)
+
     print("welcome to poc-6 cli (interactive mode)")
     print("type 'help' for commands, 'quit' to exit")
+    print("use TAB for completion, UP/DOWN for history")
     print()
 
     display_state(session)
