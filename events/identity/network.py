@@ -195,6 +195,41 @@ def get_public_key(network_id: str, recorded_by: str, db: Any) -> bytes:
     return crypto.b64decode(network_pubkey)
 
 
+def get_public_key_from_store(network_id: str, db: Any) -> bytes | None:
+    """Get network public key by reading directly from the network blob in store.
+
+    This is the conventional approach for projectors that need a network's public key
+    during cascade processing - reads from the raw blob rather than projection tables.
+    This avoids timing issues where an event is in valid_events but not yet projected.
+
+    Args:
+        network_id: The network event ID
+        db: Database connection
+
+    Returns:
+        Public key bytes, or None if blob not found or not a network event
+    """
+    unsafedb = create_unsafe_db(db)
+    blob = store.get(network_id, unsafedb)
+    if not blob:
+        log.warning(f"get_public_key_from_store() blob not found: {network_id[:20]}...")
+        return None
+
+    try:
+        event_data = crypto.parse_json(blob)
+        if event_data.get('type') != 'network':
+            log.warning(f"get_public_key_from_store() not a network event: {network_id[:20]}...")
+            return None
+        network_pubkey_b64 = event_data.get('network_pubkey')
+        if not network_pubkey_b64:
+            log.warning(f"get_public_key_from_store() no network_pubkey in blob: {network_id[:20]}...")
+            return None
+        return crypto.b64decode(network_pubkey_b64)
+    except Exception as e:
+        log.warning(f"get_public_key_from_store() failed to parse blob: {network_id[:20]}... {e}")
+        return None
+
+
 def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
     """Get network info for a peer.
 

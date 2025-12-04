@@ -638,17 +638,22 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     log.info(f"join() extracted invite_id={invite_id[:20]}... from invite link")
 
-    # Store invite prekey in group_prekeys table so we can decrypt group_key_shared events
+    # Create group_prekey event from invite key material so we can decrypt group_key_shared events
     # The invite_prekey_id was used by Alice when wrapping group_key_shared to us
-    # Derive public key from invite_private_key
+    # Since group_prekey blobs are deterministic (same key material = same hash),
+    # this produces the SAME prekey_id that Alice created
     from nacl.signing import SigningKey
+    from events.group import group_prekey
     signing_key = SigningKey(invite_private_key)
     invite_pubkey = bytes(signing_key.verify_key)
-    safedb.execute(
-        "INSERT OR IGNORE INTO group_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (invite_prekey_id, peer_id, invite_pubkey, invite_private_key, t_ms, 0, peer_id)
+    created_prekey_id = group_prekey.create_from_material(
+        public_key=invite_pubkey,
+        private_key=invite_private_key,
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db
     )
-    log.info(f"join() stored invite prekey {invite_prekey_id[:20]}... in group_prekeys for decryption")
+    log.info(f"join() created group_prekey from invite material: {created_prekey_id[:20]}... (should match invite_prekey_id={invite_prekey_id[:20]}...)")
 
     # Create invite_accepted event to capture invite link data for event-sourcing
     # This stores inviter's transit prekey in invite_accepteds table via projection

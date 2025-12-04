@@ -1,4 +1,23 @@
-"""Sync implementation with bloom-based window protocol."""
+"""Sync implementation with bloom-based window protocol.
+
+PLACEHOLDER SYNC MODE
+=====================
+Currently using simplified "send all" sync to focus on DAG bootstrap coherence
+and auth correctness. This is a temporary measure - the bloom/window protocol
+is complex and introduces non-determinism that makes debugging difficult.
+
+With PLACEHOLDER_SYNC = True:
+- On every sync request, responder sends ALL shareable events
+- No bloom filtering or window-based partitioning
+- O(n) bandwidth but deterministic and reliable
+- Allows focus on core issues: dependency ordering, trust anchors, key sharing
+
+TODO: Re-enable optimized sync (PLACEHOLDER_SYNC = False) once core DAG/auth is stable.
+"""
+
+# Placeholder sync mode - send all events on every request
+# Set to False to re-enable bloom/window-based sync
+PLACEHOLDER_SYNC = True
 
 # Registry metadata
 EVENT_TYPE = 'sync'
@@ -947,86 +966,97 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, transit_key_dict: dict[str, Any],
                   window_id: int, window_min: int, window_max: int, bloom_filter: bytes, requester_public_key: bytes,
                   t_ms: int, db: Any) -> None:
-    """Send a bloom-filtered sync response for a specific window.
+    """Send sync response - either all events (placeholder) or bloom-filtered (optimized).
 
     Args:
         to_peer_id: Requester's peer_id (for logging)
         to_peer_shared_id: Requester's peer_shared_id (unused, kept for API compatibility)
         from_peer_id: Responder's peer_id (which peer is sending the response)
         transit_key_dict: Transit key dict from the sync request
-        window_id: Window ID being synced (for salt derivation)
-        window_min: Storage window range start
-        window_max: Storage window range end
-        bloom_filter: Bloom filter of events requester HAS (64 bytes)
-        requester_public_key: Requester's public key (for deriving salt)
+        window_id: Window ID being synced (for salt derivation) - ignored in placeholder mode
+        window_min: Storage window range start - ignored in placeholder mode
+        window_max: Storage window range end - ignored in placeholder mode
+        bloom_filter: Bloom filter of events requester HAS - ignored in placeholder mode
+        requester_public_key: Requester's public key (for deriving salt) - ignored in placeholder mode
         t_ms: Current timestamp
         db: Database connection
     """
-
-    log.debug(f"[SYNC_RESPONSE] from={from_peer_id[:10]}... to={to_peer_id[:10]}... window={window_id} range={window_min}-{window_max}")
-
-    # Query random candidates to share (LIMIT to avoid O(n) scans for large event counts)
-    # Random sampling ensures we eventually cover all events across multiple rounds.
-    # Bloom filter prevents re-sending events receiver already has.
-    # TODO: This optimization breaks test_sync_perf_10k - need to fix the test or tune MAX_CANDIDATES
-    MAX_CANDIDATES = 2000  # Bound the scan per response
     safedb = create_safe_db(db, recorded_by=from_peer_id)
-    shareable_rows = safedb.query(
-        """SELECT event_id FROM shareable_events
-           WHERE can_share_peer_id = ?
-             AND window_id >= ?
-             AND window_id < ?
-           ORDER BY RANDOM()
-           LIMIT ?""",
-        (from_peer_id, window_min, window_max, MAX_CANDIDATES)
-    )
-    log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_candidate_events from={from_peer_id[:10]}...")
-    for row in shareable_rows:
-        log.debug(f"[SYNC_RESPONSE]   candidate event={row['event_id'][:20]}...")
 
-    # Derive salt for bloom checking (same salt requester used)
-    salt = derive_salt(requester_public_key, window_id)
-    log.debug(f"[BLOOM_CHECK] to={to_peer_id[:10]}... requester_pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
+    if PLACEHOLDER_SYNC:
+        # PLACEHOLDER MODE: Send ALL shareable events (no filtering)
+        # This is O(n) bandwidth but deterministic and reliable.
+        # Use this to debug DAG bootstrap and auth before optimizing sync.
+        log.info(f"[SYNC_RESPONSE_PLACEHOLDER] from={from_peer_id[:10]}... to={to_peer_id[:10]}... sending ALL events")
+        shareable_rows = safedb.query(
+            """SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?""",
+            (from_peer_id,)
+        )
+        events_to_send = [row['event_id'] for row in shareable_rows]
+        log.info(f"[SYNC_RESPONSE_PLACEHOLDER] sending {len(events_to_send)} events")
+    else:
+        # OPTIMIZED MODE: Bloom-filtered window sync
+        log.debug(f"[SYNC_RESPONSE] from={from_peer_id[:10]}... to={to_peer_id[:10]}... window={window_id} range={window_min}-{window_max}")
 
-    # Debug: Log bloom filter stats
-    bits_set = bin(int.from_bytes(bloom_filter, 'big')).count('1')
-    log.debug(f"[SYNC_RESPONSE] bloom_filter_bits_set={bits_set}/512 bloom_hex={bloom_filter.hex()[:40]}...")
+        # Query random candidates to share (LIMIT to avoid O(n) scans for large event counts)
+        MAX_CANDIDATES = 2000
+        shareable_rows = safedb.query(
+            """SELECT event_id FROM shareable_events
+               WHERE can_share_peer_id = ?
+                 AND window_id >= ?
+                 AND window_id < ?
+               ORDER BY RANDOM()
+               LIMIT ?""",
+            (from_peer_id, window_min, window_max, MAX_CANDIDATES)
+        )
+        log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_candidate_events from={from_peer_id[:10]}...")
 
-    # Filter events using bloom: send only events that FAIL bloom check
-    # (requester doesn't have them)
-    events_to_send = []
-    peer_shared_seen = 0
-    peer_shared_will_send = 0
-    for row in shareable_rows:
-        event_id_str = row['event_id']
-        event_id_bytes = crypto.b64decode(event_id_str)
+        for row in shareable_rows:
+            log.debug(f"[SYNC_RESPONSE]   candidate event={row['event_id'][:20]}...")
 
-        # Check if event is in requester's bloom
-        in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
+        # Derive salt for bloom checking (same salt requester used)
+        salt = derive_salt(requester_public_key, window_id)
+        log.debug(f"[BLOOM_CHECK] to={to_peer_id[:10]}... requester_pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
 
-        if not in_bloom:
-            # Event NOT in bloom -> requester doesn't have it -> send it
-            events_to_send.append(event_id_str)
-            log.debug(f"[SYNC_RESPONSE] will_send event_id={event_id_str[:20]}... (not_in_bloom)")
-        else:
-            log.debug(f"[SYNC_RESPONSE] skipping event_id={event_id_str[:20]}... (in_bloom)")
+        # Debug: Log bloom filter stats
+        bits_set = bin(int.from_bytes(bloom_filter, 'big')).count('1')
+        log.debug(f"[SYNC_RESPONSE] bloom_filter_bits_set={bits_set}/512 bloom_hex={bloom_filter.hex()[:40]}...")
 
-        # Try to detect peer_shared for instrumentation
-        try:
-            evt_blob_dbg = safedb.get_shareable_blob(event_id_str)
-            evt_json_dbg = crypto.parse_json(evt_blob_dbg)
-            if evt_json_dbg.get('type') == 'peer_shared':
-                peer_shared_seen += 1
-                if not in_bloom:
-                    peer_shared_will_send += 1
-        except Exception:
-            pass
+        # Filter events using bloom: send only events that FAIL bloom check
+        # (requester doesn't have them)
+        events_to_send = []
+        peer_shared_seen = 0
+        peer_shared_will_send = 0
+        for row in shareable_rows:
+            event_id_str = row['event_id']
+            event_id_bytes = crypto.b64decode(event_id_str)
 
-    log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
-    log.warning(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
+            # Check if event is in requester's bloom
+            in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
 
-    if len(events_to_send) == 0 and len(shareable_rows) > 0:
-        log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")
+            if not in_bloom:
+                # Event NOT in bloom -> requester doesn't have it -> send it
+                events_to_send.append(event_id_str)
+                log.debug(f"[SYNC_RESPONSE] will_send event_id={event_id_str[:20]}... (not_in_bloom)")
+            else:
+                log.debug(f"[SYNC_RESPONSE] skipping event_id={event_id_str[:20]}... (in_bloom)")
+
+            # Try to detect peer_shared for instrumentation
+            try:
+                evt_blob_dbg = safedb.get_shareable_blob(event_id_str)
+                evt_json_dbg = crypto.parse_json(evt_blob_dbg)
+                if evt_json_dbg.get('type') == 'peer_shared':
+                    peer_shared_seen += 1
+                    if not in_bloom:
+                        peer_shared_will_send += 1
+            except Exception:
+                pass
+
+        log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
+        log.warning(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
+
+        if len(events_to_send) == 0 and len(shareable_rows) > 0:
+            log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")
 
     # Send filtered events
     for event_id in events_to_send:

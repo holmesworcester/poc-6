@@ -78,7 +78,7 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
     1. Self-signed (no invite_id): Verify with public_key from event
     2. Invite-based (signed_by=invite_id): Verify with invite_pubkey, link to user
     """
-    log.warning(f"[PEER_SHARED_PROJECT] peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    log.debug(f"peer_shared.project() peer_shared_id={peer_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -253,6 +253,7 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 def get_public_key(peer_shared_id: str, recorded_by: str, db: Any) -> bytes:
     """Get public key for a peer_shared_id from the perspective of recorded_by."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
+
     row = safedb.query_one(
         "SELECT public_key FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
         (peer_shared_id, recorded_by)
@@ -261,6 +262,37 @@ def get_public_key(peer_shared_id: str, recorded_by: str, db: Any) -> bytes:
         raise ValueError(f"peer_shared not found: {peer_shared_id} for peer {recorded_by}")
     # public_key is stored as base64 string
     return crypto.b64decode(row['public_key'])
+
+
+def get_public_key_from_store(peer_shared_id: str, db: Any) -> bytes | None:
+    """Get public key by reading directly from the peer_shared blob in store.
+
+    This is the conventional approach for projectors that need a peer's public key
+    during cascade processing - reads from the raw blob rather than projection tables.
+    This avoids timing issues where an event is in valid_events but not yet projected.
+
+    Args:
+        peer_shared_id: The peer_shared event ID
+        db: Database connection
+
+    Returns:
+        Public key bytes, or None if blob not found or not a peer_shared event
+    """
+    unsafedb = create_unsafe_db(db)
+    blob = store.get(peer_shared_id, unsafedb)
+    if not blob:
+        log.warning(f"get_public_key_from_store() blob not found: {peer_shared_id[:20]}...")
+        return None
+
+    try:
+        event_data = crypto.parse_json(blob)
+        if event_data.get('type') != 'peer_shared':
+            log.warning(f"get_public_key_from_store() not a peer_shared event: {peer_shared_id[:20]}...")
+            return None
+        return crypto.b64decode(event_data['public_key'])
+    except Exception as e:
+        log.warning(f"get_public_key_from_store() failed to parse blob: {peer_shared_id[:20]}... {e}")
+        return None
 
 
 def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> str:
@@ -357,6 +389,24 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         }
     """
     log.info(f"peer_shared.join() peer_id={peer_id}, peer_invite_id={peer_invite_id[:20]}..., user_id={user_id[:20] if user_id else 'None'}..., device_name={device_name}")
+
+    # 0. Store invite prekey for decrypting group_key_shared events
+    # For device linking, GKS events are sealed to the invite prekey.
+    # Since group_prekey blobs are deterministic (same key material = same hash),
+    # this produces the SAME prekey_id that the inviting device created.
+    if prekey_id:
+        from nacl.signing import SigningKey
+        from events.group import group_prekey
+        signing_key = SigningKey(peer_invite_private_key)
+        invite_pubkey = bytes(signing_key.verify_key)
+        created_prekey_id = group_prekey.create_from_material(
+            public_key=invite_pubkey,
+            private_key=peer_invite_private_key,
+            peer_id=peer_id,
+            t_ms=t_ms,
+            db=db
+        )
+        log.info(f"peer_shared.join() stored invite prekey: {created_prekey_id[:20]}... (expected: {prekey_id[:20]}...)")
 
     # 1. Create peer_shared signed by peer_invite (proves access to invite)
     peer_shared_id = create(
