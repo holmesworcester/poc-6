@@ -108,7 +108,7 @@ COMMANDS = [
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
     'status', 'accounts', 'channels', 'users', 'messages', 'keys',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
-    'time', 'log', 'disappear', 'fast-forward', 'help', 'quit', 'exit'
+    'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit'
 ]
 
 # Command argument hints for context-aware completion
@@ -319,6 +319,7 @@ class CLISession:
         self.auto_tick_count: int = 100  # Number of auto-ticks after event commands (default 100)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
+        self.command_history: List[str] = []  # Commands executed in this session
 
     def initialize_database(self, use_file: bool = False, db_path: str = None):
         """Initialize database with schema.
@@ -1668,6 +1669,38 @@ def cmd_fast_forward(session: CLISession, days: int):
     display_state(session)
 
 
+def cmd_save_session(session: CLISession, name: str):
+    """Save all commands from this session as a script."""
+    if not session.command_history:
+        print("error: no commands to save")
+        return
+
+    # Sanitize name for filename
+    safe_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in name)
+    if not safe_name:
+        print("error: invalid script name")
+        return
+
+    # Create saved-sessions directory if it doesn't exist
+    script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved-sessions')
+    os.makedirs(script_dir, exist_ok=True)
+
+    script_path = os.path.join(script_dir, f"{safe_name}.sh")
+
+    # Write script
+    with open(script_path, 'w') as f:
+        f.write("#!/bin/bash\n")
+        f.write(f"# POC-6 CLI session: {name}\n")
+        f.write(f"# Commands: {len(session.command_history)}\n")
+        f.write("#\n")
+        f.write("# Run with: python cli.py < saved-sessions/" + safe_name + ".sh\n")
+        f.write("\n")
+        for cmd in session.command_history:
+            f.write(f"{cmd}\n")
+
+    print(f"saved {len(session.command_history)} commands to {script_path}")
+
+
 def cmd_toggle_log(session: CLISession):
     """Toggle event logging on/off."""
     session.event_log.enabled = not session.event_log.enabled
@@ -2316,6 +2349,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         return True
     cmd = parts[0]
 
+    # Record command in history (except meta commands)
+    meta_commands = {'quit', 'exit', 'save-session', 'help', 'status', 'accounts',
+                     'channels', 'users', 'messages', 'keys', 'time', 'log',
+                     'reactions', 'files', 'connections', 'net', 'nat-status'}
+    if cmd not in meta_commands:
+        session.command_history.append(line)
+
     # Clear event log before each command
     session.event_log.clear()
 
@@ -2628,6 +2668,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: fast-forward --days <n>")
 
+        elif cmd == "save-session":
+            if len(parts) < 2:
+                print("usage: save-session <name>")
+            else:
+                name = parts[1]
+                cmd_save_session(session, name)
+
         elif cmd == "help":
             print("available commands:")
             print()
@@ -2704,6 +2751,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    time")
             print("    log                            Toggle event log display ON/OFF")
             print("    fast-forward --days <n>")
+            print("    save-session <name>            Save session commands to saved-sessions/<name>.sh")
             print("    quit")
 
         else:
