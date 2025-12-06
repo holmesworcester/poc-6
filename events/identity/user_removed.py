@@ -209,7 +209,18 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Rotate group keys for all groups this user was a member of
     # This prevents the removed user from decrypting future messages
-    _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, db)
+    # IMPORTANT: Only the peer who CREATED this event should rotate keys.
+    # Other peers receive the rotated keys via group_key_shared.
+    # If every peer rotated keys on projection, we'd get duplicate/conflicting keys.
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (recorded_by, recorded_by)
+    )
+    if peer_self_row and peer_self_row['peer_shared_id'] == removed_by:
+        # This peer created the user_removed event - they should rotate keys
+        _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, db)
+    else:
+        log.debug(f"user_removed.project() skipping key rotation - not the event creator")
 
     return event_id
 
