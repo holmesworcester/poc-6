@@ -279,17 +279,31 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # The create_for_invite function will extract the prekey from the invite event
     from events.group import group_key_shared
 
-    # Share all_users group key
-    group_key_shared_id = group_key_shared.create_for_invite(
-        key_id=key_id,
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
-        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-        db=db
+    # Share ALL historical keys for the all_users group, not just the current key
+    # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
+    # and all historical content that may have been encrypted with older keys
+    all_group_keys = safedb.query(
+        "SELECT key_id FROM group_keys WHERE recorded_by = ?",
+        (peer_id,)
     )
 
-    log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for all_users group key")
+    keys_shared = 0
+    for key_row in all_group_keys:
+        historical_key_id = key_row['key_id']
+        try:
+            group_key_shared.create_for_invite(
+                key_id=historical_key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
+                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
+                db=db
+            )
+            keys_shared += 1
+        except Exception as e:
+            log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
+
+    log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
 
     # For mode='peer', share keys for ALL groups this user is a member of
     # This ensures the new device can decrypt all groups the user belongs to
