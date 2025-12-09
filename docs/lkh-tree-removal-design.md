@@ -448,13 +448,119 @@ def project_tree_key_shared(event_id, recorded_by, recorded_at, db):
 | Removal (not enrolled) | O(k) | Fallback to `group_key_shared` |
 | Storage per user | O(log n) | Tree keys for their path |
 
+## Prekey Rotation and Post-Compromise Security (PCS)
+
+### How do enrolled users update their prekeys?
+
+Short answer: **prekey rotation doesn't affect tree key distribution**.
+
+Tree keys flow through the tree structure, not through individual prekeys:
+
+```
+Enrollment (once):
+    admin → tree_key_shared → sealed to user's group_prekey
+
+Removal re-keying (ongoing):
+    admin → tree_key_shared → encrypted to SIBLING TREE KEY
+                              (not to individual prekeys)
+```
+
+The user's `group_prekey` is only used at enrollment time. After that, they receive tree key updates via sibling encryption - no prekey involved.
+
+### What prekey rotation does affect
+
+1. **`group_key_shared` fallback** - for non-enrolled users, needs current prekey
+2. **Initial tree enrollment** - admin needs user's current prekey to share path keys
+3. **Other key sharing** (device linking, etc.) - existing mechanisms
+
+### PCS for tree keys
+
+If Alice's device is compromised, the attacker has her tree path keys. For post-compromise security, Alice needs to rotate her tree keys - this is an O(log n) "self-update":
+
+```python
+def update_own_tree_keys(user_id, group_id, peer_id, t_ms, db):
+    """PCS update - rotate own tree path keys.
+
+    Similar to removal re-keying, but the user stays in the tree.
+    Generates fresh keys for entire path, encrypted to siblings.
+    """
+    leaf_path = get_user_leaf_path(user_id, group_id, db)
+
+    # Re-key entire path from leaf to root
+    for node_path in path_from_leaf_to_root(leaf_path):
+        sibling_path = get_sibling_path(node_path)
+
+        if sibling_path is None:
+            # Root has no sibling - just generate new root key
+            # and announce via tree_key_shared to our own subtree
+            new_key = crypto.random_bytes(32)
+            new_version = get_current_version(group_id, node_path, db) + 1
+
+            # Encrypt to our own child (the path we just updated)
+            child_path = get_child_on_path(node_path, leaf_path)
+            child_key = get_tree_key(group_id, child_path, db)
+
+            create_tree_key_shared(
+                node_path=node_path,
+                version=new_version,
+                encrypted_key=encrypt(new_key, child_key.key),
+                sibling_path=child_path,
+                sibling_version=child_key.version,
+                signed_by=peer_id,
+                db=db
+            )
+            store_tree_key(node_path, new_version, group_id, new_key, db)
+            continue
+
+        if is_subtree_empty(sibling_path, group_id, db):
+            continue  # No one to encrypt to
+
+        sibling_key = get_tree_key(group_id, sibling_path, db)
+        new_key = crypto.random_bytes(32)
+        new_version = get_current_version(group_id, node_path, db) + 1
+
+        create_tree_key_shared(
+            node_path=node_path,
+            version=new_version,
+            encrypted_key=encrypt(new_key, sibling_key.key),
+            sibling_path=sibling_path,
+            sibling_version=sibling_key.version,
+            signed_by=peer_id,
+            db=db
+        )
+
+        store_tree_key(node_path, new_version, group_id, new_key, db)
+```
+
+**Complexity:** O(log n) events for a PCS update - same as removal.
+
+### When to trigger PCS updates
+
+Options:
+1. **Periodic** - rotate tree keys on a schedule (e.g., daily)
+2. **On suspicion** - user triggers manually if they suspect compromise
+3. **Piggyback on group_prekey rotation** - when user rotates their group_prekey, also update tree keys
+
+Option 3 integrates naturally with existing PCS mechanisms.
+
+### Offline users and tree key updates
+
+If Alice is offline when Bob is removed (or does a PCS update):
+1. `tree_key_shared` events are created, encrypted to sibling keys
+2. Alice syncs later, receives the events
+3. Alice decrypts using her sibling tree key (which she already has)
+4. Alice now has the new tree keys
+
+No prekey involved - it all flows through the tree structure.
+
 ## Integration with Existing Forward Secrecy
 
 The existing forward secrecy mechanism (rekey-and-purge for expired messages) works alongside this:
 
 1. **Message expiry**: Rekey messages to clean `group_key`, distribute via `group_key_tree_shared` to current tree root
 2. **User removal**: Re-key tree path, new `group_key` uses new root
-3. **Key purging**: Purge old `tree_key` versions after all dependent events are rekeyed
+3. **PCS updates**: User re-keys own path, new keys propagate via siblings
+4. **Key purging**: Purge old `tree_key` versions after all dependent events are rekeyed
 
 ## Handling Multiple Removals
 
