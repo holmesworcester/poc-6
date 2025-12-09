@@ -302,8 +302,142 @@ CREATE TABLE tree_key_versions (
 );
 ```
 
+## Sparse Trees: What Happens When Users Leave?
+
+When a user is removed, their leaf slot becomes empty. Over time with joins and leaves, the tree becomes sparse.
+
+### Option A: Leave Gaps (Recommended)
+
+When U_1 leaves, their leaf slot stays empty. No reorganization.
+
+```
+Before:                    After U_1 removed:
+      K_root                     K_root'
+      /    \                     /    \
+    K_0    K_1                 K_0'   K_1
+    / \    / \                 / \    / \
+  K_00 K_01 K_10 K_11        K_00 [x] K_10 K_11
+   |    |    |    |           |        |    |
+  U_0  U_1  U_2  U_3         U_0      U_2  U_3
+```
+
+**Pros:**
+- Simple - no reorganization needed
+- Removal stays O(log n)
+- Deterministic - all peers agree on tree structure
+
+**Cons:**
+- Tree becomes sparse over time
+- Wasted storage for empty subtree keys
+- Tree depth doesn't shrink even if most users leave
+
+**Mitigation:** Reuse empty slots for new joins (see below).
+
+### Option B: Compact on Removal
+
+Move rightmost user into vacated slot, re-key their old and new paths.
+
+**Pros:**
+- Tree stays dense
+
+**Cons:**
+- Removal becomes O(2 log n) - re-key removed user's path AND moved user's path
+- Complex coordination - which user moves?
+- Non-deterministic without consensus on "rightmost"
+
+**Not recommended** - adds complexity for marginal benefit.
+
+### Option C: Periodic Rebalancing
+
+Let tree become sparse, periodically rebuild.
+
+**Pros:**
+- Simple day-to-day operations
+- Optimal tree structure after rebuild
+
+**Cons:**
+- Rebuild is O(n log n) - must re-share all keys to all users
+- Requires coordination on when to rebuild
+- During rebuild, which tree structure is authoritative?
+
+**Not recommended** - rebuild cost is prohibitive.
+
+### Recommended Approach: Leave Gaps + Slot Reuse
+
+1. **On removal**: Leave the slot empty, re-key the path (O(log n))
+2. **On join**: Prefer empty slots over growing the tree
+3. **Track empty slots**: Maintain a list of available leaf positions
+
+```python
+def assign_leaf(user_id, group_id, db):
+    # First, try to reuse an empty slot
+    empty_slot = db.query_one(
+        "SELECT leaf_path FROM empty_tree_slots WHERE group_id = ? LIMIT 1",
+        (group_id,)
+    )
+    if empty_slot:
+        db.execute(
+            "DELETE FROM empty_tree_slots WHERE group_id = ? AND leaf_path = ?",
+            (group_id, empty_slot['leaf_path'])
+        )
+        return empty_slot['leaf_path']
+
+    # No empty slots - assign next sequential leaf (may grow tree)
+    return assign_next_leaf(group_id, db)
+
+def on_user_removed(user_id, group_id, leaf_path, db):
+    # Mark slot as available for reuse
+    db.execute(
+        "INSERT INTO empty_tree_slots (group_id, leaf_path) VALUES (?, ?)",
+        (group_id, leaf_path)
+    )
+```
+
+**Why this works:**
+- Groups that churn (many joins/leaves) naturally reuse slots
+- Growing groups fill slots sequentially
+- Shrinking groups accumulate empty slots but don't waste re-key operations
+- Tree depth is `ceil(log2(max_concurrent_members))`, not `log2(total_ever_joined)`
+
+### Empty Subtrees Optimization
+
+When an entire subtree becomes empty, we can skip re-keying through it:
+
+```
+      K_root
+      /    \
+    K_0    K_1    ← If K_1 subtree is completely empty...
+    / \    / \
+  K_00 [x] [x] [x]
+   |
+  U_0
+
+Remove U_0: Only need to re-key K_00, K_0, K_root
+           No need to encrypt to K_1 (no one there to receive it)
+```
+
+But wait - this breaks the invariant! If we don't encrypt K_root' to K_1, then when a new user joins in the K_1 subtree, they can't learn K_root'.
+
+**Solution:** When joining into an empty subtree, the joiner receives the current root key directly (sealed to their invite prekey), plus fresh keys for their path. The empty subtree's internal keys are generated fresh.
+
+```python
+def join_into_empty_subtree(user_id, group_id, leaf_path, invite_prekey_id, db):
+    # Generate fresh keys for the entire path from leaf to first non-empty ancestor
+    empty_prefix = find_empty_prefix(leaf_path, group_id, db)
+
+    for node_path in path_from(empty_prefix, leaf_path):
+        new_key = random_bytes(32)
+        create_tree_key(node_path, version=0, group_id, new_key)
+        # Share to joiner's invite prekey
+        share_tree_key_to_invite(node_path, version=0, group_id, invite_prekey_id)
+
+    # Also share current root key (so joiner can decrypt group messages)
+    root_key = get_tree_key(group_id, "")
+    share_tree_key_to_invite("", root_key.version, group_id, invite_prekey_id)
+```
+
 ## Open Questions
 
-1. **Sparse trees**: What happens when users leave and create gaps? Do we compact?
-2. **Concurrent removals**: What if two admins remove different users simultaneously?
-3. **Recovery**: How do users catch up if they miss re-key events?
+1. **Concurrent removals**: What if two admins remove different users simultaneously? (Version conflicts on shared ancestors)
+2. **Recovery**: How do users catch up if they miss re-key events? (Need to fetch from peers who have the keys)
+3. **Consistency**: How do all peers agree on tree structure? (Need deterministic slot assignment)
