@@ -152,48 +152,87 @@ def create_invite_with_lkh(peer_id, group_id, t_ms, db):
     return invite_id, invite_link_data
 ```
 
-#### Why inviter must assign leaf position
+#### Problem: Invite links are multi-use
 
-1. **Tree state knowledge**: Only existing members know current tree structure
-2. **Empty slot reuse**: Inviter can check `empty_tree_slots` table
-3. **Consistency**: All peers will see the `invite` event with `leaf_path` and agree on assignment
-4. **No sync-first requirement**: Joiner receives leaf assignment in invite, doesn't need to sync tree first
+**Critical constraint:** Invite links can be used by multiple people. The same link might be:
+- Shared in a group chat
+- Posted on a website
+- Printed as a QR code at an event
 
-#### What if invite is never redeemed?
+This breaks the "inviter assigns leaf" model - we can't pre-assign a leaf position when we don't know how many people will use the invite.
 
-The `leaf_path` in the invite is a **reservation**, not an assignment. Two options:
+#### Solution: Defer leaf assignment to join time
 
-**Option A: Reserve on invite creation**
-- Mark slot as reserved in `empty_tree_slots` or `tree_leaf_reservations`
-- If invite expires/revoked, release reservation
-- Pro: Deterministic
-- Con: Long-lived invites waste slots
+The inviter **cannot** assign a leaf position at invite creation. Instead:
 
-**Option B: Assign on invite acceptance (recommended)**
-- `invite` event contains `leaf_path` as a **hint**
-- `invite_accepted` projection actually assigns the leaf
-- If slot was taken (race condition), find next available
-- Pro: No wasted slots
-- Con: Slight complexity in handling conflicts
+1. **Invite creation**: Share tree keys for **all current leaves' paths** (or use a different approach - see below)
+2. **Join time**: The **joiner** (or first existing member they sync with) assigns a leaf
+
+But wait - if we share keys for all paths, that's O(n) keys, defeating the purpose of LKH.
+
+#### Better solution: Two-phase join
+
+**Phase 1: Bootstrap sync (using existing O(n) mechanism)**
+1. Joiner uses invite to get `group_key` (current O(n) approach works)
+2. Joiner syncs, becomes a member, can decrypt messages
+3. Joiner does NOT yet have tree position
+
+**Phase 2: Tree enrollment (async, by any admin)**
+1. Any admin sees new member without tree position
+2. Admin assigns leaf, creates `tree_leaf_assignment` event
+3. Admin shares O(log n) tree keys to joiner's `group_prekey`
+4. Joiner receives keys, now enrolled in tree
+
+**Why this works:**
+- Multi-use invites work (no pre-assigned leaf)
+- Join is instant (uses existing group_key mechanism)
+- Tree enrollment is O(log n) per user
+- Removal is O(log n)
+
+**Trade-off:** New members aren't in tree until enrolled. If removed before enrollment, removal is still O(n) for them. But this is rare - enrollment can happen within seconds of join.
+
+#### Alternative: Lazy tree enrollment
+
+Don't enroll users in tree until first removal occurs:
+
+1. Group operates with O(n) key sharing (current behavior)
+2. First removal triggers tree construction
+3. All current members get enrolled in tree
+4. Future joins get immediate tree enrollment
+5. Future removals are O(log n)
+
+**Pro:** No overhead for groups that never remove anyone
+**Con:** First removal is O(n log n) - build tree + remove
+
+#### What the invite shares
+
+With deferred enrollment, the invite just shares the current `group_key` (as it does today). Tree keys are shared separately after leaf assignment.
 
 ```python
-def project_invite_accepted(event, db):
-    leaf_path = event['leaf_path']  # hint from invite
+def create_invite(peer_id, group_id, t_ms, db):
+    # Same as today - share group_key sealed to invite_prekey
+    # No tree keys yet (leaf not assigned)
+    ...
 
-    # Check if slot is still available
-    if is_leaf_occupied(leaf_path, group_id, db):
-        # Conflict - find next available
-        leaf_path = find_next_available_leaf(group_id, db)
-        # Note: joiner already has keys for original path
-        # They'll need additional keys for new path (handled below)
+def enroll_in_tree(user_id, group_id, admin_peer_id, t_ms, db):
+    """Called by admin after user joins to assign tree position."""
+    leaf_path = assign_next_leaf(group_id, db)
 
-    # Assign the leaf
-    create_tree_leaf_assignment(
-        user_id=joiner_user_id,
-        leaf_path=leaf_path,
-        group_id=group_id,
-        db=db
-    )
+    # Create tree_leaf_assignment event (shareable)
+    create_tree_leaf_assignment(user_id, leaf_path, group_id, admin_peer_id, t_ms, db)
+
+    # Get user's group_prekey for sealing
+    user_prekey = get_group_prekey_for_user(user_id, admin_peer_id, db)
+
+    # Share O(log n) tree keys
+    for node_path in path_from_leaf_to_root(leaf_path):
+        tree_key = get_current_tree_key(group_id, node_path, db)
+        create_tree_key_shared(
+            node_path=node_path,
+            key=tree_key.key,
+            recipient_prekey=user_prekey,
+            db=db
+        )
 ```
 
 #### Joiner's perspective
