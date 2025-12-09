@@ -103,7 +103,117 @@ group_key_tree_shared = {
 
 ## Operations
 
-### Join Flow
+### Join Flow - Detailed Analysis
+
+**Key question:** Can users add themselves to the tree when they join?
+
+**Answer:** No. The joiner doesn't know the tree state (which slots are empty, current tree depth). The **inviter** must assign the leaf position.
+
+#### Current invite flow (for reference)
+
+1. Inviter creates `invite` event with `invite_prekey_id` (a public key)
+2. Inviter creates `group_key_shared` events sealed to `invite_prekey_id`
+3. Invite link contains `invite_private_key`
+4. Joiner uses private key to decrypt `group_key_shared` events
+5. Joiner now has group keys and can decrypt messages
+
+#### LKH invite flow
+
+Same pattern, but instead of sharing `group_key` directly, share `tree_key` events:
+
+```python
+def create_invite_with_lkh(peer_id, group_id, t_ms, db):
+    # 1. Assign leaf position for future joiner
+    leaf_path = assign_leaf_for_invite(group_id, db)
+
+    # 2. Create invite with leaf assignment embedded
+    invite_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms, db)
+
+    invite_event_data = {
+        'type': 'invite',
+        'invite_prekey_id': invite_prekey_id,
+        'leaf_path': leaf_path,  # NEW: pre-assigned tree position
+        'group_id': group_id,
+        # ... other fields
+    }
+    invite_id = store.event(invite_event_data, ...)
+
+    # 3. Share O(log n) tree keys sealed to invite prekey
+    for node_path in path_from_leaf_to_root(leaf_path):
+        tree_key = get_current_tree_key(group_id, node_path, db)
+        create_tree_key_shared_for_invite(
+            node_path=node_path,
+            version=tree_key.version,
+            key=tree_key.key,
+            invite_id=invite_id,  # extracts invite_prekey for sealing
+            db=db
+        )
+
+    return invite_id, invite_link_data
+```
+
+#### Why inviter must assign leaf position
+
+1. **Tree state knowledge**: Only existing members know current tree structure
+2. **Empty slot reuse**: Inviter can check `empty_tree_slots` table
+3. **Consistency**: All peers will see the `invite` event with `leaf_path` and agree on assignment
+4. **No sync-first requirement**: Joiner receives leaf assignment in invite, doesn't need to sync tree first
+
+#### What if invite is never redeemed?
+
+The `leaf_path` in the invite is a **reservation**, not an assignment. Two options:
+
+**Option A: Reserve on invite creation**
+- Mark slot as reserved in `empty_tree_slots` or `tree_leaf_reservations`
+- If invite expires/revoked, release reservation
+- Pro: Deterministic
+- Con: Long-lived invites waste slots
+
+**Option B: Assign on invite acceptance (recommended)**
+- `invite` event contains `leaf_path` as a **hint**
+- `invite_accepted` projection actually assigns the leaf
+- If slot was taken (race condition), find next available
+- Pro: No wasted slots
+- Con: Slight complexity in handling conflicts
+
+```python
+def project_invite_accepted(event, db):
+    leaf_path = event['leaf_path']  # hint from invite
+
+    # Check if slot is still available
+    if is_leaf_occupied(leaf_path, group_id, db):
+        # Conflict - find next available
+        leaf_path = find_next_available_leaf(group_id, db)
+        # Note: joiner already has keys for original path
+        # They'll need additional keys for new path (handled below)
+
+    # Assign the leaf
+    create_tree_leaf_assignment(
+        user_id=joiner_user_id,
+        leaf_path=leaf_path,
+        group_id=group_id,
+        db=db
+    )
+```
+
+#### Joiner's perspective
+
+1. Click invite link (contains `invite_private_key`)
+2. Create local `group_prekey` from invite private key (deterministic)
+3. Sync with inviter
+4. Receive and decrypt `tree_key_shared` events using invite private key
+5. Project `invite_accepted` - this assigns leaf position
+6. Now have O(log n) tree keys, can decrypt `group_key_tree_shared` → `group_key`
+
+#### Do they need to sync the tree first?
+
+**No.** The invite contains everything needed:
+- `leaf_path`: their position in the tree
+- `tree_key_shared` events: O(log n) keys for their path
+
+They don't need to know the full tree structure. They only need their path's keys.
+
+### Join Flow (pseudocode)
 
 ```python
 def join_user(new_user_id, group_id, invite_prekey_id):
