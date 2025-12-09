@@ -19,7 +19,7 @@
 
 CREATE TABLE IF NOT EXISTS negentropy_buckets (
     recorded_by TEXT NOT NULL,              -- Local peer who owns this state
-    level TEXT NOT NULL,                    -- root|prefix_2|prefix_4|prefix_6|prefix_8
+    level TEXT NOT NULL,                    -- root|prefix_2|...|prefix_12|prefix_14|prefix_16
     prefix TEXT NOT NULL DEFAULT '',        -- Unified key prefix ('' for root)
     hash BLOB,                              -- 16-byte BLAKE2b hash (NULL if needs recompute)
     event_count INTEGER NOT NULL DEFAULT 0, -- Number of events in this bucket (for leaves)
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS negentropy_sync_state (
     range_id TEXT NOT NULL,                 -- Unique ID for this range negotiation
 
     -- Current range we're syncing
-    level TEXT NOT NULL,                    -- root|prefix_2|prefix_4|prefix_6|prefix_8
+    level TEXT NOT NULL,                    -- root|prefix_2|...|prefix_12|prefix_14|prefix_16
     prefix TEXT NOT NULL DEFAULT '',        -- Unified key prefix we're negotiating
 
     -- State

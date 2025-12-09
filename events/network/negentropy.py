@@ -22,13 +22,17 @@ Design goals:
 
 Bucket hierarchy (by unified key prefix):
 - root: all events
-- Level 1: first 2 hex chars of unified key (256 buckets)
-- Level 2: first 4 hex chars (65536 buckets)
-- Level 3: first 6 hex chars
-- Level 4: first 8 hex chars (finest level)
+- prefix_2: first 2 hex chars (256 buckets)
+- prefix_4: first 4 hex chars (65536 buckets)
+- prefix_6 through prefix_12: timestamp precision levels
+- prefix_14, prefix_16: hash precision levels (for same-timestamp events)
 
 The unified key is: timestamp_hex (12 chars for 48 bits) + event_hash (4 chars)
 Total: 16 hex chars = 64 bits
+
+For large files (e.g., 1GB = 2.4M slices), all slices may share the same timestamp.
+The hash suffix (chars 12-16) ensures these events spread across different buckets
+at the finest levels (prefix_14, prefix_16).
 
 Protocol flow:
 1. On new connection: send root hash
@@ -52,8 +56,9 @@ import crypto
 log = logging.getLogger(__name__)
 
 # Hierarchy levels - each level adds 2 hex chars (8 bits) of the unified key
-# root (0) -> level_2 (2 chars) -> level_4 (4 chars) -> level_6 (6 chars) -> level_8 (8 chars)
-LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8']
+# root (0) -> prefix_2 -> ... -> prefix_12 (full timestamp) -> prefix_14 -> prefix_16 (full key)
+# Levels prefix_14 and prefix_16 use the hash suffix to split same-timestamp events
+LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10', 'prefix_12', 'prefix_14', 'prefix_16']
 
 # Hex characters per level
 LEVEL_PREFIX_LEN = {
@@ -62,6 +67,10 @@ LEVEL_PREFIX_LEN = {
     'prefix_4': 4,
     'prefix_6': 6,
     'prefix_8': 8,
+    'prefix_10': 10,
+    'prefix_12': 12,  # Full timestamp precision
+    'prefix_14': 14,
+    'prefix_16': 16,  # Full unified key (timestamp + hash)
 }
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down
@@ -234,11 +243,11 @@ def add_event_to_sync(
 
     # Mark leaf bucket hash as stale (NULL)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    leaf_prefix = unified_key[:LEVEL_PREFIX_LEN['prefix_8']]
+    leaf_prefix = unified_key[:LEVEL_PREFIX_LEN['prefix_16']]
     safedb.execute("""
         INSERT INTO negentropy_buckets
         (recorded_by, level, prefix, hash, event_count, updated_at)
-        VALUES (?, 'prefix_8', ?, NULL, 1, ?)
+        VALUES (?, 'prefix_16', ?, NULL, 1, ?)
         ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
             hash = NULL,
             event_count = event_count + 1,
@@ -246,7 +255,7 @@ def add_event_to_sync(
     """, (recorded_by, leaf_prefix, now))
 
     # Mark all ancestor buckets as needing recompute
-    for level in ['prefix_6', 'prefix_4', 'prefix_2', 'root']:
+    for level in ['prefix_14', 'prefix_12', 'prefix_10', 'prefix_8', 'prefix_6', 'prefix_4', 'prefix_2', 'root']:
         prefix_len = LEVEL_PREFIX_LEN[level]
         ancestor_prefix = unified_key[:prefix_len]
         safedb.execute("""
@@ -282,7 +291,7 @@ def recompute_bucket_hash(
         return row['hash']
 
     # Compute hash
-    if level == 'prefix_8':
+    if level == 'prefix_16':
         # Leaf: hash of event IDs
         prefix_pattern = prefix + '%'
         events = safedb.query("""
@@ -383,7 +392,7 @@ def get_events_in_bucket(
     db,
     recorded_by: str,
     prefix: str,
-    level: str = 'prefix_8'
+    level: str = 'prefix_16'
 ) -> list[str]:
     """Get all event IDs in a bucket at any level.
 
@@ -569,7 +578,7 @@ def handle_range_request(
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
         # At finest level OR bucket has few enough events to send directly
-        if level == 'prefix_8' or event_count <= EVENTS_THRESHOLD:
+        if level == 'prefix_16' or event_count <= EVENTS_THRESHOLD:
             safedb.execute("""
                 UPDATE negentropy_sync_state
                 SET status = 'events_sent', updated_at = ?
