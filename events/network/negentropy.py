@@ -1,27 +1,51 @@
 """
-Negentropy-style deterministic sync protocol.
+Negentropy-style deterministic sync protocol - UNIFIED TIME+HASH BUCKETS variant.
+
+This variant uses a unified key space where the bucket key is:
+    timestamp (ms) || event_id_hash
+
+This creates a single unified hierarchy where:
+- Events naturally cluster by time (high-order bits are timestamp)
+- Within the same timestamp, events spread by hash
+- The hierarchy drills down through the combined key space
+
+This is essentially "one big hash" but the timestamps form the high-order bits,
+so temporal locality is preserved while still using pure prefix-based bucketing.
 
 Design goals:
 - Deterministic: no false positives, exact set reconciliation
 - Finality: clear "done" state when synced
 - UI-inspectable: track state per connection for visibility
 - Connection-scoped: ranges tracked by connection_id
+- Temporal locality: events from similar times cluster together
+- Uniform within time: events with same timestamp spread uniformly
+
+Bucket hierarchy (by unified key prefix):
+- root: all events
+- prefix_2: first 2 hex chars (256 buckets)
+- prefix_4: first 4 hex chars (65536 buckets)
+- prefix_6 through prefix_12: timestamp precision levels
+- prefix_14, prefix_16: hash precision levels (for same-timestamp events)
+
+The unified key is: timestamp_hex (12 chars for 48 bits) + event_hash (4 chars)
+Total: 16 hex chars = 64 bits
+
+For large files (e.g., 1GB = 2.4M slices), all slices may share the same timestamp.
+The hash suffix (chars 12-16) ensures these events spread across different buckets
+at the finest levels (prefix_14, prefix_16).
 
 Protocol flow:
 1. On new connection: send root hash
 2. Receive their hash, compare ranges
-3. For mismatched ranges: drill down until bucket has ≤EVENTS_THRESHOLD events
+3. For mismatched ranges: drill down by unified prefix until bucket has ≤EVENTS_THRESHOLD events
 4. At threshold: send actual event IDs
 5. When all ranges match: sync complete for this connection
-
-Buckets are identified by Unix timestamps (ms), not human-readable strings.
 """
 
 import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from calendar import monthrange
 from typing import Optional, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -31,15 +55,26 @@ import crypto
 
 log = logging.getLogger(__name__)
 
-# Hierarchy levels from coarsest to finest
-LEVELS = ['root', 'year', 'month', 'day', 'hour', 'ten_min', 'one_min']
+# Hierarchy levels - each level adds 2 hex chars (8 bits) of the unified key
+# root (0) -> prefix_2 -> ... -> prefix_12 (full timestamp) -> prefix_14 -> prefix_16 (full key)
+# Levels prefix_14 and prefix_16 use the hash suffix to split same-timestamp events
+LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10', 'prefix_12', 'prefix_14', 'prefix_16']
+
+# Hex characters per level
+LEVEL_PREFIX_LEN = {
+    'root': 0,
+    'prefix_2': 2,
+    'prefix_4': 4,
+    'prefix_6': 6,
+    'prefix_8': 8,
+    'prefix_10': 10,
+    'prefix_12': 12,  # Full timestamp precision
+    'prefix_14': 14,
+    'prefix_16': 16,  # Full unified key (timestamp + hash)
+}
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down
-# Production value: 100 events per bucket is efficient for comparison
 EVENTS_THRESHOLD = 100
-
-# Root bucket sentinel value
-ROOT_BUCKET_START = 0
 
 
 class RangeStatus(Enum):
@@ -52,11 +87,11 @@ class RangeStatus(Enum):
 
 @dataclass
 class RangeRequest:
-    """A request to sync a specific time range."""
+    """A request to sync a specific unified key prefix range."""
     range_id: str
     level: str
-    bucket_start_ms: int
-    hashes: dict[int, bytes]  # child_start_ms -> hash
+    prefix: str  # Hex prefix of unified key
+    hashes: dict[str, bytes]  # child_prefix -> hash
 
 
 @dataclass
@@ -64,96 +99,58 @@ class RangeResponse:
     """Response to a range request."""
     range_id: str
     level: str
-    bucket_start_ms: int
-    hashes: dict[int, bytes]  # Our hashes for comparison
+    prefix: str
+    hashes: dict[str, bytes]
 
 
 @dataclass
 class EventsMessage:
     """Events for a specific bucket."""
     range_id: str
-    bucket_start_ms: int
+    prefix: str
     event_ids: list[str]
 
 
 # ============================================================================
-# Bucket boundary computation
+# Unified key computation
 # ============================================================================
 
-def get_bucket_start_ms(ts_ms: int, level: str) -> int:
-    """Get the start timestamp of the bucket containing the given timestamp.
+def compute_unified_key(event_id: str, created_at: int) -> str:
+    """Compute the unified time+hash key for an event.
+
+    The unified key is: timestamp_hex (12 chars, 48 bits) + event_hash (4 chars, 16 bits)
+
+    This creates a key where:
+    - High-order bits are timestamp (so events cluster by time when sorted)
+    - Low-order bits are hash (so events with same timestamp spread uniformly)
+
+    48 bits of timestamp gives us ~8900 years of millisecond precision from epoch.
+    16 bits of hash gives 65536 sub-buckets within each timestamp.
 
     Args:
-        ts_ms: Timestamp in milliseconds since epoch
-        level: One of 'root', 'year', 'month', 'day', 'hour', 'ten_min', 'one_min'
+        event_id: The event identifier
+        created_at: Event timestamp in milliseconds since epoch
 
     Returns:
-        Start timestamp (ms) of the bucket containing ts_ms
+        16 character hex string (64 bits total)
     """
-    if level == 'root':
-        return ROOT_BUCKET_START
+    # Timestamp: 48 bits (6 bytes) - gives us ms precision for ~8900 years
+    # We mask to 48 bits to ensure consistent length
+    ts_masked = created_at & 0xFFFFFFFFFFFF  # 48 bits
+    ts_hex = format(ts_masked, '012x')  # 12 hex chars
 
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    # Event hash: 16 bits (2 bytes) for sub-bucket distribution
+    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=2).digest()
+    hash_hex = h.hex()  # 4 hex chars
 
-    if level == 'year':
-        start_dt = dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    elif level == 'month':
-        start_dt = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    elif level == 'day':
-        start_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif level == 'hour':
-        start_dt = dt.replace(minute=0, second=0, microsecond=0)
-    elif level == 'ten_min':
-        ten_min = (dt.minute // 10) * 10
-        start_dt = dt.replace(minute=ten_min, second=0, microsecond=0)
-    elif level == 'one_min':
-        start_dt = dt.replace(second=0, microsecond=0)
-    else:
-        raise ValueError(f"Unknown level: {level}")
-
-    return int(start_dt.timestamp() * 1000)
+    return ts_hex + hash_hex
 
 
-def get_bucket_end_ms(bucket_start_ms: int, level: str) -> int:
-    """Get the end timestamp (exclusive) of a bucket.
-
-    Args:
-        bucket_start_ms: Start of the bucket
-        level: Bucket level
-
-    Returns:
-        End timestamp (ms), which is the start of the next bucket
-    """
-    if level == 'root':
-        # Root spans all time - use a far future date
-        return 253402300800000  # Year 9999
-
-    dt = datetime.fromtimestamp(bucket_start_ms / 1000, tz=timezone.utc)
-
-    if level == 'year':
-        end_dt = dt.replace(year=dt.year + 1)
-    elif level == 'month':
-        if dt.month == 12:
-            end_dt = dt.replace(year=dt.year + 1, month=1)
-        else:
-            end_dt = dt.replace(month=dt.month + 1)
-    elif level == 'day':
-        # Add one day
-        end_dt = datetime.fromtimestamp((bucket_start_ms / 1000) + 86400, tz=timezone.utc)
-        end_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif level == 'hour':
-        end_dt = datetime.fromtimestamp((bucket_start_ms / 1000) + 3600, tz=timezone.utc)
-        end_dt = end_dt.replace(minute=0, second=0, microsecond=0)
-    elif level == 'ten_min':
-        end_dt = datetime.fromtimestamp((bucket_start_ms / 1000) + 600, tz=timezone.utc)
-        end_dt = end_dt.replace(second=0, microsecond=0)
-    elif level == 'one_min':
-        end_dt = datetime.fromtimestamp((bucket_start_ms / 1000) + 60, tz=timezone.utc)
-        end_dt = end_dt.replace(second=0, microsecond=0)
-    else:
-        raise ValueError(f"Unknown level: {level}")
-
-    return int(end_dt.timestamp() * 1000)
+def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
+    """Get the bucket prefix for an event at a given level."""
+    unified_key = compute_unified_key(event_id, created_at)
+    prefix_len = LEVEL_PREFIX_LEN.get(level, 0)
+    return unified_key[:prefix_len]
 
 
 def get_child_level(level: str) -> Optional[str]:
@@ -172,27 +169,12 @@ def get_parent_level(level: str) -> Optional[str]:
     return LEVELS[idx - 1]
 
 
-def format_bucket_human(bucket_start_ms: int, level: str) -> str:
-    """Format a bucket timestamp as human-readable string (for display only)."""
-    if level == 'root':
-        return 'root'
-
-    dt = datetime.fromtimestamp(bucket_start_ms / 1000, tz=timezone.utc)
-
-    if level == 'year':
-        return f"{dt.year}"
-    elif level == 'month':
-        return f"{dt.year}-{dt.month:02d}"
-    elif level == 'day':
-        return f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
-    elif level == 'hour':
-        return f"{dt.year}-{dt.month:02d}-{dt.day:02d}-{dt.hour:02d}"
-    elif level == 'ten_min':
-        return f"{dt.year}-{dt.month:02d}-{dt.day:02d}-{dt.hour:02d}-{dt.minute // 10}"
-    elif level == 'one_min':
-        return f"{dt.year}-{dt.month:02d}-{dt.day:02d}-{dt.hour:02d}-{dt.minute:02d}"
-    else:
-        return str(bucket_start_ms)
+def get_child_prefix_len(level: str) -> int:
+    """Get the prefix length for children of this level."""
+    child_level = get_child_level(level)
+    if child_level is None:
+        return LEVEL_PREFIX_LEN[level]
+    return LEVEL_PREFIX_LEN[child_level]
 
 
 # ============================================================================
@@ -200,7 +182,7 @@ def format_bucket_human(bucket_start_ms: int, level: str) -> str:
 # ============================================================================
 
 def compute_leaf_hash(event_ids: list[str]) -> bytes:
-    """Compute hash for a leaf bucket (1-minute).
+    """Compute hash for a leaf bucket.
 
     BLAKE2b-128 of sorted concatenated event IDs.
     """
@@ -215,21 +197,20 @@ def compute_leaf_hash(event_ids: list[str]) -> bytes:
     return hashlib.blake2b(data, digest_size=16).digest()
 
 
-def compute_parent_hash(child_hashes: dict[int, bytes]) -> bytes:
+def compute_parent_hash(child_hashes: dict[str, bytes]) -> bytes:
     """Compute hash for a parent bucket from child hashes.
 
-    BLAKE2b-128 of sorted (start_ms, hash) pairs, excluding empty children.
-    Child keys are bucket_start_ms integers.
+    BLAKE2b-128 of sorted (prefix, hash) pairs, excluding empty children.
     """
     # Filter out empty children
     non_empty = {k: v for k, v in child_hashes.items() if v}
     if not non_empty:
         return b''  # All children empty -> parent empty
 
-    # Sort by start_ms for determinism
+    # Sort by prefix for determinism
     items = sorted(non_empty.items())
-    # Concatenate start_ms (as 8-byte big-endian) + hash
-    data = b''.join(k.to_bytes(8, 'big') + h for k, h in items)
+    # Concatenate prefix (as utf-8) + hash
+    data = b''.join(k.encode('utf-8') + h for k, h in items)
     return hashlib.blake2b(data, digest_size=16).digest()
 
 
@@ -249,92 +230,105 @@ def add_event_to_sync(
     Marks all ancestor buckets as needing hash recomputation.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
-    bucket_start_ms = get_bucket_start_ms(created_at, 'one_min')
+
+    # Compute the unified key
+    unified_key = compute_unified_key(event_id, created_at)
 
     # Insert event -> bucket mapping
     safedb.execute("""
         INSERT OR IGNORE INTO negentropy_events
-        (recorded_by, event_id, bucket_start_ms, created_at)
+        (recorded_by, event_id, unified_key, created_at)
         VALUES (?, ?, ?, ?)
-    """, (recorded_by, event_id, bucket_start_ms, created_at))
+    """, (recorded_by, event_id, unified_key, created_at))
 
     # Mark leaf bucket hash as stale (NULL)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
+    leaf_prefix = unified_key[:LEVEL_PREFIX_LEN['prefix_16']]
     safedb.execute("""
         INSERT INTO negentropy_buckets
-        (recorded_by, level, bucket_start_ms, hash, event_count, updated_at)
-        VALUES (?, 'one_min', ?, NULL, 1, ?)
-        ON CONFLICT (recorded_by, level, bucket_start_ms) DO UPDATE SET
+        (recorded_by, level, prefix, hash, event_count, updated_at)
+        VALUES (?, 'prefix_16', ?, NULL, 1, ?)
+        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
             hash = NULL,
             event_count = event_count + 1,
             updated_at = excluded.updated_at
-    """, (recorded_by, bucket_start_ms, now))
+    """, (recorded_by, leaf_prefix, now))
 
     # Mark all ancestor buckets as needing recompute
-    for level in ['ten_min', 'hour', 'day', 'month', 'year', 'root']:
-        ancestor_start = get_bucket_start_ms(created_at, level)
+    for level in ['prefix_14', 'prefix_12', 'prefix_10', 'prefix_8', 'prefix_6', 'prefix_4', 'prefix_2', 'root']:
+        prefix_len = LEVEL_PREFIX_LEN[level]
+        ancestor_prefix = unified_key[:prefix_len]
         safedb.execute("""
             INSERT INTO negentropy_buckets
-            (recorded_by, level, bucket_start_ms, hash, event_count, updated_at)
+            (recorded_by, level, prefix, hash, event_count, updated_at)
             VALUES (?, ?, ?, NULL, 0, ?)
-            ON CONFLICT (recorded_by, level, bucket_start_ms) DO UPDATE SET
+            ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
                 hash = NULL,
                 updated_at = excluded.updated_at
-        """, (recorded_by, level, ancestor_start, now))
+        """, (recorded_by, level, ancestor_prefix, now))
 
 
 def recompute_bucket_hash(
     db,
     recorded_by: str,
     level: str,
-    bucket_start_ms: int
+    prefix: str
 ) -> bytes:
     """Recompute hash for a bucket if stale.
 
     For leaf buckets: hash of sorted event IDs.
-    For parent buckets: hash of sorted (child_start_ms, child_hash) pairs.
+    For parent buckets: hash of sorted (child_prefix, child_hash) pairs.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Check if already computed
     row = safedb.query_one("""
         SELECT hash FROM negentropy_buckets
-        WHERE recorded_by = ? AND level = ? AND bucket_start_ms = ?
-    """, (recorded_by, level, bucket_start_ms))
+        WHERE recorded_by = ? AND level = ? AND prefix = ?
+    """, (recorded_by, level, prefix))
 
     if row and row['hash'] is not None:
         return row['hash']
 
     # Compute hash
-    if level == 'one_min':
+    if level == 'prefix_16':
         # Leaf: hash of event IDs
+        prefix_pattern = prefix + '%'
         events = safedb.query("""
             SELECT event_id FROM negentropy_events
-            WHERE recorded_by = ? AND bucket_start_ms = ?
+            WHERE recorded_by = ? AND unified_key LIKE ?
             ORDER BY event_id
-        """, (recorded_by, bucket_start_ms))
+        """, (recorded_by, prefix_pattern))
         event_ids = [r['event_id'] for r in events]
         hash_val = compute_leaf_hash(event_ids)
     else:
         # Parent: hash of child hashes
         child_level = get_child_level(level)
-        bucket_end_ms = get_bucket_end_ms(bucket_start_ms, level)
+        child_prefix_len = LEVEL_PREFIX_LEN[child_level]
 
-        # Find children within this bucket's time range
-        children = safedb.query("""
-            SELECT bucket_start_ms, hash FROM negentropy_buckets
-            WHERE recorded_by = ? AND level = ?
-            AND bucket_start_ms >= ? AND bucket_start_ms < ?
-        """, (recorded_by, child_level, bucket_start_ms, bucket_end_ms))
+        if level == 'root':
+            # Root's children are all prefix_2 buckets
+            children = safedb.query("""
+                SELECT prefix, hash FROM negentropy_buckets
+                WHERE recorded_by = ? AND level = ?
+            """, (recorded_by, child_level))
+        else:
+            # Find children with matching prefix start
+            prefix_pattern = prefix + '%'
+            children = safedb.query("""
+                SELECT prefix, hash FROM negentropy_buckets
+                WHERE recorded_by = ? AND level = ?
+                AND prefix LIKE ? AND length(prefix) = ?
+            """, (recorded_by, child_level, prefix_pattern, child_prefix_len))
 
         # Recursively ensure children are computed
         child_hashes = {}
         for child_row in children:
-            child_start = child_row['bucket_start_ms']
+            child_prefix = child_row['prefix']
             child_hash = child_row['hash']
             if child_hash is None:
-                child_hash = recompute_bucket_hash(db, recorded_by, child_level, child_start)
-            child_hashes[child_start] = child_hash
+                child_hash = recompute_bucket_hash(db, recorded_by, child_level, child_prefix)
+            child_hashes[child_prefix] = child_hash
 
         hash_val = compute_parent_hash(child_hashes)
 
@@ -342,12 +336,12 @@ def recompute_bucket_hash(
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
     safedb.execute("""
         INSERT INTO negentropy_buckets
-        (recorded_by, level, bucket_start_ms, hash, event_count, updated_at)
+        (recorded_by, level, prefix, hash, event_count, updated_at)
         VALUES (?, ?, ?, ?, 0, ?)
-        ON CONFLICT (recorded_by, level, bucket_start_ms) DO UPDATE SET
+        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
             hash = excluded.hash,
             updated_at = excluded.updated_at
-    """, (recorded_by, level, bucket_start_ms, hash_val, now))
+    """, (recorded_by, level, prefix, hash_val, now))
 
     return hash_val
 
@@ -356,40 +350,40 @@ def get_hashes_at_level(
     db,
     recorded_by: str,
     level: str,
-    parent_start_ms: Optional[int] = None,
-    parent_level: Optional[str] = None
-) -> dict[int, bytes]:
-    """Get all bucket hashes at a level, optionally filtered by parent.
+    parent_prefix: Optional[str] = None
+) -> dict[str, bytes]:
+    """Get all bucket hashes at a level, optionally filtered by parent prefix.
 
     Recomputes stale hashes as needed.
 
     Returns:
-        Dict mapping bucket_start_ms -> hash
+        Dict mapping prefix -> hash
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    level_prefix_len = LEVEL_PREFIX_LEN[level]
 
-    if parent_start_ms is not None and parent_level is not None:
-        # Children within parent's time range
-        parent_end_ms = get_bucket_end_ms(parent_start_ms, parent_level)
+    if parent_prefix is not None:
+        # Children with matching prefix start
+        prefix_pattern = parent_prefix + '%'
         rows = safedb.query("""
-            SELECT bucket_start_ms, hash FROM negentropy_buckets
+            SELECT prefix, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
-            AND bucket_start_ms >= ? AND bucket_start_ms < ?
-        """, (recorded_by, level, parent_start_ms, parent_end_ms))
+            AND prefix LIKE ? AND length(prefix) = ?
+        """, (recorded_by, level, prefix_pattern, level_prefix_len))
     else:
         # All buckets at this level
         rows = safedb.query("""
-            SELECT bucket_start_ms, hash FROM negentropy_buckets
+            SELECT prefix, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
         """, (recorded_by, level))
 
     result = {}
     for row in rows:
-        bucket_start = row['bucket_start_ms']
+        prefix = row['prefix']
         hash_val = row['hash']
         if hash_val is None:
-            hash_val = recompute_bucket_hash(db, recorded_by, level, bucket_start)
-        result[bucket_start] = hash_val
+            hash_val = recompute_bucket_hash(db, recorded_by, level, prefix)
+        result[prefix] = hash_val
 
     return result
 
@@ -397,31 +391,30 @@ def get_hashes_at_level(
 def get_events_in_bucket(
     db,
     recorded_by: str,
-    bucket_start_ms: int,
-    level: str = 'one_min'
+    prefix: str,
+    level: str = 'prefix_16'
 ) -> list[str]:
     """Get all event IDs in a bucket at any level.
 
-    For one_min buckets, returns events with exact bucket_start_ms match.
-    For higher levels, returns all events within the bucket's time range.
+    Returns all events whose unified_key starts with the given prefix.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    if level == 'one_min':
-        # Leaf bucket - exact match
+    if level == 'root' or prefix == '':
+        # Root - all events
         rows = safedb.query("""
             SELECT event_id FROM negentropy_events
-            WHERE recorded_by = ? AND bucket_start_ms = ?
+            WHERE recorded_by = ?
             ORDER BY event_id
-        """, (recorded_by, bucket_start_ms))
+        """, (recorded_by,))
     else:
-        # Higher level - range query based on created_at
-        bucket_end_ms = get_bucket_end_ms(bucket_start_ms, level)
+        # Prefix match
+        prefix_pattern = prefix + '%'
         rows = safedb.query("""
             SELECT event_id FROM negentropy_events
-            WHERE recorded_by = ? AND created_at >= ? AND created_at < ?
+            WHERE recorded_by = ? AND unified_key LIKE ?
             ORDER BY event_id
-        """, (recorded_by, bucket_start_ms, bucket_end_ms))
+        """, (recorded_by, prefix_pattern))
 
     return [r['event_id'] for r in rows]
 
@@ -429,7 +422,7 @@ def get_events_in_bucket(
 def get_event_count_in_bucket(
     db,
     recorded_by: str,
-    bucket_start_ms: int,
+    prefix: str,
     level: str
 ) -> int:
     """Get count of events in a bucket at any level.
@@ -438,17 +431,17 @@ def get_event_count_in_bucket(
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    if level == 'one_min':
+    if level == 'root' or prefix == '':
         row = safedb.query_one("""
             SELECT COUNT(*) as cnt FROM negentropy_events
-            WHERE recorded_by = ? AND bucket_start_ms = ?
-        """, (recorded_by, bucket_start_ms))
+            WHERE recorded_by = ?
+        """, (recorded_by,))
     else:
-        bucket_end_ms = get_bucket_end_ms(bucket_start_ms, level)
+        prefix_pattern = prefix + '%'
         row = safedb.query_one("""
             SELECT COUNT(*) as cnt FROM negentropy_events
-            WHERE recorded_by = ? AND created_at >= ? AND created_at < ?
-        """, (recorded_by, bucket_start_ms, bucket_end_ms))
+            WHERE recorded_by = ? AND unified_key LIKE ?
+        """, (recorded_by, prefix_pattern))
 
     return row['cnt'] if row else 0
 
@@ -465,7 +458,7 @@ def get_total_event_count(db, recorded_by: str) -> int:
 
 def get_root_hash(db, recorded_by: str) -> bytes:
     """Get the root hash for this peer's event set."""
-    return recompute_bucket_hash(db, recorded_by, 'root', ROOT_BUCKET_START)
+    return recompute_bucket_hash(db, recorded_by, 'root', '')
 
 
 # ============================================================================
@@ -504,16 +497,16 @@ def init_sync_for_connection(
     # Record sync state
     safedb.execute("""
         INSERT INTO negentropy_sync_state
-        (recorded_by, connection_id, range_id, level, bucket_start_ms,
+        (recorded_by, connection_id, range_id, level, prefix,
          our_hash, their_hash, status, created_at, updated_at)
-        VALUES (?, ?, ?, 'root', ?, ?, NULL, 'pending', ?, ?)
-    """, (recorded_by, connection_id, range_id, ROOT_BUCKET_START, root_hash, t_ms, t_ms))
+        VALUES (?, ?, ?, 'root', '', ?, NULL, 'pending', ?, ?)
+    """, (recorded_by, connection_id, range_id, root_hash, t_ms, t_ms))
 
     return [{
         'type': 'range_request',
         'range_id': range_id,
         'level': 'root',
-        'bucket_start_ms': ROOT_BUCKET_START,
+        'prefix': '',
         'hash': root_hash.hex() if root_hash else '',
         'root_hash': root_hash.hex() if root_hash else '',
         'total_events': total_events,
@@ -536,7 +529,7 @@ def handle_range_request(
 
     range_id = msg['range_id']
     level = msg['level']
-    bucket_start_ms = msg['bucket_start_ms']
+    prefix = msg.get('prefix', '')
     their_hash = bytes.fromhex(msg['hash']) if msg['hash'] else b''
 
     # Get root hash and total events for all responses
@@ -544,19 +537,19 @@ def handle_range_request(
     total_events = get_total_event_count(db, recorded_by)
 
     # Compute our hash for this bucket
-    our_hash = recompute_bucket_hash(db, recorded_by, level, bucket_start_ms)
-    log.info(f"negentropy.handle_range_request: level={level} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'} match={our_hash == their_hash}")
+    our_hash = recompute_bucket_hash(db, recorded_by, level, prefix)
+    log.info(f"negentropy.handle_range_request: level={level} prefix={prefix} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'} match={our_hash == their_hash}")
 
     # Record the range
     safedb.execute("""
         INSERT INTO negentropy_sync_state
-        (recorded_by, connection_id, range_id, level, bucket_start_ms,
+        (recorded_by, connection_id, range_id, level, prefix,
          our_hash, their_hash, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         ON CONFLICT (recorded_by, connection_id, range_id) DO UPDATE SET
             their_hash = excluded.their_hash,
             updated_at = excluded.updated_at
-    """, (recorded_by, connection_id, range_id, level, bucket_start_ms, our_hash, their_hash, t_ms, t_ms))
+    """, (recorded_by, connection_id, range_id, level, prefix, our_hash, their_hash, t_ms, t_ms))
 
     # Check for checkpoint: if their root hash matches ours
     their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
@@ -582,17 +575,17 @@ def handle_range_request(
 
     else:
         # Hashes differ - check if we should send events or drill down
-        event_count = get_event_count_in_bucket(db, recorded_by, bucket_start_ms, level)
+        event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
-        # At leaf level OR bucket has few enough events to send directly
-        if level == 'one_min' or event_count <= EVENTS_THRESHOLD:
+        # At finest level OR bucket has few enough events to send directly
+        if level == 'prefix_16' or event_count <= EVENTS_THRESHOLD:
             safedb.execute("""
                 UPDATE negentropy_sync_state
                 SET status = 'events_sent', updated_at = ?
                 WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
             """, (t_ms, recorded_by, connection_id, range_id))
 
-            event_ids = get_events_in_bucket(db, recorded_by, bucket_start_ms, level)
+            event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
 
             # Send actual event blobs - they'll dedupe on their side
             if event_ids:
@@ -603,7 +596,7 @@ def handle_range_request(
             responses.append({
                 'type': 'range_events',
                 'range_id': range_id,
-                'bucket_start_ms': bucket_start_ms,
+                'prefix': prefix,
                 'event_ids': event_ids,
                 'our_hash': our_hash.hex() if our_hash else '',
                 'root_hash': root_hash.hex() if root_hash else '',
@@ -613,7 +606,7 @@ def handle_range_request(
         else:
             # Drill down: send child hashes
             child_level = get_child_level(level)
-            child_hashes = get_hashes_at_level(db, recorded_by, child_level, bucket_start_ms, level)
+            child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
 
             safedb.execute("""
                 UPDATE negentropy_sync_state
@@ -622,21 +615,21 @@ def handle_range_request(
             """, (t_ms, recorded_by, connection_id, range_id))
 
             # Create child ranges
-            for child_start, child_hash in child_hashes.items():
+            for child_prefix, child_hash in child_hashes.items():
                 child_range_id = generate_range_id()
 
                 safedb.execute("""
                     INSERT INTO negentropy_sync_state
-                    (recorded_by, connection_id, range_id, level, bucket_start_ms,
+                    (recorded_by, connection_id, range_id, level, prefix,
                      our_hash, their_hash, status, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-                """, (recorded_by, connection_id, child_range_id, child_level, child_start, child_hash, t_ms, t_ms))
+                """, (recorded_by, connection_id, child_range_id, child_level, child_prefix, child_hash, t_ms, t_ms))
 
                 responses.append({
                     'type': 'range_request',
                     'range_id': child_range_id,
                     'level': child_level,
-                    'bucket_start_ms': child_start,
+                    'prefix': child_prefix,
                     'hash': child_hash.hex() if child_hash else '',
                     'parent_range_id': range_id,
                     'root_hash': root_hash.hex() if root_hash else '',
@@ -761,7 +754,7 @@ def handle_range_events(
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     range_id = msg['range_id']
-    bucket_start_ms = msg['bucket_start_ms']
+    prefix = msg.get('prefix', '')
     their_event_ids = set(msg['event_ids'])
 
     # Get root hash and total events for responses
@@ -774,7 +767,7 @@ def handle_range_events(
         _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
 
     # Get our events for this bucket
-    our_event_ids = set(get_events_in_bucket(db, recorded_by, bucket_start_ms))
+    our_event_ids = set(get_events_in_bucket(db, recorded_by, prefix))
 
     # Events they have that we don't -> we need to request/store
     events_we_need = their_event_ids - our_event_ids
@@ -994,3 +987,34 @@ def get_sync_status(
         'is_synced': total > 0 and complete == total,
         'by_status': status,
     }
+
+
+# ============================================================================
+# Debug/Utility functions
+# ============================================================================
+
+def decode_unified_key(unified_key: str) -> tuple[int, str]:
+    """Decode a unified key back into timestamp and hash components.
+
+    Useful for debugging and visualization.
+
+    Args:
+        unified_key: 16 character hex string
+
+    Returns:
+        Tuple of (timestamp_ms, hash_hex)
+    """
+    ts_hex = unified_key[:12]
+    hash_hex = unified_key[12:]
+    ts_ms = int(ts_hex, 16)
+    return ts_ms, hash_hex
+
+
+def format_unified_key_human(unified_key: str) -> str:
+    """Format a unified key for human-readable display.
+
+    Shows the timestamp as ISO format and the hash suffix.
+    """
+    ts_ms, hash_hex = decode_unified_key(unified_key)
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    return f"{dt.isoformat()}:{hash_hex}"
