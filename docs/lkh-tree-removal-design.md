@@ -191,105 +191,196 @@ But wait - if we share keys for all paths, that's O(n) keys, defeating the purpo
 
 **Trade-off:** New members aren't in tree until enrolled. If removed before enrollment, removal is still O(n) for them. But this is rare - enrollment can happen within seconds of join.
 
-#### Alternative: Lazy tree enrollment
+#### Recommended: Lazy TreeKEM with O(n) fallback
 
-Don't enroll users in tree until first removal occurs:
+Use the tree as first resort, with `group_key_shared` as fallback for users not yet enrolled.
 
-1. Group operates with O(n) key sharing (current behavior)
-2. First removal triggers tree construction
-3. All current members get enrolled in tree
-4. Future joins get immediate tree enrollment
-5. Future removals are O(log n)
+**Key distribution:**
+```
+group_key
+    ├── group_key_tree_shared (wrapped to tree root) ─── O(1), for enrolled users
+    └── group_key_shared (per non-enrolled user) ─────── O(1) each, fallback
+```
 
-**Pro:** No overhead for groups that never remove anyone
-**Con:** First removal is O(n log n) - build tree + remove
+**When are users enrolled?**
+
+Keys only change via admin actions:
+1. User removal
+2. Key rotation (expiry, PCS updates)
+
+The admin performing a key change can **batch-enroll** any pending users:
+1. Assign leaf positions to all non-enrolled members
+2. Share O(log n) tree keys to each via their `group_prekey`
+3. Re-key tree (if removal)
+4. Wrap new `group_key` to tree root
+5. Fallback `group_key_shared` only for anyone still not enrolled (rare edge case)
+
+**Complexity:**
+| Operation | Events |
+|-----------|--------|
+| Join | O(1) - `group_key_shared` to invite prekey |
+| Send message | O(1) - wrapped to tree root |
+| Removal (all enrolled) | O(log n) - tree re-key |
+| Removal (some not enrolled) | O(log n) + O(k) where k = non-enrolled users |
+| Batch enrollment | O(k log n) - k users × log n tree keys each |
+
+**Why this works:**
+- Async self-join preserved (invite link works without online admin)
+- Multi-use invites work (no pre-assigned leaf)
+- Tree enrollment happens naturally during admin key operations
+- Falls back gracefully when tree isn't fully populated
+
+**Edge cases:**
+- User joins → immediately removed before any admin key operation → O(n) removal for them (rare)
+- Many users join between key changes → batch enrollment amortizes cost
 
 #### What the invite shares
 
-With deferred enrollment, the invite just shares the current `group_key` (as it does today). Tree keys are shared separately after leaf assignment.
+With deferred enrollment, the invite just shares the current `group_key` (as today). Tree keys are shared separately when an admin enrolls the user.
 
 ```python
 def create_invite(peer_id, group_id, t_ms, db):
     # Same as today - share group_key sealed to invite_prekey
     # No tree keys yet (leaf not assigned)
     ...
+```
 
-def enroll_in_tree(user_id, group_id, admin_peer_id, t_ms, db):
-    """Called by admin after user joins to assign tree position."""
-    leaf_path = assign_next_leaf(group_id, db)
+#### Joiner's perspective (unchanged from today)
 
-    # Create tree_leaf_assignment event (shareable)
-    create_tree_leaf_assignment(user_id, leaf_path, group_id, admin_peer_id, t_ms, db)
+1. Click invite link (contains `invite_private_key`)
+2. Create local `group_prekey` from invite private key (deterministic)
+3. Sync with any peer (or server)
+4. Receive and decrypt `group_key_shared` events using invite private key
+5. Now have `group_key`, can decrypt messages immediately
+6. Later: receive `tree_key_shared` events when admin enrolls them
 
-    # Get user's group_prekey for sealing
+The joiner can read/write messages immediately. Tree enrollment happens in background.
+
+#### Admin enrollment flow
+
+When an admin performs any key-changing operation (removal, rotation), they batch-enroll pending users:
+
+```python
+def rotate_group_key_with_enrollment(group_id, admin_peer_id, t_ms, db,
+                                      removed_user_id=None):
+    """Called by admin for key rotation or removal. Enrolls pending users."""
+
+    # 1. Find users not yet in tree
+    pending_users = get_users_without_tree_position(group_id, db)
+
+    # 2. Batch enroll them
+    for user_id in pending_users:
+        enroll_user_in_tree(user_id, group_id, admin_peer_id, t_ms, db)
+
+    # 3. If removal, re-key the removed user's path
+    if removed_user_id:
+        removed_leaf = get_user_leaf_path(removed_user_id, group_id, db)
+        rekey_path_for_removal(removed_leaf, group_id, admin_peer_id, t_ms, db)
+        mark_leaf_empty(removed_leaf, group_id, db)
+
+    # 4. Create new group key
+    new_key_id = group_key.create(admin_peer_id, t_ms, db)
+
+    # 5. Wrap to tree root (O(1) - all enrolled users can decrypt)
+    root_key = get_tree_key(group_id, "", db)  # "" = root path
+    create_group_key_tree_shared(
+        key_id=new_key_id,
+        group_id=group_id,
+        encrypted_key=encrypt(new_key_id, root_key),
+        root_version=root_key.version,
+        db=db
+    )
+
+    # 6. Fallback for any still-not-enrolled (shouldn't happen normally)
+    still_pending = get_users_without_tree_position(group_id, db)
+    for user_id in still_pending:
+        user_prekey = get_group_prekey_for_user(user_id, admin_peer_id, db)
+        group_key_shared.create(new_key_id, user_prekey, db)
+
+
+def enroll_user_in_tree(user_id, group_id, admin_peer_id, t_ms, db):
+    """Assign leaf position and share tree keys to user."""
+
+    # Assign leaf (reuse empty slot or next sequential)
+    leaf_path = assign_leaf(group_id, db)
+
+    # Create tree_leaf_assignment event (shareable, so all peers see it)
+    create_tree_leaf_assignment(
+        user_id=user_id,
+        leaf_path=leaf_path,
+        group_id=group_id,
+        signed_by=admin_peer_id,
+        t_ms=t_ms,
+        db=db
+    )
+
+    # Get user's group_prekey for sealing tree keys
     user_prekey = get_group_prekey_for_user(user_id, admin_peer_id, db)
 
-    # Share O(log n) tree keys
+    # Share O(log n) tree keys for their path
     for node_path in path_from_leaf_to_root(leaf_path):
         tree_key = get_current_tree_key(group_id, node_path, db)
-        create_tree_key_shared(
+        create_tree_key_shared_to_prekey(
             node_path=node_path,
+            version=tree_key.version,
             key=tree_key.key,
             recipient_prekey=user_prekey,
+            group_id=group_id,
             db=db
         )
 ```
 
-#### Joiner's perspective
-
-1. Click invite link (contains `invite_private_key`)
-2. Create local `group_prekey` from invite private key (deterministic)
-3. Sync with inviter
-4. Receive and decrypt `tree_key_shared` events using invite private key
-5. Project `invite_accepted` - this assigns leaf position
-6. Now have O(log n) tree keys, can decrypt `group_key_tree_shared` → `group_key`
-
-#### Do they need to sync the tree first?
-
-**No.** The invite contains everything needed:
-- `leaf_path`: their position in the tree
-- `tree_key_shared` events: O(log n) keys for their path
-
-They don't need to know the full tree structure. They only need their path's keys.
-
-### Join Flow (pseudocode)
+#### Removal flow with tree
 
 ```python
-def join_user(new_user_id, group_id, invite_prekey_id):
-    # Assign leaf position (consistent hash or sequential)
-    leaf_path = assign_leaf(new_user_id, group_id)
+def remove_user(removed_user_id, group_id, admin_peer_id, t_ms, db):
+    """Remove user with O(log n) tree re-keying."""
 
-    # User needs O(log n) keys: every node on path from leaf to root
-    path_prefixes = get_all_prefixes(leaf_path)  # ["", "L", "LL", "LLR"]
+    # Check if user is in tree
+    leaf_path = get_user_leaf_path(removed_user_id, group_id, db)
 
-    for prefix in path_prefixes:
-        current_key = get_tree_key(group_id, prefix)
-        create_group_key_shared(
-            key=current_key.key,
-            key_id=current_key.id,
-            group_prekey_shared_id=invite_prekey_id,
-            # sealed to joiner's invite prekey
-        )
-```
+    if leaf_path is None:
+        # User never enrolled - just exclude from group_key_shared
+        # (rare: they joined and got removed before any key rotation)
+        rotate_group_key_excluding_user(removed_user_id, group_id,
+                                         admin_peer_id, t_ms, db)
+        return
 
-### Removal Flow
+    # User is in tree - re-key their path
+    rekey_path_for_removal(leaf_path, group_id, admin_peer_id, t_ms, db)
 
-```python
-def remove_user(removed_user_id, group_id):
-    leaf_path = get_user_leaf_path(removed_user_id, group_id)
+    # Mark their leaf as empty (available for reuse)
+    mark_leaf_empty(leaf_path, group_id, db)
 
-    # Re-key every node on removed user's path
-    path_prefixes = get_all_prefixes(leaf_path)  # root to leaf
+    # Create user_removed event
+    create_user_removed(removed_user_id, admin_peer_id, t_ms, db)
 
-    for node_path in path_prefixes:
+    # Rotate group key (will be wrapped to new tree root)
+    rotate_group_key_with_enrollment(group_id, admin_peer_id, t_ms, db)
+
+
+def rekey_path_for_removal(leaf_path, group_id, admin_peer_id, t_ms, db):
+    """Re-key every node on removed user's path, encrypted to siblings."""
+
+    # Walk from leaf to root
+    for node_path in path_from_leaf_to_root(leaf_path):
         sibling_path = get_sibling_path(node_path)
-        sibling_key = get_tree_key(group_id, sibling_path)
+
+        if sibling_path is None:
+            continue  # root has no sibling
+
+        # Check if sibling subtree has any users
+        if is_subtree_empty(sibling_path, group_id, db):
+            continue  # no one to encrypt to
+
+        sibling_key = get_tree_key(group_id, sibling_path, db)
 
         # Generate new key for this node
-        new_key = random_bytes(32)
-        new_version = get_current_version(group_id, node_path) + 1
+        new_key = crypto.random_bytes(32)
+        new_version = get_current_version(group_id, node_path, db) + 1
 
-        # Announce re-key, encrypted to sibling subtree
+        # Create tree_key_shared encrypted to sibling
+        # (everyone in sibling subtree can decrypt via their path)
         create_tree_key_shared(
             node_path=node_path,
             version=new_version,
@@ -297,67 +388,65 @@ def remove_user(removed_user_id, group_id):
             encrypted_key=encrypt(new_key, sibling_key.key),
             sibling_path=sibling_path,
             sibling_version=sibling_key.version,
+            signed_by=admin_peer_id,
+            db=db
         )
 
         # Store locally
-        create_tree_key(
-            node_path=node_path,
-            version=new_version,
-            group_id=group_id,
-            key=new_key,
-        )
-
-    # Create new group key using new root
-    new_root = get_tree_key(group_id, "")  # root = empty path
-    new_group_key = create_group_key(group_id)
-
-    create_group_key_tree_shared(
-        key_id=new_group_key.id,
-        group_id=group_id,
-        encrypted_key=encrypt(new_group_key.key, new_root.key),
-        root_version=new_root.version,
-    )
+        store_tree_key(node_path, new_version, group_id, new_key, db)
 ```
 
-### Projection of tree_key_shared
+#### Projection of tree_key_shared
 
 ```python
-def project_tree_key_shared(event, db):
-    # Check if we can decrypt (we have the sibling key)
-    sibling_key = db.get_tree_key(
-        group_id=event.group_id,
-        node_path=event.sibling_path,
-        version=event.sibling_version
+def project_tree_key_shared(event_id, recorded_by, recorded_at, db):
+    """Project tree_key_shared - decrypt if we're in the sibling subtree."""
+
+    event = get_event_data(event_id, db)
+
+    # Check if we have the sibling key (meaning we're in that subtree)
+    sibling_key = get_tree_key(
+        group_id=event['group_id'],
+        node_path=event['sibling_path'],
+        version=event['sibling_version'],
+        db=db
     )
 
     if sibling_key is None:
-        # We're not in the sibling subtree - we might be the removed user
-        # or we're in a different subtree that will get a different re-key message
-        # Check if there's another tree_key_shared for this (node_path, version)
-        # that we CAN decrypt
-        return VALID  # Event is valid, we just can't use it
+        # We don't have the sibling key - either:
+        # 1. We're the removed user (can't decrypt)
+        # 2. We're in a different subtree (will get different re-key event)
+        # 3. We haven't synced the sibling key yet (will retry later)
+        return VALID  # Event is valid, we just can't use it yet
 
-    # Decrypt and store
-    new_key = decrypt(event.encrypted_key, sibling_key.key)
+    # Decrypt the new key
+    new_key = decrypt(event['encrypted_key'], sibling_key.key)
 
-    create_tree_key(
-        node_path=event.node_path,
-        version=event.version,
-        group_id=event.group_id,
+    # Store it
+    store_tree_key(
+        node_path=event['node_path'],
+        version=event['version'],
+        group_id=event['group_id'],
         key=new_key,
+        db=db
     )
+
+    # Check if we can now decrypt pending group_key_tree_shared events
+    retry_pending_group_key_tree_shared(event['group_id'], recorded_by, db)
 
     return VALID
 ```
 
 ## Complexity Analysis
 
-| Operation | Messages | Storage per user |
-|-----------|----------|------------------|
-| Join | O(log n) key shares | O(log n) tree keys |
-| Remove | O(log n) re-key events | unchanged |
-| Send message | O(1) | - |
-| Total storage | - | O(n log n) |
+| Operation | Events | Notes |
+|-----------|--------|-------|
+| Join (self-add via invite) | O(1) | `group_key_shared` to invite prekey |
+| Tree enrollment (by admin) | O(log n) | `tree_key_shared` for path keys |
+| Send message | O(1) | `group_key_tree_shared` to root |
+| Removal (enrolled user) | O(log n) | Re-key path + new group key |
+| Removal (not enrolled) | O(k) | Fallback to `group_key_shared` |
+| Storage per user | O(log n) | Tree keys for their path |
 
 ## Integration with Existing Forward Secrecy
 
