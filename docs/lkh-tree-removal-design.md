@@ -2,12 +2,11 @@
 
 ## Problem Statement
 
-The current bucket-based removal scheme fails because buckets are **shared**. When user A is removed:
-- A has prekey for bucket [01]
-- Future users in [01] (or any group key wrapped to [01]) are readable by A
-- This breaks forward secrecy for removal
+The current removal implementation is O(n): when a user is removed, `rotate_for_removal()` creates a new group key and then `share_key_with_group_members()` creates a separate `group_key_shared` event sealed to each remaining member's prekey.
 
-We need **negative addressing**: efficiently saying "everyone except A" without A being able to derive the key.
+For a group with 1000 members, removing one user generates ~999 key sharing events.
+
+LKH provides **O(log n) removal** by using a tree structure where keys are distributed via sibling encryption rather than individual prekeys.
 
 ## Solution: Logical Key Hierarchy (LKH)
 
