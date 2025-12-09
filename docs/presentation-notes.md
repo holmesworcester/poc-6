@@ -1,3 +1,10 @@
+Feedback:
+- Skeptical that simple will be enough for our encryption needs (1000 devices with regular removals == hundreds of megs of removals in chain)
+- Skeptical that we'll be able to get there with NaCl and our own design
+- We'll want to understand causal treekem at some point
+
+
+
 Summary: 
 
 We have: 
@@ -7,6 +14,10 @@ We have:
 - commands (in `events/event_name.py` files) that create these events either in isolation or orchestrated combination
 - cron-like jobs which run commands on tick and track the last times they were run (in the database) 
 - some queues (also in the database)
+- "scenario tests" (almost completely e2e)
+- a cli UI prototype
+- no middleware: tool handles everything from networking to API provision
+- (I think) performant enough to run in the background on iOS or be a server
 
 One of the jobs is a network simulator that moves packets from outgoing to incoming queues adding latency and packet loss optionally.
 
