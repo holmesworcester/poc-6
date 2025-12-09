@@ -780,8 +780,299 @@ def join_into_empty_subtree(user_id, group_id, leaf_path, invite_prekey_id, db):
     share_tree_key_to_invite("", root_key.version, group_id, invite_prekey_id)
 ```
 
+## Database Schema
+
+### New Tables
+
+```sql
+-- Tree keys (local-only, stores actual key material)
+CREATE TABLE IF NOT EXISTS tree_keys (
+    tree_key_id TEXT PRIMARY KEY,      -- hash(group_id || node_path || version || key)
+    group_id TEXT NOT NULL,
+    node_path TEXT NOT NULL,           -- "" for root, "L", "R", "LL", "LR", etc.
+    version INTEGER NOT NULL,
+    key BLOB NOT NULL,                 -- 32-byte symmetric key
+    created_at INTEGER NOT NULL,
+    recorded_by TEXT NOT NULL,
+    UNIQUE(group_id, node_path, version, recorded_by)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tree_keys_lookup
+ON tree_keys(group_id, node_path, recorded_by);
+
+-- Tree leaf assignments (tracks which user is at which leaf)
+CREATE TABLE IF NOT EXISTS tree_leaf_assignments (
+    assignment_id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    leaf_path TEXT NOT NULL,
+    assigned_by TEXT NOT NULL,         -- peer_shared_id of admin who assigned
+    created_at INTEGER NOT NULL,
+    recorded_by TEXT NOT NULL,
+    UNIQUE(group_id, user_id, recorded_by),
+    UNIQUE(group_id, leaf_path, recorded_by)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tree_leaf_assignments_user
+ON tree_leaf_assignments(group_id, user_id, recorded_by);
+
+CREATE INDEX IF NOT EXISTS idx_tree_leaf_assignments_leaf
+ON tree_leaf_assignments(group_id, leaf_path, recorded_by);
+
+-- Empty tree slots (available for reuse)
+CREATE TABLE IF NOT EXISTS empty_tree_slots (
+    group_id TEXT NOT NULL,
+    leaf_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    recorded_by TEXT NOT NULL,
+    PRIMARY KEY(group_id, leaf_path, recorded_by)
+);
+
+-- Tree metadata (tracks tree size, next leaf index)
+CREATE TABLE IF NOT EXISTS tree_metadata (
+    group_id TEXT NOT NULL,
+    next_leaf_index INTEGER NOT NULL DEFAULT 0,  -- for sequential assignment
+    tree_depth INTEGER NOT NULL DEFAULT 0,       -- current tree depth
+    recorded_by TEXT NOT NULL,
+    PRIMARY KEY(group_id, recorded_by)
+);
+```
+
+### Modified Tables
+
+```sql
+-- Add tree enrollment tracking to group_members or users
+-- Option: Add column to existing table
+ALTER TABLE group_members ADD COLUMN tree_enrolled INTEGER DEFAULT 0;
+
+-- Or track via tree_leaf_assignments table (preferred - no schema change)
+```
+
+## Event Module Structure
+
+### events/group/tree_key.py (local-only)
+
+```python
+EVENT_TYPE = 'tree_key'
+SHAREABLE = False  # Local-only key material
+EPHEMERAL = False
+PROJECTION_TABLE = ('tree_keys', 'tree_key_id')
+
+def create(group_id: str, node_path: str, version: int,
+           key: bytes, peer_id: str, t_ms: int, db) -> str:
+    """Create local tree_key event."""
+    ...
+
+def get(group_id: str, node_path: str, version: int,
+        peer_id: str, db) -> dict | None:
+    """Get tree key by path and version."""
+    ...
+
+def get_current(group_id: str, node_path: str, peer_id: str, db) -> dict | None:
+    """Get latest version of tree key at path."""
+    ...
+
+def get_current_version(group_id: str, node_path: str, peer_id: str, db) -> int:
+    """Get current version number for a node."""
+    ...
+```
+
+### events/group/tree_key_shared.py (shareable)
+
+```python
+EVENT_TYPE = 'tree_key_shared'
+SHAREABLE = True
+EPHEMERAL = False
+PROJECTION_TABLE = ('tree_keys_shared', 'tree_key_shared_id')
+
+def create(group_id: str, node_path: str, version: int,
+           encrypted_key: bytes, sibling_path: str, sibling_version: int,
+           peer_id: str, peer_shared_id: str, t_ms: int, db) -> str:
+    """Create tree_key_shared event (re-keying announcement)."""
+    ...
+
+def create_to_prekey(group_id: str, node_path: str, version: int,
+                     key: bytes, recipient_prekey: dict,
+                     peer_id: str, peer_shared_id: str, t_ms: int, db) -> str:
+    """Create tree_key_shared sealed to recipient's prekey (for enrollment)."""
+    ...
+
+def project(tree_key_shared_id: str, recorded_by: str,
+            recorded_at: int, db) -> str | None:
+    """Project tree_key_shared - decrypt and store if we can."""
+    ...
+```
+
+### events/group/tree_leaf_assignment.py (shareable)
+
+```python
+EVENT_TYPE = 'tree_leaf_assignment'
+SHAREABLE = True
+EPHEMERAL = False
+PROJECTION_TABLE = ('tree_leaf_assignments', 'assignment_id')
+
+def create(group_id: str, user_id: str, leaf_path: str,
+           peer_id: str, peer_shared_id: str, t_ms: int, db) -> str:
+    """Create tree_leaf_assignment event."""
+    ...
+
+def get_user_leaf(group_id: str, user_id: str, peer_id: str, db) -> str | None:
+    """Get leaf path for a user."""
+    ...
+
+def get_leaf_user(group_id: str, leaf_path: str, peer_id: str, db) -> str | None:
+    """Get user at a leaf path."""
+    ...
+
+def project(assignment_id: str, recorded_by: str,
+            recorded_at: int, db) -> str | None:
+    """Project tree_leaf_assignment."""
+    ...
+```
+
+### events/group/group_key_tree_shared.py (shareable)
+
+```python
+EVENT_TYPE = 'group_key_tree_shared'
+SHAREABLE = True
+EPHEMERAL = False
+PROJECTION_TABLE = ('group_keys_tree_shared', 'group_key_tree_shared_id')
+
+def create(key_id: str, group_id: str, encrypted_key: bytes,
+           root_version: int, peer_id: str, peer_shared_id: str,
+           t_ms: int, db) -> str:
+    """Create group_key_tree_shared event (group key wrapped to tree root)."""
+    ...
+
+def project(group_key_tree_shared_id: str, recorded_by: str,
+            recorded_at: int, db) -> str | None:
+    """Project group_key_tree_shared - decrypt group key using root tree key."""
+    ...
+```
+
+## Helper Functions
+
+### events/group/tree_utils.py
+
+```python
+def get_sibling_path(node_path: str) -> str | None:
+    """Get sibling path. Returns None for root."""
+    if not node_path:
+        return None
+    parent = node_path[:-1]
+    last = node_path[-1]
+    return parent + ('R' if last == 'L' else 'L')
+
+def get_parent_path(node_path: str) -> str | None:
+    """Get parent path. Returns None for root."""
+    if not node_path:
+        return None
+    return node_path[:-1]
+
+def path_from_leaf_to_root(leaf_path: str) -> list[str]:
+    """Get all node paths from leaf to root (inclusive)."""
+    paths = [leaf_path]
+    current = leaf_path
+    while current:
+        current = get_parent_path(current)
+        if current is not None:
+            paths.append(current)
+        else:
+            paths.append("")  # root
+            break
+    return paths
+
+def leaf_index_to_path(index: int, depth: int) -> str:
+    """Convert leaf index to path string.
+
+    Example: index=0, depth=2 -> "LL"
+             index=1, depth=2 -> "LR"
+             index=2, depth=2 -> "RL"
+             index=3, depth=2 -> "RR"
+    """
+    if depth == 0:
+        return ""
+    path = ""
+    for i in range(depth - 1, -1, -1):
+        if (index >> i) & 1:
+            path += "R"
+        else:
+            path += "L"
+    return path
+
+def path_to_leaf_index(path: str) -> int:
+    """Convert path string to leaf index."""
+    index = 0
+    for char in path:
+        index = index << 1
+        if char == 'R':
+            index |= 1
+    return index
+
+def is_subtree_empty(subtree_root: str, group_id: str, peer_id: str, db) -> bool:
+    """Check if a subtree has no assigned users."""
+    # Query tree_leaf_assignments for any leaves under this path
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    result = safedb.query_one(
+        """SELECT 1 FROM tree_leaf_assignments
+           WHERE group_id = ? AND leaf_path LIKE ? AND recorded_by = ?
+           LIMIT 1""",
+        (group_id, subtree_root + '%', peer_id)
+    )
+    return result is None
+
+def assign_leaf(group_id: str, peer_id: str, db) -> str:
+    """Assign next available leaf path."""
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # First try to reuse empty slot
+    empty = safedb.query_one(
+        "SELECT leaf_path FROM empty_tree_slots WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (group_id, peer_id)
+    )
+    if empty:
+        safedb.execute(
+            "DELETE FROM empty_tree_slots WHERE group_id = ? AND leaf_path = ? AND recorded_by = ?",
+            (group_id, empty['leaf_path'], peer_id)
+        )
+        return empty['leaf_path']
+
+    # Get or create tree metadata
+    meta = safedb.query_one(
+        "SELECT next_leaf_index, tree_depth FROM tree_metadata WHERE group_id = ? AND recorded_by = ?",
+        (group_id, peer_id)
+    )
+
+    if meta is None:
+        # First user - create tree with depth 1
+        safedb.execute(
+            "INSERT INTO tree_metadata (group_id, next_leaf_index, tree_depth, recorded_by) VALUES (?, 1, 1, ?)",
+            (group_id, peer_id)
+        )
+        return "L"  # First leaf
+
+    next_index = meta['next_leaf_index']
+    depth = meta['tree_depth']
+    max_leaves = 2 ** depth
+
+    # Check if we need to grow the tree
+    if next_index >= max_leaves:
+        depth += 1
+        # Note: grow_tree() handles re-keying, called separately
+
+    leaf_path = leaf_index_to_path(next_index, depth)
+
+    # Update metadata
+    safedb.execute(
+        "UPDATE tree_metadata SET next_leaf_index = ?, tree_depth = ? WHERE group_id = ? AND recorded_by = ?",
+        (next_index + 1, depth, group_id, peer_id)
+    )
+
+    return leaf_path
+```
+
 ## Open Questions
 
 1. **Concurrent removals**: What if two admins remove different users simultaneously? (Version conflicts on shared ancestors)
 2. **Recovery**: How do users catch up if they miss re-key events? (Need to fetch from peers who have the keys)
-3. **Consistency**: How do all peers agree on tree structure? (Need deterministic slot assignment)
+3. **Consistency**: How do all peers agree on tree structure? (Need deterministic slot assignment based on event ordering)
