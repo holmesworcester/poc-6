@@ -1,4 +1,7 @@
-"""Tests for negentropy-style deterministic sync protocol."""
+"""Tests for negentropy-style deterministic sync protocol.
+
+Tests the unified time+hash prefix-based bucketing system.
+"""
 import pytest
 import sqlite3
 from db import Database
@@ -15,83 +18,93 @@ def db():
     return database
 
 
-class TestBucketTimestamps:
-    """Test bucket timestamp computation."""
+class TestUnifiedKey:
+    """Test unified key computation."""
 
-    def test_year_bucket(self):
-        # 2024-06-15 11:30:45 UTC -> start of 2024
-        ts_ms = 1718451045000
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'year')
-        # 2024-01-01 00:00:00 UTC
-        assert start_ms == 1704067200000
-
-    def test_month_bucket(self):
-        ts_ms = 1718451045000  # 2024-06-15 UTC
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'month')
-        # 2024-06-01 00:00:00 UTC
-        assert start_ms == 1717200000000
-
-    def test_day_bucket(self):
-        ts_ms = 1718451045000  # 2024-06-15 UTC
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'day')
-        # 2024-06-15 00:00:00 UTC
-        assert start_ms == 1718409600000
-
-    def test_hour_bucket(self):
+    def test_unified_key_format(self):
+        """Unified key is 16 hex chars (64 bits)."""
+        event_id = 'test_event_abc123'
         ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'hour')
-        # 2024-06-15 11:00:00 UTC
-        assert start_ms == 1718449200000
+        key = negentropy.compute_unified_key(event_id, ts_ms)
+        assert len(key) == 16
+        assert all(c in '0123456789abcdef' for c in key)
 
-    def test_ten_min_bucket(self):
-        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC (minute 30 = bucket 3)
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'ten_min')
-        # 2024-06-15 11:30:00 UTC
-        assert start_ms == 1718451000000
+    def test_unified_key_timestamp_ordering(self):
+        """Earlier timestamps produce lexicographically smaller keys."""
+        event_id = 'test_event'
+        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # Earlier
+        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Later
+        assert key1 < key2
 
-    def test_one_min_bucket(self):
-        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'one_min')
-        # 2024-06-15 11:30:00 UTC
-        assert start_ms == 1718451000000
+    def test_unified_key_deterministic(self):
+        """Same inputs produce same key."""
+        key1 = negentropy.compute_unified_key('evt1', 1718451045000)
+        key2 = negentropy.compute_unified_key('evt1', 1718451045000)
+        assert key1 == key2
 
-    def test_root_bucket(self):
+    def test_unified_key_different_events_same_time(self):
+        """Different events at same time produce different keys."""
         ts_ms = 1718451045000
-        start_ms = negentropy.get_bucket_start_ms(ts_ms, 'root')
-        assert start_ms == negentropy.ROOT_BUCKET_START
+        key1 = negentropy.compute_unified_key('evt1', ts_ms)
+        key2 = negentropy.compute_unified_key('evt2', ts_ms)
+        # First 12 chars (timestamp) same, last 4 (hash) different
+        assert key1[:12] == key2[:12]
+        assert key1[12:] != key2[12:]
 
-    def test_bucket_end_year(self):
-        # Start of 2024
-        start_ms = 1704067200000
-        end_ms = negentropy.get_bucket_end_ms(start_ms, 'year')
-        # Should be start of 2025
-        assert end_ms == 1735689600000
+    def test_decode_unified_key(self):
+        """Can decode unified key back to timestamp."""
+        ts_ms = 1718451045000
+        key = negentropy.compute_unified_key('evt1', ts_ms)
+        decoded_ts, hash_hex = negentropy.decode_unified_key(key)
+        assert decoded_ts == ts_ms
+        assert len(hash_hex) == 4
 
-    def test_bucket_end_month(self):
-        # Start of June 2024
-        start_ms = 1717200000000
-        end_ms = negentropy.get_bucket_end_ms(start_ms, 'month')
-        # Should be start of July 2024
-        assert end_ms == 1719792000000
+
+class TestPrefixLevels:
+    """Test prefix hierarchy."""
+
+    def test_levels_defined(self):
+        """All expected levels exist."""
+        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8',
+                    'prefix_10', 'prefix_12', 'prefix_14', 'prefix_16']
+        assert negentropy.LEVELS == expected
+
+    def test_get_prefix_for_level(self):
+        """Get correct prefix length at each level."""
+        event_id = 'evt1'
+        ts_ms = 1718451045000
+        unified_key = negentropy.compute_unified_key(event_id, ts_ms)
+
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'root') == ''
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_2') == unified_key[:2]
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_4') == unified_key[:4]
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_16') == unified_key
+
+    def test_get_child_level(self):
+        """Child level is next in hierarchy."""
+        assert negentropy.get_child_level('root') == 'prefix_2'
+        assert negentropy.get_child_level('prefix_2') == 'prefix_4'
+        assert negentropy.get_child_level('prefix_14') == 'prefix_16'
+        assert negentropy.get_child_level('prefix_16') is None  # Finest level
+
+    def test_get_parent_level(self):
+        """Parent level is previous in hierarchy."""
+        assert negentropy.get_parent_level('prefix_16') == 'prefix_14'
+        assert negentropy.get_parent_level('prefix_2') == 'root'
+        assert negentropy.get_parent_level('root') is None  # Coarsest level
 
 
 class TestFormatHuman:
-    """Test human-readable bucket formatting."""
+    """Test human-readable unified key formatting."""
 
-    def test_format_year(self):
-        start_ms = 1704067200000  # 2024-01-01
-        assert negentropy.format_bucket_human(start_ms, 'year') == '2024'
-
-    def test_format_month(self):
-        start_ms = 1717200000000  # 2024-06-01
-        assert negentropy.format_bucket_human(start_ms, 'month') == '2024-06'
-
-    def test_format_day(self):
-        start_ms = 1718409600000  # 2024-06-15
-        assert negentropy.format_bucket_human(start_ms, 'day') == '2024-06-15'
-
-    def test_format_root(self):
-        assert negentropy.format_bucket_human(0, 'root') == 'root'
+    def test_format_unified_key_human(self):
+        """Format shows ISO timestamp and hash suffix."""
+        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
+        key = negentropy.compute_unified_key('evt1', ts_ms)
+        formatted = negentropy.format_unified_key_human(key)
+        assert '2024-06-15' in formatted
+        assert '11:30:45' in formatted
+        assert ':' in formatted  # Has separator between timestamp and hash
 
 
 class TestHashComputation:
@@ -122,22 +135,22 @@ class TestHashComputation:
     def test_parent_hash_empty(self):
         """Empty children produce empty parent hash."""
         assert negentropy.compute_parent_hash({}) == b''
-        assert negentropy.compute_parent_hash({123: b''}) == b''
+        assert negentropy.compute_parent_hash({'aa': b''}) == b''
 
     def test_parent_hash_non_empty(self):
         """Non-empty children produce hash."""
-        h = negentropy.compute_parent_hash({1704067200000: b'x' * 16})
+        h = negentropy.compute_parent_hash({'aa': b'x' * 16})
         assert len(h) == 16
 
     def test_parent_hash_deterministic(self):
         """Parent hash is deterministic regardless of dict order."""
         h1 = negentropy.compute_parent_hash({
-            1704067200000: b'a' * 16,
-            1706745600000: b'b' * 16,
+            'aa': b'a' * 16,
+            'bb': b'b' * 16,
         })
         h2 = negentropy.compute_parent_hash({
-            1706745600000: b'b' * 16,
-            1704067200000: b'a' * 16,
+            'bb': b'b' * 16,
+            'aa': b'a' * 16,
         })
         assert h1 == h2
 
@@ -155,13 +168,13 @@ class TestEventTracking:
 
         # Check event was recorded
         row = db.query_one("""
-            SELECT bucket_start_ms FROM negentropy_events
+            SELECT unified_key FROM negentropy_events
             WHERE recorded_by = ? AND event_id = ?
         """, (peer_id, event_id))
         assert row is not None
-        # Should be start of minute 30
-        expected_start = negentropy.get_bucket_start_ms(ts_ms, 'one_min')
-        assert row['bucket_start_ms'] == expected_start
+        # Unified key should be computed correctly
+        expected_key = negentropy.compute_unified_key(event_id, ts_ms)
+        assert row['unified_key'] == expected_key
 
     def test_add_event_creates_bucket_hierarchy(self, db):
         """Adding event marks buckets as needing recompute."""
@@ -188,24 +201,31 @@ class TestHashRecomputation:
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
         negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms)
 
-        bucket_start = negentropy.get_bucket_start_ms(ts_ms, 'one_min')
-        h = negentropy.recompute_bucket_hash(db, peer_id, 'one_min', bucket_start)
+        # Get the unified key prefix for the finest level
+        unified_key = negentropy.compute_unified_key('evt1', ts_ms)
+        prefix = unified_key[:16]  # Full prefix for prefix_16 level
 
-        expected = negentropy.compute_leaf_hash(['evt1', 'evt2'])
+        h = negentropy.recompute_bucket_hash(db, peer_id, 'prefix_16', prefix)
+
+        # Hash should match computation from event IDs in that bucket
+        # Note: evt1 and evt2 may be in different buckets if their hash suffixes differ
+        events_in_bucket = negentropy.get_events_in_bucket(db, peer_id, prefix)
+        expected = negentropy.compute_leaf_hash(events_in_bucket)
         assert h == expected
 
     def test_get_hashes_at_level(self, db):
         """Get all hashes at a level."""
         peer_id = 'peer1'
 
-        # Add events in different months
+        # Add events at different times
         negentropy.add_event_to_sync(db, peer_id, 'evt1', 1704067200000)  # 2024-01-01
-        negentropy.add_event_to_sync(db, peer_id, 'evt2', 1706745600000)  # 2024-02-01
+        negentropy.add_event_to_sync(db, peer_id, 'evt2', 1735689600000)  # 2025-01-01
 
-        year_hashes = negentropy.get_hashes_at_level(db, peer_id, 'year')
-        year_2024_start = negentropy.get_bucket_start_ms(1704067200000, 'year')
-        assert year_2024_start in year_hashes
-        assert year_hashes[year_2024_start] != b''
+        # Get hashes at prefix_2 level (coarse enough to see multiple buckets)
+        prefix_2_hashes = negentropy.get_hashes_at_level(db, peer_id, 'prefix_2')
+
+        # Should have at least one non-empty bucket
+        assert any(h != b'' for h in prefix_2_hashes.values())
 
 
 class TestSyncProtocol:
@@ -223,7 +243,7 @@ class TestSyncProtocol:
         assert len(requests) == 1  # Single root request
         assert requests[0]['type'] == 'range_request'
         assert requests[0]['level'] == 'root'
-        assert requests[0]['bucket_start_ms'] == negentropy.ROOT_BUCKET_START
+        assert requests[0]['prefix'] == ''
         assert 'root_hash' in requests[0]
         assert 'total_events' in requests[0]
         assert requests[0]['total_events'] == 1
@@ -246,7 +266,7 @@ class TestSyncProtocol:
             'type': 'range_request',
             'range_id': 'remote_range_1',
             'level': 'root',
-            'bucket_start_ms': negentropy.ROOT_BUCKET_START,
+            'prefix': '',
             'hash': requests[0]['hash'],  # Same hash
             'root_hash': requests[0]['root_hash'],
         }
@@ -268,12 +288,16 @@ class TestSyncProtocol:
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
         negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 1000)
 
-        # Receive request at year level with different hash
+        # Get the prefix for prefix_2 level (coarse level that contains both events)
+        unified_key = negentropy.compute_unified_key('evt1', ts_ms)
+        prefix = unified_key[:2]
+
+        # Receive request at prefix_2 level with different hash
         msg = {
             'type': 'range_request',
             'range_id': 'remote_1',
-            'level': 'year',
-            'bucket_start_ms': negentropy.get_bucket_start_ms(ts_ms, 'year'),
+            'level': 'prefix_2',
+            'prefix': prefix,
             'hash': 'deadbeef',  # Different hash
         }
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
@@ -291,15 +315,19 @@ class TestSyncProtocol:
 
         # Add more events than EVENTS_THRESHOLD (100)
         for i in range(150):
-            # Spread across different minutes to ensure they're in the year bucket
+            # Spread across different times to ensure they're in the same prefix_2 bucket
             negentropy.add_event_to_sync(db, peer_id, f'evt{i}', base_ts + i * 60000)
 
-        # Receive request at year level with different hash
+        # Get the prefix for prefix_2 level
+        unified_key = negentropy.compute_unified_key('evt0', base_ts)
+        prefix = unified_key[:2]
+
+        # Receive request at prefix_2 level with different hash
         msg = {
             'type': 'range_request',
             'range_id': 'remote_1',
-            'level': 'year',
-            'bucket_start_ms': negentropy.get_bucket_start_ms(base_ts, 'year'),
+            'level': 'prefix_2',
+            'prefix': prefix,
             'hash': 'deadbeef',  # Different hash
         }
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
@@ -308,9 +336,9 @@ class TestSyncProtocol:
         assert any(r['type'] == 'range_request' for r in responses)
         # Should NOT send events directly at this level
         assert not any(r['type'] == 'range_events' for r in responses)
-        # Child requests should be at 'month' level
+        # Child requests should be at 'prefix_4' level
         child_requests = [r for r in responses if r['type'] == 'range_request']
-        assert all(r['level'] == 'month' for r in child_requests)
+        assert all(r['level'] == 'prefix_4' for r in child_requests)
 
 
 class TestSyncStatus:
@@ -357,7 +385,7 @@ class TestCheckpoints:
             'type': 'range_request',
             'range_id': 'remote_1',
             'level': 'root',
-            'bucket_start_ms': negentropy.ROOT_BUCKET_START,
+            'prefix': '',
             'hash': root_hash.hex(),
             'root_hash': root_hash.hex(),
         }
@@ -391,6 +419,10 @@ class TestPublicAPI:
 
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
 
+        # Get the prefix for the request
+        unified_key = negentropy.compute_unified_key('evt1', ts_ms)
+        prefix = unified_key[:2]
+
         # Create a negentropy envelope as would arrive from sync
         envelope = {
             'type': 'negentropy',
@@ -398,8 +430,8 @@ class TestPublicAPI:
             'data': {
                 'type': 'range_request',
                 'range_id': 'remote_1',
-                'level': 'year',
-                'bucket_start_ms': negentropy.get_bucket_start_ms(ts_ms, 'year'),
+                'level': 'prefix_2',
+                'prefix': prefix,
                 'hash': 'deadbeef',
             }
         }
