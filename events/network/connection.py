@@ -763,12 +763,12 @@ def list_all_for_display(peer_id: str, t_ms: int, db: Any) -> dict:
     }
 
     for conn in connections:
-        if conn.is_bootstrap():
-            result['bootstrap'].append(conn)
+        if conn.is_bidirectional():
+            result['active'].append(conn)
         elif conn.is_pending():
             result['pending'].append(conn)
-        elif conn.is_bidirectional():
-            result['active'].append(conn)
+        elif conn.is_bootstrap():
+            result['bootstrap'].append(conn)
 
     return result
 
