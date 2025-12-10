@@ -414,7 +414,7 @@ def test_three_devices_all_linked(fresh_db):
     # Sync to share group keys (required for encrypted device names)
     print("\n=== Sync all devices ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=500, check_interval=1)
+    final_t_ms, rounds, converged, status = tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=500, check_interval=1)
 
     # Verify device names are stored correctly (after sync - encrypted names require group key)
     phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
@@ -485,7 +485,7 @@ def test_three_devices_all_linked(fresh_db):
         peer_id=alice_phone['peer_id'],
         channel_id=shared_channel_id,
         content="From phone",
-        t_ms=7000,
+        t_ms=final_t_ms + 1000,
         db=db
     )
     db.commit()
@@ -494,7 +494,7 @@ def test_three_devices_all_linked(fresh_db):
         peer_id=alice_laptop['peer_id'],
         channel_id=shared_channel_id,
         content="From laptop",
-        t_ms=7100,
+        t_ms=final_t_ms + 2000,
         db=db
     )
     db.commit()
@@ -503,7 +503,7 @@ def test_three_devices_all_linked(fresh_db):
         peer_id=alice_tablet['peer_id'],
         channel_id=shared_channel_id,
         content="From tablet",
-        t_ms=7200,
+        t_ms=final_t_ms + 3000,
         db=db
     )
     db.commit()
@@ -511,7 +511,7 @@ def test_three_devices_all_linked(fresh_db):
     # Sync messages
     print("\n=== Sync messages ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=500, check_interval=1)
+    tick_helper.sync_until_converged(db=db, start_t_ms=final_t_ms + 4000, max_rounds=500, check_interval=1)
 
     # Discover channels via sync for each device
     print("\n=== Discovering channels for each device ===")

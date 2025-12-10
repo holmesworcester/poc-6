@@ -4,9 +4,12 @@ Jobs are self-scheduling: each job decides when it should run based on
 its own logic. The tick() function asks each job if it should_run() and
 executes those that say yes.
 """
+import logging
 from typing import Any, Dict
 from abc import ABC, abstractmethod
 from db import create_unsafe_db
+
+log = logging.getLogger(__name__)
 
 # Global frequency multiplier for testing (1.0 = production, 0.01 = 100x faster)
 _frequency_multiplier = 1.0
@@ -56,6 +59,12 @@ class Job(ABC):
         # Always run on first tick
         if last_run_at == 0:
             return True
+        # Detect backwards time - this means tick() was called with a timestamp
+        # earlier than a previous call, which will cause jobs to silently not run
+        if t_ms < last_run_at:
+            log.error(f"Job '{self.name}' called with t_ms={t_ms} but last_run_at={last_run_at} - "
+                      f"time went backwards by {last_run_at - t_ms}ms! Job will not run.")
+            return False
         # Apply frequency multiplier for testing
         effective_interval = int(self.every_ms * _frequency_multiplier)
         return t_ms - last_run_at >= effective_interval
