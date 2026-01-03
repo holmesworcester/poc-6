@@ -218,6 +218,61 @@ def compute_parent_hash(child_hashes: dict[str, bytes]) -> bytes:
 # Database operations
 # ============================================================================
 
+def add_events_to_sync_batch(
+    db,
+    recorded_by: str,
+    events: list[tuple[str, int]]  # List of (event_id, created_at)
+) -> None:
+    """Add multiple events to the sync system efficiently.
+
+    Batches inserts and marks each unique bucket stale only once.
+    Much faster than calling add_event_to_sync() in a loop.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        events: List of (event_id, created_at) tuples
+    """
+    if not events:
+        return
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    # Collect unique buckets per level
+    buckets_by_level: dict[str, set[str]] = {level: set() for level in LEVELS}
+
+    # Batch insert events and collect bucket prefixes
+    for event_id, created_at in events:
+        unified_key = compute_unified_key(event_id, created_at)
+
+        # Insert event
+        safedb.execute("""
+            INSERT OR IGNORE INTO negentropy_events
+            (recorded_by, event_id, unified_key, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (recorded_by, event_id, unified_key, created_at))
+
+        # Collect unique bucket prefixes at each level
+        for level in LEVELS:
+            prefix_len = LEVEL_PREFIX_LEN[level]
+            prefix = unified_key[:prefix_len]
+            buckets_by_level[level].add(prefix)
+
+    # Mark all affected buckets as stale (NULL hash)
+    # Hash computation is deferred to get_root_hash() when outgoing sync needs it
+    # This allows many events to be inserted before a single hash recomputation pass
+    for level, prefixes in buckets_by_level.items():
+        for prefix in prefixes:
+            safedb.execute("""
+                INSERT INTO negentropy_buckets
+                (recorded_by, level, prefix, hash, event_count, updated_at)
+                VALUES (?, ?, ?, NULL, 0, ?)
+                ON CONFLICT (recorded_by, level, prefix)
+                DO UPDATE SET hash = NULL, updated_at = ?
+            """, (recorded_by, level, prefix, now, now))
+
+
 def add_event_to_sync(
     db,
     recorded_by: str,
@@ -228,44 +283,10 @@ def add_event_to_sync(
 
     Called when a new event is created or received.
     Marks all ancestor buckets as needing hash recomputation.
+
+    For bulk operations, use add_events_to_sync_batch() instead.
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Compute the unified key
-    unified_key = compute_unified_key(event_id, created_at)
-
-    # Insert event -> bucket mapping
-    safedb.execute("""
-        INSERT OR IGNORE INTO negentropy_events
-        (recorded_by, event_id, unified_key, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (recorded_by, event_id, unified_key, created_at))
-
-    # Mark leaf bucket hash as stale (NULL)
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    leaf_prefix = unified_key[:LEVEL_PREFIX_LEN['prefix_16']]
-    safedb.execute("""
-        INSERT INTO negentropy_buckets
-        (recorded_by, level, prefix, hash, event_count, updated_at)
-        VALUES (?, 'prefix_16', ?, NULL, 1, ?)
-        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
-            hash = NULL,
-            event_count = event_count + 1,
-            updated_at = excluded.updated_at
-    """, (recorded_by, leaf_prefix, now))
-
-    # Mark all ancestor buckets as needing recompute
-    for level in ['prefix_14', 'prefix_12', 'prefix_10', 'prefix_8', 'prefix_6', 'prefix_4', 'prefix_2', 'root']:
-        prefix_len = LEVEL_PREFIX_LEN[level]
-        ancestor_prefix = unified_key[:prefix_len]
-        safedb.execute("""
-            INSERT INTO negentropy_buckets
-            (recorded_by, level, prefix, hash, event_count, updated_at)
-            VALUES (?, ?, ?, NULL, 0, ?)
-            ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
-                hash = NULL,
-                updated_at = excluded.updated_at
-        """, (recorded_by, level, ancestor_prefix, now))
+    add_events_to_sync_batch(db, recorded_by, [(event_id, created_at)])
 
 
 def recompute_bucket_hash(
@@ -927,8 +948,29 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     for peer_row in local_peers:
         peer_id = peer_row['peer_id']
 
-        # Get our current root hash once per peer
-        our_root_hash = get_root_hash(db, peer_id)
+        # OPTIMIZATION: Check for stale buckets before expensive hash recomputation
+        # If no stale buckets, use cached root hash from DB
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        stale_check = safedb.query_one(
+            "SELECT COUNT(*) as c FROM negentropy_buckets WHERE recorded_by = ? AND hash IS NULL",
+            (peer_id,)
+        )
+        has_stale = stale_check and stale_check['c'] > 0
+
+        if not has_stale:
+            # No stale buckets - try to use cached root hash
+            cached_root = safedb.query_one(
+                "SELECT hash FROM negentropy_buckets WHERE recorded_by = ? AND level = 'root' AND prefix = ''",
+                (peer_id,)
+            )
+            if cached_root and cached_root['hash']:
+                our_root_hash = cached_root['hash']
+            else:
+                # No cached root, need to compute
+                our_root_hash = get_root_hash(db, peer_id)
+        else:
+            # Has stale buckets - must recompute
+            our_root_hash = get_root_hash(db, peer_id)
 
         # Get all active connections using connection module interface
         connections = conn_module.get_connections(peer_id, t_ms, db)

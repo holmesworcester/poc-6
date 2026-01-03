@@ -194,22 +194,13 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
                 (event_id, file_id, peer_id, 'file')
             )
 
-        # Mark slices as shareable (sync via regular bloom filter sync)
+        # Mark slices as shareable using batch function for efficiency
         # File slices are regular shareable events - they sync like any other event type
         # Access control is enforced at message_attachment level (group-encrypted)
-        # add_shareable_event also adds to negentropy sync buckets
         from events.network import sync
-        from events.network import negentropy
-        for event_id in event_ids:
-            sync.add_shareable_event(
-                event_id=event_id,
-                can_share_peer_id=peer_id,
-                created_at=None,  # Sync uses recorded_at for ordering
-                recorded_at=t_ms,
-                db=db
-            )
-            # Also add to negentropy sync buckets
-            negentropy.add_event_to_sync(db, peer_id, event_id, t_ms)
+        # Build batch: (event_id, created_at, recorded_at)
+        shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
+        sync.add_shareable_events_batch(shareable_batch, peer_id, db)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)

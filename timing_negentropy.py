@@ -139,9 +139,7 @@ def run_test():
     for row in buckets_by_level:
         print(f"{row[0]:15} {row[1]:8} {row[2]:8}")
 
-    # Check PLACEHOLDER_SYNC
-    from events.network import sync as sync_module
-    print(f"\nPLACEHOLDER_SYNC = {sync_module.PLACEHOLDER_SYNC}")
+    # PLACEHOLDER_SYNC removed - using negentropy sync only
 
     print("\n=== Summary ===")
     print(f"Initial get_root_hash: {t_root_before*1000:.2f}ms (few events)")
