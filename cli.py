@@ -316,7 +316,7 @@ class CLISession:
         self.selected_account: Optional[str] = None    # Currently selected account full_name
         self.selected_channel_id: Optional[str] = None  # Currently selected channel ID
         self.current_time_ms: int = 0
-        self.auto_tick_count: int = 100  # Number of auto-ticks after event commands (default 100)
+        self.auto_tick_count: int = 10  # Number of auto-ticks after event commands (default 10 = 1 second)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
         self.command_history: List[str] = []  # Commands executed in this session
@@ -2222,6 +2222,11 @@ def cmd_network_show(session: CLISession):
     print(f"  jitter:       {cfg.jitter_ms}ms (stddev)")
     print(f"  packet_loss:  {cfg.packet_loss_rate * 100:.1f}%")
     print(f"  burst_loss:   {cfg.burst_loss_probability * 100:.1f}% (length: {cfg.burst_loss_length})")
+    if cfg.bandwidth_bytes_per_sec:
+        bw_kbps = cfg.bandwidth_bytes_per_sec * 8 / 1000
+        print(f"  bandwidth:    {bw_kbps:.0f} kbps ({cfg.bandwidth_bytes_per_sec / 1000:.0f} KB/s)")
+    else:
+        print(f"  bandwidth:    unlimited")
     print(f"  max_packet:   {cfg.max_packet_size} bytes")
 
     if cfg.partitioned_peers:
@@ -2282,13 +2287,15 @@ def cmd_network_set(session: CLISession, latency: int = None, jitter: int = None
 
 def cmd_network_preset(session: CLISession, preset: str):
     """Apply a network condition preset."""
+    # Format: (latency_ms, jitter_ms, loss%, burst_prob%, burst_len, bandwidth_kbps)
+    # bandwidth_kbps: None = unlimited, otherwise kilobits per second
     presets = {
-        'lan': (0, 0, 0, 0, 3),           # Perfect local network
-        'broadband': (50, 20, 1, 0, 3),    # Good home internet
-        'mobile-4g': (100, 40, 3, 5, 3),   # Mobile 4G
-        'mobile-3g': (200, 80, 8, 10, 4),  # Mobile 3G / poor
-        'satellite': (300, 50, 2, 5, 3),   # Satellite internet
-        'lossy': (50, 20, 15, 20, 5),      # Very lossy network
+        'lan': (0, 0, 0, 0, 3, None),              # Perfect local network (unlimited)
+        'broadband': (50, 20, 1, 0, 3, 5000),      # Good home internet (5 Mbps)
+        'mobile-4g': (100, 40, 3, 5, 3, 4000),     # Mobile 4G (4 Mbps)
+        'mobile-3g': (200, 80, 8, 10, 4, 1000),    # Mobile 3G / poor (1 Mbps)
+        'satellite': (300, 50, 2, 5, 3, 2000),     # Satellite internet (2 Mbps)
+        'lossy': (50, 20, 15, 20, 5, 5000),        # Very lossy network (5 Mbps)
     }
 
     if preset not in presets:
@@ -2296,16 +2303,25 @@ def cmd_network_preset(session: CLISession, preset: str):
         print(f"  available: {', '.join(presets.keys())}")
         return
 
-    latency, jitter, loss, burst_prob, burst_len = presets[preset]
+    latency, jitter, loss, burst_prob, burst_len, bandwidth_kbps = presets[preset]
+
+    # Convert kbps to bytes/sec (kbps / 8 * 1000 = kbps * 125)
+    bandwidth_bytes = bandwidth_kbps * 125 if bandwidth_kbps else None
+
     cfg = network_config.get_network_config()
     cfg.latency_ms = latency
     cfg.jitter_ms = jitter
     cfg.packet_loss_rate = loss / 100.0
     cfg.burst_loss_probability = burst_prob / 100.0
     cfg.burst_loss_length = burst_len
+    cfg.bandwidth_bytes_per_sec = bandwidth_bytes
 
+    # Apply to simulator
+    network_config.set_network_config(cfg)
+
+    bw_str = f"{bandwidth_kbps} kbps" if bandwidth_kbps else "unlimited"
     print(f"✓ applied preset '{preset}':")
-    print(f"  latency={latency}ms, jitter={jitter}ms, loss={loss}%, burst={burst_prob}%/{burst_len}")
+    print(f"  latency={latency}ms, jitter={jitter}ms, loss={loss}%, burst={burst_prob}%/{burst_len}, bandwidth={bw_str}")
 
 
 def cmd_partition(session: CLISession, account_num: int):

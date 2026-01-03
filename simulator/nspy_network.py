@@ -140,10 +140,12 @@ class Link:
         self.wire.out = collector
 
         # Create token bucket shaper if bandwidth limited
+        # Note: TokenBucketShaper rate is in bits per simulation time unit.
+        # Our simulation uses milliseconds, so convert bps to bits/ms (divide by 1000).
         if config.bandwidth_bps is not None:
             self.shaper = TokenBucketShaper(
                 env=env,
-                rate=config.bandwidth_bps,
+                rate=config.bandwidth_bps / 1000.0,  # bits/sec → bits/ms
                 bucket_size=config.bucket_size_bytes,
                 debug=False
             )

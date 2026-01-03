@@ -24,11 +24,11 @@ class NetworkConfig:
     """
     # Basic settings
     packet_loss_rate: float = 0.0  # 0.0 to 1.0 - probability of dropping packets
-    latency_ms: int = 0             # Base latency in milliseconds
+    latency_ms: int = 20            # Base latency in milliseconds (20ms = good wired connection)
     max_packet_size: int = 10000    # Maximum packet size in bytes
 
     # Jitter: adds random variation to latency (normal distribution)
-    jitter_ms: int = 0              # Standard deviation of latency jitter in ms
+    jitter_ms: int = 5              # Standard deviation of latency jitter in ms
 
     # Network partitions: completely block traffic to/from certain peers
     partitioned_peers: Set[str] = field(default_factory=set)
@@ -37,20 +37,15 @@ class NetworkConfig:
     burst_loss_probability: float = 0.0  # Probability of entering burst loss state
     burst_loss_length: int = 3           # Number of consecutive packets lost in burst
 
-    # Bandwidth limiting
-    bandwidth_bytes_per_sec: Optional[int] = None  # None = unlimited
+    # Bandwidth limiting (1 Mbps = 125KB/s, realistic home upload speed)
+    bandwidth_bytes_per_sec: Optional[int] = 125_000  # 1 Mbps upload
 
 
 # Global simulator instance
 _simulator: Optional[NetworkSimulator] = None
 
-
-def get_simulator() -> NetworkSimulator:
-    """Get the global simulator instance, creating if needed."""
-    global _simulator
-    if _simulator is None:
-        _simulator = NetworkSimulator()
-    return _simulator
+# Current config (must be defined before get_simulator for initialization)
+_config = NetworkConfig()
 
 
 def _to_nspy_config(config: NetworkConfig) -> NspyNetworkConfig:
@@ -66,8 +61,12 @@ def _to_nspy_config(config: NetworkConfig) -> NspyNetworkConfig:
     )
 
 
-# Current config (for partitioned_peers which is mutable)
-_config = NetworkConfig()
+def get_simulator() -> NetworkSimulator:
+    """Get the global simulator instance, creating if needed with default config."""
+    global _simulator
+    if _simulator is None:
+        _simulator = NetworkSimulator(config=_to_nspy_config(_config))
+    return _simulator
 
 
 def set_network_config(config: NetworkConfig) -> None:
@@ -276,9 +275,18 @@ def consume_bandwidth(bytes_count: int, t_ms: int) -> bool:
 # ============================================================================
 
 def reset_network_config() -> None:
-    """Reset to default configuration (for testing)."""
+    """Reset to fast configuration (for testing).
+
+    Uses 0 latency and unlimited bandwidth for fast test execution.
+    The class defaults (20ms latency, 1Mbps bandwidth) are for realistic CLI demo.
+    """
     global _config, _simulator
-    _config = NetworkConfig()
+    # Use fast settings for tests (override class defaults)
+    _config = NetworkConfig(
+        latency_ms=0,
+        jitter_ms=0,
+        bandwidth_bytes_per_sec=None,  # Unlimited
+    )
     if _simulator is not None:
         _simulator.reset()
     _simulator = None
