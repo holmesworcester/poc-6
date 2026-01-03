@@ -12,10 +12,11 @@ Tests the removal of users and peers from a network:
 """
 import pytest
 import sqlite3
-from db import Database, create_safe_db, create_unsafe_db
+from db import Database
 import schema
-from events.identity import user, invite, peer, peer_shared
+from events.identity import user, invite, peer, peer_shared, network
 from events.identity import user_removed, peer_removed
+from events.group import group, group_member
 from tests.utils import tick_helper
 from events.content import message
 import store
@@ -58,15 +59,13 @@ def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
     print("\n=== Initial sync to converge ===")
     tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
-    # Verify Bob is in Alice's view
+    # Verify Bob is in Alice's member list (using API as UI would)
     print("\n=== Verify Bob joined successfully ===")
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    bob_user_alice_view = alice_safedb.query_one(
-        "SELECT user_id FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (bob['user_id'], alice['peer_id'])
-    )
-    assert bob_user_alice_view is not None, "Alice should see Bob in users"
-    print("✓ Bob successfully in Alice's view")
+    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+    members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+    member_names = [m['name'] for m in members]
+    assert 'Bob' in member_names, "Alice should see Bob in member list"
+    print("✓ Bob successfully in Alice's member list")
 
     # Bob sends a message before being removed (for testing historical preservation)
     print("\n=== Bob sends a message before removal ===")
@@ -96,18 +95,12 @@ def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
     print(f"Remaining members: {[m['name'] for m in bob_removed_result['members']]}")
     db.commit()
 
-    # Verify Bob is marked as removed in database (from Alice's perspective)
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    bob_removal_record = alice_safedb.query_one(
-        "SELECT user_id, removed_by FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (bob['user_id'], alice['peer_id'])
-    )
-    assert bob_removal_record is not None, "Bob should be in removed_users table"
-    print("✓ Bob marked as removed in database")
-
-    # Note: When a user is removed, all their peers are marked as removed in the removed_peers table
-    # via cascading. The removed_users table tracks user-level removal from the peer's perspective.
-    print("✓ Bob's removal cascaded to removed_users table")
+    # Verify Bob is no longer in Alice's member list (using API as UI would)
+    members_after = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+    member_names_after = [m['name'] for m in members_after]
+    assert 'Bob' not in member_names_after, "Bob should not appear in member list after removal"
+    assert 'Alice' in member_names_after, "Alice should still be in member list"
+    print("✓ Bob no longer in member list")
 
     # Bob tries to send another message (he won't know he's removed, so he tries anyway)
     print("\n=== Bob sends another message (after removal) ===")
@@ -121,14 +114,11 @@ def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
     print(f"Bob created another message: {bob_message_2['id'][:20]}...")
     db.commit()
 
-    # Verify Bob is marked as removed in removed_users
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    bob_user_alice_view = alice_safedb.query_one(
-        "SELECT user_id FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (bob['user_id'], alice['peer_id'])
-    )
-    assert bob_user_alice_view is not None, "Bob should be in removed_users"
-    print("✓ Bob is in removed_users (won't appear in new queries)")
+    # Verify Bob is still not in member list (removal persists)
+    members_still = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+    member_names_still = [m['name'] for m in members_still]
+    assert 'Bob' not in member_names_still, "Bob should still not appear in member list"
+    print("✓ Bob still not in member list")
 
     # Distributed systems verification
     print("\n=== Convergence & Reprojection Testing ===")
@@ -313,14 +303,12 @@ def test_receive_path_removal_check(fresh_db):
     db.commit()
     print("✓ Bob removed")
 
-    # Verify Bob is marked as removed (database check)
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    bob_removed = alice_safedb.query_one(
-        "SELECT user_id FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (bob['user_id'], alice['peer_id'])
-    )
-    assert bob_removed is not None, "Bob should be in removed_users"
-    print("✓ Bob is marked as removed in database")
+    # Verify Bob is no longer in member list (using API as UI would)
+    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+    members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+    member_names = [m['name'] for m in members]
+    assert 'Bob' not in member_names, "Bob should not appear in member list after removal"
+    print("✓ Bob no longer in member list")
 
     # Sync works even after removal (removal events propagate)
     print("\n=== Sync after removal ===")
@@ -371,14 +359,10 @@ def test_user_removal_rotates_group_keys(fresh_db):
     print("\n=== Initial sync to converge ===")
     tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
-    # Get original key
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    main_group = alice_safedb.query_one(
-        "SELECT group_id, key_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
-        (alice['peer_id'],)
-    )
-    group_id = main_group['group_id']
-    original_key_id = main_group['key_id']
+    # Get original key (using API)
+    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+    original_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
+    original_key_id = original_key['key_id']
     print(f"Original group key_id: {original_key_id[:20]}...")
 
     # Alice removes Bob (user removal)
@@ -393,13 +377,9 @@ def test_user_removal_rotates_group_keys(fresh_db):
     db.commit()
     print("✓ Bob removed")
 
-    # Verify key was rotated
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    updated_group = alice_safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (group_id, alice['peer_id'])
-    )
-    new_key_id = updated_group['key_id']
+    # Verify key was rotated (using API)
+    new_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
+    new_key_id = new_key['key_id']
 
     assert new_key_id != original_key_id, "Key should be rotated when user is removed"
     print(f"✓ Key rotated: {original_key_id[:20]}... → {new_key_id[:20]}...")
@@ -444,14 +424,10 @@ def test_peer_removal_last_device_rotates_keys(fresh_db):
     print("\n=== Initial sync to converge ===")
     tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
 
-    # Get original key
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    main_group = alice_safedb.query_one(
-        "SELECT group_id, key_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
-        (alice['peer_id'],)
-    )
-    group_id = main_group['group_id']
-    original_key_id = main_group['key_id']
+    # Get original key (using API)
+    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+    original_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
+    original_key_id = original_key['key_id']
     print(f"Original group key_id: {original_key_id[:20]}...")
 
     # Alice removes Bob's peer (peer removal)
@@ -466,13 +442,9 @@ def test_peer_removal_last_device_rotates_keys(fresh_db):
     db.commit()
     print("✓ Bob's peer removed")
 
-    # Verify key was rotated
-    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    updated_group = alice_safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (group_id, alice['peer_id'])
-    )
-    new_key_id = updated_group['key_id']
+    # Verify key was rotated (using API)
+    new_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
+    new_key_id = new_key['key_id']
 
     assert new_key_id != original_key_id, "Key should be rotated when peer is removed"
     print(f"✓ Key rotated: {original_key_id[:20]}... → {new_key_id[:20]}...")
