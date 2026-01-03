@@ -14,7 +14,7 @@ import shutil
 
 
 CLI_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'cli.py')
-SAVED_SESSIONS_DIR = os.path.join(os.path.dirname(CLI_PATH), 'saved-sessions')
+SAVED_SESSIONS_DIR = os.path.join(os.path.dirname(CLI_PATH), 'tests', 'saved-sessions')
 
 
 def run_cli(commands: str, cwd: str = None) -> subprocess.CompletedProcess:

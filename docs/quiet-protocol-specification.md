@@ -998,6 +998,8 @@ Updates must be done by a peer linked to the same `user-id` as the original even
 
 # Files
 
+TODO: consider simple dependency chains for files, with decryption and projection as completed when we receive the last event in the chain.
+
 Many messages will include images, video, or too much text to fit in one event. These are held in files, which reference file parts called "slices".
 
 For example, to add a message attachment (the `message` event has already been created) we create our slices, encrypt them with XChaCha20-Poly1305, create their ciphertext `slice` events, then create the following event:

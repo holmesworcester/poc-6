@@ -1682,7 +1682,7 @@ def cmd_save_session(session: CLISession, name: str):
         return
 
     # Create saved-sessions directory if it doesn't exist
-    script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'saved-sessions')
+    script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tests', 'saved-sessions')
     os.makedirs(script_dir, exist_ok=True)
 
     script_path = os.path.join(script_dir, f"{safe_name}.sh")
@@ -1693,7 +1693,7 @@ def cmd_save_session(session: CLISession, name: str):
         f.write(f"# POC-6 CLI session: {name}\n")
         f.write(f"# Commands: {len(session.command_history)}\n")
         f.write("#\n")
-        f.write("# Run with: python cli.py < saved-sessions/" + safe_name + ".sh\n")
+        f.write("# Run with: python cli.py < tests/saved-sessions/" + safe_name + ".sh\n")
         f.write("\n")
         for cmd in session.command_history:
             f.write(f"{cmd}\n")
@@ -2751,7 +2751,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    time")
             print("    log                            Toggle event log display ON/OFF")
             print("    fast-forward --days <n>")
-            print("    save-session <name>            Save session commands to saved-sessions/<name>.sh")
+            print("    save-session <name>            Save session commands to tests/saved-sessions/<name>.sh")
             print("    quit")
 
         else:

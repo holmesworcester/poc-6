@@ -180,10 +180,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         return None
 
     # Insert into removed_users table (with recorded_by for scoping)
+    signed_by = removed_by  # The remover's peer_shared_id is the signer
     safedb.execute(
-        """INSERT OR IGNORE INTO removed_users (user_id, removed_at, removed_by, recorded_by)
+        """INSERT OR IGNORE INTO removed_users (user_id, removed_at, signed_by, recorded_by)
            VALUES (?, ?, ?, ?)""",
-        (removed_user_id, removed_at, removed_by, recorded_by)
+        (removed_user_id, removed_at, signed_by, recorded_by)
     )
 
     # Cascade: Find all peers for this user from peers_shared and mark them as removed
@@ -196,9 +197,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         peer_shared_id = peer_row['peer_shared_id']
         # Mark peer as removed in device-wide table by peer_shared_id
         unsafe_db.execute(
-            """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, removed_by)
+            """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, signed_by)
                VALUES (?, ?, ?)""",
-            (peer_shared_id, removed_at, removed_by)
+            (peer_shared_id, removed_at, signed_by)
         )
 
         # DELETE ALL CONNECTIONS for this peer (enforcement mechanism)
