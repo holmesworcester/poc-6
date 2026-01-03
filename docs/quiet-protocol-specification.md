@@ -1989,4 +1989,14 @@ See: [README.md](./README.md) for examples.
 ## TODO
 
 - complete list of local-only events for tracking last actions, keys, etc.
-- 
+- Describe how a holepunching-only role would work (advertisement, connection request, intro events sent to specific peers, and possibly a shared state of public ip's, ports, success records, and nat statuses)
+- Describe how a relay-only role would work (connection requests, virtual connections over a relay that expose like normal connections, an additional layer of crypto wrapping, and the relay unwraps transit on incoming, and wraps and sends outgoing to the corresponding peer until inactivity timeout)
+- In both cases, try to figure out how many networks and users such roles could serve
+- Describe how transparent-to-users, semi-trusted system for finding holepunch and relay helpers could work (infra pools)
+
+## 
+
+- disable convergence testing by default for much faster tests but always run it before merge; perhaps force enable it on specific tests
+- investigate granting keys to users under the guarantee that they haven't been removed, by making keys depend on all prior removals, so that a user cannot know a key without knowing all prior removals, so that any user can provide a missing key to a member device
+- return to the pure functional branch and try to convert all the create and project functions
+- do a placeholder TreeKEM-style implementation
