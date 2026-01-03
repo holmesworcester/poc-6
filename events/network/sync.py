@@ -658,56 +658,6 @@ def send_request_to_all(t_ms: int, db: Any) -> None:
         # Send sync requests from this peer to all peers they've seen
         send_requests(peer_id, peer_shared_id, t_ms, db)
 
-        # Send file sync requests for wanted files
-        send_file_sync_requests(peer_id, t_ms, db)
-
-
-def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
-    """Send sync_file requests for files this peer wants to actively sync.
-
-    Args:
-        peer_id: Local peer
-        t_ms: Current timestamp
-        db: Database connection
-    """
-    from events.network import sync_file
-
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
-    # Get all wanted files (that haven't expired)
-    # Note: SafeDB requires recorded_by filter for subjective tables, which is already scoped
-    wanted_files = safedb.query(
-        "SELECT file_id, priority FROM file_sync_wanted WHERE recorded_by = ? AND peer_id = ? AND (ttl_ms = 0 OR ttl_ms > ?) "
-        "ORDER BY priority DESC, requested_at ASC",
-        (peer_id, peer_id, t_ms)
-    )
-
-    log.debug(f"send_file_sync_requests: peer={peer_id[:20]}... has {len(wanted_files)} files to sync")
-
-    for file_row in wanted_files:
-        file_id = file_row['file_id']
-
-        # Skip if file is already complete
-        if sync_file.is_file_complete(file_id, peer_id, db):
-            log.debug(f"send_file_sync_requests: file_id={file_id[:20]}... already complete, skipping")
-            sync_file.cancel_file_sync(file_id, peer_id, db)
-            continue
-
-        # Send file sync request to all peers
-        peers_to_request = safedb.query(
-            "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
-            (peer_id,)
-        )
-
-        log.debug(f"send_file_sync_requests: sending file sync requests for {file_id[:20]}... to {len(peers_to_request)} peers")
-
-        for peer_row in peers_to_request:
-            to_peer = peer_row['peer_shared_id']
-            try:
-                sync_file.send_request(file_id, to_peer, peer_id, t_ms, db)
-            except Exception as e:
-                log.warning(f"send_file_sync_requests: failed to send request for {file_id[:20]}...: {e}")
-
 
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
     """Send all shareable events to all active connections.

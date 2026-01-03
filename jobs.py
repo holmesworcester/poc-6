@@ -97,22 +97,6 @@ class SyncReceiveJob(Job):
         return {}
 
 
-class FileSyncJob(Job):
-    """Send file sync requests for pending file downloads."""
-
-    def __init__(self):
-        super().__init__('file_sync', every_ms=100)
-
-    def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import sync
-        from db import create_unsafe_db
-        unsafedb = create_unsafe_db(db)
-        local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
-        for peer_row in local_peers:
-            sync.send_file_sync_requests(peer_row['peer_id'], t_ms, db)
-        return {}
-
-
 class MessageRekeyAndPurgeJob(Job):
     """Rekey messages and purge old encryption keys (forward secrecy)."""
 
@@ -335,7 +319,6 @@ class NegentropySyncJob(Job):
 JOBS = [
     ConnectionSendJob(),
     SyncReceiveJob(),
-    FileSyncJob(),
     NegentropySyncJob(),
     ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),
