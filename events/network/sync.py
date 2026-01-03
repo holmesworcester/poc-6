@@ -11,7 +11,7 @@ EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any, Iterator
-from events.network import recorded, transit_prekey, sync_window
+from events.network import recorded, transit_prekey, sync_window, negentropy
 from events.identity import peer
 from db import create_safe_db, create_unsafe_db
 from events.network import connection as conn_module
@@ -1265,4 +1265,68 @@ def check_sync_progress(db: Any, prev_snapshot: dict) -> dict:
         'blocked_count': total_blocked,
         'total_valid': total_valid,
         'snapshot': current  # Include for next comparison
+    }
+
+
+def get_global_sync_status(db: Any, t_ms: int) -> dict:
+    """Get sync status across all local peers and their active connections.
+
+    Uses negentropy's per-connection sync state for accurate progress detection.
+    This replaces the snapshot-based approach with deterministic sync completion.
+
+    Args:
+        db: Database connection
+        t_ms: Current timestamp (for connection expiry check)
+
+    Returns:
+        {
+            'all_synced': bool,           # All connections across all peers synced
+            'queue_empty': bool,          # incoming_blobs is empty
+            'total_connections': int,     # Count of active connections
+            'synced_connections': int,    # Count that are fully synced
+            'by_peer': [                  # Per local peer breakdown
+                {
+                    'peer_id': str,
+                    'all_synced': bool,
+                    'total_connections': int,
+                    'synced_connections': int,
+                    'connections': [...]
+                }
+            ]
+        }
+    """
+    unsafedb = create_unsafe_db(db)
+
+    # Get queue size
+    queue = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")
+    queue_empty = (queue['cnt'] if queue else 0) == 0
+
+    # Get all local peers
+    local_peers = [row['peer_id'] for row in unsafedb.query("SELECT peer_id FROM local_peers")]
+
+    by_peer = []
+    total_connections = 0
+    total_synced = 0
+
+    for peer_id in local_peers:
+        status = negentropy.get_all_connection_sync_status(db, peer_id, t_ms)
+        by_peer.append({
+            'peer_id': peer_id,
+            'all_synced': status['all_synced'],
+            'total_connections': status['total_connections'],
+            'synced_connections': status['synced_connections'],
+            'connections': status['connections'],
+        })
+        total_connections += status['total_connections']
+        total_synced += status['synced_connections']
+
+    # All synced if every peer is synced (vacuously true if no connections)
+    all_synced = all(p['all_synced'] for p in by_peer) if by_peer else True
+
+    return {
+        'all_synced': all_synced,
+        'queue_empty': queue_empty,
+        'total_connections': total_connections,
+        'synced_connections': total_synced,
+        'by_peer': by_peer,
     }

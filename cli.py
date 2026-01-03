@@ -104,7 +104,7 @@ from events.network import connection
 
 # All available commands for tab completion
 COMMANDS = [
-    'new-network', 'switch', 'send', 'tick', 'sync', 'sync-realtime', 'auto-tick',
+    'new-network', 'switch', 'send', 'tick', 'sync', 'sync-realtime', 'sync-status', 'auto-tick',
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
     'status', 'accounts', 'channels', 'users', 'messages', 'keys',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
@@ -383,15 +383,29 @@ class CLISession:
         self.accounts[account.full_name] = account
 
     def run_auto_tick(self):
-        """Run auto-tick if enabled."""
-        if self.auto_tick_count > 0:
-            print(f"⟳ auto-syncing {self.auto_tick_count} ticks...")
-            start_t = self.current_time_ms
-            for _ in range(self.auto_tick_count):
-                self.current_time_ms += 100  # 100ms per tick
-                tick.tick(t_ms=self.current_time_ms, db=self.db)
-            print(f"✓ synced (t={start_t}ms -> {self.current_time_ms}ms)")
-            print()
+        """Run auto-tick until synced or max ticks reached."""
+        if self.auto_tick_count == 0:
+            return
+
+        from events.network import sync as sync_module
+
+        print(f"⟳ syncing...")
+        start_t = self.current_time_ms
+        ticks_run = 0
+
+        for i in range(self.auto_tick_count):
+            self.current_time_ms += 100  # 100ms per tick
+            tick.tick_sync_only(t_ms=self.current_time_ms, db=self.db)
+            ticks_run += 1
+
+            # Check if synced (every 10 ticks to avoid overhead)
+            if (i + 1) % 10 == 0:
+                status = sync_module.get_global_sync_status(self.db, self.current_time_ms)
+                if status['all_synced'] and status['queue_empty']:
+                    break
+
+        print(f"✓ synced in {ticks_run} ticks (t={start_t}ms → {self.current_time_ms}ms)")
+        print()
 
 
 # ============================================================================
@@ -922,6 +936,47 @@ def cmd_set_auto_tick(session: CLISession, count: int):
         print("✓ auto-tick disabled")
     else:
         print(f"✓ auto-tick set to {count} ticks")
+
+
+def cmd_sync_status(session: CLISession):
+    """Show sync status for all active connections."""
+    from events.network import sync as sync_module
+
+    account = session.get_selected_account()
+    if not account:
+        print("✗ no account selected")
+        return
+
+    status = sync_module.get_global_sync_status(session.db, session.current_time_ms)
+
+    total = status['total_connections']
+    synced = status['synced_connections']
+
+    if total == 0:
+        print("No active connections")
+        return
+
+    # Header
+    all_synced_mark = "✓" if status['all_synced'] else ""
+    print(f"Active Connections ({synced}/{total} synced) {all_synced_mark}")
+
+    # Per-connection details
+    for peer_info in status['by_peer']:
+        for conn in peer_info['connections']:
+            peer_id = conn['peer_shared_id']
+            short_id = peer_id[:12] + "..." if peer_id else "unknown"
+            pct = conn['progress_pct']
+            is_synced = conn['is_synced']
+
+            if is_synced:
+                print(f"  → {short_id}: 100% ✓")
+            else:
+                ranges = f"({conn['completed_ranges']}/{conn['total_ranges']} ranges)"
+                print(f"  → {short_id}: {pct:.0f}% {ranges}")
+
+    # Queue status
+    queue_status = "empty" if status['queue_empty'] else "pending"
+    print(f"\nQueue: {queue_status}")
 
 
 def cmd_sync_realtime(session: CLISession, args: List[str]):
@@ -2440,6 +2495,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "sync-realtime":
             cmd_sync_realtime(session, parts[1:])
 
+        elif cmd == "sync-status":
+            cmd_sync_status(session)
+
         elif cmd == "auto-tick":
             if len(parts) < 2:
                 print("usage: auto-tick <n>")
@@ -2728,6 +2786,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    tick <n>")
             print("    sync --ticks <n>")
             print("    sync-realtime [--ticks N|--until-file N]  Wall-clock sync with perf report")
+            print("    sync-status                               Show per-connection sync progress")
             print("    auto-tick <n>")
             print()
             print("  Network simulation:")

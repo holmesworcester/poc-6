@@ -1031,6 +1031,77 @@ def get_sync_status(
     }
 
 
+def get_all_connection_sync_status(db, recorded_by: str, t_ms: int) -> dict:
+    """Get sync status for all active connections of a peer.
+
+    Only includes bidirectional connections (both parties have exchanged keys).
+    Expired connections are excluded.
+
+    Args:
+        db: Database connection
+        recorded_by: Local peer ID
+        t_ms: Current timestamp (for expiry check)
+
+    Returns:
+        {
+            'all_synced': bool,           # True if all connections are synced
+            'total_connections': int,
+            'synced_connections': int,
+            'connections': [
+                {
+                    'connection_id': str,
+                    'peer_shared_id': str,
+                    'is_synced': bool,
+                    'progress_pct': float,
+                    'total_ranges': int,
+                    'completed_ranges': int
+                }
+            ]
+        }
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get active bidirectional connections (their_key is not NULL = bidirectional)
+    rows = safedb.query("""
+        SELECT connection_id, peer_shared_id
+        FROM connections
+        WHERE recorded_by = ?
+          AND last_handshake_ms + ttl_ms > ?
+          AND their_key IS NOT NULL
+        ORDER BY last_handshake_ms DESC
+    """, (recorded_by, t_ms))
+
+    connections = []
+    synced_count = 0
+
+    for row in rows:
+        conn_id = row['connection_id']
+        status = get_sync_status(db, recorded_by, conn_id)
+
+        conn_info = {
+            'connection_id': conn_id,
+            'peer_shared_id': row['peer_shared_id'],
+            'is_synced': status['is_synced'],
+            'progress_pct': status['progress_pct'],
+            'total_ranges': status['total_ranges'],
+            'completed_ranges': status['completed_ranges'],
+        }
+        connections.append(conn_info)
+
+        if status['is_synced']:
+            synced_count += 1
+
+    total = len(connections)
+    all_synced = (total == 0) or (synced_count == total)
+
+    return {
+        'all_synced': all_synced,
+        'total_connections': total,
+        'synced_connections': synced_count,
+        'connections': connections,
+    }
+
+
 # ============================================================================
 # Debug/Utility functions
 # ============================================================================
