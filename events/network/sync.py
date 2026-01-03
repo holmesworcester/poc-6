@@ -262,7 +262,8 @@ def remove_connections_for_user(user_id: str, recorded_by: str, db: Any) -> int:
 def add_shareable_events_batch(
     events: list[tuple[str, int, int]],  # List of (event_id, created_at, recorded_at)
     can_share_peer_id: str,
-    db: Any
+    db: Any,
+    skip_negentropy: bool = False
 ) -> None:
     """Add multiple shareable events efficiently.
 
@@ -273,6 +274,7 @@ def add_shareable_events_batch(
         events: List of (event_id, created_at, recorded_at) tuples
         can_share_peer_id: The peer who recorded/has these events
         db: Database connection
+        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
     """
     if not events:
         return
@@ -292,14 +294,16 @@ def add_shareable_events_batch(
             (event_id, can_share_peer_id, created_at, recorded_at, window_id)
         )
 
-    # Batch add to negentropy using the new batch function
-    negentropy_events = [(event_id, recorded_at) for event_id, created_at, recorded_at in events]
-    negentropy.add_events_to_sync_batch(db, can_share_peer_id, negentropy_events)
+    # Batch add to negentropy using the new batch function (unless skipped)
+    if not skip_negentropy:
+        negentropy_events = [(event_id, recorded_at) for event_id, created_at, recorded_at in events]
+        negentropy.add_events_to_sync_batch(db, can_share_peer_id, negentropy_events)
 
-    log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}...")
+    log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (skip_neg={skip_negentropy})")
 
 
-def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any) -> None:
+def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any,
+                        skip_negentropy: bool = False) -> None:
     """Add shareable event to both sync tracking tables.
 
     ARCHITECTURE NOTE: Dual Sync Tables
@@ -330,8 +334,9 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
         created_at: When event was created (often NULL for encrypted events)
         recorded_at: When this peer recorded the event (always available)
         db: Database connection
+        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
     """
-    add_shareable_events_batch([(event_id, created_at, recorded_at)], can_share_peer_id, db)
+    add_shareable_events_batch([(event_id, created_at, recorded_at)], can_share_peer_id, db, skip_negentropy)
 
 
 def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
@@ -537,6 +542,8 @@ def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
+    from events.network import negentropy
+
     transit_blobs = queues.incoming.drain(batch_size, t_ms, db)
     log.info(f"sync.receive: processing {len(transit_blobs)} blobs")
 
@@ -547,10 +554,34 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
         new_recorded_id_lists.append(result)
 
     # Flatten and project all recorded events
+    # Skip negentropy updates during projection - we'll batch them after
     valid_recorded_ids = [id for id_list in new_recorded_id_lists for id in id_list]
-    log.debug(f"sync.receive: projecting {len(valid_recorded_ids)} recorded events")
+    log.debug(f"sync.receive: projecting {len(valid_recorded_ids)} recorded events (skip_negentropy=True)")
 
-    recorded.project_ids(valid_recorded_ids, db)
+    recorded.project_ids(valid_recorded_ids, db, skip_negentropy=True)
+
+    # Batch-add all received events to negentropy (grouped by peer)
+    # Query shareable_events for events just added (recorded_at = t_ms)
+    # Use raw connection to bypass scoping (we need to query across all peers)
+    cursor = db._conn.execute(
+        "SELECT event_id, can_share_peer_id, recorded_at FROM shareable_events WHERE recorded_at = ?",
+        (t_ms,)
+    )
+    new_shareable = [{'event_id': r[0], 'can_share_peer_id': r[1], 'recorded_at': r[2]} for r in cursor.fetchall()]
+
+    if new_shareable:
+        # Group by peer_id for batch processing
+        by_peer: dict[str, list[tuple[str, int]]] = {}
+        for row in new_shareable:
+            peer_id = row['can_share_peer_id']
+            if peer_id not in by_peer:
+                by_peer[peer_id] = []
+            by_peer[peer_id].append((row['event_id'], row['recorded_at']))
+
+        # Batch-add to negentropy for each peer
+        for peer_id, events in by_peer.items():
+            negentropy.add_events_to_sync_batch(db, peer_id, events)
+            log.debug(f"sync.receive: batch-added {len(events)} events to negentropy for peer {peer_id[:20]}...")
 
     # Try to integrate with network layer for address observations (optional)
     try:

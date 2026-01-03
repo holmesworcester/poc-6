@@ -204,7 +204,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
 
     return missing_deps
 
-def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> list[list[str | None]]:
+def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
+                skip_negentropy: bool = False) -> list[list[str | None]]:
     """Since `recorded` is the event that triggers projection, this is the central function for projection."""
     """It calls the necessary project functions in other modules for the given event types."""
 
@@ -212,11 +213,11 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
         log.error(f"[PROJECT_IDS] RECURSION LIMIT EXCEEDED depth={_recursion_depth} - possible infinite loop!")
         return []
 
-    log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth})")
+    log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth}, skip_neg={skip_negentropy})")
     projected_ids = []
     for recorded_id in recorded_ids:
         try:
-            result = project(recorded_id, db, _recursion_depth)
+            result = project(recorded_id, db, _recursion_depth, skip_negentropy=skip_negentropy)
             projected_ids.append(result)
         except Exception as e:
             log.error(f"[PROJECT_IDS_EXCEPTION] ❌ EXCEPTION projecting recorded_id={recorded_id[:20]}... depth={_recursion_depth}: {str(e)[:200]}")
@@ -227,7 +228,8 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0) -> 
     return projected_ids
 
 
-def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial') -> list[str | None]:
+def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial',
+            skip_negentropy: bool = False) -> list[str | None]:
     """Project recorded event with two-phase dependency checking.
 
     1. Check encryption keys (block if missing).
@@ -236,6 +238,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
     Args:
         _triggered_by: What triggered this projection (for debugging causality)
+        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
     """
     from events.identity import peer
     from events.content import channel
@@ -355,13 +358,14 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         # Sync protocol doesn't need created_at - it uses recorded_at for ordering
         # UI lazy loading will use separate projected_events table with created_at
         from events.network import sync
-        log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None")
+        log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None (skip_neg={skip_negentropy})")
         sync.add_shareable_event(
             ref_id,
             recorded_by,
             created_at=None,  # Always None for determinism (encrypted events don't have created_at)
             recorded_at=recorded_at,
-            db=db
+            db=db,
+            skip_negentropy=skip_negentropy
         )
 
     # Handle crypto blocking (after shareable marking)
