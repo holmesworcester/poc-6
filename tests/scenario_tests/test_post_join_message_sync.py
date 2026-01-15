@@ -18,7 +18,7 @@ import pytest
 import os
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
-from tests.utils import tick_helper
+from tests.utils.tick_helper import initial_sync, run_ticks, assert_eventually
 
 
 def test_post_join_message_sync_with_prior_attachments(fresh_db):
@@ -53,7 +53,7 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
     )
 
     # Initial sync
-    t_ms = tick_helper.initial_sync(db, start_t_ms=3000)
+    t_ms = initial_sync(db, start_t_ms=3000)
 
     # Alice creates invite
     _, invite_link, _ = invite.create(
@@ -83,18 +83,18 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
     )
 
     # Sync after second message
-    t_ms = tick_helper.run_ticks(db, t_ms + 200, 100)
+    t_ms = run_ticks(db, t_ms + 200, 100)
 
     # Bob joins
     bob_peer_id = peer.create(t_ms=t_ms, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=t_ms + 100, db=db)
 
-    # Sync after Bob joins
-    t_ms = tick_helper.run_ticks(db, t_ms + 200, 100)
+    # Wait for Bob to see the first 2 messages
+    def bob_sees_2_messages():
+        bob_messages = message.list(alice['channel_id'], bob['peer_id'], db)
+        assert len(bob_messages) == 2, f"Bob should see 2 messages, got {len(bob_messages)}"
 
-    # Verify Bob sees the first 2 messages
-    bob_messages_before = message.list(alice['channel_id'], bob['peer_id'], db)
-    assert len(bob_messages_before) == 2, f"Bob should see 2 messages before Alice's 3rd, got {len(bob_messages_before)}"
+    t_ms = assert_eventually(bob_sees_2_messages, db=db, start_t_ms=t_ms + 200)
 
     # Alice sends 3rd message (plain text, no attachment)
     t_ms += 100
@@ -110,18 +110,16 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
     alice_messages = message.list(alice['channel_id'], alice['peer_id'], db)
     assert len(alice_messages) == 3, f"Alice should see 3 messages, got {len(alice_messages)}"
 
-    # Sync after 3rd message
-    t_ms = tick_helper.run_ticks(db, t_ms + 100, 100)
+    # Wait for Bob to see all 3 messages
+    def bob_sees_3_messages():
+        bob_messages = message.list(alice['channel_id'], bob['peer_id'], db)
+        assert len(bob_messages) == 3, f"Bob should see 3 messages, got {len(bob_messages)}"
+        # Verify content
+        bob_contents = [m['content'] for m in bob_messages]
+        assert bob_contents.count('hey!') == 2, \
+            f"Bob should see 'hey!' twice (messages 1 and 3), got {bob_contents}"
 
-    # Bob should see 3 messages now (THIS IS THE BUG - Bob only sees 2)
-    bob_messages_after = message.list(alice['channel_id'], bob['peer_id'], db)
-    assert len(bob_messages_after) == 3, \
-        f"Bug: Bob should see 3 messages after sync, but only sees {len(bob_messages_after)}"
-
-    # Verify content
-    bob_contents = [m['content'] for m in bob_messages_after]
-    assert bob_contents.count('hey!') == 2, \
-        f"Bob should see 'hey!' twice (messages 1 and 3), got {bob_contents}"
+    assert_eventually(bob_sees_3_messages, db=db, start_t_ms=t_ms + 100)
 
 
 def test_post_join_plain_message_sync(fresh_db):
@@ -143,7 +141,7 @@ def test_post_join_plain_message_sync(fresh_db):
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 
     # Initial sync
-    t_ms = tick_helper.run_ticks(db, 3000, 100)
+    t_ms = run_ticks(db, 3000, 100)
 
     # Alice sends a message AFTER Bob has joined
     t_ms += 100
@@ -159,11 +157,10 @@ def test_post_join_plain_message_sync(fresh_db):
     alice_messages = message.list(alice['channel_id'], alice['peer_id'], db)
     assert len(alice_messages) == 1
 
-    # Sync
-    t_ms = tick_helper.run_ticks(db, t_ms + 100, 100)
+    # Wait for Bob to see Alice's message
+    def bob_sees_message():
+        bob_messages = message.list(alice['channel_id'], bob['peer_id'], db)
+        assert len(bob_messages) == 1, f"Bob should see 1 message, got {len(bob_messages)}"
+        assert bob_messages[0]['content'] == 'hello bob!'
 
-    # Bob should see Alice's message (THIS IS THE BUG)
-    bob_messages = message.list(alice['channel_id'], bob['peer_id'], db)
-    assert len(bob_messages) == 1, \
-        f"Bug: Bob should see 1 message from Alice, but sees {len(bob_messages)}"
-    assert bob_messages[0]['content'] == 'hello bob!'
+    assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms + 100)
