@@ -875,6 +875,20 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
     return plaintext_full
 
 
+def list_attachments(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+    """Return attachment rows with message content for display."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_all(
+        """SELECT ma.file_id, ma.filename, ma.mime_type, ma.blob_bytes, ma.total_slices,
+                  m.content as message_content
+           FROM message_attachments ma
+           JOIN messages m ON ma.message_id = m.message_id AND m.recorded_by = ma.recorded_by
+           WHERE ma.recorded_by = ?
+           ORDER BY ma.recorded_at DESC""",
+        (recorded_by,),
+    )
+
+
 def get_file_download_progress(file_id: str, recorded_by: str, db: Any,
                                prev_progress: dict[str, Any] | None = None,
                                elapsed_ms: int | None = None) -> dict[str, Any] | None:

@@ -562,6 +562,29 @@ def try_create_username(user_id: str, name: str, peer_id: str, peer_shared_id: s
         return None, True
 
 
+def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
+    """Return the best available display name for a user_id.
+
+    Prefers decrypted usernames (user_names). Falls back to users.name if present.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row and row.get("name"):
+        return row["name"]
+
+    row = safedb.query_one(
+        "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row and row.get("name"):
+        return row["name"]
+
+    return None
+
+
 def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
          device_name: str = "Device") -> dict[str, Any]:
     """Join an existing network via invite link.
