@@ -24,6 +24,12 @@ def set_frequency_multiplier(multiplier: float) -> None:
     _frequency_multiplier = multiplier
 
 
+def reset_frequency_multiplier() -> None:
+    """Reset frequency multiplier to default (for testing cleanup)."""
+    global _frequency_multiplier
+    _frequency_multiplier = 1.0
+
+
 class Job(ABC):
     """Base class for stateless, deterministic jobs.
 

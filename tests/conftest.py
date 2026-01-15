@@ -22,12 +22,18 @@ def reset_global_state():
     from core import network_config
     network_config.reset_network_config()
 
+    # Reset job frequency multiplier
+    jobs.reset_frequency_multiplier()
+
     # Reset tick job state (database-backed, needs a temp db)
     # Note: Each test creates its own DB, but we need to reset the
     # job state for tests that reuse databases across ticks
     # This is handled per-test by calling tick.reset_state(db)
 
     yield
+
+    # Also reset after test to catch tests that modify global state
+    jobs.reset_frequency_multiplier()
 
 
 @pytest.fixture
