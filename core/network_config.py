@@ -24,7 +24,10 @@ class NetworkConfig:
     """
     # Basic settings
     packet_loss_rate: float = 0.0  # 0.0 to 1.0 - probability of dropping packets
-    latency_ms: int = 20            # Base latency in milliseconds (20ms = good wired connection)
+    # Base latency in milliseconds (20ms = good wired connection)
+    # WARNING: Don't use latency_ms=0 in tests - SimPy has an edge case where events
+    # scheduled at the current time may not be processed. Use latency_ms=1 instead.
+    latency_ms: int = 20
     max_packet_size: int = 10000    # Maximum packet size in bytes
 
     # Jitter: adds random variation to latency (normal distribution)
