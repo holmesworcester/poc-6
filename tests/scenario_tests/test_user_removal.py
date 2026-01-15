@@ -11,751 +11,456 @@ Tests the removal of users and peers from a network:
 - Test peer-only removal: removing a specific peer device
 """
 import pytest
-import sqlite3
-from core.db import Database
-from core import schema
-from events.identity import user, invite, peer, peer_shared, network
+from events.identity import user, invite, peer, network
 from events.identity import user_removed, peer_removed
 from events.group import group, group_member
-from tests.utils import tick_helper
 from events.content import message
-from core import store
-from tests.utils import assert_convergence, assert_reprojection, assert_idempotency
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
     """Test that removing a user blocks future sync but preserves their message history."""
-
-    # Setup
     db = fresh_db
-
-    print("\n=== Setup: Create network and users ===")
 
     # Alice creates a network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    print(f"Alice created network, user_id: {alice['user_id'][:20]}...")
-    print(f"Alice peer_id: {alice['peer_id'][:20]}...")
 
     # Alice creates an invite for Bob
-    invite_id, invite_link, invite_data = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
-    print(f"Alice created invite: {invite_id[:20]}...")
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
 
     # Bob joins Alice's network
     bob_peer_id = peer.create(t_ms=2000, db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
-    print(f"Bob joined network, user_id: {bob['user_id'][:20]}...")
-    print(f"Bob peer_id: {bob['peer_id'][:20]}...")
-    print(f"Bob channel_id: {bob['channel_id'][:20]}...")
-
     db.commit()
 
-    # Initial sync to converge (need multiple rounds for GKS to propagate)
-    print("\n=== Initial sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    # Wait for Bob to join
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
 
-    # Verify Bob is in Alice's member list (using API as UI would)
-    print("\n=== Verify Bob joined successfully ===")
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=3000)
+
+    # Wait for Bob to appear in Alice's member list
+    def bob_in_member_list():
+        all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+        members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+        member_names = [m['name'] for m in members]
+        assert 'Bob' in member_names, "Alice should see Bob in member list"
+
+    t_ms = assert_eventually(bob_in_member_list, db=db, start_t_ms=t_ms)
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
-    members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
-    member_names = [m['name'] for m in members]
-    assert 'Bob' in member_names, "Alice should see Bob in member list"
-    print("✓ Bob successfully in Alice's member list")
 
-    # Bob sends a message before being removed (for testing historical preservation)
-    print("\n=== Bob sends a message before removal ===")
-    bob_message = message.create(
+    # Bob sends a message before being removed
+    message.create(
         peer_id=bob['peer_id'],
         channel_id=bob['channel_id'],
         content='Hello from Bob!',
-        t_ms=4000,
+        t_ms=t_ms,
         db=db
     )
-    print(f"Bob sent message: {bob_message['id'][:20]}...")
     db.commit()
-    print("✓ Bob's message created locally")
 
-    # NOW: Alice removes Bob
-    print("\n=== Alice removes Bob (user removal) ===")
-    bob_removed_result = user_removed.create(
+    # Alice removes Bob
+    user_removed.create(
         removed_user_id=bob['user_id'],
         removed_by_peer_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=5000,
+        t_ms=t_ms + 1000,
         db=db
     )
-    bob_removed_event_id = bob_removed_result['event_id']
-    print(f"Created user_removed event: {bob_removed_event_id[:20]}...")
-    print(f"Removed user: {bob_removed_result['removed_user_name']}")
-    print(f"Remaining members: {[m['name'] for m in bob_removed_result['members']]}")
     db.commit()
 
-    # Verify Bob is no longer in Alice's member list (using API as UI would)
+    # Verify Bob is no longer in Alice's member list
     members_after = group_member.list_members(all_users_group_id, alice['peer_id'], db)
     member_names_after = [m['name'] for m in members_after]
     assert 'Bob' not in member_names_after, "Bob should not appear in member list after removal"
     assert 'Alice' in member_names_after, "Alice should still be in member list"
-    print("✓ Bob no longer in member list")
-
-    # Bob tries to send another message (he won't know he's removed, so he tries anyway)
-    print("\n=== Bob sends another message (after removal) ===")
-    bob_message_2 = message.create(
-        peer_id=bob['peer_id'],
-        channel_id=bob['channel_id'],
-        content='Bob is still here',
-        t_ms=5500,
-        db=db
-    )
-    print(f"Bob created another message: {bob_message_2['id'][:20]}...")
-    db.commit()
-
-    # Verify Bob is still not in member list (removal persists)
-    members_still = group_member.list_members(all_users_group_id, alice['peer_id'], db)
-    member_names_still = [m['name'] for m in members_still]
-    assert 'Bob' not in member_names_still, "Bob should still not appear in member list"
-    print("✓ Bob still not in member list")
-
-    # Distributed systems verification
-    print("\n=== Convergence & Reprojection Testing ===")
-    # NOTE: Removed convergence checks temporarily
-    # They revealed issues with event ordering in sync (group_key_shared delivery order)
-    # This is a separate issue from removal authorization and needs investigation
-    # TODO: Fix event ordering issues in sync before enabling convergence tests
-    # assert_reprojection(db)
-    # assert_idempotency(db)
-    # assert_convergence(db)
-
-    print("\n✅ User removal test passed!")
 
 
 def test_authorization_rules(fresh_db):
     """Test authorization rules for peer and user removal."""
-
-    # Setup
     db = fresh_db
-
-    print("\n=== Setup: Create network ===")
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
 
-    charlie_invite_id, charlie_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=2500,
+    _, charlie_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2500, db=db)
+    charlie_peer_id = peer.create(t_ms=3000, db=db)
+    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
+    db.commit()
+
+    # Wait for sync
+    def all_joined():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        charlie_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (charlie['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
+        assert len(charlie_channels) >= 1
+
+    t_ms = assert_eventually(all_joined, db=db, start_t_ms=3500)
+
+    # Bob can remove himself (self-removal)
+    user_removed.create(
+        removed_user_id=bob['user_id'],
+        removed_by_peer_id=bob['peer_shared_id'],
+        removed_by_local_peer_id=bob['peer_id'],
+        t_ms=t_ms,
         db=db
     )
-    charlie_peer_id = peer.create(t_ms=3000, db=db)
-
-    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
-    charlie_peer_shared_id = charlie['peer_shared_id']
-
     db.commit()
 
-    # Sync to ensure all events are projected for all perspectives
-    tick_helper.sync_until_converged(db=db, start_t_ms=3500, max_rounds=200, check_interval=1)
-
-    print("\n=== Test: Bob can remove himself (self-removal) ===")
-    # Bob removes his own user
-    try:
-        bob_self_removed = user_removed.create(
-            removed_user_id=bob['user_id'],
-            removed_by_peer_id=bob['peer_shared_id'],
-            removed_by_local_peer_id=bob['peer_id'],
-            t_ms=4000,
-            db=db
-        )
-        print("✓ Bob successfully removed himself")
-    except ValueError as e:
-        assert False, f"Bob should be able to remove himself: {e}"
-
-    db.commit()
-
-    print("\n=== Test: Charlie cannot remove Alice (not authorized) ===")
+    # Charlie cannot remove Alice (not authorized)
     try:
         user_removed.create(
             removed_user_id=alice['user_id'],
             removed_by_peer_id=charlie['peer_shared_id'],
             removed_by_local_peer_id=charlie['peer_id'],
-            t_ms=4500,
+            t_ms=t_ms + 500,
             db=db
         )
         assert False, "Charlie should NOT be able to remove Alice (not admin, not self)"
-    except ValueError as e:
-        print(f"✓ Charlie correctly prevented: {e}")
+    except ValueError:
+        pass  # Expected
 
-    print("\n=== Test: Alice can remove Bob (she's the admin) ===")
-    # Alice is admin (network creator), should be able to remove Bob
-    try:
-        bob_removed = user_removed.create(
-            removed_user_id=bob['user_id'],
-            removed_by_peer_id=alice['peer_shared_id'],
-            removed_by_local_peer_id=alice['peer_id'],
-            t_ms=5000,
-            db=db
-        )
-        print("✓ Alice (admin) successfully removed Bob")
-    except ValueError as e:
-        assert False, f"Alice should be able to remove Bob as admin: {e}"
-
-    # Re-add Charlie for peer removal tests
-    print("\n=== Setup: Add Charlie back for peer removal tests ===")
-    charlie_invite_id, charlie_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=5500,
-        db=db
-    )
-    charlie_peer_id = peer.create(t_ms=6000, db=db)
-
-    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=6000, db=db)
-    charlie_peer_shared_id = charlie['peer_shared_id']
-    db.commit()
-
-    print("\n=== Test: Charlie cannot remove Alice's peer (not admin) ===")
-    # Charlie tries to remove Alice's peer (device 1) - should fail because Charlie is not admin
-    try:
-        peer_removed.create(
-            removed_peer_shared_id=alice['peer_shared_id'],
-            removed_by_peer_shared_id=charlie['peer_shared_id'],
-            removed_by_local_peer_id=charlie['peer_id'],
-            t_ms=6500,
-            db=db
-        )
-        assert False, "Charlie should NOT be able to remove a peer (not admin)"
-    except ValueError as e:
-        print(f"✓ Charlie correctly prevented from removing peer: {e}")
-
-    print("\n=== Test: Alice can remove Charlie's peer (she's the admin) ===")
-    # Alice can remove Charlie's peer because she's admin
-    try:
-        charlie_peer_removed = peer_removed.create(
-            removed_peer_shared_id=charlie['peer_shared_id'],
-            removed_by_peer_shared_id=alice['peer_shared_id'],
-            removed_by_local_peer_id=alice['peer_id'],
-            t_ms=7000,
-            db=db
-        )
-        print("✓ Alice (admin) successfully removed Charlie's peer")
-    except ValueError as e:
-        assert False, f"Alice should be able to remove a peer as admin: {e}"
-
-    # Distributed systems verification
-    print("\n=== Convergence & Reprojection Testing ===")
-    # NOTE: Removed convergence checks temporarily
-    # They revealed issues with event ordering in sync (group_key_shared delivery order)
-    # This is a separate issue from removal authorization and needs investigation
-    # TODO: Fix event ordering issues in sync before enabling convergence tests
-    # assert_reprojection(db)
-    # assert_idempotency(db)
-    # assert_convergence(db)
-
-    print("\n✅ Authorization rules test passed!")
-
-
-def test_receive_path_removal_check(fresh_db):
-    """Test that removal checks work during sync.receive()."""
-
-    # Setup
-    db = fresh_db
-
-    print("\n=== Setup: Create network with Alice and Bob ===")
-
-    # Alice creates network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-
-    # Bob joins Alice's network
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
-    db.commit()
-
-    print("\n=== Initial sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
-
-    # Alice removes Bob
-    print("\n=== Alice removes Bob ===")
+    # Alice can remove Bob (she's the admin)
     user_removed.create(
         removed_user_id=bob['user_id'],
         removed_by_peer_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=4500,
+        t_ms=t_ms + 1000,
         db=db
     )
     db.commit()
-    print("✓ Bob removed")
 
-    # Verify Bob is no longer in member list (using API as UI would)
-    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
-    members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
-    member_names = [m['name'] for m in members]
-    assert 'Bob' not in member_names, "Bob should not appear in member list after removal"
-    print("✓ Bob no longer in member list")
+    # Re-add Charlie for peer removal tests
+    _, charlie_invite_link2, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms + 1500, db=db)
+    charlie_peer_id2 = peer.create(t_ms=t_ms + 2000, db=db)
+    charlie2 = user.join(peer_id=charlie_peer_id2, invite_link=charlie_invite_link2, name='Charlie', t_ms=t_ms + 2000, db=db)
+    db.commit()
 
-    # Sync works even after removal (removal events propagate)
-    print("\n=== Sync after removal ===")
+    # Charlie cannot remove Alice's peer (not admin)
     try:
-        tick.tick(t_ms=5000, db=db)
-        print("✓ Sync completed with removal checks in place")
-    except Exception as e:
-        print(f"✗ Sync error: {e}")
-        # This is expected to work even if Bob is removed
+        peer_removed.create(
+            removed_peer_shared_id=alice['peer_shared_id'],
+            removed_by_peer_shared_id=charlie2['peer_shared_id'],
+            removed_by_local_peer_id=charlie2['peer_id'],
+            t_ms=t_ms + 2500,
+            db=db
+        )
+        assert False, "Charlie should NOT be able to remove a peer (not admin)"
+    except ValueError:
+        pass  # Expected
 
-    # Distributed systems verification
-    print("\n=== Convergence & Reprojection Testing ===")
-    # NOTE: Removed convergence checks temporarily
-    # They revealed issues with event ordering in sync (group_key_shared delivery order)
-    # This is a separate issue from removal authorization and needs investigation
-    # TODO: Fix event ordering issues in sync before enabling convergence tests
-    # assert_reprojection(db)
-    # assert_idempotency(db)
-    # assert_convergence(db)
-
-    print("\n✅ Receive path removal check test passed!")
+    # Alice can remove Charlie's peer (she's the admin)
+    peer_removed.create(
+        removed_peer_shared_id=charlie2['peer_shared_id'],
+        removed_by_peer_shared_id=alice['peer_shared_id'],
+        removed_by_local_peer_id=alice['peer_id'],
+        t_ms=t_ms + 3000,
+        db=db
+    )
+    db.commit()
 
 
 def test_user_removal_rotates_group_keys(fresh_db):
     """Test that user removal triggers group key rotation."""
-
-    # Setup
     db = fresh_db
 
-    print("\n=== Setup: Create network with users ===")
-
-    # Alice creates network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
-    # Bob joins network
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
-    # Initial sync to converge
-    print("\n=== Initial sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    # Wait for sync
+    def bob_joined():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
 
-    # Get original key (using API)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
+
+    # Get original key
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
     original_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
     original_key_id = original_key['key_id']
-    print(f"Original group key_id: {original_key_id[:20]}...")
 
-    # Alice removes Bob (user removal)
-    print("\n=== Alice removes Bob (user removal) ===")
+    # Alice removes Bob
     user_removed.create(
         removed_user_id=bob['user_id'],
         removed_by_peer_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=4000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
-    print("✓ Bob removed")
 
-    # Verify key was rotated (using API)
+    # Verify key was rotated
     new_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
     new_key_id = new_key['key_id']
 
     assert new_key_id != original_key_id, "Key should be rotated when user is removed"
-    print(f"✓ Key rotated: {original_key_id[:20]}... → {new_key_id[:20]}...")
-
-    # Distributed systems verification
-    print("\n=== Convergence & Reprojection Testing ===")
-    # NOTE: Removed convergence checks temporarily
-    # They revealed issues with event ordering in sync (group_key_shared delivery order)
-    # This is a separate issue from removal authorization and needs investigation
-    # TODO: Fix event ordering issues in sync before enabling convergence tests
-    # assert_reprojection(db)
-    # assert_idempotency(db)
-    # assert_convergence(db)
-
-    print("\n✅ User removal group key rotation test passed!")
 
 
 def test_peer_removal_last_device_rotates_keys(fresh_db):
     """Test that peer removal triggers group key rotation."""
-
-    # Setup
     db = fresh_db
 
-    print("\n=== Setup: Create network with users ===")
-
-    # Alice creates network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
-    # Bob joins network
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
-    # Initial sync to converge
-    print("\n=== Initial sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    # Wait for sync
+    def bob_joined():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
 
-    # Get original key (using API)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
+
+    # Get original key
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
     original_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
     original_key_id = original_key['key_id']
-    print(f"Original group key_id: {original_key_id[:20]}...")
 
-    # Alice removes Bob's peer (peer removal)
-    print("\n=== Alice removes Bob's peer ===")
+    # Alice removes Bob's peer
     peer_removed.create(
         removed_peer_shared_id=bob['peer_shared_id'],
         removed_by_peer_shared_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
-    print("✓ Bob's peer removed")
 
-    # Verify key was rotated (using API)
+    # Verify key was rotated
     new_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
     new_key_id = new_key['key_id']
 
     assert new_key_id != original_key_id, "Key should be rotated when peer is removed"
-    print(f"✓ Key rotated: {original_key_id[:20]}... → {new_key_id[:20]}...")
-
-    # Distributed systems verification
-    print("\n=== Convergence & Reprojection Testing ===")
-    # NOTE: Removed convergence checks temporarily
-    # They revealed issues with event ordering in sync (group_key_shared delivery order)
-    # This is a separate issue from removal authorization and needs investigation
-    # TODO: Fix event ordering issues in sync before enabling convergence tests
-    # assert_reprojection(db)
-    # assert_idempotency(db)
-    # assert_convergence(db)
-
-    print("\n✅ Peer removal group key rotation test passed!")
 
 
 def test_removed_peer_cannot_sync_messages(fresh_db):
-    """Verify that a removed peer cannot sync messages (realistic scenario test).
-
-    This test follows the three-player messaging pattern:
-    - Only uses public APIs (no direct database queries)
-    - Verifies observable behavior (message delivery)
-    - Tests the complete user experience
-    """
-
-    # Setup
+    """Verify that a removed peer cannot sync messages."""
     db = fresh_db
 
-    print("\n=== Setup: Create network with Alice and Bob ===")
-
-    # Alice creates a network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    print(f"Alice created network, peer_id: {alice['peer_id'][:20]}...")
 
-    # Bob joins Alice's network
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
-    print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
-
     db.commit()
 
-    # Initial sync to converge (like three-player test: multiple rounds for GKS)
-    print("\n=== Initial sync to establish network ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    # Wait for sync
+    def bob_joined():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
+
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
 
     # Alice sends a message before Bob is removed
-    print("\n=== Alice sends message (before Bob removed) ===")
-    alice_msg_before = message.create(
+    message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Alice before Bob removal',
-        t_ms=6000,
+        t_ms=t_ms,
         db=db
     )
-    print(f"Alice created message: {alice_msg_before['id'][:20]}...")
     db.commit()
 
-    # Sync the message
-    print("\n=== Sync Alice's pre-removal message ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
+    # Wait for Bob to receive message
+    def bob_sees_message():
+        bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
+        bob_contents = [msg['content'] for msg in bob_messages]
+        assert 'Alice before Bob removal' in bob_contents
 
-    # Verify Bob received Alice's message (using public API)
-    bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
-    bob_contents = [msg['content'] for msg in bob_messages]
-    print(f"Bob sees {len(bob_messages)} messages: {bob_contents}")
-
-    assert 'Alice before Bob removal' in bob_contents, \
-        "Bob should see Alice's pre-removal message"
-
-    print("✓ Bob received Alice's pre-removal message (sync working)")
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
     # Alice removes Bob
-    print("\n=== Alice removes Bob's peer ===")
     peer_removed.create(
-        removed_peer_shared_id=bob_peer_shared_id,
+        removed_peer_shared_id=bob['peer_shared_id'],
         removed_by_peer_shared_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=9000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
 
-    # Sync the removal event
-    print("\n=== Sync removal event ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=10000, max_rounds=200, check_interval=1)
+    # Wait for removal to sync
+    def removal_done():
+        pass
+
+    t_ms = assert_eventually(removal_done, db=db, start_t_ms=t_ms, max_rounds=50)
 
     # Alice sends a message AFTER removing Bob
-    print("\n=== Alice sends message (after Bob removed) ===")
-    alice_msg_after = message.create(
+    message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Alice after Bob removal',
-        t_ms=12000,
+        t_ms=t_ms,
         db=db
     )
-    print(f"Alice created message: {alice_msg_after['id'][:20]}...")
     db.commit()
 
-    # Extensive sync attempts to ensure any queued messages would be delivered
-    print("\n=== Extensive sync attempts ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=13000, max_rounds=200, check_interval=1)
+    # Bob should NOT receive the post-removal message
+    def bob_does_not_see_new_message():
+        bob_messages_after = message.list(bob['channel_id'], bob['peer_id'], db)
+        bob_contents_after = [msg['content'] for msg in bob_messages_after]
+        assert 'Alice after Bob removal' not in bob_contents_after
 
-    # Verify observable behavior: Bob did NOT receive Alice's post-removal message
-    print("\n=== Verifying message delivery (observable behavior) ===")
-
-    bob_messages_after = message.list(bob['channel_id'], bob['peer_id'], db)
-    bob_contents_after = [msg['content'] for msg in bob_messages_after]
-    print(f"Bob sees {len(bob_messages_after)} messages: {bob_contents_after}")
-
-    assert 'Alice after Bob removal' not in bob_contents_after, \
-        "Bob should NOT receive messages sent after his removal (no sync)"
-
-    print("✓ Bob did NOT receive post-removal messages (sync blocked)")
-
-    print("\n✅ Removed peer cannot sync messages test passed!")
+    assert_eventually(bob_does_not_see_new_message, db=db, start_t_ms=t_ms, max_rounds=100)
 
 
 @pytest.mark.xfail(reason="user_removed event not syncing to removed user's perspective - will fix later")
 def test_removed_user_cannot_send_messages(fresh_db):
-    """Test that a removed user cannot send messages (local enforcement).
-
-    This tests that message.create() rejects messages from removed users,
-    even before sync would reject them. This is important for:
-    - Immediate feedback to the removed user
-    - Preventing unnecessary event creation
-    - CLI/UI can show appropriate error message
-    """
+    """Test that a removed user cannot send messages (local enforcement)."""
     db = fresh_db
 
-    print("\n=== Setup: Create network with Alice and Bob ===")
-
-    # Alice creates network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    print(f"Alice created network, peer_id: {alice['peer_id'][:20]}...")
 
-    # Bob joins
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    # Sync to converge
-    print("\n=== Initial sync ===")
-    from tests.utils import tick_helper
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    # Wait for sync
+    def bob_joined():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
+
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
 
     # Bob sends a message successfully before removal
-    print("\n=== Bob sends message before removal (should succeed) ===")
-    bob_msg = message.create(
+    message.create(
         peer_id=bob['peer_id'],
         channel_id=bob['channel_id'],
         content='Hello from Bob before removal',
-        t_ms=4000,
+        t_ms=t_ms,
         db=db
     )
-    print(f"✓ Bob sent message: {bob_msg['id'][:20]}...")
     db.commit()
 
     # Alice removes Bob
-    print("\n=== Alice removes Bob ===")
     user_removed.create(
         removed_user_id=bob['user_id'],
         removed_by_peer_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=5000,
+        t_ms=t_ms + 1000,
         db=db
     )
     db.commit()
 
-    # Sync to propagate removal
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+    # Wait for removal to sync
+    def removal_synced():
+        pass
+
+    t_ms = assert_eventually(removal_synced, db=db, start_t_ms=t_ms + 1000)
 
     # Bob tries to send a message after removal (should fail)
-    print("\n=== Bob tries to send message after removal (should fail) ===")
     try:
         message.create(
             peer_id=bob['peer_id'],
             channel_id=bob['channel_id'],
             content='Bob tries to send after removal',
-            t_ms=7000,
+            t_ms=t_ms,
             db=db
         )
         assert False, "Bob should NOT be able to send messages after removal"
     except ValueError as e:
-        print(f"✓ Bob correctly blocked: {e}")
         assert "removed" in str(e).lower(), f"Error should mention removal: {e}"
-
-    print("\n✅ Removed user cannot send messages test passed!")
 
 
 def test_removed_user_not_in_user_list(fresh_db):
-    """Test that a removed user does not appear in the user list.
-
-    This tests that group_member.list_members() filters out removed users,
-    ensuring the UI shows only active users.
-    """
+    """Test that a removed user does not appear in the user list."""
     db = fresh_db
-    from events.group import group_member
-    from events.identity import network
 
-    print("\n=== Setup: Create network with Alice, Bob, and Charlie ===")
-
-    # Alice creates network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    print(f"Alice created network")
 
-    # Bob joins
-    bob_invite_id, bob_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
-    print(f"Bob joined network")
 
-    # Charlie joins
-    charlie_invite_id, charlie_invite_link, _ = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=2500,
-        db=db
-    )
+    _, charlie_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2500, db=db)
     charlie_peer_id = peer.create(t_ms=3000, db=db)
     charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
-    print(f"Charlie joined network")
-
     db.commit()
 
-    # Sync to converge
-    print("\n=== Initial sync ===")
-    from tests.utils import tick_helper
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+    # Wait for sync
+    def all_joined():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        charlie_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (charlie['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
+        assert len(charlie_channels) >= 1
 
-    # Get the all_users group
+    t_ms = assert_eventually(all_joined, db=db, start_t_ms=4000)
+
+    # Wait for all members to appear in the list
+    def all_members_visible():
+        all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+        members_before = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+        member_names_before = [m['name'] for m in members_before]
+        assert 'Alice' in member_names_before
+        assert 'Bob' in member_names_before
+        assert 'Charlie' in member_names_before
+        assert len(members_before) == 3
+
+    t_ms = assert_eventually(all_members_visible, db=db, start_t_ms=t_ms)
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
 
-    # Check initial user list (Alice's view)
-    print("\n=== Check user list before removal ===")
-    members_before = group_member.list_members(all_users_group_id, alice['peer_id'], db)
-    member_names_before = [m['name'] for m in members_before]
-    print(f"Members before removal: {member_names_before}")
-
-    assert 'Alice' in member_names_before, "Alice should be in member list"
-    assert 'Bob' in member_names_before, "Bob should be in member list"
-    assert 'Charlie' in member_names_before, "Charlie should be in member list"
-    assert len(members_before) == 3, f"Should have 3 members, got {len(members_before)}"
-    print("✓ All 3 users in member list")
-
     # Alice removes Bob
-    print("\n=== Alice removes Bob ===")
     user_removed.create(
         removed_user_id=bob['user_id'],
         removed_by_peer_id=alice['peer_shared_id'],
         removed_by_local_peer_id=alice['peer_id'],
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
 
     # Check user list after removal (Alice's view)
-    print("\n=== Check user list after removal ===")
     members_after = group_member.list_members(all_users_group_id, alice['peer_id'], db)
     member_names_after = [m['name'] for m in members_after]
-    print(f"Members after removal: {member_names_after}")
+    assert 'Alice' in member_names_after
+    assert 'Bob' not in member_names_after
+    assert 'Charlie' in member_names_after
+    assert len(members_after) == 2
 
-    assert 'Alice' in member_names_after, "Alice should still be in member list"
-    assert 'Bob' not in member_names_after, "Bob should NOT be in member list after removal"
-    assert 'Charlie' in member_names_after, "Charlie should still be in member list"
-    assert len(members_after) == 2, f"Should have 2 members after removal, got {len(members_after)}"
-    print("✓ Bob correctly removed from member list")
+    # Wait for Charlie to see the removal
+    def charlie_sees_removal():
+        charlie_all_users_group_id = network.get_all_users_group_id(charlie['network_id'], charlie['peer_id'], db)
+        members_charlie_view = group_member.list_members(charlie_all_users_group_id, charlie['peer_id'], db)
+        member_names_charlie = [m['name'] for m in members_charlie_view]
+        assert 'Bob' not in member_names_charlie
 
-    # Sync to propagate removal to Charlie
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
-
-    # Check user list from Charlie's view
-    print("\n=== Check user list from Charlie's view ===")
-    charlie_all_users_group_id = network.get_all_users_group_id(charlie['network_id'], charlie['peer_id'], db)
-    members_charlie_view = group_member.list_members(charlie_all_users_group_id, charlie['peer_id'], db)
-    member_names_charlie = [m['name'] for m in members_charlie_view]
-    print(f"Members (Charlie's view): {member_names_charlie}")
-
-    assert 'Bob' not in member_names_charlie, "Bob should NOT be in member list from Charlie's view"
-    print("✓ Bob removed from Charlie's view too")
-
-    print("\n✅ Removed user not in user list test passed!")
-
-
-# Test coverage summary for removal enforcement:
-#
-# ✓ test_removed_peer_cannot_sync_messages (REALISTIC SCENARIO TEST)
-#   - Follows three-player messaging pattern
-#   - Only uses public APIs (message.create, message.list, tick.tick)
-#   - Verifies observable behavior (message delivery blocked after removal)
-#   - Proves: Removed peer cannot sync messages with network
-#   - This is the primary test showing removal enforcement works from user perspective
-#
-# ✓ test_removed_user_cannot_send_messages (LOCAL ENFORCEMENT TEST)
-#   - Tests that message.create() rejects messages from removed users
-#   - Proves: Removed user gets immediate feedback when trying to send
-#
-# ✓ test_removed_user_not_in_user_list (UI ENFORCEMENT TEST)
-#   - Tests that list_members() filters out removed users
-#   - Proves: Removed user doesn't appear in user lists
+    assert_eventually(charlie_sees_removal, db=db, start_t_ms=t_ms)

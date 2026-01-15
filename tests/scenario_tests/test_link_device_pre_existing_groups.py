@@ -17,7 +17,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
-from tests.utils import tick_helper
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_link_device_sees_pre_existing_groups(fresh_db):
@@ -96,10 +96,6 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
     )
     db.commit()
 
-    # Sync to ensure groups are fully created
-    print("\n=== Sync for group creation convergence ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3500, max_rounds=200, check_interval=1)
-
     # Alice creates link invite
     print("\n=== Alice creates link invite ===")
 
@@ -138,9 +134,27 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         "Both devices should have same user_id"
     print(f"✅ Both devices share user_id: {alice_device1['user_id'][:20]}...")
 
-    # Sync multiple rounds for convergence
-    print("\n=== Sync for link and group key propagation ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+    # Wait for device 2 to sync group keys
+    print("\n=== Waiting for device 2 to sync group keys ===")
+
+    def device2_has_all_keys():
+        has_key_a = db.query_one(
+            "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (group_a_key_id, alice_device2['peer_id'])
+        )
+        has_key_b = db.query_one(
+            "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (group_b_key_id, alice_device2['peer_id'])
+        )
+        has_key_c = db.query_one(
+            "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (group_c_key_id, alice_device2['peer_id'])
+        )
+        assert has_key_a, "Device 2 should have key for Group A"
+        assert has_key_b, "Device 2 should have key for Group B"
+        assert has_key_c, "Device 2 should have key for Group C"
+
+    assert_eventually(device2_has_all_keys, db=db, start_t_ms=6000)
 
     # Verify device 2 is a member of all groups
     print("\n=== Verifying device 2 group memberships ===")
@@ -172,32 +186,6 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
     print(f"Device 2 is member of Group C: {is_member_c}")
     assert is_member_c, "Device 2 should be member of Group C"
 
-    print("✅ Device 2 is member of all groups")
-
-    # Verify device 2 has group keys
-    print("\n=== Verifying device 2 has group keys ===")
-
-    has_key_a = db.query_one(
-        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (group_a_key_id, alice_device2['peer_id'])
-    )
-    print(f"Device 2 has key for Group A: {bool(has_key_a)}")
-    assert has_key_a, "Device 2 should have key for Group A"
-
-    has_key_b = db.query_one(
-        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (group_b_key_id, alice_device2['peer_id'])
-    )
-    print(f"Device 2 has key for Group B: {bool(has_key_b)}")
-    assert has_key_b, "Device 2 should have key for Group B"
-
-    has_key_c = db.query_one(
-        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (group_c_key_id, alice_device2['peer_id'])
-    )
-    print(f"Device 2 has key for Group C: {bool(has_key_c)}")
-    assert has_key_c, "Device 2 should have key for Group C"
-
-    print("✅ Device 2 has keys for all groups")
+    print("✅ Device 2 is member of all groups and has all keys")
 
     print(f"\n✅ All assertions passed!")
