@@ -16,12 +16,12 @@ import base64
 import io
 import logging
 from PIL import Image
-import crypto
-import store
+from core import crypto
+from core import store
 from events.group import group
 from events.identity import peer
 from events.content import file_slice
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -531,6 +531,11 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
     """
     log.debug(f"message_attachment.project() event_id={event_id[:20]}..., "
               f"recorded_by={recorded_by[:20]}...")
+
+    # Verify signature before trusting event data
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+        log.warning(f"message_attachment.project() signature verification failed for {event_id[:20]}...")
+        return
 
     message_id = event_data.get('message_id')
     file_id = event_data.get('file_id')

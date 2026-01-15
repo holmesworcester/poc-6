@@ -116,7 +116,7 @@ def send_packet(
     _record_observation(from_peer_id, to_peer_id, source_addr, t_ms, db)
 
     # Enqueue packet for delivery via network queue
-    import queues
+    from core import queues
     unsafedb = __import__('db').create_unsafe_db(db)
 
     # Add packet to incoming queue (will be delivered after latency)

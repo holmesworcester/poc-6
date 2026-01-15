@@ -9,7 +9,7 @@ import pytest
 from events.identity import user, invite, peer as peer_module
 from events.content import channel
 from events.group import group_key
-import tick
+from core import tick
 
 
 def test_list_channels_with_keys_returns_key_id(fresh_db):

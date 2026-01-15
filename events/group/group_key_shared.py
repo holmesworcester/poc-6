@@ -8,11 +8,11 @@ PROJECTION_TABLE = ('group_keys_shared', 'group_key_shared_id')
 
 from typing import Any
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.group import group_prekey
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     log.info(f"key_shared.create_for_invite() creating key_shared for key_id={key_id}, invite_id={invite_id[:20]}..., t_ms={t_ms}")
 
     # Get symmetric key from local key event
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     unsafedb = create_unsafe_db(db)
     key_blob = store.get(key_id, unsafedb)
     if not key_blob:
@@ -242,7 +242,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     )
 
     # Notify blocked queue - unblock events that were waiting for this key
-    import queues
+    from core import queues
     unblocked_ids = queues.blocked.notify_event_valid(computed_key_id, recorded_by, safedb)
     if unblocked_ids:
         log.info(f"key_shared.project() unblocked {len(unblocked_ids)} events waiting for key {computed_key_id[:20]}...")

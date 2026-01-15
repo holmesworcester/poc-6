@@ -10,12 +10,12 @@ Tests:
 6. Test cancel functionality
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from events.network import sync_file
-import tick
+from core import tick
 
 
 def test_pause_and_resume_file_download(fresh_db):

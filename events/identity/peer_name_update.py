@@ -8,11 +8,11 @@ PROJECTION_TABLE = None
 
 from typing import Any
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.group import group
 from events.identity import peer
-from db import create_safe_db
+from core.db import create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +205,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         event_data = crypto.parse_json(unwrapped)
     except Exception as e:
         log.warning(f"peer_name_update.project() failed to unwrap/parse event: {e}")
+        return None
+
+    # Verify signature before trusting event data
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+        log.warning(f"peer_name_update.project() signature verification failed for {event_id[:20]}...")
         return None
 
     # Extract fields - name is already plaintext after unwrap

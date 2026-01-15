@@ -7,13 +7,13 @@ Tests that:
 4. End-to-end: TTL expires -> tick() -> expired events removed
 """
 import sqlite3
-from db import Database, create_safe_db, create_unsafe_db
-import schema
+from core.db import Database, create_safe_db, create_unsafe_db
+from core import schema
 from events.identity import user
 from events.content import message, message_deletion
 from events.group import group_prekey
-import tick
-import crypto
+from core import tick
+from core import crypto
 
 
 def test_tick_runs_message_rekey_and_purge(fresh_db):

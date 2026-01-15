@@ -1,8 +1,8 @@
 """Unit tests for connection removal functions."""
 import pytest
 import sqlite3
-from db import Database, create_safe_db
-import schema
+from core.db import Database, create_safe_db
+from core import schema
 from events.identity import user, peer, invite
 from events.network import connection
 from tests.utils import tick_helper

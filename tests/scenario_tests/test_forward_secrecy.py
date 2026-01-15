@@ -8,14 +8,15 @@ Tests that:
 5. TTL-based expiry: prekeys expire after TTL
 6. purge_expired event deletes expired events
 """
-from db import create_safe_db, create_unsafe_db
-import crypto
+from core.db import create_safe_db, create_unsafe_db
+from core import crypto
 from events.identity import user, invite, peer
 from events.content import message, message_deletion
 from events.network import transit_prekey
 from events.group import group_prekey
 from tests.utils import tick_helper, assertions
-import purge_expired
+from tests.utils.tick_helper import assert_eventually
+from core import purge_expired
 
 
 def test_delete_message_marks_key_for_purging(fresh_db_with_alice):
@@ -89,7 +90,7 @@ def test_delete_and_rekey_message(fresh_db_with_alice):
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
     unsafedb = create_unsafe_db(db)
 
-    import crypto
+    from core import crypto
     msg2_blob = unsafedb.query_one(
         "SELECT blob FROM store WHERE id = ?",
         (msg2_id,)
@@ -169,34 +170,31 @@ def test_forward_secrecy_multi_peer(fresh_db_with_alice):
     bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
-    # Sync to converge
-    print("\n=== Sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
-
     # Alice sends a message
     print("\n=== Alice sends message ===")
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Multi-peer test message",
-        t_ms=4000,
+        t_ms=3000,
         db=db
     )
     message_id = msg_result['id']
     print(f"Message created: {message_id[:20]}...")
     db.commit()
 
-    # Sync message to Bob
-    print("\n=== Sync message to Bob ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
-
-    # Verify Bob sees the message
+    # Wait for Bob to see the message
+    print("\n=== Wait for Bob to see message ===")
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
-    bob_msg_check = bob_safedb.query_one(
-        "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_msg_check is not None, "Bob should see the message"
+
+    def bob_sees_message():
+        bob_msg_check = bob_safedb.query_one(
+            "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (message_id, bob['peer_id'])
+        )
+        assert bob_msg_check is not None, "Bob should see the message"
+
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=4000)
     print("✓ Bob sees Alice's message")
 
     # Alice deletes the message
@@ -204,32 +202,33 @@ def test_forward_secrecy_multi_peer(fresh_db_with_alice):
     deletion_id = message_deletion.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
-        t_ms=6000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
 
     # Run purge cycle on Alice's side
     print("\n=== Alice runs purge cycle ===")
-    alice_stats = message_deletion.run_message_purge_cycle(alice['peer_id'], 7000, db)
+    alice_stats = message_deletion.run_message_purge_cycle(alice['peer_id'], t_ms + 1000, db)
     db.commit()
     print(f"Alice purge stats: {alice_stats}")
 
-    # Sync deletion to Bob
-    print("\n=== Sync deletion to Bob ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1)
+    # Wait for Bob to see deletion
+    print("\n=== Wait for Bob to see deletion ===")
 
-    # Verify Bob also deleted the message
-    bob_msg_after = bob_safedb.query_one(
-        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_msg_after is None, "Bob should not see deleted message"
+    def bob_sees_deletion():
+        bob_msg_after = bob_safedb.query_one(
+            "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (message_id, bob['peer_id'])
+        )
+        assert bob_msg_after is None, "Bob should not see deleted message"
+
+    t_ms = assert_eventually(bob_sees_deletion, db=db, start_t_ms=t_ms + 2000)
     print("✓ Bob sees deletion after sync")
 
     # Bob runs purge cycle
     print("\n=== Bob runs purge cycle ===")
-    bob_stats = message_deletion.run_message_purge_cycle(bob['peer_id'], 9000, db)
+    bob_stats = message_deletion.run_message_purge_cycle(bob['peer_id'], t_ms + 1000, db)
     db.commit()
     print(f"Bob purge stats: {bob_stats}")
 
@@ -489,13 +488,15 @@ def test_new_user_joins_after_rekey(fresh_db_with_alice):
     db.commit()
     print(f"Bob joined as peer: {bob['peer_id'][:20]}...")
 
-    # Sync to converge
-    print("\n=== t=6000+: Sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
-    print("✓ Bob synced with Alice")
+    # Run sync ticks for Bob to receive events
+    print("\n=== t=6000+: Running sync ticks ===")
+    from tests.utils.tick_helper import run_ticks
+    run_ticks(db=db, start_t_ms=6000, num_rounds=200)
+    print("✓ Sync ticks completed")
+
+    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
 
     # Verify that Bob's state converged with Alice's state
-    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
     bob_msg_check = bob_safedb.query_one(
         "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
         (message_id, bob['peer_id'])
@@ -620,13 +621,15 @@ def test_new_user_with_preexisting_invite_after_rekey(fresh_db_with_alice):
     print(f"Bob joined as peer: {bob['peer_id'][:20]}...")
     print("✓ Bob used the invite created before deletion/rekey")
 
-    # Sync to converge
-    print("\n=== t=6000+: Sync to converge ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
-    print("✓ Bob synced with Alice")
+    # Run sync ticks for Bob to receive events
+    print("\n=== t=6000+: Running sync ticks ===")
+    from tests.utils.tick_helper import run_ticks
+    run_ticks(db=db, start_t_ms=6000, num_rounds=200)
+    print("✓ Sync ticks completed")
+
+    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
 
     # Verify Bob's state converged
-    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
     bob_msg_check = bob_safedb.query_one(
         "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
         (message_id, bob['peer_id'])

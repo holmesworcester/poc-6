@@ -8,10 +8,10 @@ PROJECTION_TABLE = ('addresses', 'address_id')
 
 from typing import Any
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.identity import peer
-from db import create_safe_db
+from core.db import create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get blob from store
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     unsafedb = create_unsafe_db(db)
     blob = store.get(address_id, unsafedb)
     if not blob:
@@ -166,7 +166,7 @@ def announce_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
     Returns:
         Dict with stats: announced (count), skipped (count), errors (list)
     """
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
 
     stats = {'announced': 0, 'skipped': 0, 'errors': []}
 

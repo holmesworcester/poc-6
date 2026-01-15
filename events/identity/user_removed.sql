@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS removed_users (
     user_id TEXT NOT NULL,
     removed_at INTEGER NOT NULL,
-    removed_by TEXT NOT NULL,
+    signed_by TEXT NOT NULL,
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, recorded_by)

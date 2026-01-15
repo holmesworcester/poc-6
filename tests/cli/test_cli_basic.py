@@ -14,7 +14,8 @@ CLI_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'cli.py')
 
 def run_cli(commands: str) -> subprocess.CompletedProcess:
     """Run CLI with given commands and return result."""
-    python_exe = "/home/hwilson/poc-6/venv/bin/python"
+    import sys
+    python_exe = sys.executable
     return subprocess.run(
         [python_exe, CLI_PATH],
         input=commands.strip(),
@@ -335,6 +336,7 @@ def test_non_admin_can_create_link_invite():
 new-network --name "Test Network" --username alice --devicename desktop
 invite
 accept-invite --username bob --devicename phone --invite 1
+sync --ticks 50
 switch 2
 link
 accept-link --devicename tablet --invite 2

@@ -4,9 +4,12 @@ Jobs are self-scheduling: each job decides when it should run based on
 its own logic. The tick() function asks each job if it should_run() and
 executes those that say yes.
 """
+import logging
 from typing import Any, Dict
 from abc import ABC, abstractmethod
-from db import create_unsafe_db
+from .db import create_unsafe_db
+
+log = logging.getLogger(__name__)
 
 # Global frequency multiplier for testing (1.0 = production, 0.01 = 100x faster)
 _frequency_multiplier = 1.0
@@ -19,6 +22,12 @@ def set_frequency_multiplier(multiplier: float) -> None:
     """
     global _frequency_multiplier
     _frequency_multiplier = multiplier
+
+
+def reset_frequency_multiplier() -> None:
+    """Reset frequency multiplier to default (for testing cleanup)."""
+    global _frequency_multiplier
+    _frequency_multiplier = 1.0
 
 
 class Job(ABC):
@@ -56,6 +65,12 @@ class Job(ABC):
         # Always run on first tick
         if last_run_at == 0:
             return True
+        # Detect backwards time - this means tick() was called with a timestamp
+        # earlier than a previous call, which will cause jobs to silently not run
+        if t_ms < last_run_at:
+            log.error(f"Job '{self.name}' called with t_ms={t_ms} but last_run_at={last_run_at} - "
+                      f"time went backwards by {last_run_at - t_ms}ms! Job will not run.")
+            return False
         # Apply frequency multiplier for testing
         effective_interval = int(self.every_ms * _frequency_multiplier)
         return t_ms - last_run_at >= effective_interval
@@ -96,7 +111,7 @@ class FileSyncJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync
-        from db import create_unsafe_db
+        from .db import create_unsafe_db
         unsafedb = create_unsafe_db(db)
         local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
         for peer_row in local_peers:
@@ -122,7 +137,7 @@ class PurgeExpiredEventsJob(Job):
         super().__init__('purge_expired_events', every_ms=600_000)
 
     def run(self, t_ms: int, db: Any) -> dict:
-        import purge_expired
+        from . import purge_expired
         return purge_expired.run_purge_expired_for_all_peers(t_ms, db)
 
 
@@ -172,7 +187,7 @@ class GroupPrekeyReplenishmentJob(Job):
 
         # Additional check: only run if prekeys actually low
         from events.group.group_prekey import MIN_GROUP_PREKEYS
-        from db import create_safe_db
+        from .db import create_safe_db
         unsafedb = create_unsafe_db(db)
 
         peers = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -243,7 +258,7 @@ class IntroProcessJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import intro, connection
-        from db import create_safe_db
+        from .db import create_safe_db
         import logging
 
         log = logging.getLogger(__name__)

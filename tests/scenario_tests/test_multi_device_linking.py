@@ -13,11 +13,11 @@ Tests:
 - Network sees both devices as belonging to same user
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.content import message
-from tests.utils import tick_helper
+from tests.utils.tick_helper import assert_eventually, run_ticks
 
 
 def test_alice_links_phone_to_laptop(fresh_db):
@@ -98,7 +98,7 @@ def test_alice_links_phone_to_laptop(fresh_db):
     print("\n=== Initial sync to propagate link event and group keys ===")
 
     # Run 200 ticks for initial sync (keys, channels, etc.)
-    current_t_ms = tick_helper.run_ticks(db=db, start_t_ms=4000, num_rounds=200)
+    current_t_ms = run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
     # Verify laptop has the group key (from GKS)
     laptop_has_key = db.query_one(
@@ -192,7 +192,7 @@ def test_alice_links_phone_to_laptop(fresh_db):
     # to ensure all sync rounds execute without early exit
     print("\n=== Sync messages between devices ===")
 
-    tick_helper.run_ticks(db=db, start_t_ms=current_t_ms + 2000, num_rounds=100)
+    run_ticks(db=db, start_t_ms=current_t_ms + 2000, num_rounds=100)
 
     # Verify both devices see both messages
     print("\n=== Verifying message delivery ===")
@@ -301,45 +301,35 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
     )
     db.commit()
 
-    # Sync to propagate messages and group keys to laptop
-    # NOTE: Device names are encrypted, so we check after sync when laptop has the group key
-    print("\n=== Sync messages to laptop ===")
+    # Wait for laptop to see historical messages
+    print("\n=== Waiting for laptop to sync messages ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=500, check_interval=1)
+    def laptop_sees_messages():
+        laptop_channels = db.query_all(
+            "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+            (alice_laptop['peer_id'],)
+        )
+        assert len(laptop_channels) == 1, \
+            f"Laptop should have exactly one channel"
 
-    # Verify device name is now available (encrypted via peer_name_update)
+        laptop_channel_id = laptop_channels[0]['channel_id']
+        laptop_messages = message.list(
+            laptop_channel_id,
+            alice_laptop['peer_id'],
+            db
+        )
+        laptop_contents = [msg['content'] for msg in laptop_messages]
+
+        assert len(laptop_messages) == 2, \
+            f"Laptop should see both historical messages, got {len(laptop_messages)}"
+        assert "Message 1 from phone" in laptop_contents
+        assert "Message 2 from phone" in laptop_contents
+
+    assert_eventually(laptop_sees_messages, db=db, start_t_ms=4000)
+
+    # Verify device name is now available
     laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
     assert laptop_device_name == 'Laptop', f"Device name should be 'Laptop', got '{laptop_device_name}'"
-    print(f"✅ Laptop device name: {laptop_device_name}")
-
-    # Discover channel via sync (laptop should have same channel as phone through user linking)
-    laptop_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (alice_laptop['peer_id'],)
-    )
-    print(f"Laptop discovered {len(laptop_channels)} channel(s)")
-
-    assert len(laptop_channels) == 1, \
-        f"Laptop should have exactly one channel (shared with phone), got {len(laptop_channels)}"
-
-    laptop_channel_id = laptop_channels[0]['channel_id']
-    print(f"Laptop using channel: {laptop_channel_id[:20]}...")
-
-    # Laptop should see all historical messages
-    laptop_messages = message.list(
-        laptop_channel_id,
-        alice_laptop['peer_id'],
-        db
-    )
-    laptop_contents = [msg['content'] for msg in laptop_messages]
-
-    print(f"Laptop sees {len(laptop_messages)} messages: {laptop_contents}")
-
-    assert len(laptop_messages) == 2, \
-        f"Laptop should see both historical messages, got {len(laptop_messages)}"
-    assert "Message 1 from phone" in laptop_contents
-    assert "Message 2 from phone" in laptop_contents
-
     print(f"✅ Laptop received all historical messages after linking!")
 
 
@@ -411,18 +401,18 @@ def test_three_devices_all_linked(fresh_db):
     assert alice_tablet['user_id'] == alice_phone['user_id']
     print(f"✅ All three devices share user_id: {alice_phone['user_id'][:20]}...")
 
-    # Sync to share group keys (required for encrypted device names)
-    print("\n=== Sync all devices ===")
+    # Wait for all device names to sync
+    print("\n=== Waiting for device names to sync ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=500, check_interval=1)
+    def all_device_names_synced():
+        phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
+        laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
+        tablet_device_name = peer_shared.get_device_name(alice_tablet['peer_shared_id'], alice_tablet['peer_id'], db)
+        assert phone_device_name == 'Phone', f"Phone device name should be 'Phone', got '{phone_device_name}'"
+        assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
+        assert tablet_device_name == 'Tablet', f"Tablet device name should be 'Tablet', got '{tablet_device_name}'"
 
-    # Verify device names are stored correctly (after sync - encrypted names require group key)
-    phone_device_name = peer_shared.get_device_name(alice_phone['peer_shared_id'], alice_phone['peer_id'], db)
-    laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
-    tablet_device_name = peer_shared.get_device_name(alice_tablet['peer_shared_id'], alice_tablet['peer_id'], db)
-    assert phone_device_name == 'Phone', f"Phone device name should be 'Phone', got '{phone_device_name}'"
-    assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
-    assert tablet_device_name == 'Tablet', f"Tablet device name should be 'Tablet', got '{tablet_device_name}'"
+    final_t_ms = assert_eventually(all_device_names_synced, db=db, start_t_ms=6000)
     print(f"✅ All device names stored correctly: Phone, Laptop, Tablet")
 
     # Verify connections between all three devices
@@ -478,6 +468,22 @@ def test_three_devices_all_linked(fresh_db):
     shared_channel_id = phone_channels[0]['channel_id']
     print(f"All devices will use shared channel: {shared_channel_id[:20]}...")
 
+    # Wait for all devices to have the channel synced
+    def all_devices_have_channel():
+        laptop_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ? AND channel_id = ?",
+            (alice_laptop['peer_id'], shared_channel_id)
+        )
+        tablet_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ? AND channel_id = ?",
+            (alice_tablet['peer_id'], shared_channel_id)
+        )
+        assert len(laptop_channels) >= 1, "Laptop should have synced channel"
+        assert len(tablet_channels) >= 1, "Tablet should have synced channel"
+
+    final_t_ms = assert_eventually(all_devices_have_channel, db=db, start_t_ms=final_t_ms)
+    print("✅ All devices have the shared channel")
+
     # Each device sends a message
     print("\n=== Each device sends a message ===")
 
@@ -485,7 +491,7 @@ def test_three_devices_all_linked(fresh_db):
         peer_id=alice_phone['peer_id'],
         channel_id=shared_channel_id,
         content="From phone",
-        t_ms=7000,
+        t_ms=final_t_ms + 1000,
         db=db
     )
     db.commit()
@@ -494,7 +500,7 @@ def test_three_devices_all_linked(fresh_db):
         peer_id=alice_laptop['peer_id'],
         channel_id=shared_channel_id,
         content="From laptop",
-        t_ms=7100,
+        t_ms=final_t_ms + 2000,
         db=db
     )
     db.commit()
@@ -503,18 +509,27 @@ def test_three_devices_all_linked(fresh_db):
         peer_id=alice_tablet['peer_id'],
         channel_id=shared_channel_id,
         content="From tablet",
-        t_ms=7200,
+        t_ms=final_t_ms + 3000,
         db=db
     )
     db.commit()
 
-    # Sync messages
-    print("\n=== Sync messages ===")
+    # Wait for all devices to see all messages
+    print("\n=== Waiting for message sync ===")
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=500, check_interval=1)
+    def all_devices_see_all_messages():
+        phone_msgs = message.list(shared_channel_id, alice_phone['peer_id'], db)
+        laptop_msgs = message.list(shared_channel_id, alice_laptop['peer_id'], db)
+        tablet_msgs = message.list(shared_channel_id, alice_tablet['peer_id'], db)
 
-    # Discover channels via sync for each device
-    print("\n=== Discovering channels for each device ===")
+        assert len(phone_msgs) == 3, f"Phone should see 3 messages, got {len(phone_msgs)}"
+        assert len(laptop_msgs) == 3, f"Laptop should see 3 messages, got {len(laptop_msgs)}"
+        assert len(tablet_msgs) == 3, f"Tablet should see 3 messages, got {len(tablet_msgs)}"
+
+    assert_eventually(all_devices_see_all_messages, db=db, start_t_ms=final_t_ms + 4000)
+
+    # Verify channels
+    print("\n=== Verifying channels for each device ===")
 
     phone_channels = db.query_all(
         "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",

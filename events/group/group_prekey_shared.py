@@ -8,10 +8,10 @@ PROJECTION_TABLE = ('group_prekeys_shared', 'group_prekey_shared_id')
 
 from typing import Any
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 

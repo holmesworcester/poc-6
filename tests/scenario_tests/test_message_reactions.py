@@ -1,7 +1,7 @@
 """
 Scenario tests for message emoji reactions.
 
-Based on the three-player messaging pattern, these tests verify that:
+Tests verify that:
 - Reactions sync correctly between peers
 - Multiple reactions on the same message work correctly
 - Reactions converge to identical state across peers
@@ -9,448 +9,387 @@ Based on the three-player messaging pattern, these tests verify that:
 - Message deletion cascade-deletes all reactions
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_deletion, message_reaction
-from tests.utils import tick_helper
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_message_reactions_basic_two_peer(fresh_db):
     """Test basic message reactions with two peers: Alice and Bob."""
-
     db = fresh_db
-
-    print("\n=== Setup: Create networks and users ===")
 
     # Alice creates a network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    print(f"Alice created network")
 
     # Alice creates an invite for Bob
-    invite_id, invite_link, invite_data = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
-    print(f"Alice created invite")
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
 
     # Bob joins Alice's network
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    print(f"Bob joined network")
-
     db.commit()
 
-    # Initial sync
-    print("\n=== Initial sync ===")
-    final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=False
-    )
-    print(f"Initial sync completed in {rounds_used} rounds")
+    channel_id = alice['channel_id']
 
-    # Get channels
-    print("\n=== Discovering channels ===")
-    alice_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )
-    bob_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (bob['peer_id'],)
-    )
+    # Wait for Bob to see channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) == 1
 
-    assert len(alice_channels) == 1, f"Alice should have 1 channel, got {len(alice_channels)}"
-    assert len(bob_channels) == 1, f"Bob should have 1 channel, got {len(bob_channels)}"
-
-    channel_id = alice_channels[0]['channel_id']
-    print(f"Channel ID: {channel_id[:20]}...")
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
 
     # Create message
-    print("\n=== Alice creates message ===")
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Test message for reactions",
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
-    message_id = msg_result['id']
     db.commit()
-    print(f"Message created: {message_id[:20]}...")
 
-    # Sync message to Bob
-    print("\n=== Sync message to Bob ===")
-    final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=False
-    )
-    print(f"Message sync completed in {rounds_used} rounds")
+    # Wait for Bob to see the message
+    def bob_sees_message():
+        bob_messages = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_messages) > 0
+        assert bob_messages[0]['content'] == "Test message for reactions"
 
-    # Verify both see the message
-    print("\n=== Verify message visibility ===")
-    alice_messages = message.list(channel_id, alice['peer_id'], db)
-    bob_messages = message.list(channel_id, bob['peer_id'], db)
-
-    print(f"Alice sees {len(alice_messages)} messages")
-    print(f"Bob sees {len(bob_messages)} messages")
-
-    assert len(alice_messages) > 0, "Alice should see the message"
-    assert len(bob_messages) > 0, "Bob should see the message"
-    assert alice_messages[0]['content'] == "Test message for reactions"
-    assert bob_messages[0]['content'] == "Test message for reactions"
-
-    print("\n✅ Base two-peer test passed!")
+    assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
 
 def test_message_reactions_single_emoji(fresh_db):
     """Test: Alice adds one emoji reaction to a message."""
-
     db = fresh_db
 
-    print("\n=== Setup ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    print("\n=== Initial sync ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=False)
+    channel_id = alice['channel_id']
 
-    # Get channel and create message
-    alice_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )
-    channel_id = alice_channels[0]['channel_id']
+    # Wait for Bob to see channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) == 1
 
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+
+    # Create message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="React to me!",
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    print("\n=== Sync message ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the message
+    def bob_sees_message():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_msgs) > 0
+
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
     # Alice adds reaction
-    print("\n=== Alice adds thumbs up reaction ===")
-    reaction_id = message_reaction.create(
+    message_reaction.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         emoji='👍',
-        t_ms=7000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
-    print(f"Reaction created: {reaction_id[:20]}...")
 
-    # Check Alice's view before sync
-    print("\n=== Check Alice's view (before Bob sync) ===")
+    # Verify Alice sees reaction
     alice_msgs = message.list(channel_id, alice['peer_id'], db)
     reactions = alice_msgs[0].get('reactions', [])
-    print(f"Alice sees {len(reactions)} reactions")
     assert len(reactions) == 1, "Alice should see 1 reaction"
     assert reactions[0]['emoji'] == '👍', "Should be thumbs up"
     assert reactions[0]['count'] == 1, "Count should be 1"
     assert 'Alice' in reactions[0]['reactors'], "Alice should be listed as reactor"
 
-    # Sync reaction to Bob
-    print("\n=== Sync reaction to Bob ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the reaction
+    def bob_sees_reaction():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        bob_reactions = bob_msgs[0].get('reactions', [])
+        assert len(bob_reactions) == 1, "Bob should see 1 reaction"
+        assert bob_reactions[0]['emoji'] == '👍', "Should be thumbs up"
+        assert bob_reactions[0]['count'] == 1, "Count should be 1"
+        assert 'Alice' in bob_reactions[0]['reactors'], "Alice should be listed as reactor"
 
-    # Check Bob's view
-    print("\n=== Check Bob's view (after sync) ===")
-    bob_msgs = message.list(channel_id, bob['peer_id'], db)
-    bob_reactions = bob_msgs[0].get('reactions', [])
-    print(f"Bob sees {len(bob_reactions)} reactions")
-    assert len(bob_reactions) == 1, "Bob should see 1 reaction"
-    assert bob_reactions[0]['emoji'] == '👍', "Should be thumbs up"
-    assert bob_reactions[0]['count'] == 1, "Count should be 1"
-    assert 'Alice' in bob_reactions[0]['reactors'], "Alice should be listed as reactor"
-
-    print("\n✅ Single emoji reaction test passed!")
+    assert_eventually(bob_sees_reaction, db=db, start_t_ms=t_ms)
 
 
 def test_message_reactions_multiple_emoji(fresh_db):
     """Test: Alice and Bob add different emoji reactions to same message."""
-
     db = fresh_db
 
-    print("\n=== Setup ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    print("\n=== Initial sync ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=False)
+    channel_id = alice['channel_id']
+
+    # Wait for Bob to see channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) == 1
+
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
 
     # Create message
-    alice_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )
-    channel_id = alice_channels[0]['channel_id']
-
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="React to me!",
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    print("\n=== Sync message ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the message
+    def bob_sees_message():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_msgs) > 0
+
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
     # Alice adds thumbs up
-    print("\n=== Alice adds thumbs up ===")
-    alice_reaction = message_reaction.create(
+    message_reaction.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         emoji='👍',
-        t_ms=7000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
 
     # Bob adds heart
-    print("\n=== Bob adds heart ===")
-    bob_reaction = message_reaction.create(
+    message_reaction.create(
         peer_id=bob['peer_id'],
         message_id=message_id,
         emoji='❤️',
-        t_ms=7100,
+        t_ms=t_ms + 100,
         db=db
     )
     db.commit()
 
-    # Check Alice's view before sync
-    print("\n=== Check Alice's view (before sync) ===")
-    alice_msgs = message.list(channel_id, alice['peer_id'], db)
-    reactions = alice_msgs[0].get('reactions', [])
-    print(f"Alice sees {len(reactions)} reactions (local only)")
-    assert len(reactions) == 1, "Alice should see 1 reaction locally (her own)"
+    # Wait for both peers to see both reactions
+    def both_see_both_reactions():
+        alice_msgs = message.list(channel_id, alice['peer_id'], db)
+        reactions = alice_msgs[0].get('reactions', [])
+        assert len(reactions) == 2, f"Alice should see 2 reactions, got {len(reactions)}"
 
-    # Sync reactions
-    print("\n=== Sync reactions ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1, verbose=False)
+        emojis = sorted([r['emoji'] for r in reactions])
+        assert '👍' in emojis, "Should have thumbs up"
+        assert '❤️' in emojis, "Should have heart"
 
-    # Check Alice's view after sync
-    print("\n=== Check Alice's view (after sync) ===")
-    alice_msgs = message.list(channel_id, alice['peer_id'], db)
-    reactions = alice_msgs[0].get('reactions', [])
-    print(f"Alice sees {len(reactions)} reactions (after sync)")
-    assert len(reactions) == 2, f"Alice should see 2 reactions, got {len(reactions)}"
+        thumbs_up = next(r for r in reactions if r['emoji'] == '👍')
+        heart = next(r for r in reactions if r['emoji'] == '❤️')
+        assert 'Alice' in thumbs_up['reactors'], "Alice should be thumbs up reactor"
+        assert 'Bob' in heart['reactors'], "Bob should be heart reactor"
 
-    # Verify the emojis
-    emojis = sorted([r['emoji'] for r in reactions])
-    assert '👍' in emojis, "Should have thumbs up"
-    assert '❤️' in emojis, "Should have heart"
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        bob_reactions = bob_msgs[0].get('reactions', [])
+        assert len(bob_reactions) == 2, "Bob should see 2 reactions"
 
-    # Verify reactor names
-    thumbs_up = next(r for r in reactions if r['emoji'] == '👍')
-    heart = next(r for r in reactions if r['emoji'] == '❤️')
-    assert 'Alice' in thumbs_up['reactors'], "Alice should be thumbs up reactor"
-    assert 'Bob' in heart['reactors'], "Bob should be heart reactor"
+        alice_reactions_sorted = sorted([r['emoji'] for r in reactions])
+        bob_reactions_sorted = sorted([r['emoji'] for r in bob_reactions])
+        assert alice_reactions_sorted == bob_reactions_sorted, "Reactions should converge"
 
-    # Check Bob's view
-    print("\n=== Check Bob's view (after sync) ===")
-    bob_msgs = message.list(channel_id, bob['peer_id'], db)
-    bob_reactions = bob_msgs[0].get('reactions', [])
-    print(f"Bob sees {len(bob_reactions)} reactions")
-    assert len(bob_reactions) == 2, "Bob should see 2 reactions"
-
-    # Verify convergence
-    alice_reactions_sorted = sorted([r['emoji'] for r in reactions])
-    bob_reactions_sorted = sorted([r['emoji'] for r in bob_reactions])
-    assert alice_reactions_sorted == bob_reactions_sorted, "Reactions should converge"
-
-    print("\n✅ Multiple emoji reaction test passed!")
+    assert_eventually(both_see_both_reactions, db=db, start_t_ms=t_ms)
 
 
 def test_message_reactions_removal(fresh_db):
     """Test: Alice removes her reaction and peers converge."""
-
     db = fresh_db
 
-    print("\n=== Setup ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=False)
+    channel_id = alice['channel_id']
 
-    # Create message and add reactions
-    alice_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )
-    channel_id = alice_channels[0]['channel_id']
+    # Wait for Bob to see channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) == 1
 
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+
+    # Create message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="React to me!",
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the message
+    def bob_sees_message():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_msgs) > 0
+
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
     # Both add reactions
-    print("\n=== Both peers add reactions ===")
     alice_reaction = message_reaction.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         emoji='👍',
-        t_ms=7000,
+        t_ms=t_ms,
         db=db
     )
     bob_reaction = message_reaction.create(
         peer_id=bob['peer_id'],
         message_id=message_id,
         emoji='❤️',
-        t_ms=7100,
+        t_ms=t_ms + 100,
         db=db
     )
     db.commit()
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for both to see both reactions
+    def both_see_both():
+        alice_msgs = message.list(channel_id, alice['peer_id'], db)
+        reactions = alice_msgs[0].get('reactions', [])
+        assert len(reactions) == 2, f"Should have 2 reactions, got {len(reactions)}"
 
-    # Verify both have 2 reactions
-    alice_msgs = message.list(channel_id, alice['peer_id'], db)
-    reactions = alice_msgs[0].get('reactions', [])
-    assert len(reactions) == 2, f"Should have 2 reactions, got {len(reactions)}"
-    print(f"✓ Both peers see 2 reactions before removal")
+    t_ms = assert_eventually(both_see_both, db=db, start_t_ms=t_ms)
 
     # Alice removes her thumbs up reaction
-    print("\n=== Alice removes thumbs up ===")
-    deletion_id = message_reaction.remove(
+    message_reaction.remove(
         peer_id=alice['peer_id'],
         message_id=message_id,
         emoji='👍',
-        t_ms=9000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
-    print(f"Removal created: {deletion_id[:20]}...")
 
-    # Check Alice's view (should only have heart)
+    # Verify Alice sees only heart
     alice_msgs = message.list(channel_id, alice['peer_id'], db)
     reactions = alice_msgs[0].get('reactions', [])
-    print(f"Alice sees {len(reactions)} reactions (before Bob sync)")
     assert len(reactions) == 1, f"Alice should see 1 reaction after removal, got {len(reactions)}"
     assert reactions[0]['emoji'] == '❤️', "Should only have heart"
 
-    # Sync removal to Bob
-    print("\n=== Sync removal to Bob ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=10000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the removal
+    def bob_sees_removal():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        bob_reactions = bob_msgs[0].get('reactions', [])
+        assert len(bob_reactions) == 1, f"Bob should see 1 reaction after sync, got {len(bob_reactions)}"
+        assert bob_reactions[0]['emoji'] == '❤️', "Should only have heart"
 
-    # Check Bob's view (should only have heart)
-    bob_msgs = message.list(channel_id, bob['peer_id'], db)
-    bob_reactions = bob_msgs[0].get('reactions', [])
-    print(f"Bob sees {len(bob_reactions)} reactions (after sync)")
-    assert len(bob_reactions) == 1, f"Bob should see 1 reaction after sync, got {len(bob_reactions)}"
-    assert bob_reactions[0]['emoji'] == '❤️', "Should only have heart"
-
-    print("\n✅ Reaction removal test passed!")
+    assert_eventually(bob_sees_removal, db=db, start_t_ms=t_ms)
 
 
 def test_message_reactions_cascade_deletion(fresh_db):
     """Test: Deleting message cascade-deletes all reactions."""
-
     db = fresh_db
 
-    print("\n=== Setup ===")
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1, verbose=False)
+    channel_id = alice['channel_id']
 
-    # Create message and add reactions
-    alice_channels = db.query_all(
-        "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )
-    channel_id = alice_channels[0]['channel_id']
+    # Wait for Bob to see channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT DISTINCT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) == 1
 
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+
+    # Create message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Delete me!",
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the message
+    def bob_sees_message():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_msgs) > 0
+
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
     # Both add reactions
-    print("\n=== Both add reactions ===")
     message_reaction.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
         emoji='👍',
-        t_ms=7000,
+        t_ms=t_ms,
         db=db
     )
     message_reaction.create(
         peer_id=bob['peer_id'],
         message_id=message_id,
         emoji='❤️',
-        t_ms=7100,
+        t_ms=t_ms + 100,
         db=db
     )
     db.commit()
 
-    tick_helper.sync_until_converged(db=db, start_t_ms=8000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for both to see both reactions
+    def both_see_both():
+        alice_msgs = message.list(channel_id, alice['peer_id'], db)
+        reactions = alice_msgs[0].get('reactions', [])
+        assert len(reactions) == 2, "Should have 2 reactions before deletion"
 
-    # Verify both reactions exist
-    alice_msgs = message.list(channel_id, alice['peer_id'], db)
-    reactions = alice_msgs[0].get('reactions', [])
-    assert len(reactions) == 2, "Should have 2 reactions before deletion"
-    print(f"✓ Both reactions exist before message deletion")
+    t_ms = assert_eventually(both_see_both, db=db, start_t_ms=t_ms)
 
     # Alice deletes message
-    print("\n=== Alice deletes message ===")
-    deletion_id = message_deletion.create(
+    message_deletion.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
-        t_ms=9000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
-    print(f"Deletion created: {deletion_id[:20]}...")
 
-    # Check Alice's view (message and reactions should be gone)
+    # Verify Alice sees no messages
     alice_msgs = message.list(channel_id, alice['peer_id'], db)
-    print(f"Alice sees {len(alice_msgs)} messages (after deletion)")
     assert len(alice_msgs) == 0, "Alice should see no messages after deletion"
 
-    # Sync deletion to Bob
-    print("\n=== Sync deletion to Bob ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=10000, max_rounds=200, check_interval=1, verbose=False)
+    # Wait for Bob to see the deletion
+    def bob_sees_deletion():
+        bob_msgs = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_msgs) == 0, "Bob should see no messages after deletion sync"
 
-    # Check Bob's view (message and reactions should be gone)
-    bob_msgs = message.list(channel_id, bob['peer_id'], db)
-    print(f"Bob sees {len(bob_msgs)} messages (after sync)")
-    assert len(bob_msgs) == 0, "Bob should see no messages after deletion sync"
-
-    print("\n✅ Cascade deletion test passed!")
+    assert_eventually(bob_sees_deletion, db=db, start_t_ms=t_ms)

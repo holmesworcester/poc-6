@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS removed_peers (
     peer_shared_id TEXT NOT NULL PRIMARY KEY,
     removed_at INTEGER NOT NULL,
-    removed_by TEXT NOT NULL,
+    signed_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -9,10 +9,10 @@ from typing import Any
 import logging
 import hashlib
 import math
-import crypto
-import store
+from core import crypto
+from core import store
 from events.identity import peer_shared
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -414,7 +414,7 @@ def send_request(file_id: str, to_peer: str, from_peer_id: str, t_ms: int, db: A
 
     # Get target peer's transit prekey for wrapping
     from events.network import transit_prekey
-    import queues
+    from core import queues
 
     target_prekey = transit_prekey.get_prekey_for_peer(to_peer, from_peer_id, t_ms, db)
     if not target_prekey:
@@ -519,7 +519,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_fil
         log.warning(f"sync_file.project() failed to get requester prekey: {e}")
         return
 
-    import queues
+    from core import queues
     slices_sent = 0
 
     # Send each slice wrapped with requester's prekey

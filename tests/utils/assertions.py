@@ -3,7 +3,7 @@
 Eliminates repeated assertion patterns across test_forward_secrecy.py,
 test_user_removal.py, and other scenario tests.
 """
-from db import Database, create_safe_db, create_unsafe_db
+from core.db import Database, create_safe_db, create_unsafe_db
 
 
 def assert_message_exists(safedb, message_id: str, peer_id: str, content: str | None = None) -> None:

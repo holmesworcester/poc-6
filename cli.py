@@ -83,18 +83,18 @@ if not _verbose:
     for name in _noisy_modules:
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
-from db import Database
-import schema
-import tick
+from core.db import Database
+from core import schema
+from core import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed, peer_shared
 from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update, message_attachment
 from events.network import sync_file
-import purge_expired
+from core import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 import os
-import network_config
+from core import network_config
 from events.network import connection
 
 
@@ -108,7 +108,7 @@ COMMANDS = [
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
     'status', 'accounts', 'channels', 'users', 'messages', 'keys',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
-    'time', 'log', 'disappear', 'fast-forward', 'help', 'quit', 'exit'
+    'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit'
 ]
 
 # Command argument hints for context-aware completion
@@ -316,9 +316,10 @@ class CLISession:
         self.selected_account: Optional[str] = None    # Currently selected account full_name
         self.selected_channel_id: Optional[str] = None  # Currently selected channel ID
         self.current_time_ms: int = 0
-        self.auto_tick_count: int = 100  # Number of auto-ticks after event commands (default 100)
+        self.auto_tick_count: int = 10  # Number of auto-ticks after event commands (default 10 = 1 second)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
+        self.command_history: List[str] = []  # Commands executed in this session
 
     def initialize_database(self, use_file: bool = False, db_path: str = None):
         """Initialize database with schema.
@@ -931,7 +932,7 @@ def cmd_sync_realtime(session: CLISession, args: List[str]):
         sync-realtime --ticks <n>       # Run N ticks at wall-clock time
         sync-realtime --until-file <n>  # Sync until file N is complete
     """
-    import perf_tick
+    from tests import perf_tick
 
     # Parse args
     num_ticks = None
@@ -1253,7 +1254,7 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
 
     # Fallback: try to get from database (might work after sync)
     if not username:
-        from db import create_safe_db
+        from core.db import create_safe_db
         safedb = create_safe_db(session.db, recorded_by=peer_id)
         user_row = safedb.query_one(
             "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
@@ -1262,7 +1263,7 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
         username = user_row['name'] if user_row else "unknown"
 
     if not network_id:
-        from db import create_safe_db
+        from core.db import create_safe_db
         safedb = create_safe_db(session.db, recorded_by=peer_id)
         network_row = safedb.query_one(
             "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
@@ -1472,7 +1473,7 @@ def cmd_files(session: CLISession):
     account = session.get_selected_account()
 
     # Query all attachments visible to this peer
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(session.db, recorded_by=account.peer_id)
 
     attachments = safedb.query_all(
@@ -1666,6 +1667,38 @@ def cmd_fast_forward(session: CLISession, days: int):
     print(f"Fast-forwarded {days} day{'s' if days != 1 else ''} (current time: {session.current_time_ms}ms)")
     print()
     display_state(session)
+
+
+def cmd_save_session(session: CLISession, name: str):
+    """Save all commands from this session as a script."""
+    if not session.command_history:
+        print("error: no commands to save")
+        return
+
+    # Sanitize name for filename
+    safe_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in name)
+    if not safe_name:
+        print("error: invalid script name")
+        return
+
+    # Create saved-sessions directory if it doesn't exist
+    script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tests', 'saved-sessions')
+    os.makedirs(script_dir, exist_ok=True)
+
+    script_path = os.path.join(script_dir, f"{safe_name}.sh")
+
+    # Write script
+    with open(script_path, 'w') as f:
+        f.write("#!/bin/bash\n")
+        f.write(f"# POC-6 CLI session: {name}\n")
+        f.write(f"# Commands: {len(session.command_history)}\n")
+        f.write("#\n")
+        f.write("# Run with: python cli.py < tests/saved-sessions/" + safe_name + ".sh\n")
+        f.write("\n")
+        for cmd in session.command_history:
+            f.write(f"{cmd}\n")
+
+    print(f"saved {len(session.command_history)} commands to {script_path}")
 
 
 def cmd_toggle_log(session: CLISession):
@@ -2189,6 +2222,11 @@ def cmd_network_show(session: CLISession):
     print(f"  jitter:       {cfg.jitter_ms}ms (stddev)")
     print(f"  packet_loss:  {cfg.packet_loss_rate * 100:.1f}%")
     print(f"  burst_loss:   {cfg.burst_loss_probability * 100:.1f}% (length: {cfg.burst_loss_length})")
+    if cfg.bandwidth_bytes_per_sec:
+        bw_kbps = cfg.bandwidth_bytes_per_sec * 8 / 1000
+        print(f"  bandwidth:    {bw_kbps:.0f} kbps ({cfg.bandwidth_bytes_per_sec / 1000:.0f} KB/s)")
+    else:
+        print(f"  bandwidth:    unlimited")
     print(f"  max_packet:   {cfg.max_packet_size} bytes")
 
     if cfg.partitioned_peers:
@@ -2249,13 +2287,15 @@ def cmd_network_set(session: CLISession, latency: int = None, jitter: int = None
 
 def cmd_network_preset(session: CLISession, preset: str):
     """Apply a network condition preset."""
+    # Format: (latency_ms, jitter_ms, loss%, burst_prob%, burst_len, bandwidth_kbps)
+    # bandwidth_kbps: None = unlimited, otherwise kilobits per second
     presets = {
-        'lan': (0, 0, 0, 0, 3),           # Perfect local network
-        'broadband': (50, 20, 1, 0, 3),    # Good home internet
-        'mobile-4g': (100, 40, 3, 5, 3),   # Mobile 4G
-        'mobile-3g': (200, 80, 8, 10, 4),  # Mobile 3G / poor
-        'satellite': (300, 50, 2, 5, 3),   # Satellite internet
-        'lossy': (50, 20, 15, 20, 5),      # Very lossy network
+        'lan': (0, 0, 0, 0, 3, None),              # Perfect local network (unlimited)
+        'broadband': (50, 20, 1, 0, 3, 5000),      # Good home internet (5 Mbps)
+        'mobile-4g': (100, 40, 3, 5, 3, 4000),     # Mobile 4G (4 Mbps)
+        'mobile-3g': (200, 80, 8, 10, 4, 1000),    # Mobile 3G / poor (1 Mbps)
+        'satellite': (300, 50, 2, 5, 3, 2000),     # Satellite internet (2 Mbps)
+        'lossy': (50, 20, 15, 20, 5, 5000),        # Very lossy network (5 Mbps)
     }
 
     if preset not in presets:
@@ -2263,16 +2303,25 @@ def cmd_network_preset(session: CLISession, preset: str):
         print(f"  available: {', '.join(presets.keys())}")
         return
 
-    latency, jitter, loss, burst_prob, burst_len = presets[preset]
+    latency, jitter, loss, burst_prob, burst_len, bandwidth_kbps = presets[preset]
+
+    # Convert kbps to bytes/sec (kbps / 8 * 1000 = kbps * 125)
+    bandwidth_bytes = bandwidth_kbps * 125 if bandwidth_kbps else None
+
     cfg = network_config.get_network_config()
     cfg.latency_ms = latency
     cfg.jitter_ms = jitter
     cfg.packet_loss_rate = loss / 100.0
     cfg.burst_loss_probability = burst_prob / 100.0
     cfg.burst_loss_length = burst_len
+    cfg.bandwidth_bytes_per_sec = bandwidth_bytes
 
+    # Apply to simulator
+    network_config.set_network_config(cfg)
+
+    bw_str = f"{bandwidth_kbps} kbps" if bandwidth_kbps else "unlimited"
     print(f"✓ applied preset '{preset}':")
-    print(f"  latency={latency}ms, jitter={jitter}ms, loss={loss}%, burst={burst_prob}%/{burst_len}")
+    print(f"  latency={latency}ms, jitter={jitter}ms, loss={loss}%, burst={burst_prob}%/{burst_len}, bandwidth={bw_str}")
 
 
 def cmd_partition(session: CLISession, account_num: int):
@@ -2315,6 +2364,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         print(f"error: {e}")
         return True
     cmd = parts[0]
+
+    # Record command in history (except meta commands)
+    meta_commands = {'quit', 'exit', 'save-session', 'help', 'status', 'accounts',
+                     'channels', 'users', 'messages', 'keys', 'time', 'log',
+                     'reactions', 'files', 'connections', 'net', 'nat-status'}
+    if cmd not in meta_commands:
+        session.command_history.append(line)
 
     # Clear event log before each command
     session.event_log.clear()
@@ -2628,6 +2684,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             except SystemExit:
                 print("usage: fast-forward --days <n>")
 
+        elif cmd == "save-session":
+            if len(parts) < 2:
+                print("usage: save-session <name>")
+            else:
+                name = parts[1]
+                cmd_save_session(session, name)
+
         elif cmd == "help":
             print("available commands:")
             print()
@@ -2704,6 +2767,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    time")
             print("    log                            Toggle event log display ON/OFF")
             print("    fast-forward --days <n>")
+            print("    save-session <name>            Save session commands to tests/saved-sessions/<name>.sh")
             print("    quit")
 
         else:

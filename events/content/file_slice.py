@@ -20,9 +20,9 @@ PROJECTION_TABLE = None  # No created_at lookup needed
 
 from typing import Any
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -145,8 +145,8 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         Number of slices created
     """
     global _batch_mode
-    import store
-    from db import create_safe_db
+    from core import store
+    from core.db import create_safe_db
 
     if not slices_data:
         return 0
@@ -197,7 +197,9 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         # Mark slices as shareable (sync via regular bloom filter sync)
         # File slices are regular shareable events - they sync like any other event type
         # Access control is enforced at message_attachment level (group-encrypted)
+        # add_shareable_event also adds to negentropy sync buckets
         from events.network import sync
+        from events.network import negentropy
         for event_id in event_ids:
             sync.add_shareable_event(
                 event_id=event_id,
@@ -206,6 +208,8 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
                 recorded_at=t_ms,
                 db=db
             )
+            # Also add to negentropy sync buckets
+            negentropy.add_event_to_sync(db, peer_id, event_id, t_ms)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)

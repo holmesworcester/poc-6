@@ -15,7 +15,7 @@ def parse_json(data: bytes) -> dict[str, Any]:
     return json.loads(data.decode('utf-8'))
 from nacl.public import SealedBox, Box, PrivateKey, PublicKey
 
-import store
+from . import store
 
 # ===== Constants =====
 
@@ -259,7 +259,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
         Key dict for crypto.unwrap_transit(), or None if not found or not owned
     """
     import logging
-    from db import create_unsafe_db
+    from .db import create_unsafe_db
 
     log = logging.getLogger(__name__)
     key_id = b64encode(id_bytes)
@@ -296,7 +296,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     # Check connections table (symmetric keys from connection handshake)
     # The hint is first 16 bytes of connection_id hash, so we need to compare
-    from db import create_safe_db
+    from .db import create_safe_db
     safedb = create_safe_db(db, recorded_by=recorded_by)
     conn_rows = safedb.query(
         "SELECT connection_id, our_key FROM connections WHERE recorded_by = ?",
@@ -341,7 +341,7 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
         Key dict for crypto.unwrap_event(), or None if not found or not owned
     """
     import logging
-    from db import create_safe_db
+    from .db import create_safe_db
 
     log = logging.getLogger(__name__)
     key_id = b64encode(id_bytes)
@@ -392,7 +392,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
         Key dict for crypto.unwrap(), or None if not found or not accessible
     """
     import logging
-    from db import create_unsafe_db, create_safe_db
+    from .db import create_unsafe_db, create_safe_db
 
     log = logging.getLogger(__name__)
     key_id = b64encode(id_bytes)

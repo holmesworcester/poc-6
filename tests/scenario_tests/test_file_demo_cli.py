@@ -16,7 +16,7 @@ from cli import (
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from events.network import sync_file
-import tick
+from core import tick
 
 
 @pytest.fixture

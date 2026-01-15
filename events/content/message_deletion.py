@@ -15,9 +15,9 @@ PROJECTION_TABLE = ('message_deletions', 'deletion_id')
 
 from typing import Any
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -236,6 +236,12 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
 
     # Parse event
     event_data = crypto.parse_json(plaintext)
+
+    # Verify signature before trusting event data
+    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
+        log.warning(f"message_deletion.project() signature verification failed for {deletion_id[:20]}...")
+        return None
+
     message_id = event_data['message_id']
     deleted_by = event_data['signed_by']
     created_at = event_data['created_at']

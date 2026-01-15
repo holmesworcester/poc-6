@@ -1,10 +1,10 @@
 """Test that peer_shared events have invite dependencies (trust anchor model)."""
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, peer_shared
 from events.network import recorded
-import store
+from core import store
 
 
 def test_peer_shared_has_invite_deps():

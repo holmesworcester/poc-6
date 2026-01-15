@@ -12,8 +12,8 @@ Tests:
 import sqlite3
 import base64
 import pytest
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, peer
 from events.content import message, message_attachment
 
@@ -438,7 +438,7 @@ def test_incomplete_file_returns_none():
 
     # Bob tries to get the file but doesn't have slices yet
     # First sync the metadata
-    import tick
+    from core import tick
     for i in range(5):
         tick.tick(t_ms=6000 + i*100, db=db)
         db.commit()

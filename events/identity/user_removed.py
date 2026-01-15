@@ -8,9 +8,9 @@ PROJECTION_TABLE = None
 
 from typing import Any
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +152,23 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     event_data = crypto.parse_json(blob)
 
+    # Verify signature before trusting event data
+    # user_removed uses 'removed_by' as the signer field (not 'signed_by')
+    signer_peer_shared_id = event_data.get('removed_by')
+    if not signer_peer_shared_id:
+        log.warning(f"user_removed.project() missing removed_by field for {event_id[:20]}...")
+        return None
+
+    from events.identity import peer_shared
+    try:
+        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
+        if not crypto.verify_event(event_data, public_key):
+            log.warning(f"user_removed.project() signature verification failed for {event_id[:20]}...")
+            return None
+    except ValueError:
+        log.warning(f"user_removed.project() signer peer_shared not found for {event_id[:20]}...")
+        return None
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafe_db = create_unsafe_db(db)
 
@@ -163,10 +180,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         return None
 
     # Insert into removed_users table (with recorded_by for scoping)
+    signed_by = removed_by  # The remover's peer_shared_id is the signer
     safedb.execute(
-        """INSERT OR IGNORE INTO removed_users (user_id, removed_at, removed_by, recorded_by)
+        """INSERT OR IGNORE INTO removed_users (user_id, removed_at, signed_by, recorded_by)
            VALUES (?, ?, ?, ?)""",
-        (removed_user_id, removed_at, removed_by, recorded_by)
+        (removed_user_id, removed_at, signed_by, recorded_by)
     )
 
     # Cascade: Find all peers for this user from peers_shared and mark them as removed
@@ -179,9 +197,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         peer_shared_id = peer_row['peer_shared_id']
         # Mark peer as removed in device-wide table by peer_shared_id
         unsafe_db.execute(
-            """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, removed_by)
+            """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, signed_by)
                VALUES (?, ?, ?)""",
-            (peer_shared_id, removed_at, removed_by)
+            (peer_shared_id, removed_at, signed_by)
         )
 
         # DELETE ALL CONNECTIONS for this peer (enforcement mechanism)
@@ -192,7 +210,18 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Rotate group keys for all groups this user was a member of
     # This prevents the removed user from decrypting future messages
-    _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, db)
+    # IMPORTANT: Only the peer who CREATED this event should rotate keys.
+    # Other peers receive the rotated keys via group_key_shared.
+    # If every peer rotated keys on projection, we'd get duplicate/conflicting keys.
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (recorded_by, recorded_by)
+    )
+    if peer_self_row and peer_self_row['peer_shared_id'] == removed_by:
+        # This peer created the user_removed event - they should rotate keys
+        _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, db)
+    else:
+        log.debug(f"user_removed.project() skipping key rotation - not the event creator")
 
     return event_id
 

@@ -10,9 +10,9 @@ from typing import Any
 import base64
 import json
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     # This is the cascade trigger - unblocks events waiting on network_id
     # =========================================================================
     from events.network import recorded as recorded_module
-    import queues
+    from core import queues
 
     if network_id:
         safedb.execute(

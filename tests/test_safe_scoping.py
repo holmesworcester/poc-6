@@ -8,7 +8,7 @@ These tests verify that:
 """
 import sqlite3
 import pytest
-from db import (
+from core.db import (
     Database,
     create_safe_db,
     create_unsafe_db,
@@ -16,7 +16,7 @@ from db import (
     SUBJECTIVE_TABLES,
     DEVICE_TABLES,
 )
-import schema
+from core import schema
 
 
 def test_subjective_tables_have_recorded_by_in_pk():
@@ -359,7 +359,7 @@ def test_safedb_get_blob_enforces_scoping():
     bob_id = 'bob_peer_id'
 
     # Create some test blobs in store
-    import crypto
+    from core import crypto
     alice_blob = b'alice secret data'
     bob_blob = b'bob secret data'
 
@@ -413,7 +413,7 @@ def test_safedb_get_blob_nonexistent_event():
 
     # Try to get a blob that doesn't exist at all
     # Use a valid base64 string that represents a non-existent event
-    import crypto
+    from core import crypto
     fake_event_id = crypto.b64encode(b'nonexistent_event_id_bytes')
 
     with pytest.raises(ScopingViolation, match="doesn't have access"):

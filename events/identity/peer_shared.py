@@ -9,10 +9,10 @@ PROJECTION_TABLE = ('peers_shared', 'peer_shared_id')
 from typing import Any
 import json
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -468,7 +468,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     # Try to create peer_name_update event for device name (encrypted)
     # May fail if key not available yet - will be stored in pending_name_updates
     from events.identity import peer_name_update
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
     try:
         peer_name_update_id = peer_name_update.create(

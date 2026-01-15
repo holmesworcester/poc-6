@@ -8,9 +8,9 @@ EPHEMERAL = False
 PROJECTION_TABLE = None  # No projection table (stored in peers table)
 import json
 import logging
-import crypto
-import store
-from db import create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def project(peer_id: str, recorded_by: str, recorded_at: int, db: Any) -> str:
     log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
 
     unsafedb = create_unsafe_db(db)
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get blob from store

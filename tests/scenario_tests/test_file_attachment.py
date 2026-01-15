@@ -14,13 +14,13 @@ Tests the complete file attachment flow:
 Tests the API-only (no direct DB inspection except via query functions).
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
 from tests.utils import tick_helper
-import tick
-import crypto
+from core import tick
+from core import crypto
 
 
 def test_two_party_file_attachment_and_sync(fresh_db):

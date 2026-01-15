@@ -5,12 +5,12 @@ Uses global_count for convergent update ordering (highest wins).
 """
 from typing import Any
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.group import group as group_module
 from events.identity import peer
-import global_counter
-from db import create_safe_db, create_unsafe_db
+from core import global_counter
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 

@@ -10,12 +10,12 @@ Tests:
 - Charlie is isolated (separate network)
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message
-from tests.utils import tick_helper
-import tick
+from tests.utils.tick_helper import run_ticks, assert_eventually
+from core import tick
 
 
 def test_three_player_messaging(fresh_db):
@@ -87,11 +87,8 @@ def test_three_player_messaging(fresh_db):
     # Initial sync - run enough ticks for random window selection to cover all 16 windows
     # With w=4 (16 windows), we need ~100 rounds to have high probability of hitting all windows
     print("\n=== Initial sync ===")
-    num_rounds = 100
-    for i in range(num_rounds):
-        tick.tick(t_ms=4000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
-    final_t_ms = 4000 + num_rounds * tick_helper.TICK_INTERVAL_MS
-    print(f"Initial sync completed after {num_rounds} ticks")
+    final_t_ms = run_ticks(db=db, start_t_ms=4000, num_rounds=100)
+    print(f"Initial sync completed")
 
     # Check connections AFTER sync
     print("\n=== Connections AFTER sync ===")
@@ -170,7 +167,7 @@ def test_three_player_messaging(fresh_db):
 
     # Debug: Check what Bob's 4 original events were
     print("\n=== Bob's original events ===")
-    import store, crypto
+    from core import store, crypto
     for row in bob_events_before:
         try:
             blob = store.get(row['event_id'], db)
@@ -211,7 +208,7 @@ def test_three_player_messaging(fresh_db):
     # Also check the event types that are blocked
     print("\n=== Blocked event details ===")
     all_blocked_ids = set(b['recorded_id'] for b in alice_blocked + bob_blocked)
-    import store
+    from core import store
     for blocked_id in list(all_blocked_ids)[:3]:
         blob = store.get(blocked_id, db)
         if blob:
@@ -459,12 +456,16 @@ def test_three_player_messaging(fresh_db):
     db.commit()
     print(f"Charlie created message: {charlie_msg['id'][:20]}...")
 
-    # Sync messages
-    print("\n=== Sync Round 2: Message exchange ===")
-    final_t_ms2, rounds_used2, converged2, status2 = tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=500, check_interval=1, verbose=True
-    )
-    print(f"Message sync completed in {rounds_used2} rounds (converged={converged2})")
+    # Wait for Alice to see Bob's message
+    print("\n=== Waiting for message exchange ===")
+
+    def alice_sees_bobs_message():
+        alice_messages = message.list(alice_channel_id, alice['peer_id'], db)
+        alice_message_contents = [msg['content'] for msg in alice_messages]
+        assert "Hello from Bob!" in alice_message_contents, "Alice should see Bob's message"
+
+    assert_eventually(alice_sees_bobs_message, db=db, start_t_ms=6000)
+    print(f"Message sync completed")
 
     # Verify message delivery
     print("\n=== Verifying message delivery ===")

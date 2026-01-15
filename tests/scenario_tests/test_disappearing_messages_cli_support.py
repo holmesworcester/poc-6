@@ -10,7 +10,7 @@ Tests that the API returns the fields needed by the CLI:
 import pytest
 from events.identity import user, invite, peer as peer_module
 from events.content import channel, message, channel_update
-import tick
+from core import tick
 
 
 def test_channel_list_returns_disappearing_time_ms(fresh_db):

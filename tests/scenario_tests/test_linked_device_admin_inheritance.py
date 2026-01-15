@@ -12,11 +12,11 @@ Tests:
 - New user can successfully join via second device's invite
 """
 import sqlite3
-from db import Database
-import schema
-from events.identity import user, invite, peer_shared, peer, invite, peer, network
+from core.db import Database
+from core import schema
+from events.identity import user, invite, peer_shared, peer, network
 from events.group import group_member
-from tests.utils import tick_helper
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_linked_device_inherits_admin_privileges(fresh_db):
@@ -77,20 +77,18 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
     assert alice_device2['user_id'] == alice_device1['user_id']
     print(f"✅ Both devices share user_id")
 
-    # Sync for link convergence
-    print("\n=== Sync for link convergence ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+    # Wait for device 2 to see admin status
+    print("\n=== Waiting for device 2 to sync admin status ===")
 
-    # Verify Alice's second device is also admin
-    print("\n=== Verifying device 2 is admin ===")
+    def device2_is_admin():
+        is_admin_device2 = invite.is_admin(
+            alice_device2['peer_shared_id'],
+            alice_device2['peer_id'],
+            db
+        )
+        assert is_admin_device2, "Device 2 should be admin (linked to admin user)"
 
-    is_admin_device2 = invite.is_admin(
-        alice_device2['peer_shared_id'],
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is admin: {is_admin_device2}")
-    assert is_admin_device2, "Device 2 should be admin (linked to admin user)"
+    t_ms = assert_eventually(device2_is_admin, db=db, start_t_ms=4000)
     print("✅ Device 2 is admin")
 
     # Verify device 2 can create invites
@@ -120,53 +118,33 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
     print(f"  user_id={bob['user_id'][:20]}...")
     db.commit()
 
-    # Sync for Bob's join
-    print("\n=== Sync for Bob's join ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
-
-    # Verify Bob successfully joined
-    print("\n=== Verifying Bob's membership ===")
+    # Wait for both Alice devices to see Bob
+    print("\n=== Waiting for both devices to see Bob ===")
 
     # Get network's all_users group from Alice's device
-    # Use network.get_all_users_group_id() which queries groups by signed_by=network_id
     all_users_group_id = network.get_all_users_group_id(
         alice_device1['network_id'],
         alice_device1['peer_id'],
         db
     )
 
-    # Check if Bob is in all_users group
-    bob_is_member = group_member.is_member(
-        bob['user_id'],
-        all_users_group_id,
-        bob['peer_id'],
-        db
-    )
-    print(f"Bob is member of all_users group: {bob_is_member}")
-    assert bob_is_member, "Bob should be member of all_users group"
-    print("✅ Bob successfully joined via device 2's invite")
+    def both_devices_see_bob():
+        device1_sees_bob = group_member.is_member(
+            bob['user_id'],
+            all_users_group_id,
+            alice_device1['peer_id'],
+            db
+        )
+        device2_sees_bob = group_member.is_member(
+            bob['user_id'],
+            all_users_group_id,
+            alice_device2['peer_id'],
+            db
+        )
+        assert device1_sees_bob, "Device 1 should see Bob as member"
+        assert device2_sees_bob, "Device 2 should see Bob as member"
 
-    # Verify both Alice devices can see Bob
-    print("\n=== Verifying both Alice devices see Bob ===")
-
-    device1_sees_bob = group_member.is_member(
-        bob['user_id'],
-        all_users_group_id,
-        alice_device1['peer_id'],
-        db
-    )
-    print(f"Device 1 sees Bob: {device1_sees_bob}")
-    assert device1_sees_bob, "Device 1 should see Bob as member"
-
-    device2_sees_bob = group_member.is_member(
-        bob['user_id'],
-        all_users_group_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 sees Bob: {device2_sees_bob}")
-    assert device2_sees_bob, "Device 2 should see Bob as member"
-
+    assert_eventually(both_devices_see_bob, db=db, start_t_ms=7000)
     print("✅ Both Alice devices see Bob as member")
 
     print(f"\n✅ All assertions passed! Admin privileges inherited correctly.")

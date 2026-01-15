@@ -2,10 +2,10 @@
 import pytest
 import sqlite3
 import logging
-from db import Database
-import schema
-import tick
-import jobs
+from core.db import Database
+from core import schema
+from core import tick
+from core import jobs
 
 # Disable all logging during tests for performance
 # Use pytest -o log_cli=true to re-enable if needed for debugging
@@ -19,8 +19,11 @@ def reset_global_state():
     This fixture runs automatically before every test function.
     """
     # Reset network configuration
-    import network_config
+    from core import network_config
     network_config.reset_network_config()
+
+    # Reset job frequency multiplier
+    jobs.reset_frequency_multiplier()
 
     # Reset tick job state (database-backed, needs a temp db)
     # Note: Each test creates its own DB, but we need to reset the
@@ -28,6 +31,9 @@ def reset_global_state():
     # This is handled per-test by calling tick.reset_state(db)
 
     yield
+
+    # Also reset after test to catch tests that modify global state
+    jobs.reset_frequency_multiplier()
 
 
 @pytest.fixture
@@ -77,7 +83,7 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     from events.identity import user as user_module
     from events.identity import invite as invite_module
     from events.identity import peer as peer_module
-    from tests.utils import tick_helper
+    from tests.utils.tick_helper import run_ticks
 
     db, alice = fresh_db_with_alice
 
@@ -92,7 +98,7 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     db.commit()
 
     # Sync to converge
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    run_ticks(db=db, start_t_ms=3000, num_rounds=200)
 
     return db, alice, bob
 

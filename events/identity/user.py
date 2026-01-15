@@ -8,10 +8,10 @@ EPHEMERAL = False
 PROJECTION_TABLE = ('users', 'user_id')
 import base64
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -293,7 +293,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     # This eliminates the "fudging" and lets dependency blocking work as designed.
 
     # Create safedb for bootstrap operations (join needs it)
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Stage 3b: Create bootstrap user invite WITHOUT placeholder IDs
@@ -531,7 +531,7 @@ def try_create_username(user_id: str, name: str, peer_id: str, peer_shared_id: s
         (username_update_id or None, was_stored_pending: bool)
     """
     from events.identity import username_update
-    from db import create_safe_db
+    from core.db import create_safe_db
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
@@ -597,7 +597,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     from events.identity import invite
 
     # Verify peer was created (check local_peers table)
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=peer_id)
     unsafedb = create_unsafe_db(db)
     peer_exists = unsafedb.query_one("SELECT 1 FROM local_peers WHERE peer_id = ?", (peer_id,))

@@ -531,6 +531,8 @@ Unlike Signal or MLS, we do not pursue Forward Secrecy for not-yet-purged events
 
 ## Removal
 
+TODO: Add note/feature that all invites known to the removed user are invalidated upon removal. Also add invite expiration for good measure.  
+
 All users must be able to remove peers on lost or stolen devices. Admins must be able to remove both peers and users.
 
 When encrypting a new event, a peer MUST choose a key whose recipient set excludes every `user_id` and `peer_shared_id` present in any accepted `remove-user` or `remove-peer` event. If no such key exists, it MUST create a fresh key event for all remaining members and use that.
@@ -919,9 +921,50 @@ While it is not useful to share `sync` events, since they are specific to a wind
 
 When making connections (see: [Connection](#connection)) peers preferentially pick other peers that they have recently received `sync` requests from, so while sync is "half-duplex" (one-way), in practice we tend to "full-duplex" (two-way) connections.
 
-## Informal Convergence Proof 
+## Negentropy Protocol
 
-Our Bloom is 512 bits (64 bytes), ~100 IDs and k = 5 hashes. Probability a single test wrongly says “present” is:
+As an alternative to bloom filters, we implement deterministic set reconciliation using hierarchical bucket hashes (inspired by [Negentropy](https://github.com/hoytech/negentropy)). This provides exact reconciliation with no false positives and clear "synced" checkpoints.
+
+### Unified Key
+
+Each event maps to a 64-bit unified key combining timestamp and hash:
+
+```
+unified_key = timestamp_hex (12 chars, 48 bits) + event_hash (4 chars, 16 bits)
+```
+
+High-order bits are timestamp (events cluster by time); low-order bits are hash (same-timestamp events spread uniformly). This handles large files: 1GB = ~2.4M slices at same timestamp distributed across 65K hash buckets.
+
+### Bucket Hierarchy
+
+Events are organized into a prefix tree by unified key:
+
+```
+root → prefix_2 → prefix_4 → ... → prefix_12 (full timestamp) → prefix_14 → prefix_16 (leaf)
+```
+
+Each level adds 2 hex characters (8 bits). Bucket hash is BLAKE2b-128 of sorted child hashes (or sorted event IDs at leaf level).
+
+### Protocol Flow
+
+1. On connection: send root hash
+2. If roots match: synced (log checkpoint)
+3. If roots differ: drill down, comparing child bucket hashes
+4. When bucket has ≤100 events: exchange event IDs directly
+5. Send missing event blobs; recipient processes through normal `recorded` → projection path
+
+Every message includes the current root hash. When root hashes match mid-protocol, a checkpoint is logged immediately—even if sub-ranges are still being reconciled.
+
+### Properties
+
+- **Deterministic**: No false positives; exact set difference computed
+- **Efficient**: O(log n) messages for small differences; O(n) for disjoint sets
+- **Resumable**: Per-connection state tracks which ranges are pending/matched/complete
+- **Observable**: UI can display sync progress as percentage of ranges matched
+
+## Informal Convergence Proof
+
+Our Bloom is 512 bits (64 bytes), ~100 IDs and k = 5 hashes. Probability a single test wrongly says "present" is:
 
 `FPR ≈ 0.03  (≈ 3 %)`
 
@@ -997,6 +1040,8 @@ The root `event-id` must be repeated outside the [Event-layer Encryption](#Event
 Updates must be done by a peer linked to the same `user-id` as the original event.
 
 # Files
+
+TODO: consider simple dependency chains for files, with decryption and projection as completed when we receive the last event in the chain.
 
 Many messages will include images, video, or too much text to fit in one event. These are held in files, which reference file parts called "slices".
 
@@ -1989,4 +2034,13 @@ See: [README.md](./README.md) for examples.
 ## TODO
 
 - complete list of local-only events for tracking last actions, keys, etc.
-- 
+- Describe how a holepunching-only role would work (advertisement, connection request, intro events sent to specific peers, and possibly a shared state of public ip's, ports, success records, and nat statuses)
+- Describe how a relay-only role would work (connection requests, virtual connections over a relay that expose like normal connections, an additional layer of crypto wrapping, and the relay unwraps transit on incoming, and wraps and sends outgoing to the corresponding peer until inactivity timeout)
+- In both cases, try to figure out how many networks and users such roles could serve
+- Describe how transparent-to-users, semi-trusted system for finding holepunch and relay helpers could work (infra pools)
+- investigate granting keys to users under the guarantee that they haven't been removed, by making keys depend on all prior removals, so that a user cannot know a key without knowing all prior removals, so that any user can provide a missing key to a member device
+- return to the pure functional branch and try to convert all the create and project functions. 
+-- consider sending a message when we don't have recipient keys yet. perhaps the intent is an event?
+-- make deletion and user removal work with functional projection and batching
+- add key request / response and "preemptive response" ... solve the case where valid pubkeys don't exist for a recipient.
+- do a placeholder TreeKEM-style implementation

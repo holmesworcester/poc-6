@@ -8,9 +8,9 @@ PROJECTION_TABLE = None
 
 from typing import Any
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -103,21 +103,38 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     event_data = crypto.parse_json(blob)
 
+    # Verify signature before trusting event data
+    # peer_removed uses 'removed_by' as the signer field (not 'signed_by')
+    signer_peer_shared_id = event_data.get('removed_by')
+    if not signer_peer_shared_id:
+        log.warning(f"peer_removed.project() missing removed_by field for {event_id[:20]}...")
+        return None
+
+    from events.identity import peer_shared
+    try:
+        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
+        if not crypto.verify_event(event_data, public_key):
+            log.warning(f"peer_removed.project() signature verification failed for {event_id[:20]}...")
+            return None
+    except ValueError:
+        log.warning(f"peer_removed.project() signer peer_shared not found for {event_id[:20]}...")
+        return None
+
     unsafe_db = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     removed_peer_shared_id = event_data.get('removed_peer_shared_id')
     removed_at = event_data.get('created_at')
-    removed_by = event_data.get('removed_by')
+    signed_by = event_data.get('removed_by')  # The remover's peer_shared_id is the signer
 
     if not removed_peer_shared_id:
         return None
 
     # Insert into removed_peers table (device-wide, no recorded_by)
     unsafe_db.execute(
-        """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, removed_by)
+        """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, signed_by)
            VALUES (?, ?, ?)""",
-        (removed_peer_shared_id, removed_at, removed_by)
+        (removed_peer_shared_id, removed_at, signed_by)
     )
 
     # DELETE ALL CONNECTIONS with this peer (enforcement mechanism)

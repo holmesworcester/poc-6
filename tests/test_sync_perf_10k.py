@@ -7,9 +7,9 @@ Alice to Bob, using the realistic user.join() API.
 import sqlite3
 import logging
 import pytest
-from db import Database
-import schema
-import tick
+from core.db import Database
+from core import schema
+from core import tick
 from events.identity import user, peer
 from events.content import message
 

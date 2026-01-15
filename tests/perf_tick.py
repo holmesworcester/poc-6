@@ -5,7 +5,7 @@ measuring execution time and detecting backpressure (when ticks take longer
 than their interval).
 
 Usage:
-    import perf_tick
+    from tests import perf_tick
 
     # Run until condition met
     final_t_ms, report = perf_tick.run_realtime(
@@ -27,7 +27,7 @@ Usage:
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
-import tick as tick_module
+from core import tick as tick_module
 
 TICK_INTERVAL_MS = 100  # Production interval
 

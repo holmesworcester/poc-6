@@ -6,8 +6,8 @@ No direct database inspection - all verification via returned data and query fun
 """
 import sqlite3
 import pytest
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user
 from events.content import channel, message
 
