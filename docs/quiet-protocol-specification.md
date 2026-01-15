@@ -529,6 +529,48 @@ Rekeying is more performant if `key` events are not re‑used across channels, a
 
 Unlike Signal or MLS, we do not pursue Forward Secrecy for not-yet-purged events, since "Slack-like" users typically share historical chats and files with newcomers, and since any device compromise would also compromise these not-yet-purged events.
 
+### Key Requests
+
+When a peer is missing a key (due to partition, late join, inactive period), they can request it. Key requests must prevent removed users from obtaining keys created after their removal.
+
+**Keys reference the removal frontier via `prior`:**
+
+```
+{
+    'type': 'group_key',
+    'prior': [latest_removal],  # Removal this key is aware of (null if none)
+    ...
+}
+```
+
+**Key request and response events:**
+
+```
+# Request (from peer missing a key)
+{
+    'type': 'key_request',
+    'key_id': requested_key_id,
+    'signed_by': requester_peer_id,
+}
+
+# Response (sealed to requester's prekey)
+{
+    'type': 'key_response',
+    'key_id': key_id,
+    'for_request_id': request_id,
+    'sealed_key': '...',
+    'signed_by': responder_peer_id,
+}
+```
+
+**Validation rule:** When Bob requests key K from Alice:
+1. If Bob is not removed → share K
+2. If Bob is removed and K has no `prior` → share K (key predates removal system)
+3. If Bob is removed and `is_dag_ancestor(bob_removal, K.prior[0])` → don't share (K was created after Bob's removal was known)
+4. Otherwise → share K
+
+This uses the same DAG ancestry check as admin action validation.
+
 ## Removal
 
 All users must be able to remove peers on lost or stolen devices. Admins must be able to remove both peers and users.
