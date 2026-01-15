@@ -557,35 +557,40 @@ We [blocking and unblocking](#blocking-and-unblocking) `remove-user` events that
 
 ### Admin Action Chains
 
-Admin-gated events (invite, admin, group_member, channel) form per-peer chains via `prior_admin_action`:
+Admin-gated events (invite, admin, group_member, channel, user_removed) form a DAG via `prior` field:
 
 ```
 {
     'type': 'invite',
     'signed_by': peer_shared_id,
-    'prior_admin_action': previous_action_id,  # None for first action
+    'prior': ['own_previous'],              # Own chain only
+    'prior': ['own_previous', 'merge_ref'], # Own chain + merge
     ...
 }
 ```
 
-When removing a user, include `admin_action_heads` mapping each of the removed user's `peer_shared_id` to their latest admin action:
+Rules:
+- `prior[0]` = previous action from same device (null for first action)
+- `prior[1]` = optional merge reference to another action or removal epoch
+- Max 2 entries; to merge N chains, create N-1 intermediate events
+- Device chain: follow `prior[0]` links
+- DAG ancestry: follow all `prior` entries
+
+Removal uses the same structure:
 
 ```
 {
     'type': 'user_removed',
     'removed_user_id': user_id,
-    'admin_action_heads': {
-        peer_shared_id_1: last_action_id_1,
-        peer_shared_id_2: last_action_id_2,
-    },
+    'prior': ['own_previous', 'frontier'],  # frontier covers known actions
 }
 ```
 
-An admin action from a removed user is valid **iff** it is an ancestor of the head for that peer. Ancestry is checked by walking `prior_admin_action` links from head to action.
+An admin action from a removed user is valid **iff** it is an ancestor of the removal (reachable by walking `prior` links). Actions not reachable are invalidated.
 
-**False head defense:** When projecting removal, use `MAX(claimed_head, known_head)` for each peer - if we've already projected actions beyond the claimed head, use our knowledge. This prevents a malicious remover from invalidating legitimately-seen actions.
+**False head defense:** When projecting removal, if we've seen actions beyond the frontier, use our knowledge.
 
-**Unknown devices:** Devices NOT in `admin_action_heads` have ALL their actions invalidated. The remover's knowledge is authoritative; security > availability.
+**Removal epochs:** Keys and other events can depend on a removal's ID as a single dependency, proving they were created after that removal.
 
 ## Post-Quantum
 
