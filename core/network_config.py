@@ -280,16 +280,17 @@ def consume_bandwidth(bytes_count: int, t_ms: int) -> bool:
 def reset_network_config() -> None:
     """Reset to fast configuration (for testing).
 
-    Uses 0 latency and unlimited bandwidth for fast test execution.
+    Uses 1ms latency and unlimited bandwidth for fast test execution.
     The class defaults (20ms latency, 1Mbps bandwidth) are for realistic CLI demo.
 
-    Note: Tests using latency_ms=0 should drain at t_ms+1 to avoid SimPy edge
-    case where events scheduled at current time may not be processed correctly.
+    Note: We use latency_ms=1 instead of 0 because SimPy has an edge case where
+    events scheduled at the current time may not be processed correctly.
     """
     global _config, _simulator
     # Use fast settings for tests (override class defaults)
+    # latency_ms=1 to avoid SimPy edge case with 0 latency
     _config = NetworkConfig(
-        latency_ms=0,
+        latency_ms=1,
         jitter_ms=0,
         bandwidth_bytes_per_sec=None,  # Unlimited
     )

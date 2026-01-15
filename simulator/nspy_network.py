@@ -33,7 +33,9 @@ class NetworkConfig:
     All times are in milliseconds.
     """
     # Latency settings
-    latency_ms: float = 0.0
+    # Note: Use latency_ms >= 1, not 0. SimPy has an edge case where events
+    # scheduled at the current time may not be processed correctly.
+    latency_ms: float = 1.0
     jitter_ms: float = 0.0  # Standard deviation of gaussian jitter
 
     # Packet loss settings
@@ -470,7 +472,7 @@ class NetworkSimulator:
 # ============================================================================
 
 def create_simulator(
-    latency_ms: float = 0.0,
+    latency_ms: float = 1.0,
     jitter_ms: float = 0.0,
     packet_loss_rate: float = 0.0,
     bandwidth_kbps: int = None,

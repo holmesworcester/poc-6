@@ -47,18 +47,22 @@ def sim_with_peers(sim):
 
 
 class TestBasicDelivery:
-    """Test basic packet send and receive."""
+    """Test basic packet send and receive.
+
+    Note: Default latency is 1ms (not 0) to avoid SimPy edge case where
+    events scheduled at the current time may not be processed.
+    """
 
     def test_send_and_drain_immediate(self, sim_with_peers):
-        """Packets with zero latency deliver immediately."""
+        """Packets with minimal latency (1ms) deliver quickly."""
         sim = sim_with_peers
 
         # Send packet at t=1000
         result = sim.send("alice", "bob", b"hello", t_ms=1000)
         assert result is True
 
-        # Advance time and drain
-        sim.advance_to(1000)
+        # Advance time past 1ms latency and drain
+        sim.advance_to(1001)
         packets = sim.drain()
 
         assert len(packets) == 1
@@ -71,7 +75,7 @@ class TestBasicDelivery:
         for i in range(10):
             sim.send("alice", "bob", f"packet_{i}".encode(), t_ms=1000)
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
 
         assert len(packets) == 10
@@ -85,7 +89,7 @@ class TestBasicDelivery:
         for i in range(10):
             sim.send("alice", "bob", f"packet_{i}".encode(), t_ms=1000)
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
 
         # Drain only 3
         packets = sim.drain(max_count=3)
@@ -100,7 +104,7 @@ class TestBasicDelivery:
         sim = sim_with_peers
 
         sim.send("alice", "bob", b"test", t_ms=1000)
-        sim.advance_to(1000)
+        sim.advance_to(1001)
 
         packets = sim.drain()
         assert len(packets) == 1
@@ -199,7 +203,10 @@ class TestLatency:
 
 
 class TestPacketLoss:
-    """Test packet loss simulation."""
+    """Test packet loss simulation.
+
+    Note: Default latency is 1ms, so we drain at t+1.
+    """
 
     def test_zero_loss_delivers_all(self, sim):
         """Zero loss rate delivers all packets."""
@@ -210,7 +217,7 @@ class TestPacketLoss:
         for i in range(100):
             sim.send("alice", "bob", f"pkt_{i}".encode(), t_ms=1000)
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
         assert len(packets) == 100
 
@@ -224,7 +231,7 @@ class TestPacketLoss:
         for i in range(200):
             sim.send("alice", "bob", f"pkt_{i}".encode(), t_ms=1000)
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
 
         # With 50% loss, expect roughly 100 packets (allow 70-130)
@@ -239,7 +246,7 @@ class TestPacketLoss:
         for i in range(1000):
             sim.send("alice", "bob", f"pkt_{i}".encode(), t_ms=1000)
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
 
         # With 95% loss, expect ~50 packets (allow 10-100)
@@ -263,7 +270,7 @@ class TestPacketLoss:
         r3 = sim.send("alice", "bob", b"x" * 101, t_ms=1000)
         assert r3 is False
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
         assert len(packets) == 2
 
@@ -304,7 +311,7 @@ class TestBurstLoss:
         for i in range(100):
             sim.send("alice", "bob", f"pkt_{i}".encode(), t_ms=1000)
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
 
         # With 10% burst probability and length 2, expect ~80% delivery
@@ -312,7 +319,10 @@ class TestBurstLoss:
 
 
 class TestBandwidth:
-    """Test bandwidth limiting."""
+    """Test bandwidth limiting.
+
+    Note: Default latency is 1ms, so we drain at t+1.
+    """
 
     def test_unlimited_bandwidth(self, sim):
         """Unlimited bandwidth doesn't throttle."""
@@ -325,7 +335,7 @@ class TestBandwidth:
             r = sim.send("alice", "bob", b"x" * 1000, t_ms=1000)
             assert r is True
 
-        sim.advance_to(1000)
+        sim.advance_to(1001)
         packets = sim.drain()
         assert len(packets) == 100
 

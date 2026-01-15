@@ -27,17 +27,21 @@ def reset_network_config():
     network_config.reset_network_config()
 
 
-def test_incoming_with_zero_latency(db):
-    """Test that packets with zero latency deliver immediately."""
-    # Setup: default config (zero latency, zero loss)
+def test_incoming_with_minimal_latency(db):
+    """Test that packets with minimal latency (1ms) deliver quickly.
+
+    Note: We use 1ms instead of 0ms because SimPy has an edge case where
+    events scheduled at the current time may not be processed correctly.
+    """
+    # Setup: default config (1ms latency, zero loss)
     unsafedb = create_unsafe_db(db)
 
     # Add packet at t=1000
     queues.incoming.add(b"test_packet", t_ms=1000, unsafedb=unsafedb)
     db.commit()
 
-    # Should be deliverable immediately at t=1000 (or any time >= 1000)
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    # Should be deliverable at t=1001 (after 1ms latency)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
     assert received[0] == b"test_packet"
 
@@ -198,12 +202,12 @@ def test_drain_respects_batch_size(db):
         queues.incoming.add(f"packet_{i}".encode(), t_ms=1000, unsafedb=unsafedb)
     db.commit()
 
-    # Request only 2 packets
-    received = queues.incoming.drain(batch_size=2, current_time_ms=1000, unsafedb=unsafedb)
+    # Request only 2 packets (drain at t+1 for 1ms latency)
+    received = queues.incoming.drain(batch_size=2, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 2
 
     # Request 5 more packets (should get remaining 3)
-    received = queues.incoming.drain(batch_size=5, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(batch_size=5, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 3
 
 
@@ -216,19 +220,19 @@ def test_drain_removes_delivered_packets(db):
         queues.incoming.add(f"packet_{i}".encode(), t_ms=1000, unsafedb=unsafedb)
     db.commit()
 
-    # Drain all 3
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    # Drain all 3 (at t+1 for 1ms latency)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 3
 
     # Try to drain again - should get nothing (packets were removed)
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 0
 
 
 def test_high_packet_loss(db):
     """Test with very high packet loss rate."""
-    # Setup: 99% loss
-    network_config.set_network_config(network_config.NetworkConfig(packet_loss_rate=0.99))
+    # Setup: 99% loss, 1ms latency (not 0 to avoid SimPy edge case)
+    network_config.set_network_config(network_config.NetworkConfig(packet_loss_rate=0.99, latency_ms=1))
     unsafedb = create_unsafe_db(db)
 
     # Send 1000 packets - expect only ~10 to survive
@@ -236,7 +240,7 @@ def test_high_packet_loss(db):
         queues.incoming.add(f"packet_{i}".encode(), t_ms=1000, unsafedb=unsafedb)
     db.commit()
 
-    received = queues.incoming.drain(1000, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(1000, current_time_ms=1001, unsafedb=unsafedb)
     # Allow wide variance but should be much less than 1000
     assert len(received) < 100, f"Expected ~10 packets with 99% loss, got {len(received)}"
 
@@ -245,8 +249,8 @@ def test_network_config_global_state(db):
     """Test that network config is properly global and can be changed."""
     unsafedb = create_unsafe_db(db)
 
-    # Start with default (0ms latency)
-    assert network_config.get_network_config().latency_ms == 0
+    # Start with default (1ms latency - not 0 to avoid SimPy edge case)
+    assert network_config.get_network_config().latency_ms == 1
 
     queues.incoming.add(b"packet_1", t_ms=1000, unsafedb=unsafedb)
     db.commit()
@@ -336,7 +340,7 @@ def test_network_partition_blocks_source(db):
     assert result is True
 
     db.commit()
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
     assert received[0] == b"from_bob"
 
@@ -357,7 +361,7 @@ def test_network_partition_blocks_destination(db):
     assert result is True
 
     db.commit()
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
     assert received[0] == b"to_dave"
 
@@ -383,7 +387,7 @@ def test_network_partition_can_be_restored(db):
     assert result is True
 
     db.commit()
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
     assert received[0] == b"restored"
 
@@ -459,7 +463,7 @@ def test_add_returns_true_on_success(db):
     assert result is True
 
     db.commit()
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
 
 
@@ -608,7 +612,7 @@ def test_bandwidth_unlimited_by_default(db):
         assert result is True, f"Packet {i} should succeed with unlimited bandwidth"
 
     db.commit()
-    received = queues.incoming.drain(100, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(100, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 100
 
 

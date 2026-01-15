@@ -1204,16 +1204,18 @@ class TestHistoricalKeyAccess:
         final_user = user.join(peer_id=final_peer_id, invite_link=final_invite_link, name='FinalUser', t_ms=t_ms, db=db)
         t_ms += 100
         db.commit()
-        run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
 
         # CRITICAL: Final user must have ALL historical keys
-        safedb = create_safe_db(db, recorded_by=final_user['peer_id'])
-        final_user_keys = safedb.query("SELECT key_id FROM group_keys WHERE recorded_by = ?", (final_user['peer_id'],))
+        # Wait for sync to complete
+        def final_user_has_all_keys():
+            safedb = create_safe_db(db, recorded_by=final_user['peer_id'])
+            final_user_keys = safedb.query("SELECT key_id FROM group_keys WHERE recorded_by = ?", (final_user['peer_id'],))
+            # Final user should have at least as many keys as Alice
+            # (they need all historical keys to decrypt historical content)
+            assert len(final_user_keys) >= len(alice_keys), \
+                f"Final user should have all {len(alice_keys)} historical keys, but only has {len(final_user_keys)}"
 
-        # Final user should have at least as many keys as Alice
-        # (they need all historical keys to decrypt historical content)
-        assert len(final_user_keys) >= len(alice_keys), \
-            f"Final user should have all {len(alice_keys)} historical keys, but only has {len(final_user_keys)}"
+        assert_eventually(final_user_has_all_keys, db=db, start_t_ms=t_ms)
 
     def test_new_joiner_key_count_at_least_matches_inviter(self, fresh_db):
         """New joiner should receive at least as many keys as inviter has.
