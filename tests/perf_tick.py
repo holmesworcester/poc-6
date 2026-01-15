@@ -5,7 +5,7 @@ measuring execution time and detecting backpressure (when ticks take longer
 than their interval).
 
 Usage:
-    import perf_tick
+    from tests import perf_tick
 
     # Run until condition met
     final_t_ms, report = perf_tick.run_realtime(

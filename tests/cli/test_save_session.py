@@ -19,7 +19,8 @@ SAVED_SESSIONS_DIR = os.path.join(os.path.dirname(CLI_PATH), 'tests', 'saved-ses
 
 def run_cli(commands: str, cwd: str = None) -> subprocess.CompletedProcess:
     """Run CLI with given commands and return result."""
-    python_exe = "/home/hwilson/poc-6/venv/bin/python"
+    import sys
+    python_exe = sys.executable
     return subprocess.run(
         [python_exe, CLI_PATH],
         input=commands.strip(),

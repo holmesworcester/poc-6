@@ -932,7 +932,7 @@ def cmd_sync_realtime(session: CLISession, args: List[str]):
         sync-realtime --ticks <n>       # Run N ticks at wall-clock time
         sync-realtime --until-file <n>  # Sync until file N is complete
     """
-    import perf_tick
+    from tests import perf_tick
 
     # Parse args
     num_ticks = None

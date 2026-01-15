@@ -15,7 +15,8 @@ CLI_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'cli.py')
 
 def run_cli(commands: str) -> subprocess.CompletedProcess:
     """Run CLI with given commands and return result."""
-    python_exe = "/home/hwilson/poc-6/venv/bin/python"
+    import sys
+    python_exe = sys.executable
     return subprocess.run(
         [python_exe, CLI_PATH],
         input=commands.strip(),

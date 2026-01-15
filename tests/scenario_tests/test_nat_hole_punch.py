@@ -110,15 +110,15 @@ def test_nat_hole_punch_simple(fresh_db):
     print("\n=== Phase 5: Verify address observations ===")
     # The address event was created and stored, but needs proper sync to reach Bob/Charlie
     # For now, we verify it exists in the store
-    unsafedb_local = __import__('db').create_unsafe_db(db)
-    address_blob = __import__('store').get(address_id, unsafedb_local)
+    unsafedb_local = __import__('core.db', fromlist=['create_unsafe_db']).create_unsafe_db(db)
+    address_blob = __import__('core.store', fromlist=['get']).get(address_id, unsafedb_local)
     assert address_blob is not None, "Address event should be stored"
     print(f"✓ Address event stored for Bob: {address_id[:20]}...")
 
     # Phase 6: Verify intro event was created
     print("\n=== Phase 6: Verify intro event creation ===")
     # The intro event was created and should be stored
-    intro_blob = __import__('store').get(intro_id, unsafedb_local)
+    intro_blob = __import__('core.store', fromlist=['get']).get(intro_id, unsafedb_local)
     assert intro_blob is not None, "Intro event should be stored"
     print(f"✓ Intro event created and stored: {intro_id[:20]}...")
 
