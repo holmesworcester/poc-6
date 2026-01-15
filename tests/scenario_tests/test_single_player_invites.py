@@ -8,8 +8,8 @@ Alice creates her account and then creates:
 This tests the invite creation flow without requiring multi-party sync.
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 
 

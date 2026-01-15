@@ -10,16 +10,16 @@ Tests:
 """
 import sqlite3
 import pytest
-from db import Database, create_safe_db, create_unsafe_db
-import schema
+from core.db import Database, create_safe_db, create_unsafe_db
+from core import schema
 from events.identity import user, peer, invite
 from events.content import message, message_deletion, message_rekey
 from events.group import group_key, group_prekey
 from tests.utils import tick_helper
-import tick
-import jobs
-import crypto
-import store
+from core import tick
+from core import jobs
+from core import crypto
+from core import store
 
 
 def test_keys_display():

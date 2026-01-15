@@ -2,8 +2,8 @@
 from typing import Any
 import json
 import logging
-from db import UnsafeDB, SafeDB
-import network_config
+from .db import UnsafeDB, SafeDB
+from . import network_config
 
 log = logging.getLogger(__name__)
 

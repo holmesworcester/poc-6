@@ -17,8 +17,8 @@ The bug: Bobby's peer doesn't have the all_users group projected yet,
 because the group event hasn't synced/projected from Bobby's perspective.
 """
 import pytest
-from db import Database, create_safe_db
-import schema
+from core.db import Database, create_safe_db
+from core import schema
 from events.identity import user, invite, peer, user_removed, network
 from events.content import message
 from events.group import group_member

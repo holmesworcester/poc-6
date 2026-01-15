@@ -7,16 +7,18 @@ import os
 def create_all(db: Any) -> None:
     """Create all database tables by loading SQL files.
 
-    Loads all .sql files from the root directory and events/ directory (including subdirectories).
+    Loads all .sql files from core/ directory and events/ directory (including subdirectories).
     """
-    # Get the directory of this file
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Get the directory of this file (core/)
+    core_dir = os.path.dirname(os.path.abspath(__file__))
+    # Get the project root (parent of core/)
+    project_root = os.path.dirname(core_dir)
 
-    # Load all .sql files from root and events/ directory (including subdirs)
+    # Load all .sql files from core/ and events/ directories
     sql_files = []
-    sql_files.extend(glob.glob(os.path.join(base_dir, '*.sql')))
-    sql_files.extend(glob.glob(os.path.join(base_dir, 'events', '*.sql')))
-    sql_files.extend(glob.glob(os.path.join(base_dir, 'events', '**', '*.sql'), recursive=True))
+    sql_files.extend(glob.glob(os.path.join(core_dir, '*.sql')))
+    sql_files.extend(glob.glob(os.path.join(project_root, 'events', '*.sql')))
+    sql_files.extend(glob.glob(os.path.join(project_root, 'events', '**', '*.sql'), recursive=True))
 
     # Sort for deterministic order
     sql_files.sort()

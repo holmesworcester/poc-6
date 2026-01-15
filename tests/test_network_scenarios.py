@@ -10,11 +10,11 @@ Tests protocol behavior under realistic network conditions:
 import sqlite3
 import random
 import pytest
-from db import Database
-import schema
-from db import create_unsafe_db
-import queues
-import network_config
+from core.db import Database
+from core import schema
+from core.db import create_unsafe_db
+from core import queues
+from core import network_config
 
 
 @pytest.fixture

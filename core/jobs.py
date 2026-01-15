@@ -7,7 +7,7 @@ executes those that say yes.
 import logging
 from typing import Any, Dict
 from abc import ABC, abstractmethod
-from db import create_unsafe_db
+from .db import create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ class FileSyncJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import sync
-        from db import create_unsafe_db
+        from .db import create_unsafe_db
         unsafedb = create_unsafe_db(db)
         local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
         for peer_row in local_peers:
@@ -131,7 +131,7 @@ class PurgeExpiredEventsJob(Job):
         super().__init__('purge_expired_events', every_ms=600_000)
 
     def run(self, t_ms: int, db: Any) -> dict:
-        import purge_expired
+        from . import purge_expired
         return purge_expired.run_purge_expired_for_all_peers(t_ms, db)
 
 
@@ -181,7 +181,7 @@ class GroupPrekeyReplenishmentJob(Job):
 
         # Additional check: only run if prekeys actually low
         from events.group.group_prekey import MIN_GROUP_PREKEYS
-        from db import create_safe_db
+        from .db import create_safe_db
         unsafedb = create_unsafe_db(db)
 
         peers = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -252,7 +252,7 @@ class IntroProcessJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import intro, connection
-        from db import create_safe_db
+        from .db import create_safe_db
         import logging
 
         log = logging.getLogger(__name__)

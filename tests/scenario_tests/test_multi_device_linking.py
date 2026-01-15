@@ -13,8 +13,8 @@ Tests:
 - Network sees both devices as belonging to same user
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.content import message
 from tests.utils import tick_helper

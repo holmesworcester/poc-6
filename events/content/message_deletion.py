@@ -15,9 +15,9 @@ PROJECTION_TABLE = ('message_deletions', 'deletion_id')
 
 from typing import Any
 import logging
-import crypto
-import store
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 

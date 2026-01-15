@@ -12,8 +12,8 @@ Tests:
 - Messages sync correctly in both directions
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
 from events.content import message

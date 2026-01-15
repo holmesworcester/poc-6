@@ -15,8 +15,8 @@ import sqlite3
 import base64
 from PIL import Image
 import io
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user
 from events.content import message, message_attachment
 

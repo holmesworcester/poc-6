@@ -18,9 +18,9 @@ PROJECTION_TABLE = None
 from typing import Any, Optional
 import json
 import logging
-import crypto
-import store
-from db import create_safe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def project(address_id: str, recorded_by: str, recorded_at: int, db: Any) -> Opt
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Get blob from store
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     unsafedb = create_unsafe_db(db)
     blob = store.get(address_id, unsafedb)
     if not blob:

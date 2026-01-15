@@ -5,7 +5,7 @@ import random
 import itertools
 import time
 import os
-import crypto
+from core import crypto
 
 
 def assert_reprojection(db: Any) -> None:
@@ -63,7 +63,7 @@ def assert_reprojection(db: Any) -> None:
             print(f"This is a known architectural issue where sync protocol state affects projection.")
             if blocked:
                 print(f"\nALL {len(blocked)} blocked events:")
-                import crypto as crypto_mod
+                from core import crypto as crypto_mod
                 for i, b in enumerate(blocked):
                     # Try to get the event type
                     event_type = "unknown"
@@ -389,7 +389,7 @@ def _clear_projection_tables(db: Any) -> None:
 
 def _recreate_projection_tables(db: Any) -> None:
     """Drop and recreate all projection tables using schema.create_all()."""
-    import schema
+    from core import schema
     import sqlite3
 
     # Clear incoming_blobs (sync protocol messages that reference ephemeral state)
@@ -430,7 +430,7 @@ def _recreate_projection_tables(db: Any) -> None:
 def _replay_events(event_ids: list[str], db: Any) -> None:
     """Replay recorded events in order. Event-driven unblocking happens automatically."""
     from events.network import recorded
-    import crypto
+    from core import crypto
 
     # Project all events - unblocking happens automatically via notify_event_valid()
     for i, event_id in enumerate(event_ids):

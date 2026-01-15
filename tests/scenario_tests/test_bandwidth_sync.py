@@ -7,13 +7,13 @@ Tests verify that:
 3. Unlimited bandwidth (default) doesn't throttle
 """
 import pytest
-from db import Database
-import schema
-import network_config
+from core.db import Database
+from core import schema
+from core import network_config
 from events.identity import user, invite, peer
 from events.content import message
 from tests.utils import tick_helper
-from db import create_safe_db
+from core.db import create_safe_db
 
 
 @pytest.fixture(autouse=True)

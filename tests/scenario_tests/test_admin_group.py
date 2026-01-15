@@ -22,15 +22,15 @@ import pytest
 import json
 import base64
 import pytest
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, network, peer, peer_shared, admin
 from events.group import group_member
 from events.network import transit_prekey
 from tests.utils import tick_helper
-import tick
-import store
-import crypto
+from core import tick
+from core import store
+from core import crypto
 from tests.utils import tick_helper
 
 
@@ -285,7 +285,7 @@ def test_admin_group_workflow(fresh_db):
     print("\n=== Crafting rogue invite (bypassing normal validation) ===")
 
     # Get Charlie's info
-    from db import create_safe_db, create_unsafe_db
+    from core.db import create_safe_db, create_unsafe_db
     charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
     unsafedb = create_unsafe_db(db)
 

@@ -8,12 +8,12 @@ PROJECTION_TABLE = ('group_members', 'user_id')
 
 from typing import Any
 import logging
-import crypto
-import store
+from core import crypto
+from core import store
 from events.group import group_key
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
-import queues
+from core.db import create_safe_db, create_unsafe_db
+from core import queues
 
 log = logging.getLogger(__name__)
 

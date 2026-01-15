@@ -9,8 +9,8 @@ Based on the three-player messaging pattern, these tests verify that:
 - Message deletion cascade-deletes all reactions
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_deletion, message_reaction
 from tests.utils import tick_helper

@@ -4,7 +4,7 @@ Provides consistent defaults for timing across all tests to match production job
 plus utilities to detect when sync has converged rather than using hard-coded round counts.
 """
 from typing import Any
-import tick as tick_module
+from core import tick as tick_module
 
 
 # Production job frequencies (from jobs.py):

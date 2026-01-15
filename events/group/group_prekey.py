@@ -9,9 +9,9 @@ PROJECTION_TABLE = None
 from typing import Any
 import json
 import logging
-import crypto
-import store
-from db import create_safe_db
+from core import crypto
+from core import store
+from core.db import create_safe_db
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +230,7 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
     """
     log.info(f"group_prekey.replenish_for_all_peers() t_ms={t_ms}")
 
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     unsafedb = create_unsafe_db(db)
 
     stats = {

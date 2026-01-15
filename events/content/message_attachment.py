@@ -16,12 +16,12 @@ import base64
 import io
 import logging
 from PIL import Image
-import crypto
-import store
+from core import crypto
+from core import store
 from events.group import group
 from events.identity import peer
 from events.content import file_slice
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 

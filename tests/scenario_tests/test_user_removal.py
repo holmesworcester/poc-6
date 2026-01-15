@@ -12,14 +12,14 @@ Tests the removal of users and peers from a network:
 """
 import pytest
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer, peer_shared, network
 from events.identity import user_removed, peer_removed
 from events.group import group, group_member
 from tests.utils import tick_helper
 from events.content import message
-import store
+from core import store
 from tests.utils import assert_convergence, assert_reprojection, assert_idempotency
 
 

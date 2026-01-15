@@ -1,13 +1,13 @@
 """Debug script to trace connection flow."""
 import sqlite3
 import logging
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.network import connection
-import queues
-import crypto
-import tick
+from core import queues
+from core import crypto
+from core import tick
 
 # Suppress most logging
 logging.getLogger().setLevel(logging.ERROR)

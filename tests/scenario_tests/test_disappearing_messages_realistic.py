@@ -13,12 +13,12 @@ The disappearing messages feature:
 6. Multi-peer convergence: all peers see same expiration times
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer as peer_module
 from events.content import channel, message, channel_update
-import purge_expired
-import tick
+from core import purge_expired
+from core import tick
 
 
 def test_alice_creates_disappearing_channel_and_sends_messages(fresh_db):

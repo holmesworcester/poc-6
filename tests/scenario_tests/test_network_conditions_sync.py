@@ -8,9 +8,9 @@ These tests verify that the sync protocol converges correctly even with:
 - Network partitions and healing
 """
 import pytest
-from db import Database
-import schema
-import network_config
+from core.db import Database
+from core import schema
+from core import network_config
 from events.identity import user, invite, peer
 from events.content import message, channel
 from tests.utils import tick_helper

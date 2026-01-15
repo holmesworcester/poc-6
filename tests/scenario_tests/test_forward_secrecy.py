@@ -8,14 +8,14 @@ Tests that:
 5. TTL-based expiry: prekeys expire after TTL
 6. purge_expired event deletes expired events
 """
-from db import create_safe_db, create_unsafe_db
-import crypto
+from core.db import create_safe_db, create_unsafe_db
+from core import crypto
 from events.identity import user, invite, peer
 from events.content import message, message_deletion
 from events.network import transit_prekey
 from events.group import group_prekey
 from tests.utils import tick_helper, assertions
-import purge_expired
+from core import purge_expired
 
 
 def test_delete_message_marks_key_for_purging(fresh_db_with_alice):
@@ -89,7 +89,7 @@ def test_delete_and_rekey_message(fresh_db_with_alice):
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
     unsafedb = create_unsafe_db(db)
 
-    import crypto
+    from core import crypto
     msg2_blob = unsafedb.query_one(
         "SELECT blob FROM store WHERE id = ?",
         (msg2_id,)

@@ -21,8 +21,8 @@ Note: Messages sent in tick N are delivered in tick N+1 or later based on
 network latency configuration.
 """
 from typing import Any
-from db import create_unsafe_db
-import jobs
+from .db import create_unsafe_db
+from . import jobs
 
 
 def reset_state(db: Any) -> None:

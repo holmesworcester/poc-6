@@ -31,9 +31,9 @@ import logging
 from events import registry
 from events.group import group
 from events.content import message
-import store
-import crypto
-from db import create_safe_db, create_unsafe_db
+from core import store
+from core import crypto
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -239,7 +239,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     """
     from events.identity import peer
     from events.content import channel
-    import queues
+    from core import queues
     import json
     from tests.utils import timeline
 
@@ -535,7 +535,7 @@ def _cleanup_successfully_projected_events(unblocked_ids: list[str], recorded_by
     if not unblocked_ids:
         return 0
 
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=recorded_by)
     cleaned_count = 0
 

@@ -7,10 +7,10 @@ Tests that create_bootstrap_user_invite() works correctly:
 3. The signed_by field correctly identifies the network
 """
 import sqlite3
-from db import Database
-import schema
-import crypto
-import store
+from core.db import Database
+from core import schema
+from core import crypto
+from core import store
 from events.identity import user, network
 
 

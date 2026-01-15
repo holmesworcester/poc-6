@@ -7,8 +7,8 @@ and should still be queryable and usable.
 """
 import sqlite3
 import pytest
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user
 from events.content import message
 

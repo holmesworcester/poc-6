@@ -23,7 +23,7 @@ def get_next_global_count(peer_id: str, db: Any) -> int:
     Returns:
         int: Next global count value for this peer
     """
-    from db import create_unsafe_db
+    from .db import create_unsafe_db
 
     unsafedb = create_unsafe_db(db)
 
@@ -57,7 +57,7 @@ def update_highest_count_seen(peer_id: str, gc: int, db: Any) -> None:
         gc: Global count value from the received event
         db: Database connection
     """
-    from db import create_unsafe_db
+    from .db import create_unsafe_db
 
     unsafedb = create_unsafe_db(db)
 
@@ -121,7 +121,7 @@ def get_winners(
                              {'recorded_by': peer_id, 'message_id': [msg_id]}, db,
                              id_field='update_id')
     """
-    from db import create_unsafe_db, create_safe_db, SUBJECTIVE_TABLES
+    from .db import create_unsafe_db, create_safe_db, SUBJECTIVE_TABLES
 
     # Use SafeDB for subjective tables, UnsafeDB for device tables
     is_subjective = table in SUBJECTIVE_TABLES

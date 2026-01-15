@@ -4,8 +4,8 @@ Tests the unified time+hash prefix-based bucketing system.
 """
 import pytest
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.network import negentropy
 
 

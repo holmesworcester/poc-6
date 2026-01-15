@@ -32,10 +32,10 @@ PROJECTION_TABLE = 'connections'
 
 import logging
 import json
-import crypto
-import store
+from core import crypto
+from core import store
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 
@@ -337,7 +337,7 @@ def _send_ack_for_request(
     db: Any
 ) -> None:
     """Send connection ack in response to a request."""
-    from db import create_safe_db
+    from core.db import create_safe_db
 
     safedb = create_safe_db(db, recorded_by=local_peer_id)
 
@@ -389,7 +389,7 @@ def _send_ack_for_request(
         }
         wrapped = crypto.wrap(ack_blob, to_key, db)
 
-        import queues
+        from core import queues
         # Pass peer IDs for NAT enforcement
         queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=local_peer_id, to_peer=remote_peer_shared_id)
 
@@ -431,7 +431,7 @@ def _send_ack_for_request(
 
     wrapped = crypto.wrap(ack_blob, to_key, db)
 
-    import queues
+    from core import queues
     # Pass peer IDs for NAT enforcement
     queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=local_peer_id, to_peer=remote_peer_shared_id)
 
@@ -593,7 +593,7 @@ def _send_request(
     request_blob = store.get(connection_id, unsafedb)
     wrapped = crypto.wrap(request_blob, to_key, db)
 
-    import queues
+    from core import queues
     # Pass peer IDs for NAT enforcement
     queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=from_peer_id, to_peer=to_peer_shared_id)
 
@@ -1069,7 +1069,7 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     wrapped = crypto.wrap(blob, to_key, db)
 
     unsafedb = create_unsafe_db(db)
-    import queues
+    from core import queues
     # Pass peer IDs for NAT enforcement
     queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=recorded_by, to_peer=to_peer_shared_id)
 

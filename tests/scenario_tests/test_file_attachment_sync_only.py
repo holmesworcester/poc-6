@@ -11,11 +11,11 @@ Verifies that:
 This test isolates the sync phase to identify which events are/aren't being synced.
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
-import tick
+from core import tick
 
 
 def test_file_attachment_sync_only(fresh_db):

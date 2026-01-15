@@ -1,11 +1,11 @@
 """Unit tests for sync bloom filter functions."""
 import sqlite3
 import pytest
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.network import sync
 from events.identity import user, invite, peer
-import crypto
+from core import crypto
 
 
 def test_bloom_filter_basic():

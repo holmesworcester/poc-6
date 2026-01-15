@@ -28,11 +28,11 @@ PROJECTION_TABLE = None
 from typing import Any, Iterator
 from events.network import recorded, transit_prekey, sync_window
 from events.identity import peer
-from db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db, create_unsafe_db
 from events.network import connection as conn_module
-import queues
-import crypto
-import store
+from core import queues
+from core import crypto
+from core import store
 import hashlib
 import struct
 import logging
@@ -1179,7 +1179,7 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         log.debug(f"[SYNC_RESPONSE] wrapped blob hint={actual_hint_in_blob} ({len(actual_hint_in_blob)} chars), matches_expected={actual_hint_in_blob == hint_for_wrapping}")
 
         # Count blobs in queue before adding
-        from db import create_unsafe_db
+        from core.db import create_unsafe_db
         unsafedb = create_unsafe_db(db)
         before_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
         queues.incoming.add(wrapped_blob, t_ms, db)

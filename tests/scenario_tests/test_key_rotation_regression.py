@@ -11,12 +11,12 @@ This test verifies:
 2. No extra keys are created during projection by non-removing peers
 """
 import pytest
-from db import Database, create_safe_db
-import schema
+from core.db import Database, create_safe_db
+from core import schema
 from events.identity import user, invite, peer, user_removed
 from events.group import group_key
 from tests.utils import tick_helper
-import tick
+from core import tick
 
 
 def test_key_rotation_only_by_remover(fresh_db):

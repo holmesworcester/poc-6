@@ -27,7 +27,7 @@ Usage:
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
-import tick as tick_module
+from core import tick as tick_module
 
 TICK_INTERVAL_MS = 100  # Production interval
 

@@ -8,9 +8,9 @@ Tests verify that:
 4. Direct peers (not behind NAT) work normally
 """
 import pytest
-from db import Database
-import schema
-import network_config
+from core.db import Database
+from core import schema
+from core import network_config
 from events.identity import user, invite, peer
 from events.content import message, channel
 from tests.utils import tick_helper

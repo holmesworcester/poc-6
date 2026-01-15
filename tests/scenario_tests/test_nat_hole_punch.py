@@ -11,13 +11,13 @@ Goal: Verify that address events capture observations and intro events
       facilitate hole punching between peers behind NAT.
 """
 import sqlite3
-from db import Database, create_safe_db
-import schema
+from core.db import Database, create_safe_db
+from core import schema
 from events.identity import user, invite, peer
-import tick
+from core import tick
 from events.network import observed_address as address_module
 from events.network import intro as intro_module
-import network_config
+from core import network_config
 
 
 def test_nat_hole_punch_simple(fresh_db):
@@ -172,7 +172,7 @@ def test_intro_process_job_automatic(fresh_db):
     3. IntroProcessJob calls sync_connect.send() for hole punching
     4. The intro gets marked as processed
     """
-    import jobs
+    from core import jobs
     from tests.utils import tick_helper
 
     db = fresh_db
@@ -275,7 +275,7 @@ def test_full_nat_hole_punch_integration(fresh_db):
 
     This tests the complete flow from network setup through hole punch to sync.
     """
-    import jobs
+    from core import jobs
     from tests.utils import tick_helper
 
     db = fresh_db
@@ -401,7 +401,7 @@ def test_full_nat_hole_punch_integration(fresh_db):
 
     # Note: They may have already been processed by IntroProcessJob during sync
     # We can check by looking at the processed flag directly
-    from db import create_safe_db
+    from core.db import create_safe_db
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
     charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
 
@@ -470,7 +470,7 @@ def test_full_nat_hole_punch_integration(fresh_db):
         # The mappings may exist but not be detected by has_nat_mapping
         # because connection requests create connections, not explicit NAT mappings
         # Let's check if connections exist
-        from db import create_safe_db
+        from core.db import create_safe_db
         bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
         charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
         bob_connections = bob_safedb.query(
@@ -490,7 +490,7 @@ def test_full_nat_hole_punch_integration(fresh_db):
     print("="*60)
 
     # Verify that Bob and Charlie have connections (created by connection requests from intro processing)
-    from db import create_safe_db
+    from core.db import create_safe_db
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
     charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
 
@@ -511,7 +511,7 @@ def test_full_nat_hole_punch_integration(fresh_db):
     assert charlie_conn_count >= 1, f"Charlie should have at least 1 connection, got {charlie_conn_count}"
 
     # Verify all peers have learned about each other (have each other's peer_shared)
-    from db import create_safe_db
+    from core.db import create_safe_db
     bob_safedb_final = create_safe_db(db, recorded_by=bob['peer_id'])
     charlie_safedb_final = create_safe_db(db, recorded_by=charlie['peer_id'])
 

@@ -1,8 +1,8 @@
 """Tests for message update (editing) functionality."""
 import pytest
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_update
 from tests.utils import tick_helper

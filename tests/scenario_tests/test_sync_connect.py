@@ -10,11 +10,11 @@ Tests:
 - Connections refresh on repeated connects
 """
 import sqlite3
-from db import Database, create_safe_db, create_unsafe_db
-import schema
+from core.db import Database, create_safe_db, create_unsafe_db
+from core import schema
 from events.identity import user, invite, peer
 from tests.utils import tick_helper
-import tick
+from core import tick
 from events.network import connection as conn_module
 
 

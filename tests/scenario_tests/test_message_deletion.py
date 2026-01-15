@@ -14,8 +14,8 @@ Atomicity tests:
 """
 import pytest
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer, admin
 from events.content import message
 from events.content import message_deletion
@@ -47,7 +47,7 @@ def test_message_deletion_self():
     db.commit()
 
     # Verify message exists
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
     msg_check = safedb.query_one(
         "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
@@ -93,7 +93,7 @@ def test_message_deletion_self():
     print("✓ Event marked in deleted_events table")
 
     # Verify blob is removed from store
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     unsafedb = create_unsafe_db(db)
     blob_check = unsafedb.query_one(
         "SELECT 1 FROM store WHERE id = ?",
@@ -167,7 +167,7 @@ def test_message_deletion_admin():
     tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=10)
 
     # Verify Bob sees the message
-    from db import create_safe_db
+    from core.db import create_safe_db
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
     bob_msg_check = bob_safedb.query_one(
         "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
@@ -352,7 +352,7 @@ def test_message_deletion_ordering():
     tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=10)
 
     # Verify Bob never sees the message (deletion blocks it)
-    from db import create_safe_db
+    from core.db import create_safe_db
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
     bob_msg_check = bob_safedb.query_one(
         "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
@@ -383,7 +383,7 @@ def test_message_deletion_ordering():
     print("✓ Bob has message in deleted_events (prevents future projection)")
 
     # Verify blob is removed from store for Alice
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     unsafedb = create_unsafe_db(db)
     alice_blob_check = unsafedb.query_one(
         "SELECT 1 FROM store WHERE id = ?",

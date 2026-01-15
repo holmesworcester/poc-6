@@ -8,8 +8,8 @@ Goal: Verify that all shareable events sync correctly between Alice and Bob,
       while Charlie remains isolated.
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from tests.utils import tick_helper
 

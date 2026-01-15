@@ -83,18 +83,18 @@ if not _verbose:
     for name in _noisy_modules:
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
-from db import Database
-import schema
-import tick
+from core.db import Database
+from core import schema
+from core import tick
 
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed, peer_shared
 from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update, message_attachment
 from events.network import sync_file
-import purge_expired
+from core import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 import os
-import network_config
+from core import network_config
 from events.network import connection
 
 
@@ -1254,7 +1254,7 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
 
     # Fallback: try to get from database (might work after sync)
     if not username:
-        from db import create_safe_db
+        from core.db import create_safe_db
         safedb = create_safe_db(session.db, recorded_by=peer_id)
         user_row = safedb.query_one(
             "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
@@ -1263,7 +1263,7 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
         username = user_row['name'] if user_row else "unknown"
 
     if not network_id:
-        from db import create_safe_db
+        from core.db import create_safe_db
         safedb = create_safe_db(session.db, recorded_by=peer_id)
         network_row = safedb.query_one(
             "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
@@ -1473,7 +1473,7 @@ def cmd_files(session: CLISession):
     account = session.get_selected_account()
 
     # Query all attachments visible to this peer
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(session.db, recorded_by=account.peer_id)
 
     attachments = safedb.query_all(

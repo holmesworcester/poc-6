@@ -1,7 +1,7 @@
 """Basic tests for bloom-based sync components."""
 import pytest
 from events.network import sync
-import crypto
+from core import crypto
 
 
 def test_bloom_filter_basic():

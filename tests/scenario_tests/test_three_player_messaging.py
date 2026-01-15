@@ -10,12 +10,12 @@ Tests:
 - Charlie is isolated (separate network)
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message
 from tests.utils import tick_helper
-import tick
+from core import tick
 
 
 def test_three_player_messaging(fresh_db):
@@ -170,7 +170,7 @@ def test_three_player_messaging(fresh_db):
 
     # Debug: Check what Bob's 4 original events were
     print("\n=== Bob's original events ===")
-    import store, crypto
+    from core import store, crypto
     for row in bob_events_before:
         try:
             blob = store.get(row['event_id'], db)
@@ -211,7 +211,7 @@ def test_three_player_messaging(fresh_db):
     # Also check the event types that are blocked
     print("\n=== Blocked event details ===")
     all_blocked_ids = set(b['recorded_id'] for b in alice_blocked + bob_blocked)
-    import store
+    from core import store
     for blocked_id in list(all_blocked_ids)[:3]:
         blob = store.get(blocked_id, db)
         if blob:

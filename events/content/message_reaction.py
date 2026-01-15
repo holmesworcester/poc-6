@@ -6,10 +6,10 @@ Reactions are reference events that depend on messages.
 """
 from typing import Any
 import logging
-import crypto
-import store
-import global_counter
-from db import create_safe_db, create_unsafe_db
+from core import crypto
+from core import store
+from core import global_counter
+from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
 

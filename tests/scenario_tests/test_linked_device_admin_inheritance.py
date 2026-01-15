@@ -12,8 +12,8 @@ Tests:
 - New user can successfully join via second device's invite
 """
 import sqlite3
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer_shared, peer, invite, peer, network
 from events.group import group_member
 from tests.utils import tick_helper

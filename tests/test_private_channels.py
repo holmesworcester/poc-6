@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Simple test for private channels without complex syncing."""
 import sqlite3
-from db import Database, create_safe_db
-import schema
+from core.db import Database, create_safe_db
+from core import schema
 from events.identity import user, invite, peer
 from events.content import channel
 from events.group import group_member

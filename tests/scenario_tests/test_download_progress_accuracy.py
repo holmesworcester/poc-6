@@ -10,12 +10,12 @@ Verifies that download progress tracking reports accurate:
 """
 import sqlite3
 import time
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from events.network import sync_file
-import tick
+from core import tick
 
 
 def test_progress_bytes_accuracy(fresh_db):

@@ -35,8 +35,8 @@ Expected behavior: Keys should be sealed to invite_1's prekey (the invite
 that device B actually used), which is available in the peer_shared event data.
 """
 import sqlite3
-from db import Database, create_safe_db
-import schema
+from core.db import Database, create_safe_db
+from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
 from tests.utils import tick_helper

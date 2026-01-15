@@ -9,8 +9,8 @@ Tests that:
 """
 import sqlite3
 import pytest
-from db import Database
-import schema
+from core.db import Database
+from core import schema
 from events.identity import user, network, invite
 from events.content import message
 
@@ -40,7 +40,7 @@ def test_alice_network_with_encrypted_username(fresh_db):
     assert alice_result['network_id']
 
     # Query Alice's user and verify name is stored
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=alice_result['peer_id'])
 
     user_row = safedb.query_one(
@@ -131,7 +131,7 @@ def test_username_appears_with_device_link():
 
     # In a real scenario, Device 2 would link via invite
     # For now, just verify Device 1 has username
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=alice_d1['peer_id'])
 
     user_names = safedb.query(
@@ -162,7 +162,7 @@ def test_pending_name_updates_table():
     schema.create_all(db)
 
     # Insert a test pending name
-    from db import create_safe_db
+    from core.db import create_safe_db
     from events.identity import peer
     peer_id = peer.create(t_ms=1000, db=db)
 
@@ -199,7 +199,7 @@ def test_pending_name_decrypts_table():
     schema.create_all(db)
 
     # Insert a test pending decrypt
-    from db import create_safe_db
+    from core.db import create_safe_db
     from events.identity import peer
     peer_id = peer.create(t_ms=1000, db=db)
 
@@ -246,7 +246,7 @@ def test_user_names_table():
     )
 
     # Verify user_names table has Alice's name
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=alice_result['peer_id'])
 
     user_names = safedb.query(
@@ -279,7 +279,7 @@ def test_network_names_table():
     )
 
     # Verify network_names table has network name
-    from db import create_safe_db
+    from core.db import create_safe_db
     safedb = create_safe_db(db, recorded_by=alice_result['peer_id'])
 
     network_names = safedb.query(
@@ -304,7 +304,7 @@ def test_validation_blocks_until_entity_exists():
     schema.create_all(db)
 
     from events.identity import username_update, peer
-    from db import create_safe_db
+    from core.db import create_safe_db
 
     # Create a peer
     peer_id = peer.create(t_ms=1000, db=db)
@@ -328,7 +328,7 @@ def test_pending_updates_retry_on_key_arrival():
     db = Database(conn)
     schema.create_all(db)
 
-    from db import create_safe_db
+    from core.db import create_safe_db
     from events.identity import peer
     import hashlib
 
@@ -372,7 +372,7 @@ def test_name_table_with_missing_decryption():
     db = Database(conn)
     schema.create_all(db)
 
-    from db import create_safe_db
+    from core.db import create_safe_db
     import hashlib
 
     # Create Alice's network first
