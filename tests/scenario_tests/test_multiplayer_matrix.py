@@ -65,7 +65,7 @@ from events.identity import user_removed, peer_removed, network as network_modul
 from events.group import group_member, group_key, group_key_shared, group
 from events.content import message
 from events.network import transit_prekey
-from tests.utils import tick_helper
+from tests.utils.tick_helper import run_ticks, assert_eventually
 from core import crypto
 from core import store
 
@@ -102,7 +102,7 @@ def network_with_alice_and_bob(network_with_alice):
     db.commit()
 
     # Sync to converge
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+    run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
     return db, alice, bob
 
@@ -125,7 +125,7 @@ def network_with_three_users(network_with_alice_and_bob):
     db.commit()
 
     # Sync to converge
-    tick_helper.sync_until_converged(db=db, start_t_ms=12000, max_rounds=200, check_interval=5)
+    run_ticks(db=db, start_t_ms=12000, num_rounds=200)
 
     return db, alice, bob, charlie
 
@@ -157,7 +157,7 @@ def network_with_two_admins(network_with_alice_and_bob):
     db.commit()
 
     # Sync to converge
-    tick_helper.sync_until_converged(db=db, start_t_ms=11000, max_rounds=200, check_interval=5)
+    run_ticks(db=db, start_t_ms=11000, num_rounds=200)
 
     return db, alice, bob
 
@@ -309,7 +309,7 @@ class TestInvitationAcceptance:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # Check Bob is in all_users group from Alice's perspective
         all_users_group_id = network_module.get_all_users_group_id(
@@ -401,7 +401,7 @@ class TestInvitationRejection:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=21000, max_rounds=50, check_interval=5)
+        run_ticks(db=db, start_t_ms=21000, num_rounds=50)
 
         # Verify Alice rejected the rogue invite
         alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -653,7 +653,7 @@ class TestAdminGrantChain:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=11000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=11000, num_rounds=200)
 
         # Verify Bob is now admin from Bob's perspective
         bob_is_admin = admin.is_user_admin(
@@ -686,7 +686,7 @@ class TestAdminGrantChain:
         db.commit()
 
         # Sync so Bob receives his admin grant
-        tick_helper.sync_until_converged(db=db, start_t_ms=11000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=11000, num_rounds=200)
 
         # Verify Bob has admin grant before continuing
         bob_grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -697,7 +697,7 @@ class TestAdminGrantChain:
         charlie_peer_id = peer.create(t_ms=16000, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link, name='Charlie', t_ms=16000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=17000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=17000, num_rounds=200)
 
         # Bob grants admin to Charlie
         bob_private_key = peer.get_private_key(bob['peer_id'], bob['peer_id'], db)
@@ -715,7 +715,7 @@ class TestAdminGrantChain:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=26000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=26000, num_rounds=200)
 
         # Verify Charlie is admin from all perspectives
         charlie_admin_alice = admin.is_user_admin(
@@ -985,7 +985,7 @@ class TestRemovalPropagation:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=21000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=21000, num_rounds=200)
 
         # Charlie should see Bob removed
         all_users_group_id = network_module.get_all_users_group_id(
@@ -1042,7 +1042,7 @@ class TestHistoricalKeyAccess:
         bob_peer_id = peer.create(t_ms=4000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=4000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=5000, num_rounds=200)
 
         # Bob sends message
         bob_msg = message.create(
@@ -1053,7 +1053,7 @@ class TestHistoricalKeyAccess:
             db=db
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=7000, num_rounds=200)
 
         # Alice removes Bob - THIS ROTATES THE KEY
         user_removed.create(
@@ -1064,7 +1064,7 @@ class TestHistoricalKeyAccess:
             db=db
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=9000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=9000, num_rounds=200)
 
         # Alice sends message AFTER removal (encrypted with NEW key)
         alice_msg2 = message.create(
@@ -1081,7 +1081,7 @@ class TestHistoricalKeyAccess:
         charlie_peer_id = peer.create(t_ms=12000, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite2_link, name='Charlie', t_ms=12000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=13000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=13000, num_rounds=200)
 
         # CRITICAL: Charlie must be able to see ALL messages
         charlie_messages = message.list(charlie['channel_id'], charlie['peer_id'], db)
@@ -1113,7 +1113,7 @@ class TestHistoricalKeyAccess:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # Alice removes Bob - THIS ROTATES THE KEY
         user_removed.create(
@@ -1124,14 +1124,14 @@ class TestHistoricalKeyAccess:
             db=db
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=6000, num_rounds=200)
 
         # Charlie joins AFTER the key rotation
         invite2_id, invite2_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=7000, db=db)
         charlie_peer_id = peer.create(t_ms=8000, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite2_link, name='Charlie', t_ms=8000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=9000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=9000, num_rounds=200)
 
         # CRITICAL: Charlie must be able to find the all_users group
         # This requires decrypting the group event with the ORIGINAL key
@@ -1176,7 +1176,7 @@ class TestHistoricalKeyAccess:
             temp_user = user.join(peer_id=temp_peer_id, invite_link=invite_link, name=f'Temp{i}', t_ms=t_ms, db=db)
             t_ms += 100
             db.commit()
-            tick_helper.sync_until_converged(db=db, start_t_ms=t_ms, max_rounds=200, check_interval=5)
+            run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
             t_ms += 1000
 
             # User removed (key rotates)
@@ -1189,7 +1189,7 @@ class TestHistoricalKeyAccess:
             )
             t_ms += 100
             db.commit()
-            tick_helper.sync_until_converged(db=db, start_t_ms=t_ms, max_rounds=200, check_interval=5)
+            run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
             t_ms += 1000
 
         # Verify Alice now has multiple keys
@@ -1204,7 +1204,7 @@ class TestHistoricalKeyAccess:
         final_user = user.join(peer_id=final_peer_id, invite_link=final_invite_link, name='FinalUser', t_ms=t_ms, db=db)
         t_ms += 100
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=t_ms, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
 
         # CRITICAL: Final user must have ALL historical keys
         safedb = create_safe_db(db, recorded_by=final_user['peer_id'])
@@ -1233,7 +1233,7 @@ class TestHistoricalKeyAccess:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         user_removed.create(
             removed_user_id=bob['user_id'],
@@ -1243,7 +1243,7 @@ class TestHistoricalKeyAccess:
             db=db
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=6000, num_rounds=200)
 
         # Count Alice's keys
         safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -1256,7 +1256,7 @@ class TestHistoricalKeyAccess:
         charlie_peer_id = peer.create(t_ms=8000, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite2_link, name='Charlie', t_ms=8000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=9000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=9000, num_rounds=200)
 
         # Count Charlie's keys
         safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
@@ -1314,7 +1314,7 @@ class TestKeyOversharing:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # Count Alice's keys after Bob joins (before removal)
         safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -1352,7 +1352,7 @@ class TestKeyOversharing:
             db=db
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=6000, num_rounds=200)
 
         # Count Alice's keys after removal
         safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -1423,7 +1423,7 @@ class TestKeyOversharing:
             db.commit()
 
             print("\n=== PHASE 3: Sync after Bob joins ===")
-            tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+            run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
             print("\n=== PHASE 4: Alice removes Bob ===")
             user_removed.create(
@@ -1436,7 +1436,7 @@ class TestKeyOversharing:
             db.commit()
 
             print("\n=== PHASE 5: Sync after removal ===")
-            tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=5)
+            run_ticks(db=db, start_t_ms=6000, num_rounds=200)
 
             # Alice's keys before creating Charlie's invite
             safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -1476,7 +1476,7 @@ class TestKeyOversharing:
 
             # Sync
             print("\n=== PHASE 8: Sync after Charlie joins ===")
-            tick_helper.sync_until_converged(db=db, start_t_ms=9000, max_rounds=200, check_interval=5)
+            run_ticks(db=db, start_t_ms=9000, num_rounds=200)
 
             # Charlie's keys after sync
             safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
@@ -1608,7 +1608,7 @@ class TestInviteAfterRemoval:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # Remove Bob
         user_removed.create(
@@ -1641,7 +1641,7 @@ class TestInviteAfterRemoval:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=17000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=17000, num_rounds=200)
 
         # Verify by user_id rather than name due to known user_name sync issues
         all_users_group_id = network_module.get_all_users_group_id(
@@ -1689,7 +1689,7 @@ class TestSimultaneousJoins:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=300, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=300)
 
         # Both should be members
         all_users_group_id = network_module.get_all_users_group_id(
@@ -1749,7 +1749,7 @@ class TestMessageAfterRemoval:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # Alice sends message before removal
         alice_msg_before = message.create(
@@ -1762,7 +1762,7 @@ class TestMessageAfterRemoval:
         db.commit()
 
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=9000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=9000, num_rounds=200)
 
         # Bob should see the message
         bob_messages_before = message.list(bob['channel_id'], bob['peer_id'], db)
@@ -1781,7 +1781,7 @@ class TestMessageAfterRemoval:
         db.commit()
 
         # Sync removal
-        tick_helper.sync_until_converged(db=db, start_t_ms=11000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=11000, num_rounds=200)
 
         # Alice sends message after removal
         alice_msg_after = message.create(
@@ -1794,7 +1794,7 @@ class TestMessageAfterRemoval:
         db.commit()
 
         # More sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=16000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=16000, num_rounds=200)
 
         # Bob should NOT see the post-removal message (sync blocked)
         bob_messages_after = message.list(bob['channel_id'], bob['peer_id'], db)
@@ -1857,7 +1857,7 @@ class TestStateMachine:
 
         # State: Bob=JOINING (sync in progress)
         # Sync
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # State: Network=MULTI_USER, Bob=ACTIVE, Bob has KEY_AVAILABLE
         all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
@@ -1913,7 +1913,7 @@ class TestStateMachine:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # State: Bob=NON_ADMIN
         bob_admin = admin.is_user_admin(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -1937,7 +1937,7 @@ class TestStateMachine:
             admin_grant=alice_grant
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=10000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=10000, num_rounds=200)
 
         # State: Bob=ADMIN
         bob_admin = admin.is_user_admin(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -1955,7 +1955,7 @@ class TestStateMachine:
         charlie_peer_id = peer.create(t_ms=16000, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link2, name='Charlie', t_ms=16000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=17000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=17000, num_rounds=200)
 
         # State: Network=MULTI_USER, Bob=ADMIN, Charlie=ACTIVE
         all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
@@ -1977,7 +1977,7 @@ class TestStateMachine:
             admin_grant=bob_grant
         )
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=21000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=21000, num_rounds=200)
 
         # State: Network=MULTI_ADMIN (Alice, Bob, Charlie are all admins)
         charlie_admin = admin.is_user_admin(charlie['user_id'], alice['network_id'], alice['peer_id'], db)
@@ -2000,7 +2000,7 @@ class TestStateMachine:
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite2_link, name='Charlie', t_ms=5000, db=db)
 
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=300, check_interval=5)
+        run_ticks(db=db, start_t_ms=6000, num_rounds=300)
 
         # State: 3 users
         all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
@@ -2064,7 +2064,7 @@ class TestStateMachine:
         david_peer_id = peer.create(t_ms=26000, db=db)
         david = user.join(peer_id=david_peer_id, invite_link=invite3_link, name='David', t_ms=26000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=27000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=27000, num_rounds=200)
 
         # State: 2 users (Alice, David) - verify by user_id due to known name sync issues
         members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
@@ -2154,7 +2154,7 @@ class TestPermissionMatrix:
         charlie2_peer_id = peer.create(t_ms=22000, db=db)
         charlie2 = user.join(peer_id=charlie2_peer_id, invite_link=invite_link, name='Charlie2', t_ms=22000, db=db)
         db.commit()
-        tick_helper.sync_until_converged(db=db, start_t_ms=23000, max_rounds=200, check_interval=5)
+        run_ticks(db=db, start_t_ms=23000, num_rounds=200)
 
         # Non-admin cannot remove peer
         with pytest.raises(ValueError):

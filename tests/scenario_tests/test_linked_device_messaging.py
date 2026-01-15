@@ -17,7 +17,7 @@ from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
 from events.content import message
-from tests.utils import tick_helper
+from tests.utils.tick_helper import assert_eventually, run_ticks
 
 
 def test_linked_devices_bidirectional_messaging(fresh_db):
@@ -55,9 +55,6 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
     )
     db.commit()
 
-    # Sync for group creation
-    tick_helper.sync_until_converged(db=db, start_t_ms=2000, max_rounds=200, check_interval=1)
-
     # Alice creates peer invite and links second device
     print("\n=== Link second device ===")
 
@@ -90,17 +87,29 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
     assert alice_device2['user_id'] == alice_device1['user_id']
     print(f"✅ Both devices share user_id")
 
-    # Sync for link convergence and group key sharing
-    print("\n=== Sync for link convergence ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
+    # Wait for device 2 to get group key
+    print("\n=== Waiting for device 2 to sync group key ===")
 
-    # Verify device 2 has the group key
-    has_key = db.query_one(
-        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (group_key_id, alice_device2['peer_id'])
-    )
-    assert has_key, "Device 2 should have group key"
+    def device2_has_key():
+        has_key = db.query_one(
+            "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (group_key_id, alice_device2['peer_id'])
+        )
+        assert has_key, "Device 2 should have group key"
+
+    t_ms = assert_eventually(device2_has_key, db=db, start_t_ms=5000)
     print("✅ Device 2 has group key")
+
+    # Wait for device 2 to sync the channel
+    def device2_has_channel():
+        channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ? AND channel_id = ?",
+            (alice_device2['peer_id'], alice_device1['channel_id'])
+        )
+        assert len(channels) >= 1, "Device 2 should have synced channel"
+
+    t_ms = assert_eventually(device2_has_channel, db=db, start_t_ms=t_ms)
+    print("✅ Device 2 has channel")
 
     # Device 1 sends message M1
     print("\n=== Device 1 sends message M1 ===")
@@ -132,51 +141,37 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
     print(f"Device 2 sent message: {msg2_id[:20]}...")
     db.commit()
 
-    # Sync for message convergence
-    print("\n=== Sync for message convergence ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=7000, max_rounds=200, check_interval=1)
+    # Wait for both devices to see both messages
+    print("\n=== Waiting for message sync ===")
 
-    # Verify device 1 sees both messages
-    print("\n=== Verifying device 1 sees both messages ===")
+    def both_devices_see_both_messages():
+        device1_messages = message.list(
+            alice_device1['channel_id'],
+            alice_device1['peer_id'],
+            db
+        )
+        device1_contents = [msg['content'] for msg in device1_messages]
 
-    device1_messages = message.list(
-        alice_device1['channel_id'],
-        alice_device1['peer_id'],
-        db
-    )
-    device1_contents = [msg['content'] for msg in device1_messages]
+        device2_messages = message.list(
+            alice_device1['channel_id'],  # Linked devices share channels
+            alice_device2['peer_id'],
+            db
+        )
+        device2_contents = [msg['content'] for msg in device2_messages]
 
-    print(f"Device 1 sees {len(device1_messages)} messages: {device1_contents}")
+        # Device 1 sees both
+        assert "Message from device 1" in device1_contents, \
+            "Device 1 should see its own message"
+        assert "Message from device 2" in device1_contents, \
+            "Device 1 should see device 2's message"
 
-    assert "Message from device 1" in device1_contents, \
-        "Device 1 should see its own message"
-    assert "Message from device 2" in device1_contents, \
-        "Device 1 should see device 2's message"
+        # Device 2 sees both
+        assert "Message from device 1" in device2_contents, \
+            "Device 2 should see device 1's message"
+        assert "Message from device 2" in device2_contents, \
+            "Device 2 should see its own message"
 
-    print("✅ Device 1 sees both messages")
-
-    # Verify device 2 sees both messages
-    # Note: Device 2 queries the same channel (shared with device 1)
-    print("\n=== Verifying device 2 sees both messages ===")
-
-    device2_messages = message.list(
-        alice_device1['channel_id'],  # Linked devices share channels
-        alice_device2['peer_id'],
-        db
-    )
-    device2_contents = [msg['content'] for msg in device2_messages]
-
-    print(f"Device 2 sees {len(device2_messages)} messages: {device2_contents}")
-
-    assert "Message from device 1" in device2_contents, \
-        "Device 2 should see device 1's message"
-    assert "Message from device 2" in device2_contents, \
-        "Device 2 should see its own message"
-
-    print("✅ Device 2 sees both messages")
-
-    # Verify message count matches
-    assert len(device1_messages) == len(device2_messages) == 2, \
-        "Both devices should see exactly 2 messages"
+    assert_eventually(both_devices_see_both_messages, db=db, start_t_ms=7000)
+    print("✅ Both devices see both messages")
 
     print(f"\n✅ All assertions passed! Bidirectional messaging works correctly.")

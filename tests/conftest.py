@@ -83,7 +83,7 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     from events.identity import user as user_module
     from events.identity import invite as invite_module
     from events.identity import peer as peer_module
-    from tests.utils import tick_helper
+    from tests.utils.tick_helper import run_ticks
 
     db, alice = fresh_db_with_alice
 
@@ -98,7 +98,7 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     db.commit()
 
     # Sync to converge
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    run_ticks(db=db, start_t_ms=3000, num_rounds=200)
 
     return db, alice, bob
 
