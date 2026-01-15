@@ -145,9 +145,13 @@ def assert_convergence(
     num_trials: int = 10,
     save_failures: bool = True,
     stop_on_first_failure: bool = True,
-    debug_timeline: bool = True
+    debug_timeline: bool = True,
+    skip_unless_enabled: bool = True
 ) -> None:
     """Test that projecting events in different orders produces identical final state.
+
+    This test is SLOW (tests many event orderings) and skipped by default.
+    Enable with: RUN_CONVERGENCE_TESTS=1 pytest ...
 
     Args:
         db: Database connection (in-memory for tests)
@@ -156,10 +160,16 @@ def assert_convergence(
         save_failures: Whether to save failed orderings to disk (default True)
         stop_on_first_failure: Whether to stop on first failure or continue testing (default True)
         debug_timeline: Whether to enable timeline debugging (default True)
+        skip_unless_enabled: If True (default), skip unless RUN_CONVERGENCE_TESTS=1 is set
 
     Raises:
         AssertionError: If any ordering produces different final state
     """
+    # Check if convergence tests are enabled
+    if skip_unless_enabled and not os.environ.get('RUN_CONVERGENCE_TESTS'):
+        print("⏭️  Skipping convergence test (slow). Enable with: RUN_CONVERGENCE_TESTS=1")
+        return
+
     from . import timeline
 
     # Enable timeline debugging

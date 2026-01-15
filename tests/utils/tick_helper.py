@@ -91,101 +91,84 @@ def sync_until_converged(
     db: Any,
     start_t_ms: int,
     max_rounds: int = 500,
-    check_interval: int = 5,
+    check_interval: int = 1,
     verbose: bool = False,
-    stability_threshold: int = 200
+    stability_threshold: int = 3,  # Reduced: negentropy detection is deterministic
+    sync_only: bool = True  # Use sync-only ticks (no event creation)
 ) -> tuple[int, int, bool, dict]:
-    """Run ticks until sync stabilizes (no more progress) or max_rounds reached.
+    """Run ticks until all connections are synced or max_rounds reached.
 
-    Uses snapshot-based detection: takes a snapshot of recorded event counts
-    at the start, then checks if sync is still making progress. Exits when
-    no new events have been recorded for stability_threshold consecutive checks.
+    Uses negentropy-based detection: checks if all active connections have
+    matching root hashes. This is deterministic - no need for long stability
+    thresholds.
 
-    This approach avoids complex peer-pair detection and naturally handles
-    all sync scenarios including multi-device and cross-network cases.
+    By default uses sync-only ticks to prevent event-creating jobs from
+    causing infinite sync loops.
 
     Args:
         db: Database connection
         start_t_ms: Starting timestamp
         max_rounds: Maximum sync rounds (default 500)
-        check_interval: Check progress every N rounds (default 5)
+        check_interval: Check progress every N rounds (default 1)
         verbose: Print progress status (default False)
-        stability_threshold: Exit if no progress for N consecutive checks (default 200)
+        stability_threshold: Confirm sync for N consecutive checks (default 3)
+        sync_only: Use sync-only ticks, no event creation (default True)
 
     Returns:
         (final_t_ms, rounds_used, converged, status_dict)
 
-        rounds_used is the round when stability STARTED (not when we confirmed it),
-        so it reflects when sync actually completed, not the verification period.
-
     Status dict contains:
-        - 'converged': bool (True if queue empty when stabilized)
-        - 'stable': bool (True if counts stabilized)
-        - 'queue_size': incoming_blobs count
-        - 'blocked_count': blocked_events count
-        - 'total_valid': total valid events across all peers
+        - 'converged': bool (True if all synced and queue empty)
+        - 'all_synced': bool (True if all connections synced)
+        - 'queue_empty': bool (True if no pending blobs)
+        - 'total_connections': count of active connections
+        - 'synced_connections': count of synced connections
     """
     from events.network import sync as sync_module
 
-    # Take initial snapshot
-    snapshot = sync_module.take_sync_snapshot(db)
-    stable_count = 0
-    stability_started_round = None  # Track when we first became stable
-    prev_total_valid = sum(snapshot['valid_counts'].values())
+    tick_fn = tick_module.tick_sync_only if sync_only else tick_module.tick
+    synced_count = 0
 
     for round_num in range(max_rounds):
         t_ms = start_t_ms + (round_num * TICK_INTERVAL_MS)
-        tick_module.tick(t_ms=t_ms, db=db)
+        tick_fn(t_ms=t_ms, db=db)
 
         # Check progress every check_interval rounds
         if (round_num + 1) % check_interval == 0:
-            status = sync_module.check_sync_progress(db, snapshot)
-            snapshot = status['snapshot']  # Update snapshot for next check
+            status = sync_module.get_global_sync_status(db, t_ms)
 
             if verbose:
-                new_events = status['total_valid'] - prev_total_valid
-                print(f"Round {round_num + 1}: "
-                      f"valid={status['total_valid']} (+{new_events}), "
-                      f"queue={status['queue_size']}, "
-                      f"blocked={status['blocked_count']}")
+                synced = status['synced_connections']
+                total = status['total_connections']
+                queue = 'empty' if status['queue_empty'] else 'pending'
+                print(f"Round {round_num + 1}: {synced}/{total} connections synced, queue={queue}")
 
-            # Check for stability (no progress for N consecutive checks)
-            if not status['progressed']:
-                if stable_count == 0:
-                    # First stable check - record when stability started
-                    stability_started_round = round_num + 1
-                stable_count += 1
-                if stable_count >= stability_threshold:
-                    # Report the round when stability STARTED, not when confirmed
-                    final_t_ms = start_t_ms + (stability_started_round * TICK_INTERVAL_MS)
-                    converged = (status['queue_size'] == 0)
+            # Check if fully synced
+            if status['all_synced'] and status['queue_empty']:
+                synced_count += 1
+                if synced_count >= stability_threshold:
+                    final_t_ms = start_t_ms + ((round_num + 1) * TICK_INTERVAL_MS)
                     if verbose:
-                        stuck = f", {status['queue_size']} stuck in queue" if status['queue_size'] > 0 else ""
-                        print(f"✓ Stabilized at round {stability_started_round} "
-                              f"(confirmed after {stable_count} checks, "
-                              f"{status['total_valid']} total valid{stuck})")
-                    return (final_t_ms, stability_started_round, converged, {
-                        'converged': converged,
-                        'stable': True,
-                        'queue_size': status['queue_size'],
-                        'blocked_count': status['blocked_count'],
-                        'total_valid': status['total_valid']
+                        print(f"✓ Converged at round {round_num + 1}")
+                    return (final_t_ms, round_num + 1, True, {
+                        'converged': True,
+                        'all_synced': True,
+                        'queue_empty': True,
+                        'total_connections': status['total_connections'],
+                        'synced_connections': status['synced_connections'],
                     })
             else:
-                stable_count = 0
-                stability_started_round = None
+                synced_count = 0
 
-            prev_total_valid = status['total_valid']
-
-    # Did not stabilize within max_rounds
+    # Did not converge within max_rounds
     final_t_ms = start_t_ms + (max_rounds * TICK_INTERVAL_MS)
-    final_status = sync_module.check_sync_progress(db, snapshot)
+    final_status = sync_module.get_global_sync_status(db, final_t_ms)
     if verbose:
-        print(f"✗ Did not stabilize within {max_rounds} rounds")
+        print(f"✗ Did not converge within {max_rounds} rounds")
     return (final_t_ms, max_rounds, False, {
         'converged': False,
-        'stable': False,
-        'queue_size': final_status['queue_size'],
-        'blocked_count': final_status['blocked_count'],
-        'total_valid': final_status['total_valid']
+        'all_synced': final_status['all_synced'],
+        'queue_empty': final_status['queue_empty'],
+        'total_connections': final_status['total_connections'],
+        'synced_connections': final_status['synced_connections'],
     })

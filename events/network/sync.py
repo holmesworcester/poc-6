@@ -1,23 +1,8 @@
 """Sync implementation with bloom-based window protocol.
 
-PLACEHOLDER SYNC MODE
-=====================
-Currently using simplified "send all" sync to focus on DAG bootstrap coherence
-and auth correctness. This is a temporary measure - the bloom/window protocol
-is complex and introduces non-determinism that makes debugging difficult.
-
-With PLACEHOLDER_SYNC = True:
-- On every sync request, responder sends ALL shareable events
-- No bloom filtering or window-based partitioning
-- O(n) bandwidth but deterministic and reliable
-- Allows focus on core issues: dependency ordering, trust anchors, key sharing
-
-TODO: Re-enable optimized sync (PLACEHOLDER_SYNC = False) once core DAG/auth is stable.
+Uses negentropy for efficient set reconciliation between peers.
+Bloom filter sync is used as a fallback for window-based partitioning.
 """
-
-# Placeholder sync mode - send all events on every request
-# Set to False to re-enable bloom/window-based sync
-PLACEHOLDER_SYNC = True
 
 # Registry metadata
 EVENT_TYPE = 'sync'
@@ -26,7 +11,7 @@ EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any, Iterator
-from events.network import recorded, transit_prekey, sync_window
+from events.network import recorded, transit_prekey, sync_window, negentropy
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from events.network import connection as conn_module
@@ -274,7 +259,51 @@ def remove_connections_for_user(user_id: str, recorded_by: str, db: Any) -> int:
 # ============================================================================
 
 
-def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any) -> None:
+def add_shareable_events_batch(
+    events: list[tuple[str, int, int]],  # List of (event_id, created_at, recorded_at)
+    can_share_peer_id: str,
+    db: Any,
+    skip_negentropy: bool = False
+) -> None:
+    """Add multiple shareable events efficiently.
+
+    Batches inserts for both shareable_events and negentropy tables.
+    Much faster than calling add_shareable_event() in a loop for bulk operations.
+
+    Args:
+        events: List of (event_id, created_at, recorded_at) tuples
+        can_share_peer_id: The peer who recorded/has these events
+        db: Database connection
+        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
+    """
+    if not events:
+        return
+
+    from events.network import negentropy
+
+    safedb = create_safe_db(db, recorded_by=can_share_peer_id)
+
+    # Batch insert into shareable_events
+    for event_id, created_at, recorded_at in events:
+        event_id_bytes = crypto.b64decode(event_id)
+        window_id = sync_window.SyncWindow.storage_window_from_event_id(event_id_bytes)
+
+        safedb.execute(
+            """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+        )
+
+    # Batch add to negentropy using the new batch function (unless skipped)
+    if not skip_negentropy:
+        negentropy_events = [(event_id, recorded_at) for event_id, created_at, recorded_at in events]
+        negentropy.add_events_to_sync_batch(db, can_share_peer_id, negentropy_events)
+
+    log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (skip_neg={skip_negentropy})")
+
+
+def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any,
+                        skip_negentropy: bool = False) -> None:
     """Add shareable event to both sync tracking tables.
 
     ARCHITECTURE NOTE: Dual Sync Tables
@@ -297,30 +326,17 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
     Incoming synced events also flow through recorded.project(), so they
     automatically get added to both tables on the receiving side.
 
+    For bulk operations, use add_shareable_events_batch() instead.
+
     Args:
         event_id: The event being marked as shareable
         can_share_peer_id: The peer who recorded/has this event and can share it
         created_at: When event was created (often NULL for encrypted events)
         recorded_at: When this peer recorded the event (always available)
         db: Database connection
+        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
     """
-    from events.network import negentropy
-
-    event_id_bytes = crypto.b64decode(event_id)
-    # Use SyncWindow to compute storage window
-    window_id = sync_window.SyncWindow.storage_window_from_event_id(event_id_bytes)
-
-    log.debug(f"add_shareable_event: event={event_id[:20]}..., peer={can_share_peer_id[:20]}..., window={window_id}")
-
-    safedb = create_safe_db(db, recorded_by=can_share_peer_id)
-    safedb.execute(
-        """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
-           VALUES (?, ?, ?, ?, ?)""",
-        (event_id, can_share_peer_id, created_at, recorded_at, window_id)
-    )
-
-    # Add to negentropy sync buckets - use recorded_at for bucketing (always available)
-    negentropy.add_event_to_sync(db, can_share_peer_id, event_id, recorded_at)
+    add_shareable_events_batch([(event_id, created_at, recorded_at)], can_share_peer_id, db, skip_negentropy)
 
 
 def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
@@ -526,6 +542,8 @@ def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
+    from events.network import negentropy
+
     transit_blobs = queues.incoming.drain(batch_size, t_ms, db)
     log.info(f"sync.receive: processing {len(transit_blobs)} blobs")
 
@@ -536,10 +554,34 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
         new_recorded_id_lists.append(result)
 
     # Flatten and project all recorded events
+    # Skip negentropy updates during projection - we'll batch them after
     valid_recorded_ids = [id for id_list in new_recorded_id_lists for id in id_list]
-    log.debug(f"sync.receive: projecting {len(valid_recorded_ids)} recorded events")
+    log.debug(f"sync.receive: projecting {len(valid_recorded_ids)} recorded events (skip_negentropy=True)")
 
-    recorded.project_ids(valid_recorded_ids, db)
+    recorded.project_ids(valid_recorded_ids, db, skip_negentropy=True)
+
+    # Batch-add all received events to negentropy (grouped by peer)
+    # Query shareable_events for events just added (recorded_at = t_ms)
+    # Use raw connection to bypass scoping (we need to query across all peers)
+    cursor = db._conn.execute(
+        "SELECT event_id, can_share_peer_id, recorded_at FROM shareable_events WHERE recorded_at = ?",
+        (t_ms,)
+    )
+    new_shareable = [{'event_id': r[0], 'can_share_peer_id': r[1], 'recorded_at': r[2]} for r in cursor.fetchall()]
+
+    if new_shareable:
+        # Group by peer_id for batch processing
+        by_peer: dict[str, list[tuple[str, int]]] = {}
+        for row in new_shareable:
+            peer_id = row['can_share_peer_id']
+            if peer_id not in by_peer:
+                by_peer[peer_id] = []
+            by_peer[peer_id].append((row['event_id'], row['recorded_at']))
+
+        # Batch-add to negentropy for each peer
+        for peer_id, events in by_peer.items():
+            negentropy.add_events_to_sync_batch(db, peer_id, events)
+            log.debug(f"sync.receive: batch-added {len(events)} events to negentropy for peer {peer_id[:20]}...")
 
     # Try to integrate with network layer for address observations (optional)
     try:
@@ -615,56 +657,6 @@ def send_request_to_all(t_ms: int, db: Any) -> None:
 
         # Send sync requests from this peer to all peers they've seen
         send_requests(peer_id, peer_shared_id, t_ms, db)
-
-        # Send file sync requests for wanted files
-        send_file_sync_requests(peer_id, t_ms, db)
-
-
-def send_file_sync_requests(peer_id: str, t_ms: int, db: Any) -> None:
-    """Send sync_file requests for files this peer wants to actively sync.
-
-    Args:
-        peer_id: Local peer
-        t_ms: Current timestamp
-        db: Database connection
-    """
-    from events.network import sync_file
-
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
-    # Get all wanted files (that haven't expired)
-    # Note: SafeDB requires recorded_by filter for subjective tables, which is already scoped
-    wanted_files = safedb.query(
-        "SELECT file_id, priority FROM file_sync_wanted WHERE recorded_by = ? AND peer_id = ? AND (ttl_ms = 0 OR ttl_ms > ?) "
-        "ORDER BY priority DESC, requested_at ASC",
-        (peer_id, peer_id, t_ms)
-    )
-
-    log.debug(f"send_file_sync_requests: peer={peer_id[:20]}... has {len(wanted_files)} files to sync")
-
-    for file_row in wanted_files:
-        file_id = file_row['file_id']
-
-        # Skip if file is already complete
-        if sync_file.is_file_complete(file_id, peer_id, db):
-            log.debug(f"send_file_sync_requests: file_id={file_id[:20]}... already complete, skipping")
-            sync_file.cancel_file_sync(file_id, peer_id, db)
-            continue
-
-        # Send file sync request to all peers
-        peers_to_request = safedb.query(
-            "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?",
-            (peer_id,)
-        )
-
-        log.debug(f"send_file_sync_requests: sending file sync requests for {file_id[:20]}... to {len(peers_to_request)} peers")
-
-        for peer_row in peers_to_request:
-            to_peer = peer_row['peer_shared_id']
-            try:
-                sync_file.send_request(file_id, to_peer, peer_id, t_ms, db)
-            except Exception as e:
-                log.warning(f"send_file_sync_requests: failed to send request for {file_id[:20]}...: {e}")
 
 
 def send_requests(from_peer_id: str, from_peer_shared_id: str, t_ms: int, db: Any) -> None:
@@ -1061,97 +1053,84 @@ def _project_sync_event(sync_event_id: str, sync_data: dict, recorded_by: str, r
 def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, transit_key_dict: dict[str, Any],
                   window_id: int, window_min: int, window_max: int, bloom_filter: bytes, requester_public_key: bytes,
                   t_ms: int, db: Any) -> None:
-    """Send sync response - either all events (placeholder) or bloom-filtered (optimized).
+    """Send bloom-filtered sync response.
 
     Args:
         to_peer_id: Requester's peer_id (for logging)
         to_peer_shared_id: Requester's peer_shared_id (unused, kept for API compatibility)
         from_peer_id: Responder's peer_id (which peer is sending the response)
         transit_key_dict: Transit key dict from the sync request
-        window_id: Window ID being synced (for salt derivation) - ignored in placeholder mode
-        window_min: Storage window range start - ignored in placeholder mode
-        window_max: Storage window range end - ignored in placeholder mode
-        bloom_filter: Bloom filter of events requester HAS - ignored in placeholder mode
-        requester_public_key: Requester's public key (for deriving salt) - ignored in placeholder mode
+        window_id: Window ID being synced (for salt derivation)
+        window_min: Storage window range start
+        window_max: Storage window range end
+        bloom_filter: Bloom filter of events requester HAS
+        requester_public_key: Requester's public key (for deriving salt)
         t_ms: Current timestamp
         db: Database connection
     """
     safedb = create_safe_db(db, recorded_by=from_peer_id)
 
-    if PLACEHOLDER_SYNC:
-        # PLACEHOLDER MODE: Send ALL shareable events (no filtering)
-        # This is O(n) bandwidth but deterministic and reliable.
-        # Use this to debug DAG bootstrap and auth before optimizing sync.
-        log.info(f"[SYNC_RESPONSE_PLACEHOLDER] from={from_peer_id[:10]}... to={to_peer_id[:10]}... sending ALL events")
-        shareable_rows = safedb.query(
-            """SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?""",
-            (from_peer_id,)
-        )
-        events_to_send = [row['event_id'] for row in shareable_rows]
-        log.info(f"[SYNC_RESPONSE_PLACEHOLDER] sending {len(events_to_send)} events")
-    else:
-        # OPTIMIZED MODE: Bloom-filtered window sync
-        log.debug(f"[SYNC_RESPONSE] from={from_peer_id[:10]}... to={to_peer_id[:10]}... window={window_id} range={window_min}-{window_max}")
+    log.debug(f"[SYNC_RESPONSE] from={from_peer_id[:10]}... to={to_peer_id[:10]}... window={window_id} range={window_min}-{window_max}")
 
-        # Query random candidates to share (LIMIT to avoid O(n) scans for large event counts)
-        MAX_CANDIDATES = 2000
-        shareable_rows = safedb.query(
-            """SELECT event_id FROM shareable_events
-               WHERE can_share_peer_id = ?
-                 AND window_id >= ?
-                 AND window_id < ?
-               ORDER BY RANDOM()
-               LIMIT ?""",
-            (from_peer_id, window_min, window_max, MAX_CANDIDATES)
-        )
-        log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_candidate_events from={from_peer_id[:10]}...")
+    # Query random candidates to share (LIMIT to avoid O(n) scans for large event counts)
+    MAX_CANDIDATES = 2000
+    shareable_rows = safedb.query(
+        """SELECT event_id FROM shareable_events
+           WHERE can_share_peer_id = ?
+             AND window_id >= ?
+             AND window_id < ?
+           ORDER BY RANDOM()
+           LIMIT ?""",
+        (from_peer_id, window_min, window_max, MAX_CANDIDATES)
+    )
+    log.debug(f"[SYNC_RESPONSE] found={len(shareable_rows)}_candidate_events from={from_peer_id[:10]}...")
 
-        for row in shareable_rows:
-            log.debug(f"[SYNC_RESPONSE]   candidate event={row['event_id'][:20]}...")
+    for row in shareable_rows:
+        log.debug(f"[SYNC_RESPONSE]   candidate event={row['event_id'][:20]}...")
 
-        # Derive salt for bloom checking (same salt requester used)
-        salt = derive_salt(requester_public_key, window_id)
-        log.debug(f"[BLOOM_CHECK] to={to_peer_id[:10]}... requester_pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
+    # Derive salt for bloom checking (same salt requester used)
+    salt = derive_salt(requester_public_key, window_id)
+    log.debug(f"[BLOOM_CHECK] to={to_peer_id[:10]}... requester_pubkey_for_salt={crypto.b64encode(requester_public_key)[:20]}...")
 
-        # Debug: Log bloom filter stats
-        bits_set = bin(int.from_bytes(bloom_filter, 'big')).count('1')
-        log.debug(f"[SYNC_RESPONSE] bloom_filter_bits_set={bits_set}/512 bloom_hex={bloom_filter.hex()[:40]}...")
+    # Debug: Log bloom filter stats
+    bits_set = bin(int.from_bytes(bloom_filter, 'big')).count('1')
+    log.debug(f"[SYNC_RESPONSE] bloom_filter_bits_set={bits_set}/512 bloom_hex={bloom_filter.hex()[:40]}...")
 
-        # Filter events using bloom: send only events that FAIL bloom check
-        # (requester doesn't have them)
-        events_to_send = []
-        peer_shared_seen = 0
-        peer_shared_will_send = 0
-        for row in shareable_rows:
-            event_id_str = row['event_id']
-            event_id_bytes = crypto.b64decode(event_id_str)
+    # Filter events using bloom: send only events that FAIL bloom check
+    # (requester doesn't have them)
+    events_to_send = []
+    peer_shared_seen = 0
+    peer_shared_will_send = 0
+    for row in shareable_rows:
+        event_id_str = row['event_id']
+        event_id_bytes = crypto.b64decode(event_id_str)
 
-            # Check if event is in requester's bloom
-            in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
+        # Check if event is in requester's bloom
+        in_bloom = check_bloom(event_id_bytes, bloom_filter, salt)
 
-            if not in_bloom:
-                # Event NOT in bloom -> requester doesn't have it -> send it
-                events_to_send.append(event_id_str)
-                log.debug(f"[SYNC_RESPONSE] will_send event_id={event_id_str[:20]}... (not_in_bloom)")
-            else:
-                log.debug(f"[SYNC_RESPONSE] skipping event_id={event_id_str[:20]}... (in_bloom)")
+        if not in_bloom:
+            # Event NOT in bloom -> requester doesn't have it -> send it
+            events_to_send.append(event_id_str)
+            log.debug(f"[SYNC_RESPONSE] will_send event_id={event_id_str[:20]}... (not_in_bloom)")
+        else:
+            log.debug(f"[SYNC_RESPONSE] skipping event_id={event_id_str[:20]}... (in_bloom)")
 
-            # Try to detect peer_shared for instrumentation
-            try:
-                evt_blob_dbg = safedb.get_shareable_blob(event_id_str)
-                evt_json_dbg = crypto.parse_json(evt_blob_dbg)
-                if evt_json_dbg.get('type') == 'peer_shared':
-                    peer_shared_seen += 1
-                    if not in_bloom:
-                        peer_shared_will_send += 1
-            except Exception:
-                pass
+        # Try to detect peer_shared for instrumentation
+        try:
+            evt_blob_dbg = safedb.get_shareable_blob(event_id_str)
+            evt_json_dbg = crypto.parse_json(evt_blob_dbg)
+            if evt_json_dbg.get('type') == 'peer_shared':
+                peer_shared_seen += 1
+                if not in_bloom:
+                    peer_shared_will_send += 1
+        except Exception:
+            pass
 
-        log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
-        log.warning(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
+    log.debug(f"[SYNC_RESPONSE] sending={len(events_to_send)}_events to={to_peer_id[:10]}...")
+    log.info(f"[SYNC_RESPONSE_STATS] from={from_peer_id[:10]}... to={to_peer_id[:10]}... shareable={len(shareable_rows)} will_send={len(events_to_send)} peer_shared_seen={peer_shared_seen} peer_shared_will_send={peer_shared_will_send}")
 
-        if len(events_to_send) == 0 and len(shareable_rows) > 0:
-            log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")
+    if len(events_to_send) == 0 and len(shareable_rows) > 0:
+        log.debug(f"[SYNC_RESPONSE] WARNING: All {len(shareable_rows)} events were filtered by bloom! This suggests a bloom filter bug.")
 
     # Send filtered events
     for event_id in events_to_send:
@@ -1286,4 +1265,68 @@ def check_sync_progress(db: Any, prev_snapshot: dict) -> dict:
         'blocked_count': total_blocked,
         'total_valid': total_valid,
         'snapshot': current  # Include for next comparison
+    }
+
+
+def get_global_sync_status(db: Any, t_ms: int) -> dict:
+    """Get sync status across all local peers and their active connections.
+
+    Uses negentropy's per-connection sync state for accurate progress detection.
+    This replaces the snapshot-based approach with deterministic sync completion.
+
+    Args:
+        db: Database connection
+        t_ms: Current timestamp (for connection expiry check)
+
+    Returns:
+        {
+            'all_synced': bool,           # All connections across all peers synced
+            'queue_empty': bool,          # incoming_blobs is empty
+            'total_connections': int,     # Count of active connections
+            'synced_connections': int,    # Count that are fully synced
+            'by_peer': [                  # Per local peer breakdown
+                {
+                    'peer_id': str,
+                    'all_synced': bool,
+                    'total_connections': int,
+                    'synced_connections': int,
+                    'connections': [...]
+                }
+            ]
+        }
+    """
+    unsafedb = create_unsafe_db(db)
+
+    # Get queue size
+    queue = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")
+    queue_empty = (queue['cnt'] if queue else 0) == 0
+
+    # Get all local peers
+    local_peers = [row['peer_id'] for row in unsafedb.query("SELECT peer_id FROM local_peers")]
+
+    by_peer = []
+    total_connections = 0
+    total_synced = 0
+
+    for peer_id in local_peers:
+        status = negentropy.get_all_connection_sync_status(db, peer_id, t_ms)
+        by_peer.append({
+            'peer_id': peer_id,
+            'all_synced': status['all_synced'],
+            'total_connections': status['total_connections'],
+            'synced_connections': status['synced_connections'],
+            'connections': status['connections'],
+        })
+        total_connections += status['total_connections']
+        total_synced += status['synced_connections']
+
+    # All synced if every peer is synced (vacuously true if no connections)
+    all_synced = all(p['all_synced'] for p in by_peer) if by_peer else True
+
+    return {
+        'all_synced': all_synced,
+        'queue_empty': queue_empty,
+        'total_connections': total_connections,
+        'synced_connections': total_synced,
+        'by_peer': by_peer,
     }

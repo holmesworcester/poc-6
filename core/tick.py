@@ -73,3 +73,55 @@ def tick(t_ms: int, db: Any) -> None:
                 (job.name, t_ms, t_ms)
             )
             db.commit()
+
+
+# Jobs that are safe to run during sync-only mode (don't create new events)
+SYNC_ONLY_JOBS = {'sync_receive', 'negentropy_sync', 'connection_send'}
+
+
+def tick_sync_only(t_ms: int, db: Any) -> None:
+    """Run only sync-related jobs (no event creation).
+
+    This mode is used during sync_until_converged() to ensure convergence
+    is achievable. Running event-creating jobs during sync would cause
+    infinite sync loops as new events keep appearing.
+
+    Jobs run in sync-only mode:
+    - sync_receive: Process incoming messages (every 100ms)
+    - negentropy_sync: Set reconciliation (every 1000ms)
+    - connection_send: Send messages on connections (every 1000ms)
+
+    Jobs NOT run (they create events):
+    - intro_process, self_address_announce, transit_prekey_replenishment,
+      group_prekey_replenishment, message_rekey_and_purge, etc.
+
+    Args:
+        t_ms: Current time in milliseconds
+        db: Database connection
+    """
+    unsafedb = create_unsafe_db(db)
+
+    for job in jobs.JOBS:
+        # Skip non-sync jobs
+        if job.name not in SYNC_ONLY_JOBS:
+            continue
+
+        # Get last run time from database (0 if never run)
+        state = unsafedb.query_one(
+            "SELECT last_run_at FROM job_state WHERE job_name = ?",
+            (job.name,)
+        )
+        last_run_at = state['last_run_at'] if state else 0
+
+        # Respect job timing (don't force run - it's expensive)
+        if job.should_run(t_ms, last_run_at, db):
+            # Run the job
+            job.run(t_ms, db)
+
+            # Update state in database
+            unsafedb.execute(
+                """INSERT OR REPLACE INTO job_state (job_name, last_run_at, updated_at)
+                   VALUES (?, ?, ?)""",
+                (job.name, t_ms, t_ms)
+            )
+            db.commit()
