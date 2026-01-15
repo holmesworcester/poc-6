@@ -3,77 +3,8 @@
 Provides consistent defaults for timing across all tests to match production job frequencies,
 plus utilities to detect when sync has converged rather than using hard-coded round counts.
 """
-from typing import Any, Callable
+from typing import Any
 from core import tick as tick_module
-
-
-def assert_eventually(
-    check: Callable[[], Any],
-    db: Any,
-    start_t_ms: int,
-    max_rounds: int = 100,
-    interval_ms: int = 100,
-    msg: str = None
-) -> int:
-    """Run ticks until check() passes or timeout.
-
-    This is the preferred way to write sync tests. Instead of guessing
-    how many rounds sync takes, just assert what you care about and
-    let this helper tick until it's true.
-
-    Args:
-        check: Callable that raises AssertionError if condition not met.
-               Can also return a value - truthy = pass, falsy = fail.
-        db: Database connection
-        start_t_ms: Starting timestamp
-        max_rounds: Maximum ticks before giving up (default 100 = 10 seconds)
-        interval_ms: Time between ticks (default 100ms)
-        msg: Optional message for timeout failure
-
-    Returns:
-        Final timestamp after check passed
-
-    Raises:
-        AssertionError: If check doesn't pass within max_rounds
-
-    Example:
-        # Wait until Bob can see Alice's message
-        t_ms = assert_eventually(
-            lambda: db.query_one(
-                "SELECT * FROM messages WHERE id = ? AND recorded_by = ?",
-                (msg_id, bob_peer_id)
-            ),
-            db=db,
-            start_t_ms=5000
-        )
-    """
-    last_error = None
-
-    for i in range(max_rounds):
-        t_ms = start_t_ms + i * interval_ms
-        tick_module.tick(t_ms=t_ms, db=db)
-        db.commit()
-
-        try:
-            result = check()
-            # Support both assertion-style (raises) and return-style (truthy/falsy)
-            if result is not None and not result:
-                raise AssertionError(f"Check returned falsy: {result}")
-            return t_ms + interval_ms  # Return next available timestamp
-        except AssertionError as e:
-            last_error = e
-            continue
-
-    # Final attempt with real error
-    timeout_msg = msg or f"Condition not met after {max_rounds} rounds ({max_rounds * interval_ms}ms)"
-    try:
-        result = check()
-        if result is not None and not result:
-            raise AssertionError(f"{timeout_msg}: check returned {result}")
-    except AssertionError as e:
-        raise AssertionError(f"{timeout_msg}: {e}") from None
-
-    return start_t_ms + max_rounds * interval_ms
 
 
 # Production job frequencies (from jobs.py):
