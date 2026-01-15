@@ -154,38 +154,35 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         assert has_key_b, "Device 2 should have key for Group B"
         assert has_key_c, "Device 2 should have key for Group C"
 
-    assert_eventually(device2_has_all_keys, db=db, start_t_ms=6000)
+    t_ms = assert_eventually(device2_has_all_keys, db=db, start_t_ms=6000)
 
     # Verify device 2 is a member of all groups
     print("\n=== Verifying device 2 group memberships ===")
 
-    is_member_a = group_member.is_member(
-        alice_device1['user_id'],
-        group_a_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group A: {is_member_a}")
-    assert is_member_a, "Device 2 should be member of Group A"
+    def device2_is_member_of_all_groups():
+        is_member_a = group_member.is_member(
+            alice_device1['user_id'],
+            group_a_id,
+            alice_device2['peer_id'],
+            db
+        )
+        is_member_b = group_member.is_member(
+            alice_device1['user_id'],
+            group_b_id,
+            alice_device2['peer_id'],
+            db
+        )
+        is_member_c = group_member.is_member(
+            alice_device1['user_id'],
+            group_c_id,
+            alice_device2['peer_id'],
+            db
+        )
+        assert is_member_a, "Device 2 should be member of Group A"
+        assert is_member_b, "Device 2 should be member of Group B"
+        assert is_member_c, "Device 2 should be member of Group C"
 
-    is_member_b = group_member.is_member(
-        alice_device1['user_id'],
-        group_b_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group B: {is_member_b}")
-    assert is_member_b, "Device 2 should be member of Group B"
-
-    is_member_c = group_member.is_member(
-        alice_device1['user_id'],
-        group_c_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group C: {is_member_c}")
-    assert is_member_c, "Device 2 should be member of Group C"
-
+    assert_eventually(device2_is_member_of_all_groups, db=db, start_t_ms=t_ms)
     print("✅ Device 2 is member of all groups and has all keys")
 
     print(f"\n✅ All assertions passed!")

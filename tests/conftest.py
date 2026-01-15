@@ -34,6 +34,7 @@ def reset_global_state():
 
     # Also reset after test to catch tests that modify global state
     jobs.reset_frequency_multiplier()
+    network_config.reset_network_config()
 
 
 @pytest.fixture

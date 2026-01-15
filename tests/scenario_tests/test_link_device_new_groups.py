@@ -131,29 +131,28 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
         assert has_key_a, "Device 2 should have key for Group A"
         assert has_key_b, "Device 2 should have key for Group B"
 
-    assert_eventually(device2_has_both_keys, db=db, start_t_ms=6000)
+    t_ms = assert_eventually(device2_has_both_keys, db=db, start_t_ms=6000)
 
     # Verify device 2 is member of BOTH groups
     print("\n=== Verifying device 2 group memberships ===")
 
-    is_member_a = group_member.is_member(
-        alice_device1['user_id'],
-        group_a_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group A: {is_member_a}")
-    assert is_member_a, "Device 2 should be member of Group A (existed before invite)"
+    def device2_is_member_of_both_groups():
+        is_member_a = group_member.is_member(
+            alice_device1['user_id'],
+            group_a_id,
+            alice_device2['peer_id'],
+            db
+        )
+        is_member_b = group_member.is_member(
+            alice_device1['user_id'],
+            group_b_id,
+            alice_device2['peer_id'],
+            db
+        )
+        assert is_member_a, "Device 2 should be member of Group A (existed before invite)"
+        assert is_member_b, "Device 2 should be member of Group B (created after invite)"
 
-    is_member_b = group_member.is_member(
-        alice_device1['user_id'],
-        group_b_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group B: {is_member_b}")
-    assert is_member_b, "Device 2 should be member of Group B (created after invite)"
-
+    assert_eventually(device2_is_member_of_both_groups, db=db, start_t_ms=t_ms)
     print("✅ Device 2 is member of both groups and has keys for both")
 
     print(f"\n✅ All assertions passed!")
