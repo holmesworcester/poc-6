@@ -531,15 +531,13 @@ Unlike Signal or MLS, we do not pursue Forward Secrecy for not-yet-purged events
 
 ## Removal
 
-TODO: Add note/feature that all invites known to the removed user are invalidated upon removal. Also add invite expiration for good measure.  
-
 All users must be able to remove peers on lost or stolen devices. Admins must be able to remove both peers and users.
 
 When encrypting a new event, a peer MUST choose a key whose recipient set excludes every `user_id` and `peer_shared_id` present in any accepted `remove-user` or `remove-peer` event. If no such key exists, it MUST create a fresh key event for all remaining members and use that.
 
 > **Note:** "Accepted" means the peer has received and successfully projected the removal event. Each peer enforces this rule based on their own subjective view of removal state. A peer that has not yet received a removal event will correctly use keys that include the (from their perspective, not-yet-removed) user. This is consistent with the protocol's eventual consistency model.
 
-To ensure a convergent historical record, events from removed users are still valid. However, peers check their set of `remove-peer` and `remove-user` events and reject any [Transit-layer Encryption](#transit-layer-encryption) connection, request, or response from removed peers. 
+To ensure a convergent historical record, events from removed users are still valid. However, peers check their set of `remove-peer` and `remove-user` events and reject any [Transit-layer Encryption](#transit-layer-encryption) connection, request, or response from removed peers.
 
 (Implementation note: projection of the removed_user event deletes connection information and with it transit keys.)
 
@@ -556,6 +554,38 @@ We [blocking and unblocking](#blocking-and-unblocking) `remove-peer` events that
 Peers can remove the user they are linked to with a `remove-user` event that names the `user-id`. Admins can remove any user, including other admins and themselves.
 
 We [blocking and unblocking](#blocking-and-unblocking) `remove-user` events that are invalid for lack of permission.
+
+### Admin Action Chains
+
+Admin-gated events (invite, admin, group_member, channel) form per-peer chains via `prior_admin_action`:
+
+```
+{
+    'type': 'invite',
+    'signed_by': peer_shared_id,
+    'prior_admin_action': previous_action_id,  # None for first action
+    ...
+}
+```
+
+When removing a user, include `admin_action_heads` mapping each of the removed user's `peer_shared_id` to their latest admin action:
+
+```
+{
+    'type': 'user_removed',
+    'removed_user_id': user_id,
+    'admin_action_heads': {
+        peer_shared_id_1: last_action_id_1,
+        peer_shared_id_2: last_action_id_2,
+    },
+}
+```
+
+An admin action from a removed user is valid **iff** it is an ancestor of the head for that peer. Ancestry is checked by walking `prior_admin_action` links from head to action.
+
+**False head defense:** When projecting removal, use `MAX(claimed_head, known_head)` for each peer - if we've already projected actions beyond the claimed head, use our knowledge. This prevents a malicious remover from invalidating legitimately-seen actions.
+
+**Unknown devices:** Devices NOT in `admin_action_heads` have ALL their actions invalidated. The remover's knowledge is authoritative; security > availability.
 
 ## Post-Quantum
 
