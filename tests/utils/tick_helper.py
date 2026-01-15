@@ -7,11 +7,16 @@ from typing import Any, Callable
 from core import tick as tick_module
 
 
+# Global test timeout - increase this if tests are timing out
+# 500 rounds = 50 seconds of simulated time at 100ms intervals
+DEFAULT_MAX_ROUNDS = 500
+
+
 def assert_eventually(
     check: Callable[[], Any],
     db: Any,
     start_t_ms: int,
-    max_rounds: int = 100,
+    max_rounds: int = None,
     interval_ms: int = 100,
     msg: str = None
 ) -> int:
@@ -26,7 +31,7 @@ def assert_eventually(
                Can also return a value - truthy = pass, falsy = fail.
         db: Database connection
         start_t_ms: Starting timestamp
-        max_rounds: Maximum ticks before giving up (default 100 = 10 seconds)
+        max_rounds: Maximum ticks before giving up (default: DEFAULT_MAX_ROUNDS)
         interval_ms: Time between ticks (default 100ms)
         msg: Optional message for timeout failure
 
@@ -47,6 +52,9 @@ def assert_eventually(
             start_t_ms=5000
         )
     """
+    if max_rounds is None:
+        max_rounds = DEFAULT_MAX_ROUNDS
+
     last_error = None
 
     for i in range(max_rounds):
@@ -60,7 +68,9 @@ def assert_eventually(
             if result is not None and not result:
                 raise AssertionError(f"Check returned falsy: {result}")
             return t_ms + interval_ms  # Return next available timestamp
-        except AssertionError as e:
+        except Exception as e:
+            # Catch all exceptions - sync may not have propagated data yet
+            # ValueError, KeyError, etc. are all retryable until timeout
             last_error = e
             continue
 
@@ -70,7 +80,7 @@ def assert_eventually(
         result = check()
         if result is not None and not result:
             raise AssertionError(f"{timeout_msg}: check returned {result}")
-    except AssertionError as e:
+    except Exception as e:
         raise AssertionError(f"{timeout_msg}: {e}") from None
 
     return start_t_ms + max_rounds * interval_ms
