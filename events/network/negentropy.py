@@ -1,45 +1,38 @@
 """
-Negentropy-style deterministic sync protocol - UNIFIED TIME+HASH BUCKETS variant.
+Negentropy-style deterministic sync protocol - HASH-ONLY BUCKETS variant.
 
-This variant uses a unified key space where the bucket key is:
-    timestamp (ms) || event_id_hash
-
-This creates a single unified hierarchy where:
-- Events naturally cluster by time (high-order bits are timestamp)
-- Within the same timestamp, events spread by hash
-- The hierarchy drills down through the combined key space
-
-This is essentially "one big hash" but the timestamps form the high-order bits,
-so temporal locality is preserved while still using pure prefix-based bucketing.
+This variant uses pure hash-based bucketing - the unified key is derived
+entirely from the event_id, with no timestamp dependency. This ensures
+that all peers compute identical keys for the same events, enabling
+accurate root hash comparison for sync detection.
 
 Design goals:
 - Deterministic: no false positives, exact set reconciliation
-- Finality: clear "done" state when synced
+- Finality: clear "done" state when synced (root hashes match)
 - UI-inspectable: track state per connection for visibility
 - Connection-scoped: ranges tracked by connection_id
-- Temporal locality: events from similar times cluster together
-- Uniform within time: events with same timestamp spread uniformly
+- Peer-consistent: same event_id always produces same unified_key
 
-Bucket hierarchy (by unified key prefix):
+Bucket hierarchy (by hash prefix):
 - root: all events
 - prefix_2: first 2 hex chars (256 buckets)
 - prefix_4: first 4 hex chars (65536 buckets)
-- prefix_6 through prefix_12: timestamp precision levels
-- prefix_14, prefix_16: hash precision levels (for same-timestamp events)
+- prefix_6 through prefix_16: progressively finer hash buckets
 
-The unified key is: timestamp_hex (12 chars for 48 bits) + event_hash (4 chars)
-Total: 16 hex chars = 64 bits
+The unified key is: BLAKE2b(event_id)[:8] as 16 hex chars
+This provides uniform distribution across all bucket levels.
 
-For large files (e.g., 1GB = 2.4M slices), all slices may share the same timestamp.
-The hash suffix (chars 12-16) ensures these events spread across different buckets
-at the finest levels (prefix_14, prefix_16).
+Trade-offs vs time-based bucketing:
+- Loses temporal locality (can't efficiently sync "just recent events")
+- Gains peer consistency (same event = same bucket on all peers)
+- Better for encrypted events where created_at is unavailable
 
 Protocol flow:
 1. On new connection: send root hash
 2. Receive their hash, compare ranges
-3. For mismatched ranges: drill down by unified prefix until bucket has ≤EVENTS_THRESHOLD events
+3. For mismatched ranges: drill down by hash prefix until bucket has ≤EVENTS_THRESHOLD events
 4. At threshold: send actual event IDs
-5. When all ranges match: sync complete for this connection
+5. When root hashes match: sync complete for this connection
 """
 
 import hashlib
@@ -115,35 +108,24 @@ class EventsMessage:
 # Unified key computation
 # ============================================================================
 
-def compute_unified_key(event_id: str, created_at: int) -> str:
-    """Compute the unified time+hash key for an event.
+def compute_unified_key(event_id: str, created_at: int = 0) -> str:
+    """Compute the unified hash key for an event.
 
-    The unified key is: timestamp_hex (12 chars, 48 bits) + event_hash (4 chars, 16 bits)
-
-    This creates a key where:
-    - High-order bits are timestamp (so events cluster by time when sorted)
-    - Low-order bits are hash (so events with same timestamp spread uniformly)
-
-    48 bits of timestamp gives us ~8900 years of millisecond precision from epoch.
-    16 bits of hash gives 65536 sub-buckets within each timestamp.
+    The unified key is derived purely from the event_id using BLAKE2b hash.
+    This ensures that all peers compute the same key for the same event,
+    regardless of when they received it or what timestamp metadata they have.
 
     Args:
         event_id: The event identifier
-        created_at: Event timestamp in milliseconds since epoch
+        created_at: Ignored (kept for API compatibility during transition)
 
     Returns:
-        16 character hex string (64 bits total)
+        16 character hex string (64 bits of hash)
     """
-    # Timestamp: 48 bits (6 bytes) - gives us ms precision for ~8900 years
-    # We mask to 48 bits to ensure consistent length
-    ts_masked = created_at & 0xFFFFFFFFFFFF  # 48 bits
-    ts_hex = format(ts_masked, '012x')  # 12 hex chars
-
-    # Event hash: 16 bits (2 bytes) for sub-bucket distribution
-    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=2).digest()
-    hash_hex = h.hex()  # 4 hex chars
-
-    return ts_hex + hash_hex
+    # Hash the event_id to get uniform distribution
+    # Use 8 bytes (64 bits) = 16 hex chars
+    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
+    return h.hex()  # 16 hex chars
 
 
 def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
@@ -994,27 +976,24 @@ def get_sync_status(
 # ============================================================================
 
 def decode_unified_key(unified_key: str) -> tuple[int, str]:
-    """Decode a unified key back into timestamp and hash components.
+    """Decode a unified key (hash-only variant).
 
-    Useful for debugging and visualization.
+    In the hash-only variant, the unified key is purely derived from event_id.
+    This function returns (0, full_hash) for compatibility with code that
+    expects a (timestamp, hash) tuple.
 
     Args:
         unified_key: 16 character hex string
 
     Returns:
-        Tuple of (timestamp_ms, hash_hex)
+        Tuple of (0, full_hash_hex) - timestamp is always 0 in hash-only mode
     """
-    ts_hex = unified_key[:12]
-    hash_hex = unified_key[12:]
-    ts_ms = int(ts_hex, 16)
-    return ts_ms, hash_hex
+    return 0, unified_key
 
 
 def format_unified_key_human(unified_key: str) -> str:
     """Format a unified key for human-readable display.
 
-    Shows the timestamp as ISO format and the hash suffix.
+    In hash-only mode, just shows the hash prefix since there's no timestamp.
     """
-    ts_ms, hash_hex = decode_unified_key(unified_key)
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-    return f"{dt.isoformat()}:{hash_hex}"
+    return f"hash:{unified_key[:8]}..."
