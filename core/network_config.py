@@ -279,6 +279,9 @@ def reset_network_config() -> None:
 
     Uses 0 latency and unlimited bandwidth for fast test execution.
     The class defaults (20ms latency, 1Mbps bandwidth) are for realistic CLI demo.
+
+    Note: Tests using latency_ms=0 should drain at t_ms+1 to avoid SimPy edge
+    case where events scheduled at current time may not be processed correctly.
     """
     global _config, _simulator
     # Use fast settings for tests (override class defaults)

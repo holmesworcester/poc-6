@@ -336,6 +336,7 @@ def test_non_admin_can_create_link_invite():
 new-network --name "Test Network" --username alice --devicename desktop
 invite
 accept-invite --username bob --devicename phone --invite 1
+sync --ticks 50
 switch 2
 link
 accept-link --devicename tablet --invite 2

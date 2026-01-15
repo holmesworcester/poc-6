@@ -44,8 +44,8 @@ def test_incoming_with_zero_latency(db):
 
 def test_incoming_with_latency(db):
     """Test that latency delays packet delivery."""
-    # Setup: 100ms latency
-    network_config.set_network_config(network_config.NetworkConfig(latency_ms=100))
+    # Setup: 100ms latency, no jitter for deterministic timing
+    network_config.set_network_config(network_config.NetworkConfig(latency_ms=100, jitter_ms=0))
     unsafedb = create_unsafe_db(db)
 
     # Add packet at t=1000
@@ -64,8 +64,8 @@ def test_incoming_with_latency(db):
 
 def test_incoming_with_exact_latency_boundary(db):
     """Test that packets deliver exactly at deliver_at time."""
-    # Setup: 50ms latency
-    network_config.set_network_config(network_config.NetworkConfig(latency_ms=50))
+    # Setup: 50ms latency, no jitter for deterministic timing
+    network_config.set_network_config(network_config.NetworkConfig(latency_ms=50, jitter_ms=0))
     unsafedb = create_unsafe_db(db)
 
     # Add packet at t=1000, should deliver at t=1050
@@ -84,8 +84,8 @@ def test_incoming_with_exact_latency_boundary(db):
 
 def test_packet_loss_rate(db):
     """Test that packet loss rate is applied correctly."""
-    # Setup: 50% packet loss
-    network_config.set_network_config(network_config.NetworkConfig(packet_loss_rate=0.5))
+    # Setup: 50% packet loss, 1ms latency for near-immediate delivery (0ms has SimPy edge cases)
+    network_config.set_network_config(network_config.NetworkConfig(packet_loss_rate=0.5, latency_ms=1, jitter_ms=0))
     unsafedb = create_unsafe_db(db)
 
     # Send 100 packets
@@ -96,14 +96,14 @@ def test_packet_loss_rate(db):
 
     # With 50% loss, expect roughly 50 packets to survive
     # Allow variance (30-70 packets out of 100)
-    received = queues.incoming.drain(num_sent, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(num_sent, current_time_ms=1001, unsafedb=unsafedb)
     assert 30 <= len(received) <= 70, f"Expected ~50 packets, got {len(received)}"
 
 
 def test_packet_loss_zero(db):
     """Test that zero packet loss means all packets are delivered."""
-    # Setup: 0% packet loss
-    network_config.set_network_config(network_config.NetworkConfig(packet_loss_rate=0.0))
+    # Setup: 0% packet loss, 1ms latency for near-immediate delivery (0ms has SimPy edge cases)
+    network_config.set_network_config(network_config.NetworkConfig(packet_loss_rate=0.0, latency_ms=1, jitter_ms=0))
     unsafedb = create_unsafe_db(db)
 
     # Send 100 packets
@@ -113,14 +113,14 @@ def test_packet_loss_zero(db):
     db.commit()
 
     # All packets should be delivered
-    received = queues.incoming.drain(num_sent, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(num_sent, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == num_sent
 
 
 def test_max_packet_size_enforcement(db):
     """Test that oversized packets are dropped."""
-    # Setup: max 100 bytes
-    network_config.set_network_config(network_config.NetworkConfig(max_packet_size=100))
+    # Setup: max 100 bytes, 1ms latency for near-immediate delivery (0ms has SimPy edge cases)
+    network_config.set_network_config(network_config.NetworkConfig(max_packet_size=100, latency_ms=1, jitter_ms=0))
     unsafedb = create_unsafe_db(db)
 
     # Add under-size packet (should succeed)
@@ -135,15 +135,15 @@ def test_max_packet_size_enforcement(db):
     db.commit()
 
     # Should receive only 2 packets
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 2
 
 
 def test_latency_and_loss_combined(db):
     """Test latency and packet loss together."""
-    # Setup: 50ms latency + 20% loss
+    # Setup: 50ms latency + 20% loss, no jitter for deterministic timing
     network_config.set_network_config(
-        network_config.NetworkConfig(latency_ms=50, packet_loss_rate=0.2)
+        network_config.NetworkConfig(latency_ms=50, packet_loss_rate=0.2, jitter_ms=0)
     )
     unsafedb = create_unsafe_db(db)
 
@@ -163,8 +163,8 @@ def test_latency_and_loss_combined(db):
 
 def test_multiple_batches_with_different_delivery_times(db):
     """Test that packets sent at different times are delivered at appropriate times."""
-    # Setup: 100ms latency
-    network_config.set_network_config(network_config.NetworkConfig(latency_ms=100))
+    # Setup: 100ms latency, no jitter for deterministic timing
+    network_config.set_network_config(network_config.NetworkConfig(latency_ms=100, jitter_ms=0))
     unsafedb = create_unsafe_db(db)
 
     # Add packets at different times (must be in chronological order for discrete-event sim)
@@ -245,17 +245,18 @@ def test_network_config_global_state(db):
     """Test that network config is properly global and can be changed."""
     unsafedb = create_unsafe_db(db)
 
-    # Start with default (no latency)
+    # Start with default (0ms latency)
     assert network_config.get_network_config().latency_ms == 0
 
     queues.incoming.add(b"packet_1", t_ms=1000, unsafedb=unsafedb)
     db.commit()
 
-    received = queues.incoming.drain(10, current_time_ms=1000, unsafedb=unsafedb)
+    # Drain at t+1 to avoid SimPy edge case with 0-delay events at current time
+    received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
 
     # Change config and add another packet
-    network_config.set_network_config(network_config.NetworkConfig(latency_ms=100))
+    network_config.set_network_config(network_config.NetworkConfig(latency_ms=100, jitter_ms=0))
     assert network_config.get_network_config().latency_ms == 100
 
     queues.incoming.add(b"packet_2", t_ms=2000, unsafedb=unsafedb)
@@ -413,9 +414,9 @@ def test_burst_loss_drops_consecutive_packets(db):
 
 def test_burst_loss_probabilistic_entry(db):
     """Test that burst loss entry is probabilistic."""
-    # Setup: low burst probability
+    # Setup: low burst probability, 1ms latency for near-immediate delivery (0ms has SimPy edge cases)
     network_config.set_network_config(
-        network_config.NetworkConfig(burst_loss_probability=0.1, burst_loss_length=2)
+        network_config.NetworkConfig(burst_loss_probability=0.1, burst_loss_length=2, latency_ms=1, jitter_ms=0)
     )
     unsafedb = create_unsafe_db(db)
 
@@ -427,7 +428,7 @@ def test_burst_loss_probabilistic_entry(db):
             delivered += 1
 
     db.commit()
-    received = queues.incoming.drain(100, current_time_ms=1000, unsafedb=unsafedb)
+    received = queues.incoming.drain(100, current_time_ms=1001, unsafedb=unsafedb)
 
     # With 10% burst probability and burst length 2, expect ~80% delivery
     # Allow wide variance
