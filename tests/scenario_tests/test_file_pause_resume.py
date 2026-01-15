@@ -102,7 +102,7 @@ def test_pause_and_resume_file_download(fresh_db):
     print("\n=== Downloading to 50% ===")
 
     target_slices = expected_slices // 2
-    for round_num in range(25):  # Should be enough to get to 50%
+    for round_num in range(50):  # Hash-only bucketing may need more rounds
         tick.tick(t_ms=7000 + round_num * 100, db=db)
         db.commit()
 
@@ -172,7 +172,7 @@ def test_pause_and_resume_file_download(fresh_db):
     # Continue downloading to completion
     print("\n=== Downloading to completion ===")
 
-    for round_num in range(40):  # Should be enough to complete
+    for round_num in range(80):  # Hash-only bucketing may need more rounds
         tick.tick(t_ms=9000 + round_num * 100, db=db)
         db.commit()
 
