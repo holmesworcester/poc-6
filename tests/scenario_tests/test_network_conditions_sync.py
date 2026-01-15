@@ -13,7 +13,7 @@ from core import schema
 from core import network_config
 from events.identity import user, invite, peer
 from events.content import message, channel
-from tests.utils import tick_helper
+from tests.utils.tick_helper import run_ticks, assert_eventually
 
 
 @pytest.fixture(autouse=True)
@@ -51,14 +51,11 @@ class TestSyncWithLatency:
         db.commit()
 
         # Run sync - need more rounds due to latency
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=300, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=300)
 
-        print(f"Converged: {converged}, rounds: {rounds}, status: {status}")
-
-        # Should eventually converge even with latency
-        assert status['blocked_count'] == 0, f"Should have no blocked events, got {status['blocked_count']}"
+        # Check no blocked events
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        assert blocked_count == 0, f"Should have no blocked events, got {blocked_count}"
 
     def test_sync_with_high_latency(self, fresh_db):
         """Sync should converge even with 300ms latency (satellite-like)."""
@@ -84,12 +81,11 @@ class TestSyncWithLatency:
         db.commit()
 
         # Run sync - need even more rounds due to high latency
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=500, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=500)
 
-        print(f"Converged: {converged}, rounds: {rounds}, status: {status}")
-        assert status['blocked_count'] == 0, f"Should have no blocked events, got {status['blocked_count']}"
+        # Check no blocked events
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        assert blocked_count == 0, f"Should have no blocked events, got {blocked_count}"
 
 
 class TestSyncWithPacketLoss:
@@ -119,12 +115,11 @@ class TestSyncWithPacketLoss:
         db.commit()
 
         # Run sync
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=400, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=400)
 
-        print(f"Converged: {converged}, rounds: {rounds}, status: {status}")
-        assert status['blocked_count'] == 0, f"Should converge despite packet loss"
+        # Check no blocked events
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        assert blocked_count == 0, f"Should converge despite packet loss, got {blocked_count} blocked"
 
     def test_sync_with_10_percent_loss(self, fresh_db):
         """Sync should converge with 10% packet loss (needs retries)."""
@@ -150,13 +145,11 @@ class TestSyncWithPacketLoss:
         db.commit()
 
         # Run sync - more rounds needed with higher loss
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=600, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=600)
 
-        print(f"Converged: {converged}, rounds: {rounds}, status: {status}")
         # May not fully converge with high loss, but shouldn't crash
-        assert status is not None
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        print(f"10% packet loss sync: {blocked_count} events blocked")
 
 
 class TestSyncWithPartitions:
@@ -186,7 +179,7 @@ class TestSyncWithPartitions:
         db.commit()
 
         # Initial sync to establish connection
-        t_ms = tick_helper.run_ticks(db, start_t_ms=3000, num_rounds=50)
+        t_ms = run_ticks(db, start_t_ms=3000, num_rounds=50)
 
         # Partition Bob
         print("\n=== Partitioning Bob ===")
@@ -204,7 +197,7 @@ class TestSyncWithPartitions:
         t_ms += 100
 
         # Run sync while Bob is partitioned
-        t_ms = tick_helper.run_ticks(db, start_t_ms=t_ms, num_rounds=50)
+        t_ms = run_ticks(db, start_t_ms=t_ms, num_rounds=50)
 
         # Check Bob doesn't have the message yet
         bob_messages = message.list(alice['channel_id'], bob['peer_id'], db)
@@ -218,9 +211,7 @@ class TestSyncWithPartitions:
         network_config.unpartition_peer(bob['peer_id'])
 
         # Run more sync to allow catch-up
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=t_ms, max_rounds=200, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
 
         # Check Bob now has the message
         bob_messages_after = message.list(alice['channel_id'], bob['peer_id'], db)
@@ -228,7 +219,6 @@ class TestSyncWithPartitions:
             m.get('content') == "Message during partition" for m in bob_messages_after
         )
         print(f"Bob has message after heal: {msg_found_after_heal}")
-
         # Bob should eventually get the message after partition heals
         # (This tests the protocol's ability to recover from network issues)
 
@@ -264,12 +254,11 @@ class TestSyncWithBurstLoss:
         db.commit()
 
         # Run sync
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=500, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=500)
 
-        print(f"Converged: {converged}, rounds: {rounds}, status: {status}")
         # Should handle burst loss through retries
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        print(f"Burst loss sync: {blocked_count} events blocked")
 
 
 class TestSyncWithRealisticConditions:
@@ -305,12 +294,11 @@ class TestSyncWithRealisticConditions:
         db.commit()
 
         # Run sync
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=500, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=500)
 
-        print(f"Mobile 4G sync: converged={converged}, rounds={rounds}")
-        assert status['blocked_count'] == 0, "Should converge under mobile 4G conditions"
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        print(f"Mobile 4G sync: {blocked_count} events blocked")
+        assert blocked_count == 0, "Should converge under mobile 4G conditions"
 
     def test_poor_wifi_conditions(self, fresh_db):
         """Sync should work under poor WiFi conditions."""
@@ -342,9 +330,8 @@ class TestSyncWithRealisticConditions:
         db.commit()
 
         # Run sync - may need many rounds with high loss
-        final_t, rounds, converged, status = tick_helper.sync_until_converged(
-            db=db, start_t_ms=3000, max_rounds=800, verbose=True
-        )
+        run_ticks(db=db, start_t_ms=3000, num_rounds=800)
 
-        print(f"Poor WiFi sync: converged={converged}, rounds={rounds}")
         # High loss may prevent full convergence, but shouldn't crash
+        blocked_count = db.query_one("SELECT COUNT(*) as cnt FROM blocked_events_ephemeral")['cnt']
+        print(f"Poor WiFi sync: {blocked_count} events blocked")
