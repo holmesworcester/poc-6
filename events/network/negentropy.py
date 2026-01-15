@@ -34,8 +34,8 @@ from typing import Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
-from db import create_safe_db
-import crypto
+from core.db import create_safe_db
+from core import crypto
 
 log = logging.getLogger(__name__)
 
@@ -915,7 +915,7 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     Returns:
         Stats dict with counts
     """
-    from db import create_unsafe_db
+    from core.db import create_unsafe_db
     from events.network import connection as conn_module
 
     unsafedb = create_unsafe_db(db)
