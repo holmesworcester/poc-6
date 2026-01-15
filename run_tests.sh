@@ -2,9 +2,11 @@
 # Standard test runner for poc-6
 #
 # Usage:
-#   ./run_tests.sh                 # Run all tests
+#   ./run_tests.sh                 # Run all tests in parallel (auto-detect cores)
 #   ./run_tests.sh tests/test_safe_scoping.py  # Run specific test file
 #   ./run_tests.sh -k test_name    # Run tests matching pattern
+#   ./run_tests.sh -n 4            # Run with 4 parallel workers
+#   ./run_tests.sh -n 1            # Run sequentially (disable parallel)
 #
 # For LLMs: Use this script to run tests consistently
 
