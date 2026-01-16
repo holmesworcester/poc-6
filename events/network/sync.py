@@ -263,7 +263,8 @@ def add_shareable_events_batch(
     events: list[tuple[str, int, int]],  # List of (event_id, created_at, recorded_at)
     can_share_peer_id: str,
     db: Any,
-    skip_negentropy: bool = False
+    skip_negentropy: bool = False,
+    defer_buckets: bool = False
 ) -> None:
     """Add multiple shareable events efficiently.
 
@@ -274,7 +275,9 @@ def add_shareable_events_batch(
         events: List of (event_id, created_at, recorded_at) tuples
         can_share_peer_id: The peer who recorded/has these events
         db: Database connection
-        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
+        skip_negentropy: If True, skip negentropy entirely
+        defer_buckets: If True, skip bucket computation (caller must call
+                       negentropy.rebuild_buckets_for_peer after all events added)
     """
     if not events:
         return
@@ -297,9 +300,9 @@ def add_shareable_events_batch(
     # Batch add to negentropy using the new batch function (unless skipped)
     if not skip_negentropy:
         negentropy_events = [(event_id, recorded_at) for event_id, created_at, recorded_at in events]
-        negentropy.add_events_to_sync_batch(db, can_share_peer_id, negentropy_events)
+        negentropy.add_events_to_sync_batch(db, can_share_peer_id, negentropy_events, defer_buckets=defer_buckets)
 
-    log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (skip_neg={skip_negentropy})")
+    log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (defer={defer_buckets})")
 
 
 def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db: Any,
@@ -578,10 +581,14 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
                 by_peer[peer_id] = []
             by_peer[peer_id].append((row['event_id'], row['recorded_at']))
 
-        # Batch-add to negentropy for each peer
+        # Batch-add to negentropy for each peer (defer bucket rebuilds for efficiency)
         for peer_id, events in by_peer.items():
-            negentropy.add_events_to_sync_batch(db, peer_id, events)
+            negentropy.add_events_to_sync_batch(db, peer_id, events, defer_buckets=True)
             log.debug(f"sync.receive: batch-added {len(events)} events to negentropy for peer {peer_id[:20]}...")
+
+        # Rebuild buckets once per peer at the end (much faster than per-event)
+        for peer_id in by_peer.keys():
+            negentropy.rebuild_buckets_for_peer(db, peer_id)
 
     # Try to integrate with network layer for address observations (optional)
     try:

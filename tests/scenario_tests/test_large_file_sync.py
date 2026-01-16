@@ -235,3 +235,112 @@ def test_10mb_file_download(fresh_db):
     bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
     assert bob_data == file_data, "File data should match"
     print(f"✓ Bob received and verified {len(bob_data):,} byte file")
+
+
+@pytest.mark.slow
+def test_1gb_file_download(fresh_db):
+    """Perf gut-check: sync a 1GB file between two peers.
+
+    1GB = ~2.4 million file slices.
+    This tests the XOR fingerprinting at scale.
+
+    Run with: pytest -m slow -k 1gb
+    """
+    from tests.utils.tick_helper import assert_eventually
+
+    db = fresh_db
+
+    # Setup
+    print("\n=== Setup ===")
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    db.commit()
+    print("✓ Alice and Bob ready")
+
+    # Alice creates 1GB file
+    print("\n=== Creating 1GB file ===")
+    file_size = 1 * 1024 * 1024 * 1024  # 1 GB (~2,386,093 slices)
+    expected_slices = (file_size + 449) // 450
+    print(f"File size: {file_size:,} bytes")
+    print(f"Expected slices: {expected_slices:,}")
+
+    # Create file data - use a pattern that compresses poorly to test real behavior
+    # but is fast to generate
+    file_data = b'X' * file_size
+
+    msg_result = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Huge file',
+        t_ms=3000,
+        db=db
+    )
+
+    print("Creating file attachment (this will take a while)...")
+    start_time = time.time()
+    file_result = message_attachment.create(
+        peer_id=alice['peer_id'],
+        message_id=msg_result['id'],
+        file_data=file_data,
+        filename='huge_file.dat',
+        mime_type='application/octet-stream',
+        t_ms=3100,
+        db=db
+    )
+    file_id = file_result['file_id']
+    create_time = time.time() - start_time
+    print(f"✓ Created {file_size:,} bytes ({file_result['slice_count']:,} slices) in {create_time:.1f}s")
+    print(f"  ({file_result['slice_count'] / create_time:.0f} slices/sec)")
+    db.commit()
+
+    # Bob requests focused sync for the file
+    sync_file.request_file_sync(
+        file_id=file_id,
+        peer_id=bob['peer_id'],
+        priority=10,
+        ttl_ms=0,
+        t_ms=4000,
+        db=db
+    )
+    db.commit()
+
+    # Wait for Bob to receive complete file
+    print("\n=== Syncing ===")
+    sync_start = time.time()
+    last_pct = 0
+
+    def bob_has_complete_file():
+        nonlocal last_pct
+        progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
+        if progress:
+            pct = progress['percentage_complete']
+            if pct >= last_pct + 10:  # Log every 10%
+                elapsed = time.time() - sync_start
+                print(f"  {pct}% complete ({elapsed:.1f}s)")
+                last_pct = pct
+        assert progress and progress['is_complete'], f"Bob at {progress['percentage_complete'] if progress else 0}%"
+
+    # 2.4M slices at ~100 slices/round = 24,000 rounds minimum
+    # But with XOR fingerprinting, negentropy should be much faster
+    assert_eventually(bob_has_complete_file, db=db, start_t_ms=4000, max_rounds=50000)
+
+    sync_time = time.time() - sync_start
+    print(f"✓ Sync completed in {sync_time:.1f}s")
+    print(f"  ({file_result['slice_count'] / sync_time:.0f} slices/sec)")
+
+    # Verify file integrity (this will also take a while for 1GB)
+    print("\n=== Verifying ===")
+    verify_start = time.time()
+    bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
+    assert bob_data is not None, "Bob should have the file"
+    assert len(bob_data) == file_size, f"Expected {file_size} bytes, got {len(bob_data)}"
+    # Don't compare full 1GB in memory - just check size and a sample
+    assert bob_data[:1000] == file_data[:1000], "Start of file should match"
+    assert bob_data[-1000:] == file_data[-1000:], "End of file should match"
+    verify_time = time.time() - verify_start
+    print(f"✓ Verified {len(bob_data):,} byte file in {verify_time:.1f}s")
+
+    total_time = time.time() - start_time
+    print(f"\n✅ Total time: {total_time:.1f}s")

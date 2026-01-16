@@ -173,34 +173,44 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
     try:
         event_ids = store.batch_store_events(event_blobs, peer_id, t_ms, db)
 
-        # Project all slices efficiently (bulk insert into file_slices table)
-        safedb = create_safe_db(db, recorded_by=peer_id)
+        # Project all slices efficiently using executemany (bulk insert)
+        # Build batch data for file_slices table
+        slice_batch = [
+            (file_id, slice_number, slice_nonce, ciphertext, poly_tag, event_id, peer_id, t_ms)
+            for event_id, (slice_number, slice_nonce, ciphertext, poly_tag) in zip(event_ids, slices_data)
+        ]
 
-        # Bulk insert all slices at once for maximum efficiency
-        for event_id, (slice_number, slice_nonce, ciphertext, poly_tag) in zip(event_ids, slices_data):
-            # Insert into file_slices table
-            safedb.execute(
-                """INSERT OR IGNORE INTO file_slices
-                   (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (file_id, slice_number, slice_nonce, ciphertext, poly_tag, event_id, peer_id, t_ms)
-            )
+        db._conn.executemany(
+            """INSERT OR IGNORE INTO file_slices
+               (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            slice_batch
+        )
 
-            # Record dependency
-            safedb.execute(
-                """INSERT OR IGNORE INTO event_dependencies
-                   (child_event_id, parent_event_id, recorded_by, dependency_type)
-                   VALUES (?, ?, ?, ?)""",
-                (event_id, file_id, peer_id, 'file')
-            )
+        # Build batch data for event_dependencies table
+        dep_batch = [
+            (event_id, file_id, peer_id, 'file')
+            for event_id in event_ids
+        ]
+
+        db._conn.executemany(
+            """INSERT OR IGNORE INTO event_dependencies
+               (child_event_id, parent_event_id, recorded_by, dependency_type)
+               VALUES (?, ?, ?, ?)""",
+            dep_batch
+        )
 
         # Mark slices as shareable using batch function for efficiency
         # File slices are regular shareable events - they sync like any other event type
         # Access control is enforced at message_attachment level (group-encrypted)
-        from events.network import sync
+        from events.network import sync, negentropy
         # Build batch: (event_id, created_at, recorded_at)
         shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
-        sync.add_shareable_events_batch(shareable_batch, peer_id, db)
+        # Defer bucket computation for efficiency - we'll rebuild once at the end
+        sync.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=True)
+
+        # Rebuild all bucket hashes in one efficient pass
+        negentropy.rebuild_buckets_for_peer(db, peer_id)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)

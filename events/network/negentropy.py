@@ -17,7 +17,7 @@ Bucket hierarchy (by hash prefix):
 - root: all events
 - prefix_2: first 2 hex chars (256 buckets)
 - prefix_4: first 4 hex chars (65536 buckets)
-- prefix_6 through prefix_16: progressively finer hash buckets
+- prefix_6 through prefix_6: progressively finer hash buckets
 
 The unified key is: BLAKE2b(event_id)[:8] as 16 hex chars
 This provides uniform distribution across all bucket levels.
@@ -48,25 +48,22 @@ from core import crypto
 
 log = logging.getLogger(__name__)
 
-# Hierarchy levels - each level adds 2 hex chars (8 bits) of the unified key
-# root (0) -> prefix_2 -> ... -> prefix_12 (full timestamp) -> prefix_14 -> prefix_16 (full key)
-# Levels prefix_14 and prefix_16 use the hash suffix to split same-timestamp events
-LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10', 'prefix_12', 'prefix_14', 'prefix_16']
+# Hierarchy levels - reduced to 4 levels for efficiency
+# root (0) -> prefix_2 -> prefix_4 -> prefix_6
+# prefix_6 (24 bits) = 16.7M possible buckets, enough for 100GB+ files
+# With EVENTS_THRESHOLD=100, this handles up to 1.67 billion events
+LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
 
 # Hex characters per level
 LEVEL_PREFIX_LEN = {
     'root': 0,
-    'prefix_2': 2,
-    'prefix_4': 4,
-    'prefix_6': 6,
-    'prefix_8': 8,
-    'prefix_10': 10,
-    'prefix_12': 12,  # Full timestamp precision
-    'prefix_14': 14,
-    'prefix_16': 16,  # Full unified key (timestamp + hash)
+    'prefix_2': 2,   # 256 buckets
+    'prefix_4': 4,   # 65,536 buckets
+    'prefix_6': 6,   # 16,777,216 buckets
 }
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down
+# 100 is a good balance: small enough for reliable delivery, large enough for efficiency
 EVENTS_THRESHOLD = 100
 
 
@@ -224,41 +221,69 @@ def xor_into_bucket(db, recorded_by: str, level: str, prefix: str, fingerprint: 
 def add_events_to_sync_batch(
     db,
     recorded_by: str,
-    events: list[tuple[str, int]]  # List of (event_id, created_at)
+    events: list[tuple[str, int]],  # List of (event_id, created_at)
+    defer_buckets: bool = False
 ) -> None:
     """Add multiple events to the sync system efficiently.
 
-    Uses XOR fingerprinting for O(1) bucket hash updates.
-    Each event's fingerprint is XORed into all ancestor bucket hashes.
+    For large batches, set defer_buckets=True and call rebuild_buckets_for_peer()
+    once after all events are added. This is much faster for bulk operations.
 
     Args:
         db: Database connection
         recorded_by: Peer ID
         events: List of (event_id, created_at) tuples
+        defer_buckets: If True, skip bucket updates (caller must call rebuild_buckets_for_peer).
+                       If False (default), rebuild buckets immediately.
     """
     if not events:
         return
 
+    # Build batch data for executemany
+    batch_data = []
+    for event_id, created_at in events:
+        unified_key = compute_unified_key(event_id, created_at)
+        batch_data.append((recorded_by, event_id, unified_key, created_at))
+
+    # Batch insert using executemany (much faster than individual inserts)
+    db._conn.executemany("""
+        INSERT OR IGNORE INTO negentropy_events
+        (recorded_by, event_id, unified_key, created_at)
+        VALUES (?, ?, ?, ?)
+    """, batch_data)
+
+    # Optionally update buckets immediately (for small batches or single events)
+    if not defer_buckets:
+        rebuild_buckets_for_peer(db, recorded_by)
+
+
+def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
+    """Rebuild all bucket hashes for a peer from scratch.
+
+    Efficiently computes XOR fingerprints for all events in one pass.
+    This is O(n) in events + O(b) in buckets, much faster than
+    incremental updates for large batches.
+
+    Call this after add_events_to_sync_batch() when defer_buckets=True.
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    # Accumulate XOR contributions per bucket for batch update
-    # bucket_key = (level, prefix) -> accumulated fingerprint XOR
+    # Load all events for this peer
+    rows = safedb.query("""
+        SELECT event_id, unified_key FROM negentropy_events
+        WHERE recorded_by = ?
+    """, (recorded_by,))
+
+    # Accumulate XOR fingerprints per bucket in memory
     bucket_xors: dict[tuple[str, str], bytes] = {}
     bucket_counts: dict[tuple[str, str], int] = {}
 
-    for event_id, created_at in events:
-        unified_key = compute_unified_key(event_id, created_at)
+    for row in rows:
+        event_id = row['event_id']
+        unified_key = row['unified_key']
         fingerprint = compute_fingerprint(event_id)
 
-        # Insert event into negentropy_events table
-        safedb.execute("""
-            INSERT OR IGNORE INTO negentropy_events
-            (recorded_by, event_id, unified_key, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (recorded_by, event_id, unified_key, created_at))
-
-        # XOR fingerprint into all ancestor buckets
         for level in LEVELS:
             prefix_len = LEVEL_PREFIX_LEN[level]
             prefix = unified_key[:prefix_len]
@@ -271,44 +296,20 @@ def add_events_to_sync_batch(
                 bucket_xors[bucket_key] = fingerprint
                 bucket_counts[bucket_key] = 1
 
-    # Batch read all existing bucket hashes (single query)
-    existing_buckets = {}
-    rows = safedb.query("""
-        SELECT level, prefix, hash, event_count FROM negentropy_buckets
-        WHERE recorded_by = ?
-    """, (recorded_by,))
-    for row in rows:
-        existing_buckets[(row['level'], row['prefix'])] = (row['hash'], row['event_count'] or 0)
+    # Clear existing buckets and write new ones in batch
+    db._conn.execute("DELETE FROM negentropy_buckets WHERE recorded_by = ?", (recorded_by,))
 
-    # Compute new hashes and batch write
-    updates = []
-    for (level, prefix), xor_contribution in bucket_xors.items():
-        count = bucket_counts[(level, prefix)]
+    # Build batch data for executemany
+    bucket_batch = [
+        (recorded_by, level, prefix, xor_hash, bucket_counts[(level, prefix)], now)
+        for (level, prefix), xor_hash in bucket_xors.items()
+    ]
 
-        if (level, prefix) in existing_buckets:
-            current_hash, current_count = existing_buckets[(level, prefix)]
-            if current_hash:
-                new_hash = xor_bytes(current_hash, xor_contribution)
-            else:
-                new_hash = xor_contribution
-            new_count = current_count + count
-        else:
-            new_hash = xor_contribution
-            new_count = count
-
-        updates.append((recorded_by, level, prefix, new_hash, new_count, now))
-
-    # Upsert all buckets
-    for row_peer, level, prefix, new_hash, new_count, updated_at in updates:
-        safedb.execute("""
-            INSERT INTO negentropy_buckets
-            (recorded_by, level, prefix, hash, event_count, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
-                hash = excluded.hash,
-                event_count = excluded.event_count,
-                updated_at = excluded.updated_at
-        """, (row_peer, level, prefix, new_hash, new_count, updated_at))
+    db._conn.executemany("""
+        INSERT INTO negentropy_buckets
+        (recorded_by, level, prefix, hash, event_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, bucket_batch)
 
 
 def add_event_to_sync(
@@ -394,7 +395,7 @@ def get_events_in_bucket(
     db,
     recorded_by: str,
     prefix: str,
-    level: str = 'prefix_16'
+    level: str = 'prefix_6'
 ) -> list[str]:
     """Get all event IDs in a bucket at any level.
 
@@ -580,7 +581,7 @@ def handle_range_request(
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
         # At finest level OR bucket has few enough events to send directly
-        if level == 'prefix_16' or event_count <= EVENTS_THRESHOLD:
+        if level == 'prefix_6' or event_count <= EVENTS_THRESHOLD:
             safedb.execute("""
                 UPDATE negentropy_sync_state
                 SET status = 'events_sent', updated_at = ?

@@ -60,9 +60,8 @@ class TestPrefixLevels:
     """Test prefix hierarchy."""
 
     def test_levels_defined(self):
-        """All expected levels exist."""
-        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8',
-                    'prefix_10', 'prefix_12', 'prefix_14', 'prefix_16']
+        """All expected levels exist (reduced to 4 for efficiency)."""
+        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
         assert negentropy.LEVELS == expected
 
     def test_get_prefix_for_level(self):
@@ -74,18 +73,18 @@ class TestPrefixLevels:
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'root') == ''
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_2') == unified_key[:2]
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_4') == unified_key[:4]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_16') == unified_key
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_6') == unified_key[:6]
 
     def test_get_child_level(self):
         """Child level is next in hierarchy."""
         assert negentropy.get_child_level('root') == 'prefix_2'
         assert negentropy.get_child_level('prefix_2') == 'prefix_4'
-        assert negentropy.get_child_level('prefix_14') == 'prefix_16'
-        assert negentropy.get_child_level('prefix_16') is None  # Finest level
+        assert negentropy.get_child_level('prefix_4') == 'prefix_6'
+        assert negentropy.get_child_level('prefix_6') is None  # Finest level
 
     def test_get_parent_level(self):
         """Parent level is previous in hierarchy."""
-        assert negentropy.get_parent_level('prefix_16') == 'prefix_14'
+        assert negentropy.get_parent_level('prefix_6') == 'prefix_4'
         assert negentropy.get_parent_level('prefix_2') == 'root'
         assert negentropy.get_parent_level('root') is None  # Coarsest level
 
@@ -198,11 +197,11 @@ class TestXORBucketHashes:
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
         negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms)
 
-        # Get the unified key prefix for the finest level
+        # Get the unified key prefix for the finest level (prefix_6)
         unified_key = negentropy.compute_unified_key('evt1', ts_ms)
-        prefix = unified_key[:16]  # Full prefix for prefix_16 level
+        prefix = unified_key[:6]  # Full prefix for prefix_6 level
 
-        h = negentropy.get_bucket_hash(db, peer_id, 'prefix_16', prefix)
+        h = negentropy.get_bucket_hash(db, peer_id, 'prefix_6', prefix)
 
         # Hash should be XOR of fingerprints of events in that bucket
         events_in_bucket = negentropy.get_events_in_bucket(db, peer_id, prefix)
