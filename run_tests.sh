@@ -112,7 +112,7 @@ run_component_tests() {
         return 0
     fi
 
-    echo -e "${BLUE}[Component]${NC} Starting Cypress component tests..."
+    echo -e "${BLUE}[Component]${NC} Starting Vitest component tests..."
     pushd app > /dev/null
     if npm run test > "$COMPONENT_LOG" 2>&1; then
         echo "0" > "$COMPONENT_EXIT_FILE"
@@ -180,7 +180,7 @@ print_summary() {
 
     if $RUN_FRONTEND && [ -d "app" ]; then
         if [ "$COMPONENT_EXIT" -eq 0 ]; then
-            echo -e "${GREEN}[PASS]${NC} Component tests (32 tests)"
+            echo -e "${GREEN}[PASS]${NC} Component tests (24 tests, Vitest)"
         else
             echo -e "${RED}[FAIL]${NC} Component tests"
         fi
