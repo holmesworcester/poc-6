@@ -12,6 +12,7 @@ from core import global_counter
 from events.content import message
 from events.identity import peer_shared
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +21,71 @@ EVENT_TYPE = 'message_reaction'
 SHAREABLE = True  # Sync reactions to other peers
 EPHEMERAL = False
 PROJECTION_TABLE = ('message_reactions', 'reaction_id')
+
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'message': {
+            'source': 'table',
+            'table': 'messages',
+            'key': 'message_id',
+            'fields': ['message_id'],
+        },
+    },
+    'optional': {
+        'deletion': {
+            'source': 'context',
+            'table': 'message_reaction_deletions',
+            'key': 'reaction_id',
+            'key_from': '@event_id',
+            'fields': ['deletion_id'],
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for message_reaction events."""
+    event_data = ctx.event_data
+
+    message_id = event_data.get('message_id')
+    reactor_id = event_data.get('reactor_id')
+    signed_by = event_data.get('signed_by')
+    emoji = event_data.get('emoji')
+    created_at = event_data.get('created_at')
+    global_count = event_data.get('global_count')
+
+    if not all([message_id, reactor_id, signed_by, emoji, created_at is not None, global_count is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if ctx.deps.get('deletion'):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='message_reactions',
+            values={
+                'reaction_id': ctx.event_id,
+                'message_id': message_id,
+                'reactor_id': reactor_id,
+                'signed_by': signed_by,
+                'emoji': emoji,
+                'created_at': created_at,
+                'global_count': global_count,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str:
@@ -67,6 +133,7 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
         'message_id': message_id,
         'reactor_id': reactor_user_id,
         'signed_by': reactor_peer_shared_id,
+        'signer_type': 'peer_shared',
         'emoji': emoji,
         'created_at': t_ms,
         'global_count': global_count
@@ -142,6 +209,7 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
         'type': 'message_reaction_deletion',
         'reaction_id': reaction_id,
         'deleted_by': remover_peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 

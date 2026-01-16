@@ -133,14 +133,13 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # Event types with NO dependencies (root events or self-signed)
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
-        'peer_shared',      # Self-signed, peer_id is foreign local
         'connection',       # Ephemeral, auth handled in projection
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
-    # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
-    # and must wait for that invite to be valid before projecting
+    # Note: peer_shared is NOT in NO_DEPS_TYPES - invite-based peer_shared
+    # is signed by invite_id and must wait for that invite to be valid
 
     if event_type in NO_DEPS_TYPES:
         return []
@@ -148,7 +147,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # For invite events, only check signed_by (group/channel are metadata copied into invite)
     # For message_deletion, only check signed_by (message may not exist yet)
     # For group_key_shared, only check signed_by (key_id is BEING PROVIDED, not a dependency)
-    SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared'}
+    # For peer_shared, only check signed_by (invite_id for invite-based, self-signed otherwise)
+    SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared', 'peer_shared'}
     if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
     # For user events, check invite (which contains group/channel stubs) not group/channel directly
@@ -380,80 +380,221 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if not event_data:
         return [None, recorded_id]
 
-    # Check semantic dependencies
     event_type = event_data.get('type')
-
-    # NOTE: Invite validation moved to invite.project() for better modularity
-    # Invites from URLs (with invite_accepted) skip validation in projector
-    # Invites from sync are validated (signature, network, creator) in projector
-    # NOTE: invite_accepted is now in NO_DEPS_TYPES in check_deps() since it's local-only
-
-    missing_deps = check_deps(event_data, recorded_by, db)
-    if missing_deps:
-        # Ephemeral events (transit-layer) are recurring/retryable
-        # If deps are missing, drop them - sender will retry
-        # Use registry to check if event type is ephemeral
-        if registry.is_ephemeral(event_type):
-            log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
-            return [None, recorded_id]
-
-        # Historical events - block until dependencies resolved
-        requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
-        log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
-
-        # DEBUG: If this is a channel event, log the actual dep_ids
-        if event_type == 'channel':
-            log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
-
-        timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
-                     status='blocked_deps', blocked_on=missing_deps)
-        queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
-        return [None, recorded_id]
-
-    # All dependencies satisfied - proceed with projection
     projected_id = None
-    log.warning(f"[PROJECTION_DISPATCH] Projecting event type: {event_type}, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
-    timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
 
-    # Check if this event has been marked as deleted (prevents projection of deleted messages)
-    # This handles the case where a deletion arrives before or after the message
-    if event_type == 'message':
-        deleted_check = safedb.query_one(
-            "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
-            (ref_id, recorded_by)
+    project_pure_fn = registry.get_project_pure_fn(event_type) if event_type else None
+    event_spec = registry.get_event_spec(event_type) if event_type else None
+
+    if event_spec and project_pure_fn:
+        from core.projection_v2 import resolver as v2_resolver
+        from core.projection_v2 import apply as v2_apply
+
+        resolve_result = v2_resolver.resolve_event(
+            ref_id=ref_id,
+            event_type=event_type,
+            event_data=event_data,
+            recorded_by=recorded_by,
+            recorded_at=recorded_at,
+            db=db,
         )
-        if deleted_check:
-            log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
+
+        if resolve_result.status == 'block':
+            missing_deps = list(resolve_result.missing)
+            if registry.is_ephemeral(event_type):
+                log.warning(
+                    f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... "
+                    f"with missing deps: {[d[:20] for d in missing_deps]}"
+                )
+                return [None, recorded_id]
+
+            requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+            log.warning(
+                f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... "
+                f"requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: "
+                f"{[d[:20] for d in missing_deps]}"
+            )
+
+            if event_type == 'channel':
+                log.error(
+                    f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... "
+                    f"missing_deps={missing_deps}"
+                )
+
+            timeline.log(
+                'blocked',
+                ref_id=ref_id,
+                ref_type=event_type,
+                recorded_by=recorded_by,
+                status='blocked_deps',
+                blocked_on=missing_deps,
+            )
+            queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
 
-    # ==========================================================================
-    # PROJECTION DISPATCH - Uses event registry for auto-discovered projectors
-    # ==========================================================================
-    # All projectors return event_id on success, None on failure/not-for-us.
-    # None means "don't mark as valid" (handled uniformly below).
-    #
-    # Special cases (non-standard signatures):
-    # - file_slice, message_attachment: take event_data parameter (performance)
-    # ==========================================================================
+        if resolve_result.status == 'reject':
+            log.warning(
+                f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... rejected: {resolve_result.error}"
+            )
+            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
+            return [None, recorded_id]
 
-    # Special case: projectors that take event_data (avoid re-parsing for performance)
-    if event_type == 'file_slice':
-        from events.content import file_slice
-        file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
-        projected_id = ref_id
-    elif event_type == 'message_attachment':
-        from events.content import message_attachment
-        message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
-        projected_id = ref_id
+        if resolve_result.status != 'ok' or resolve_result.ctx is None:
+            log.error(
+                f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... resolve returned {resolve_result.status}"
+            )
+            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
+            return [None, recorded_id]
 
+        log.warning(
+            f"[PROJECTION_DISPATCH] (v2) Projecting event type: {event_type}, "
+            f"ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..."
+        )
+        timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
+
+        if event_type == 'message':
+            deleted_check = safedb.query_one(
+                "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (ref_id, recorded_by)
+            )
+            if deleted_check:
+                log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
+                return [None, recorded_id]
+
+        try:
+            projector_result = project_pure_fn(resolve_result.ctx)
+        except Exception as e:
+            log.error(f"[PROJECTION_FAILED] project_pure raised for {ref_id[:20]}...: {e}")
+            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
+            return [None, recorded_id]
+
+        try:
+            v2_apply.apply_writes(projector_result, recorded_by, recorded_at, db)
+        except Exception as e:
+            log.error(f"[PROJECTION_FAILED] apply_writes raised for {ref_id[:20]}...: {e}")
+            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
+            return [None, recorded_id]
+
+        if not projector_result.valid_event:
+            log.warning(
+                f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid"
+            )
+            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
+            return [None, recorded_id]
+
+        if event_type == 'group':
+            # Legacy group.project triggers pending name retries; keep behavior during v2 migration.
+            from events.group.group_key_shared import retry_pending_name_updates
+
+            retry_pending_name_updates(recorded_by, db)
+
+        if event_type == 'invite_accepted':
+            # v2 projector writes to invite_accepteds table, but we also need to:
+            # 1. Store network_id in trust_anchors (NOT valid_events - network validates when it arrives)
+            # 2. Store inviter's peer_shared blob from link data
+            import base64
+
+            invite_link_data = event_data.get('invite_link_data', {})
+            network_id = invite_link_data.get('network_id')
+            inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
+            inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
+
+            if network_id:
+                # Store in trust_anchors - network will validate when it arrives via sync
+                safedb.execute(
+                    "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
+                    (network_id, recorded_by, recorded_at)
+                )
+                log.warning(f"[INVITE_ACCEPTED_V2] stored network_id={network_id[:20]}... in trust_anchors (will validate on arrival)")
+            else:
+                log.warning(f"[INVITE_ACCEPTED_V2] no network_id in invite_link_data, keys={list(invite_link_data.keys())}")
+
+            # Store inviter's peer_shared blob from link data (for sync)
+            if inviter_peer_shared_blob_b64 and inviter_peer_shared_id:
+                padding = 4 - len(inviter_peer_shared_blob_b64) % 4
+                if padding != 4:
+                    inviter_peer_shared_blob_b64 += '=' * padding
+                inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64)
+
+                stored_ps_id = store.blob(inviter_peer_shared_blob, recorded_at, True, unsafedb)
+                log.warning(f"[INVITE_ACCEPTED_V2] stored inviter peer_shared blob, id={stored_ps_id[:20]}...")
+
+                # Create recorded wrapper for inviter's peer_shared so it can be projected
+                ps_recorded_id = create(stored_ps_id, recorded_by, recorded_at, db, return_dupes=False)
+                log.warning(f"[INVITE_ACCEPTED_V2] created recorded wrapper for inviter peer_shared")
+
+        projected_id = ref_id
     else:
-        # Standard case: use registry to get project function
-        project_fn = registry.get_project_fn(event_type)
-        if project_fn:
-            # All projectors return event_id on success, None on failure
-            projected_id = project_fn(ref_id, recorded_by, recorded_at, db)
+        # NOTE: Invite validation moved to invite.project() for better modularity
+        # Invites from URLs (with invite_accepted) skip validation in projector
+        # Invites from sync are validated (signature, network, creator) in projector
+        # NOTE: invite_accepted is now in NO_DEPS_TYPES in check_deps() since it's local-only
+
+        missing_deps = check_deps(event_data, recorded_by, db)
+        if missing_deps:
+            # Ephemeral events (transit-layer) are recurring/retryable
+            # If deps are missing, drop them - sender will retry
+            # Use registry to check if event type is ephemeral
+            if registry.is_ephemeral(event_type):
+                log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
+                return [None, recorded_id]
+
+            # Historical events - block until dependencies resolved
+            requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+            log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
+
+            # DEBUG: If this is a channel event, log the actual dep_ids
+            if event_type == 'channel':
+                log.error(f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... missing_deps={missing_deps}")
+
+            timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
+                         status='blocked_deps', blocked_on=missing_deps)
+            queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
+            return [None, recorded_id]
+
+        # All dependencies satisfied - proceed with projection
+        log.warning(f"[PROJECTION_DISPATCH] Projecting event type: {event_type}, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
+        timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
+
+        # Check if this event has been marked as deleted (prevents projection of deleted messages)
+        # This handles the case where a deletion arrives before or after the message
+        if event_type == 'message':
+            deleted_check = safedb.query_one(
+                "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (ref_id, recorded_by)
+            )
+            if deleted_check:
+                log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
+                return [None, recorded_id]
+
+        # ==========================================================================
+        # PROJECTION DISPATCH - Uses event registry for auto-discovered projectors
+        # ==========================================================================
+        # All projectors return event_id on success, None on failure/not-for-us.
+        # None means "don't mark as valid" (handled uniformly below).
+        #
+        # Special cases (non-standard signatures):
+        # - file_slice, message_attachment: take event_data parameter (performance)
+        # ==========================================================================
+
+        # Special case: projectors that take event_data (avoid re-parsing for performance)
+        if event_type == 'file_slice':
+            from events.content import file_slice
+            file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)
+            projected_id = ref_id
+        elif event_type == 'message_attachment':
+            from events.content import message_attachment
+            message_attachment.project(ref_id, event_data, recorded_by, recorded_at, db)
+            projected_id = ref_id
+
         else:
-            log.warning(f"[PROJECTION_DISPATCH] No projector found for event type: {event_type}")
+            # Standard case: use registry to get project function
+            project_fn = registry.get_project_fn(event_type)
+            if project_fn:
+                # All projectors return event_id on success, None on failure
+                projected_id = project_fn(ref_id, recorded_by, recorded_at, db)
+            else:
+                log.warning(f"[PROJECTION_DISPATCH] No projector found for event type: {event_type}")
 
     # Only mark event as valid if projection succeeded (projected_id is not None)
     # Events that fail projection (authorization, missing data) should NOT be marked valid

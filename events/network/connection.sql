@@ -79,3 +79,25 @@ ON connection_inbox(connection_id);
 -- Index for ordered processing
 CREATE INDEX IF NOT EXISTS idx_connection_inbox_received
 ON connection_inbox(received_at);
+
+
+-- ============================================================================
+-- pending_connection_requests table (SUBJECTIVE)
+-- ============================================================================
+-- Stores incoming connection requests that couldn't be acked immediately
+-- (e.g., peer_self not available yet during bootstrap).
+-- Processed by send_to_all() once peer_self is available.
+
+CREATE TABLE IF NOT EXISTS pending_connection_requests (
+    request_id TEXT NOT NULL,               -- The incoming request's event ID
+    remote_peer_shared_id TEXT,             -- Who sent the request (may be NULL for bootstrap)
+    their_key BLOB NOT NULL,                -- Their symmetric key from the request
+    received_at INTEGER NOT NULL,           -- When we received the request
+    recorded_by TEXT NOT NULL,              -- Local peer who received this request
+
+    PRIMARY KEY (request_id, recorded_by)
+);
+
+-- Index for lookup by recorded_by
+CREATE INDEX IF NOT EXISTS idx_pending_connection_requests_recorded_by
+ON pending_connection_requests(recorded_by);

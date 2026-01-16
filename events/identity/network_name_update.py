@@ -12,6 +12,39 @@ from core import crypto
 from core import store
 from events.group import group
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
+
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'network': {
+            'source': 'table',
+            'table': 'networks',
+            'key': 'network_id',
+            'fields': ['network_id'],
+        },
+        'group_key': {
+            'source': 'table',
+            'table': 'group_keys',
+            'key': 'key_id',
+            'fields': ['key_id'],
+        },
+    },
+    'optional': {
+        'existing_name': {
+            'source': 'table',
+            'table': 'network_names',
+            'key': 'network_id',
+            'key_from': 'network_id',
+            'fields': ['network_id', 'global_count'],
+        },
+    },
+    'cascade_on_delete': [],
+}
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +108,7 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
         'key_id': key_id,
         'global_count': 0,
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 
@@ -82,6 +116,64 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
 
     log.info(f"network_name_update.create() created network_name_update_id={network_name_update_id[:20]}...")
     return network_name_update_id
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for network_name_update events."""
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'network_name_update':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    network_id = event_data.get('network_id')
+    name = event_data.get('name')
+    key_id = event_data.get('key_id')
+    global_count = event_data.get('global_count', 0)
+
+    if not network_id or not name:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    existing = ctx.deps.get('existing_name')
+    writes: list[WriteOp] = []
+
+    if existing is None:
+        writes.append(
+            WriteOp(
+                op='insert',
+                table='network_names',
+                values={
+                    'network_id': network_id,
+                    'name': name,
+                    'event_id': ctx.event_id,
+                    'global_count': global_count,
+                    'key_id': key_id,
+                    'created_at': event_data.get('created_at'),
+                    'signed_by': event_data.get('signed_by'),
+                    'recorded_at': ctx.recorded_at,
+                },
+            )
+        )
+    elif existing.get('global_count', 0) < global_count:
+        writes.append(
+            WriteOp(
+                op='update',
+                table='network_names',
+                values={
+                    'name': name,
+                    'event_id': ctx.event_id,
+                    'global_count': global_count,
+                    'key_id': key_id,
+                    'created_at': event_data.get('created_at'),
+                    'signed_by': event_data.get('signed_by'),
+                    'recorded_at': ctx.recorded_at,
+                },
+                where={
+                    'network_id': network_id,
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def validate(event_id: str, recorded_by: str, db: Any) -> str | None:

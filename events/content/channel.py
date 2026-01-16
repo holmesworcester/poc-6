@@ -1,5 +1,4 @@
 """Channel event type (shareable, encrypted)."""
-from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'channel'
@@ -12,10 +11,95 @@ import json
 import logging
 from core import crypto
 from core import store
-from events.group import group as group_module, group_member
+from events.group import group_key, group as group_module, group_member
+from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'group': {
+            'source': 'table',
+            'table': 'groups',
+            'key': 'group_id',
+            'fields': ['group_id', 'key_id'],
+        },
+    },
+    'optional': {
+        'admin_grant': {
+            'source': 'table',
+            'table': 'admins',
+            'key': 'admin_id',
+            'key_from': 'admin_grant',
+            'fields': ['user_id', 'admin_id'],
+            'required_if_present': True,  # If admin_grant field present, must be valid
+        },
+    },
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for channel events."""
+    event_data = ctx.event_data
+
+    name = event_data.get('name')
+    group_id = event_data.get('group_id')
+    signed_by = event_data.get('signed_by')
+    created_at = event_data.get('created_at')
+    disappearing_time_ms = event_data.get('disappearing_time_ms', 0) or 0
+    is_main = event_data.get('is_main', 0) or 0
+    admin_grant = event_data.get('admin_grant')
+
+    # Validate required fields
+    if not name or not group_id or not signed_by or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Verify group exists
+    group_row = ctx.deps.get('group')
+    if not group_row or not group_row.get('group_id'):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Verify admin authorization if admin_grant present
+    if admin_grant:
+        admin_row = ctx.deps.get('admin_grant')
+        if not admin_row:
+            # admin_grant specified but not valid - reject
+            return ProjectorResult(writes=tuple(), valid_event=False)
+        # Verify signer is authorized by admin_grant
+        signer_info = ctx.signer
+        if signer_info and signer_info.get('user_id'):
+            if admin_row.get('user_id') != signer_info['user_id']:
+                # Admin grant doesn't match signer
+                return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='channels',
+            values={
+                'channel_id': ctx.event_id,
+                'name': name,
+                'group_id': group_id,
+                'signed_by': signed_by,
+                'created_at': created_at,
+                'disappearing_time_ms': disappearing_time_ms,
+                'is_main': is_main,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -227,17 +311,30 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'type': 'channel',
         'name': name,
         'group_id': group_id,
-        'signed_by': peer_shared_id,
+        'signed_by': peer_shared_id,  # References shareable peer identity
+        'signer_type': 'peer_shared',  # Required for v2 resolver
         'created_at': t_ms,
-        'disappearing_time_ms': disappearing_time_ms,
-        'is_main': 1 if is_main else 0
+        'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
+        'is_main': 1 if is_main else 0  # Store is_main flag
     }
 
     # Include admin_grant for projection-time verification (if available)
     if admin_grant_id:
         event_data['admin_grant'] = admin_grant_id
 
-    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    # Sign the event with local peer's private key
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    signed_event = crypto.sign_event(event_data, private_key)
+
+    # Get key_data for encryption
+    key_data = group_key.get_key(key_id, peer_id, db)
+
+    # Wrap (canonicalize + encrypt)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, key_data, db)
+
+    # Store event with recorded wrapper and projection
+    event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"channel.create() created channel_id={event_id}")
     return event_id
@@ -379,19 +476,36 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     return event_id
 
 
-def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    name_subquery = (
+        "SELECT cu.new_channel_name FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_channel_name IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     return safedb.query(
-        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
-           FROM channels
-           WHERE recorded_by = ?
+        f"""SELECT c.channel_id,
+                   COALESCE(({name_subquery}), c.name) AS name,
+                   c.group_id,
+                   c.signed_by,
+                   c.created_at,
+                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
+           FROM channels c
+           WHERE c.recorded_by = ?
            ORDER BY created_at DESC""",
         (recorded_by,)
     )
 
 
-def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels with their current group keys.
 
     Returns channel info plus the current key_id from the associated group,
@@ -405,9 +519,26 @@ def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
         List of dicts with channel_id, name, group_id, key_id, etc.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    name_subquery = (
+        "SELECT cu.new_channel_name FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_channel_name IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     return safedb.query(
-        """SELECT c.channel_id, c.name, c.group_id, c.signed_by, c.created_at,
-                  c.disappearing_time_ms, g.key_id
+        f"""SELECT c.channel_id,
+                  COALESCE(({name_subquery}), c.name) AS name,
+                  c.group_id,
+                  c.signed_by,
+                  c.created_at,
+                  COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms,
+                  g.key_id
            FROM channels c
            LEFT JOIN groups g ON c.group_id = g.group_id AND c.recorded_by = g.recorded_by
            WHERE c.recorded_by = ?
@@ -416,26 +547,7 @@ def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
-def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
-    """Get the main channel for a peer.
-
-    Args:
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        Channel dict with channel_id, name, group_id, etc., or None if not found
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    return safedb.query_one(
-        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
-           FROM channels
-           WHERE recorded_by = ? AND is_main = 1""",
-        (recorded_by,)
-    )
-
-
-def get(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get_by_id(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a single channel by ID.
 
     Args:
@@ -447,33 +559,29 @@ def get(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
         Channel dict with channel_id, name, group_id, etc., or None if not found
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    name_subquery = (
+        "SELECT cu.new_channel_name FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_channel_name IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     return safedb.query_one(
-        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
-           FROM channels
-           WHERE channel_id = ? AND recorded_by = ?""",
+        f"""SELECT c.channel_id,
+                   COALESCE(({name_subquery}), c.name) AS name,
+                   c.group_id,
+                   c.signed_by,
+                   c.created_at,
+                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
+           FROM channels c
+           WHERE c.channel_id = ? AND c.recorded_by = ?""",
         (channel_id, recorded_by)
     )
-
-
-def get_next_update_count(channel_id: str, recorded_by: str, db: Any) -> int:
-    """Get the next global_count for a channel update.
-
-    Returns max existing global_count + 1, or 1 if no updates exist.
-
-    Args:
-        channel_id: Channel ID to check
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        Next global_count value to use
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    max_count_row = safedb.query_one(
-        "SELECT MAX(global_count) as max_count FROM channel_updates WHERE channel_id = ? AND recorded_by = ?",
-        (channel_id, recorded_by)
-    )
-    return (max_count_row['max_count'] or 0) + 1 if max_count_row else 1
 
 
 def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:

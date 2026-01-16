@@ -12,16 +12,111 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by invite_id
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'invite': {
+            'source': 'table',
+            'table': 'invites',
+            'key': 'invite_id',
+            'key_from': 'invite_id',
+            'fields': ['invite_id', 'invite_pubkey', 'group_id'],
+        },
+    },
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for user events.
+
+    User events represent network membership, signed by invite_id.
+    The resolver handles signature verification with invite_pubkey.
+
+    Writes to: users, group_members (if invite has group_id)
+    """
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'user':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    invite_id = event_data.get('invite_id')
+    signed_by = event_data.get('signed_by')
+
+    if not invite_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if signed_by != invite_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract user fields
+    user_pubkey = event_data.get('user_pubkey', '')
+    network_id = event_data.get('network_id')
+    created_at = event_data.get('created_at')
+
+    # Try to get network_id from invite dep if not in event
+    invite_row = ctx.deps.get('invite')
+    if not network_id and invite_row:
+        # network_id might be in invite event, but invites table doesn't store it
+        # Leave as None - legacy projector has more complex logic
+        pass
+
+    writes = [
+        WriteOp(
+            op='insert',
+            table='users',
+            values={
+                'user_id': ctx.event_id,
+                'name': '',  # Placeholder - real name from encrypted username_update
+                'network_id': network_id,
+                'created_at': created_at,
+                'user_pubkey': user_pubkey,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    ]
+
+    # Add to group_members if invite has group_id
+    if invite_row and invite_row.get('group_id'):
+        group_id = invite_row['group_id']
+        inviter_peer_shared_id = invite_row.get('inviter_id', signed_by)
+        writes.append(
+            WriteOp(
+                op='insert',
+                table='group_members',
+                values={
+                    'member_id': ctx.event_id,  # Use user_id as member_id
+                    'group_id': group_id,
+                    'user_id': ctx.event_id,
+                    'added_by': inviter_peer_shared_id,
+                    'created_at': created_at,
+                    'recorded_by': ctx.recorded_by,
+                    'recorded_at': ctx.recorded_at,
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def create(peer_id: str, name: str, t_ms: int, db: Any,
            invite_id: str,
            invite_private_key: bytes,
+           network_id: str | None = None,
            # Deprecated parameters kept for compatibility - not used
-           peer_shared_id: str | None = None,
-           network_id: str | None = None) -> tuple[str, bytes]:
+           peer_shared_id: str | None = None) -> tuple[str, bytes]:
     """Create a user event representing network membership.
 
     User events are signed by invite (signed_by=invite_id) with user's own keypair.
@@ -40,8 +135,8 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
         db: Database connection
         invite_id: Reference to invite event (required - all users join via invite)
         invite_private_key: Invite private key for signing (required - proves invite possession)
+        network_id: Network ID from invite link (passed directly to avoid reading invite blob)
         peer_shared_id: Deprecated, not used (kept for compatibility)
-        network_id: Network ID (optional - if not provided, extracted from invite blob)
 
     Returns:
         (user_id, user_private_key): The stored user event ID and user_private_key
@@ -53,14 +148,8 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
     if not invite_private_key:
         raise ValueError("invite_private_key is required - proves possession of invite")
 
-    # Get network_id - either passed directly or extracted from invite blob
-    if network_id is None:
-        # Extract from invite blob (requires invite to be in local store)
-        invite_blob = store.get(invite_id, db)
-        if not invite_blob:
-            raise ValueError(f"invite event not found: {invite_id}. Pass network_id directly for real networking.")
-        invite_event_data = crypto.parse_json(invite_blob)
-        network_id = invite_event_data.get('network_id')
+    # network_id is now passed as parameter from invite link data
+    # This avoids reading the invite blob which may not be available in distributed scenarios
 
     # Generate user's OWN unique keypair
     # This is separate from invite keypair - each user has their own identity
@@ -75,6 +164,7 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
         'type': 'user',
         'invite_id': invite_id,  # Reference to invite that authorized this user
         'signed_by': invite_id,  # Polymorphic signer field (verified with invite_pubkey)
+        'signer_type': 'invite',  # v2: user events are signed by invite
         'user_pubkey': crypto.b64encode(user_pubkey),  # User's OWN public key (for signing first peer invite)
         'created_at': t_ms
     }
@@ -102,87 +192,6 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
 
     # Return user_private_key for caller to sign first peer invite
     return user_id, user_private_key
-
-
-def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
-    """Get display name for a user.
-
-    Prefers encrypted username from user_names, falls back to users.name.
-
-    Args:
-        user_id: User ID to look up
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        Display name string if found, None otherwise
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        """SELECT COALESCE(un.name, u.name) as name
-           FROM users u
-           LEFT JOIN user_names un ON u.user_id = un.user_id AND u.recorded_by = un.recorded_by
-           WHERE u.user_id = ? AND u.recorded_by = ? LIMIT 1""",
-        (user_id, recorded_by)
-    )
-    return row['name'] if row else None
-
-
-def get_username(user_id: str, recorded_by: str, db: Any) -> str | None:
-    """Get username for a user from the user_names table.
-
-    Args:
-        user_id: User ID to look up
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        Username string if found, None otherwise
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, recorded_by)
-    )
-    return row['name'] if row else None
-
-
-def has_username(user_id: str, recorded_by: str, db: Any) -> bool:
-    """Check if a user has a username set.
-
-    Args:
-        user_id: User ID to check
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        True if user has a username, False otherwise
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        "SELECT 1 FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, recorded_by)
-    )
-    return row is not None
-
-
-def is_removed(user_id: str, recorded_by: str, db: Any) -> bool:
-    """Check if a user has been removed from the network.
-
-    Args:
-        user_id: User ID to check
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        True if user is removed, False otherwise
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, recorded_by)
-    )
-    return row is not None
 
 
 def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -237,8 +246,23 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
                 invite_pubkey_bytes = crypto.b64decode(invite_pubkey_b64)
                 log.info(f"[USER_PROJECT] Got invite_pubkey from store blob (bootstrap case)")
 
+    # Fallback: Derive invite_pubkey from invite_private_key in invite_accepteds
+    # This handles distributed scenario where invite blob hasn't synced yet
+    # but we accepted the invite ourselves (have the private key)
     if not invite_pubkey_bytes:
-        # Neither table nor store has invite - return None, will retry later
+        ia_row = safedb.query_one(
+            "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+            (invite_id, recorded_by)
+        )
+        if ia_row and ia_row['invite_private_key']:
+            from nacl.signing import SigningKey
+            priv_key = ia_row['invite_private_key']
+            signing_key = SigningKey(priv_key)
+            invite_pubkey_bytes = bytes(signing_key.verify_key)
+            log.info(f"[USER_PROJECT] Derived invite_pubkey from invite_accepteds (distributed bootstrap)")
+
+    if not invite_pubkey_bytes:
+        # Neither table, store, nor invite_accepteds has invite - return None, will retry later
         log.warning(f"[USER_PROJECT_EARLY_RETURN] invite_id={invite_id[:20]}... not available yet")
         return None
 
@@ -426,7 +450,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         invite_id=invite_id,
-        invite_private_key=invite_private_key
+        invite_private_key=invite_private_key,
+        network_id=network_id  # Pass directly (available locally in new_network)
     )
     log.info(f"new_network() created user: user_id={user_id[:20]}...")
 
@@ -646,6 +671,29 @@ def try_create_username(user_id: str, name: str, peer_id: str, peer_shared_id: s
         return None, True
 
 
+def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
+    """Return the best available display name for a user_id.
+
+    Prefers decrypted usernames (user_names). Falls back to users.name if present.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row and row.get("name"):
+        return row["name"]
+
+    row = safedb.query_one(
+        "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row and row.get("name"):
+        return row["name"]
+
+    return None
+
+
 def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
          device_name: str = "Device") -> dict[str, Any]:
     """Join an existing network via invite link.
@@ -712,7 +760,6 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     invite_prekey_id = invite_data['invite_prekey_id']
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
     inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
-    network_id = invite_data.get('network_id')  # For real networking without blob
     channel_id = invite_data.get('channel_id')
     key_id = invite_data.get('key_id')
 
@@ -756,7 +803,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         db=db,
         invite_id=invite_id,
         invite_private_key=invite_private_key,
-        network_id=network_id  # Pass directly for real networking (no blob lookup)
+        network_id=invite_data.get('network_id')  # Pass from invite link data
     )
 
     # invite_proof removed - proof IS the signature on user event (signed_by=invite_id)

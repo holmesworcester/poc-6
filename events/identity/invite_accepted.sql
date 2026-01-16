@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS invite_accepteds (
     invite_id TEXT NOT NULL,
     inviter_peer_shared_id TEXT NOT NULL,
     network_id TEXT DEFAULT '',         -- Network ID from invite (for bootstrap)
+    user_id TEXT DEFAULT '',            -- User ID from invite (for peer invites / device linking)
     address TEXT,                       -- Inviter IP address (from invite link)
     port INTEGER,                       -- Inviter port number (from invite link)
     inviter_transit_prekey_id TEXT,     -- Inviter's transit prekey ID

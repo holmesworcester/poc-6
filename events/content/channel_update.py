@@ -17,8 +17,82 @@ from core import store
 from events.content import channel
 from events.identity import invite as invite_module
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'updated_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'channel': {
+            'source': 'table',
+            'table': 'channels',
+            'key': 'channel_id',
+            'fields': ['channel_id', 'group_id'],
+        },
+    },
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for channel_update events."""
+    event_data = ctx.event_data
+
+    channel_id = event_data.get('channel_id')
+    group_id = event_data.get('group_id')
+    updated_by = event_data.get('updated_by')
+    global_count = event_data.get('global_count')
+    new_channel_name = event_data.get('new_channel_name')
+    new_disappearing_time_ms = event_data.get('new_disappearing_time_ms')
+    created_at = event_data.get('created_at')
+
+    if not all([channel_id, group_id, updated_by, global_count is not None, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if new_channel_name is None and new_disappearing_time_ms is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if new_channel_name is not None and not new_channel_name.strip():
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if new_disappearing_time_ms is not None and new_disappearing_time_ms < 0:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    channel_row = ctx.deps.get('channel')
+    if not channel_row or channel_row.get('group_id') != group_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    signer = ctx.signer or {}
+    if signer.get('type') != 'peer_shared':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+    if not signer.get('is_admin'):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='channel_updates',
+            values={
+                'update_id': ctx.event_id,
+                'channel_id': channel_id,
+                'updated_by': updated_by,
+                'global_count': global_count,
+                'new_channel_name': new_channel_name,
+                'new_disappearing_time_ms': new_disappearing_time_ms,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -95,6 +169,7 @@ def create(
         'channel_id': channel_id,
         'group_id': group_id,
         'updated_by': peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms,
         'global_count': global_count,
         'new_channel_name': new_channel_name,
@@ -171,8 +246,7 @@ def validate(update_id: str, recorded_by: str, db: Any) -> bool:
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project a channel update event into the database.
 
-    Applies the highest global_count update to the channel. When multiple updates
-    exist for the same channel, only the one with the highest global_count is applied.
+    Stores updates only; channel state is resolved at query time.
 
     Args:
         event_id: Event ID of the channel_update
@@ -254,31 +328,6 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         (update_id, channel_id, updated_by, global_count, new_channel_name,
          new_disappearing_time_ms, created_at, recorded_by, recorded_at)
     )
-
-    # Check if this is the winning update (highest global_count) for this channel
-    winning_update = safedb.query_one(
-        """SELECT update_id, global_count FROM channel_updates
-           WHERE channel_id = ? AND recorded_by = ?
-           ORDER BY global_count DESC LIMIT 1""",
-        (channel_id, recorded_by)
-    )
-
-    # If this is a winning update (highest global_count), apply it to the channel
-    if winning_update is None or global_count >= winning_update['global_count']:
-        # This is the winning update - apply changes to channels table
-        if new_channel_name is not None:
-            safedb.execute(
-                "UPDATE channels SET name = ? WHERE channel_id = ? AND recorded_by = ?",
-                (new_channel_name, channel_id, recorded_by)
-            )
-            log.info(f"channel_update.project() updated channel name: {channel_id} = '{new_channel_name}'")
-
-        if new_disappearing_time_ms is not None:
-            safedb.execute(
-                "UPDATE channels SET disappearing_time_ms = ? WHERE channel_id = ? AND recorded_by = ?",
-                (new_disappearing_time_ms, channel_id, recorded_by)
-            )
-            log.info(f"channel_update.project() updated disappearing_time: {channel_id} = {new_disappearing_time_ms}ms")
 
     # Record as valid event
     safedb.execute(

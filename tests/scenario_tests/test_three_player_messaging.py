@@ -456,7 +456,7 @@ def test_three_player_messaging(fresh_db):
     db.commit()
     print(f"Charlie created message: {charlie_msg['id'][:20]}...")
 
-    # Wait for Alice to see Bob's message
+    # Wait for Alice to see Bob's message AND Bob to see Alice's message
     print("\n=== Waiting for message exchange ===")
 
     def alice_sees_bobs_message():
@@ -464,7 +464,13 @@ def test_three_player_messaging(fresh_db):
         alice_message_contents = [msg['content'] for msg in alice_messages]
         assert "Hello from Bob!" in alice_message_contents, "Alice should see Bob's message"
 
+    def bob_sees_alices_message():
+        bob_messages = message.list(bob_channel_id, bob['peer_id'], db)
+        bob_message_contents = [msg['content'] for msg in bob_messages]
+        assert "Hello from Alice!" in bob_message_contents, "Bob should see Alice's message"
+
     assert_eventually(alice_sees_bobs_message, db=db, start_t_ms=6000)
+    assert_eventually(bob_sees_alices_message, db=db, start_t_ms=7000)
     print(f"Message sync completed")
 
     # Verify message delivery

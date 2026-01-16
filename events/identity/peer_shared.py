@@ -13,8 +13,105 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - peer_shared uses legacy NO_DEPS_TYPES behavior
+# peer_shared has invite as optional dep with required_if_present:
+# - If invite_id is in event data, block until invite is projected (to get user_id)
+# - If no invite_id (bootstrap peer_shared), don't block
+# The blocking ensures proper causal ordering - sync will eventually deliver the invite.
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,  # Signer verification done by legacy projector
+    'requires': {},
+    'optional': {
+        'invite': {
+            'source': 'table',
+            'table': 'invites',
+            'key': 'invite_id',
+            'key_from': 'invite_id',
+            'fields': ['invite_id', 'invite_pubkey', 'user_id'],
+            'required_if_present': True,  # Block until invite is projected (need user_id)
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for peer_shared events.
+
+    peer_shared events represent public peer identity.
+    Can be signed by invite (mode=peer) or self-signed (bootstrap).
+    The resolver handles signature verification.
+
+    Writes to: peers_shared, peer_self (if this is our own peer and invite-based)
+    """
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'peer_shared':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract fields
+    public_key_b64 = event_data.get('public_key')
+    if not public_key_b64:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    owner_peer_id = event_data.get('peer_id')
+    if not owner_peer_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    created_at = event_data.get('created_at')
+
+    # Determine verification mode and user_id
+    invite_id = event_data.get('invite_id')
+    signed_by = event_data.get('signed_by')
+    user_id = None
+
+    if invite_id and signed_by == invite_id:
+        # Invite-based - get user_id from invite
+        invite_row = ctx.deps.get('invite')
+        if invite_row:
+            user_id = invite_row.get('user_id')
+
+    writes = [
+        WriteOp(
+            op='insert',
+            table='peers_shared',
+            values={
+                'peer_shared_id': ctx.event_id,
+                'peer_id': owner_peer_id,
+                'public_key': public_key_b64,
+                'user_id': user_id,  # NULL if self-signed bootstrap
+                'device_name': None,  # device_name from encrypted peer_name_update events
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    ]
+
+    # Update peer_self if this is our own peer AND invite-based (has user_id)
+    # Self-signed peer_shared from bootstrap should NOT update peer_self
+    if owner_peer_id == ctx.recorded_by and user_id:
+        writes.append(
+            WriteOp(
+                op='insert',  # Will be INSERT OR REPLACE in apply
+                table='peer_self',
+                values={
+                    'peer_id': owner_peer_id,
+                    'peer_shared_id': ctx.event_id,
+                    'user_id': user_id,
+                    'recorded_by': ctx.recorded_by,
+                    'recorded_at': ctx.recorded_at,
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def create(peer_id: str, t_ms: int, db: Any,
@@ -52,12 +149,13 @@ def create(peer_id: str, t_ms: int, db: Any,
         'type': 'peer_shared',
         'public_key': crypto.b64encode(public_key),
         'peer_id': peer_id,  # Link back to local peer
+        'invite_id': invite_id,  # Link to invite that authorized this peer
+        'signed_by': invite_id,  # Polymorphic signer field
+        'signer_type': 'invite',  # v2: peer_shared events are signed by invite
         'created_at': t_ms
     }
 
     # Sign with invite key (links peer_shared to user via invite)
-    event_data['invite_id'] = invite_id
-    event_data['signed_by'] = invite_id
     signed_event = crypto.sign_event(event_data, invite_private_key)
     log.info(f"peer_shared.create() signed with invite key (signed_by={invite_id[:20]}...)")
 
@@ -126,6 +224,22 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
                     invite_pubkey_bytes = crypto.b64decode(invite_pubkey_b64)
                     user_id = invite_data.get('user_id')
                     log.info(f"peer_shared.project() got invite_pubkey from store blob (bootstrap case)")
+
+        # Fallback: Derive invite_pubkey from invite_private_key in invite_accepteds
+        # This supports distributed bootstrap where invite blob is on a different device
+        owner_peer_id = event_data['peer_id']
+        if not invite_pubkey_bytes and owner_peer_id == recorded_by:
+            ia_row = safedb.query_one(
+                "SELECT invite_private_key, user_id FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+                (invite_id, recorded_by)
+            )
+            if ia_row and ia_row['invite_private_key']:
+                from nacl.signing import SigningKey
+                priv_key = ia_row['invite_private_key']
+                signing_key = SigningKey(priv_key)
+                invite_pubkey_bytes = bytes(signing_key.verify_key)
+                user_id = ia_row['user_id']
+                log.info(f"[PEER_SHARED_PROJECT] Derived invite_pubkey from invite_accepteds (distributed bootstrap)")
 
         if not invite_pubkey_bytes:
             log.warning(f"peer_shared.project() invite_id={invite_id[:20]}... not available yet")
@@ -468,24 +582,15 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         )
         log.info(f"peer_shared.join() stored invite prekey: {created_prekey_id[:20]}... (expected: {prekey_id[:20]}...)")
 
-    # 1. Create peer_shared signed by peer_invite (proves access to invite)
-    peer_shared_id = create(
-        peer_id=peer_id,
-        t_ms=t_ms,
-        db=db,
-        invite_id=peer_invite_id,
-        invite_private_key=peer_invite_private_key,
-        device_name=device_name
-    )
-    log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
-
-    # 2. Create invite_accepted to event-source the secrets (triggers notify_event_valid cascade)
-    # Build invite_link_data for peer invites (mode=peer) - no network_id since this is device linking
+    # 1. Create invite_accepted FIRST - stores invite_private_key in invite_accepteds
+    # This MUST happen before peer_shared.create() so peer_shared.project() can
+    # derive invite_pubkey from the stored private key (distributed bootstrap case)
     from events.identity import invite_accepted
     peer_invite_link_data = {
         'invite_id': peer_invite_id,
         'invite_prekey_id': prekey_id,
         'invite_private_key': crypto.b64encode(peer_invite_private_key),
+        'user_id': user_id,  # User being linked to (for device linking)
         # Peer invites don't have network_id - they link devices to existing users
     }
     invite_accepted_id = invite_accepted.create(
@@ -495,6 +600,17 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         db=db
     )
     log.info(f"peer_shared.join() created invite_accepted: {invite_accepted_id[:20]}...")
+
+    # 2. NOW create peer_shared - projection can derive invite_pubkey from invite_accepteds
+    peer_shared_id = create(
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db,
+        invite_id=peer_invite_id,
+        invite_private_key=peer_invite_private_key,
+        device_name=device_name
+    )
+    log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
 
     # 3. Auto-create transit_prekey + transit_prekey_shared for sync
     from events.network import transit_prekey, transit_prekey_shared

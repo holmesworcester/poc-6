@@ -13,8 +13,80 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - local-only, unsigned (captures out-of-band invite data)
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,  # Local-only, unsigned
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for invite_accepted events.
+
+    invite_accepted is local-only and stores connection metadata from invite links.
+    The engine handles marking network_id as valid (trust anchor).
+
+    Writes to: invite_accepteds
+    """
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'invite_accepted':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    invite_link_data = event_data.get('invite_link_data')
+    if not invite_link_data:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    invite_id = invite_link_data.get('invite_id')
+    if not invite_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract fields from invite_link_data
+    inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
+    address = invite_link_data.get('ip')
+    port = invite_link_data.get('port')
+    network_id = invite_link_data.get('network_id')
+    link_user_id = invite_link_data.get('user_id')
+    inviter_transit_prekey_id = invite_link_data.get('inviter_transit_prekey_id')
+
+    # Decode invite_private_key if present
+    invite_private_key_b64 = invite_link_data.get('invite_private_key')
+    invite_private_key = crypto.b64decode(invite_private_key_b64) if invite_private_key_b64 else None
+
+    # Decode inviter transit prekey if present
+    inviter_transit_prekey_public_key = None
+    if invite_link_data.get('inviter_transit_prekey_public_key'):
+        inviter_transit_prekey_public_key = crypto.b64decode(invite_link_data['inviter_transit_prekey_public_key'])
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='invite_accepteds',
+            values={
+                'invite_id': invite_id,
+                'inviter_peer_shared_id': inviter_peer_shared_id,
+                'address': address,
+                'port': port,
+                'network_id': network_id,
+                'user_id': link_user_id,
+                'inviter_transit_prekey_id': inviter_transit_prekey_id,
+                'inviter_transit_prekey_public_key': inviter_transit_prekey_public_key,
+                'invite_private_key': invite_private_key,
+                'created_at': event_data.get('created_at'),
+                'recorded_by': ctx.recorded_by,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
@@ -97,25 +169,15 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
 
     # =========================================================================
-    # 1. MARK NETWORK_ID AS VALID (TRUST ANCHOR)
-    # This is the cascade trigger - unblocks events waiting on network_id
+    # 1. STORE NETWORK_ID IN TRUST_ANCHORS
+    # Network will validate when it arrives via sync, then trigger cascade
     # =========================================================================
-    from events.network import recorded as recorded_module
-    from core import queues
-
     if network_id:
         safedb.execute(
-            "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-            (network_id, recorded_by)
+            "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
+            (network_id, recorded_by, event_data['created_at'])
         )
-        log.info(f"[INVITE_ACCEPTED_PROJECT] marked network_id={network_id[:20]}... as valid (TRUST ANCHOR)")
-
-        # Unblock events that were waiting for network_id
-        # This triggers the cascade: network -> bootstrap invite -> user -> etc.
-        unblocked_by_network = queues.blocked.notify_event_valid(network_id, recorded_by, safedb)
-        if unblocked_by_network:
-            log.info(f"invite_accepted.project() unblocked {len(unblocked_by_network)} events waiting for network_id")
-            recorded_module.project_ids(unblocked_by_network, db)
+        log.info(f"[INVITE_ACCEPTED_PROJECT] stored network_id={network_id[:20]}... in trust_anchors (will validate on arrival)")
 
     # =========================================================================
     # 2. STORE INVITER'S PEER_SHARED FROM LINK DATA
@@ -160,18 +222,22 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     if invite_link_data.get('inviter_transit_prekey_public_key'):
         inviter_transit_prekey_public_key = crypto.b64decode(invite_link_data['inviter_transit_prekey_public_key'])
 
+    # Extract user_id for device linking (peer invites carry the user_id being linked to)
+    link_user_id = invite_link_data.get('user_id')
+
     safedb.execute("""
         INSERT OR IGNORE INTO invite_accepteds
-        (invite_id, inviter_peer_shared_id, address, port, network_id,
+        (invite_id, inviter_peer_shared_id, address, port, network_id, user_id,
          inviter_transit_prekey_id, inviter_transit_prekey_public_key,
          invite_private_key, created_at, recorded_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         invite_id,
         inviter_peer_shared_id,
         address,
         port,
         network_id,
+        link_user_id,
         inviter_transit_prekey_id,
         inviter_transit_prekey_public_key,
         invite_private_key,
