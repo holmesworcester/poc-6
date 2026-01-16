@@ -208,6 +208,23 @@ def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
+def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the main group for a peer.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Group dict with group_id, key_id, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        "SELECT group_id, name, key_id, signed_by, created_at FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+
+
 def get_current_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get the current key ID for a group.
 
