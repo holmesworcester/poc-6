@@ -8,7 +8,8 @@ import logging
 from core import crypto
 from core import store
 from events.group import group as group_module
-from events.identity import peer
+from events.content import message
+from events.identity import peer, peer_shared
 from core import global_counter
 from core.db import create_safe_db, create_unsafe_db
 
@@ -45,14 +46,8 @@ def create(
     Raises:
         ValueError: If not authorized, message not found, or invalid parameters
     """
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
     # Get the original message to verify ownership and get group_id
-    message_row = safedb.query_one(
-        """SELECT message_id, group_id, author_id, content
-           FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1""",
-        (message_id, peer_id)
-    )
+    message_row = message.get_by_id(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found")
 
@@ -60,17 +55,14 @@ def create(
     original_author_id = message_row['author_id']
 
     # Get our identity from peer_self
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row or not peer_self_row['peer_shared_id']:
+    identity = peer_shared.get_self_identity(peer_id, db)
+    if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found in peer_self table")
-    if not peer_self_row['user_id']:
+    if not identity['user_id']:
         raise ValueError(f"User identity not set for peer {peer_id}")
 
-    peer_shared_id = peer_self_row['peer_shared_id']
-    user_id = peer_self_row['user_id']
+    peer_shared_id = identity['peer_shared_id']
+    user_id = identity['user_id']
 
     # Check authorization - only the original author can edit
     if user_id != original_author_id:

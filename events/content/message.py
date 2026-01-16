@@ -114,6 +114,24 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     }
 
 
+def get_by_id(message_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get a single message by ID.
+
+    Args:
+        message_id: Message ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Message dict with all fields, or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT * FROM messages WHERE message_id = ? AND recorded_by = ?""",
+        (message_id, recorded_by)
+    )
+
+
 def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer, including attachments, author names, and reactions.
 

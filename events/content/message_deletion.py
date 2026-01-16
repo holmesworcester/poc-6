@@ -17,6 +17,8 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from events.content import message
+from events.identity import peer_shared
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -138,27 +140,19 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
     """
     log.info(f"message_deletion.create() deleting message_id={message_id[:20]}... by peer={peer_id[:20]}...")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
     # Get message to validate it exists and get group_id
-    message_row = safedb.query_one(
-        "SELECT author_id, group_id, channel_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-        (message_id, peer_id)
-    )
+    message_row = message.get_by_id(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found for peer {peer_id}")
 
     message_group_id = message_row['group_id']
 
     # Get deleter's peer_shared_id
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row or not peer_self_row['peer_shared_id']:
+    identity = peer_shared.get_self_identity(peer_id, db)
+    if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
 
-    deleter_peer_shared_id = peer_self_row['peer_shared_id']
+    deleter_peer_shared_id = identity['peer_shared_id']
 
     # Authorization check using shared validate() function
     if not validate(message_id, deleter_peer_shared_id, peer_id, db):

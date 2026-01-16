@@ -328,6 +328,25 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
     return peer_id
 
 
+def get_user_id(peer_shared_id: str, recorded_by: str, db: Any) -> str | None:
+    """Get the user_id associated with a peer_shared_id.
+
+    Args:
+        peer_shared_id: Public peer ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        user_id string if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    return row['user_id'] if row and row['user_id'] else None
+
+
 def get_self_identity(peer_id: str, db: Any) -> dict[str, str] | None:
     """Get the identity (peer_shared_id and user_id) for a local peer.
 
