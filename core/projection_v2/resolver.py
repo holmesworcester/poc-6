@@ -319,7 +319,23 @@ def _resolve_signer(
             try:
                 public_key = network.get_public_key(signer_id, recorded_by, db)
             except ValueError:
-                return "reject", None, [], "network signer not available"
+                # Network is valid (trust anchor) but not projected yet - block until it projects
+                return "block", None, [signer_id], None
+    elif signer_type == "user":
+        # User signer - used by first peer invite (signed by user_id during bootstrap)
+        if not _is_event_valid(signer_id, recorded_by, safedb):
+            return "block", None, [signer_id], None
+        # Get user's public key from users table
+        user_row = safedb.query_one(
+            "SELECT user_pubkey FROM users WHERE user_id = ? AND recorded_by = ?",
+            (signer_id, recorded_by),
+        )
+        if not user_row or not user_row.get("user_pubkey"):
+            return "reject", None, [], "user signer not available"
+        try:
+            public_key = crypto.b64decode(user_row["user_pubkey"])
+        except Exception:
+            return "reject", None, [], "invalid user pubkey"
     else:
         return "reject", None, [], f"unknown signer type '{signer_type}'"
 
@@ -397,7 +413,7 @@ def resolve_event(
         return ResolveResult(status="block", ctx=None, missing=tuple(unique_missing))
 
     for dep_name, dep_spec in optional.items():
-        status, value, _, error = _resolve_dep(
+        status, value, missing_ids, error = _resolve_dep(
             dep_name,
             dep_spec,
             ref_id,
@@ -411,7 +427,17 @@ def resolve_event(
         )
         if status == "reject":
             return ResolveResult(status="reject", ctx=None, error=error)
+        if status == "block":
+            # Optional dep with required_if_present=True is blocking
+            missing.extend(missing_ids)
+            continue
         deps[dep_name] = value
+
+    # Check if optional deps caused blocking (required_if_present)
+    if missing:
+        seen = set()
+        unique_missing = [dep_id for dep_id in missing if not (dep_id in seen or seen.add(dep_id))]
+        return ResolveResult(status="block", ctx=None, missing=tuple(unique_missing))
 
     signer_status, signer, signer_missing, signer_error = _resolve_signer(
         event_spec,

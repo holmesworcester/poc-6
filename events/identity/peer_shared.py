@@ -13,8 +13,105 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - peer_shared uses legacy NO_DEPS_TYPES behavior
+# peer_shared has invite as optional dep with required_if_present:
+# - If invite_id is in event data, block until invite is projected (to get user_id)
+# - If no invite_id (bootstrap peer_shared), don't block
+# The blocking ensures proper causal ordering - sync will eventually deliver the invite.
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,  # Signer verification done by legacy projector
+    'requires': {},
+    'optional': {
+        'invite': {
+            'source': 'table',
+            'table': 'invites',
+            'key': 'invite_id',
+            'key_from': 'invite_id',
+            'fields': ['invite_id', 'invite_pubkey', 'user_id'],
+            'required_if_present': True,  # Block until invite is projected (need user_id)
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for peer_shared events.
+
+    peer_shared events represent public peer identity.
+    Can be signed by invite (mode=peer) or self-signed (bootstrap).
+    The resolver handles signature verification.
+
+    Writes to: peers_shared, peer_self (if this is our own peer and invite-based)
+    """
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'peer_shared':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract fields
+    public_key_b64 = event_data.get('public_key')
+    if not public_key_b64:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    owner_peer_id = event_data.get('peer_id')
+    if not owner_peer_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    created_at = event_data.get('created_at')
+
+    # Determine verification mode and user_id
+    invite_id = event_data.get('invite_id')
+    signed_by = event_data.get('signed_by')
+    user_id = None
+
+    if invite_id and signed_by == invite_id:
+        # Invite-based - get user_id from invite
+        invite_row = ctx.deps.get('invite')
+        if invite_row:
+            user_id = invite_row.get('user_id')
+
+    writes = [
+        WriteOp(
+            op='insert',
+            table='peers_shared',
+            values={
+                'peer_shared_id': ctx.event_id,
+                'peer_id': owner_peer_id,
+                'public_key': public_key_b64,
+                'user_id': user_id,  # NULL if self-signed bootstrap
+                'device_name': None,  # device_name from encrypted peer_name_update events
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    ]
+
+    # Update peer_self if this is our own peer AND invite-based (has user_id)
+    # Self-signed peer_shared from bootstrap should NOT update peer_self
+    if owner_peer_id == ctx.recorded_by and user_id:
+        writes.append(
+            WriteOp(
+                op='insert',  # Will be INSERT OR REPLACE in apply
+                table='peer_self',
+                values={
+                    'peer_id': owner_peer_id,
+                    'peer_shared_id': ctx.event_id,
+                    'user_id': user_id,
+                    'recorded_by': ctx.recorded_by,
+                    'recorded_at': ctx.recorded_at,
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def create(peer_id: str, t_ms: int, db: Any,
@@ -52,12 +149,13 @@ def create(peer_id: str, t_ms: int, db: Any,
         'type': 'peer_shared',
         'public_key': crypto.b64encode(public_key),
         'peer_id': peer_id,  # Link back to local peer
+        'invite_id': invite_id,  # Link to invite that authorized this peer
+        'signed_by': invite_id,  # Polymorphic signer field
+        'signer_type': 'invite',  # v2: peer_shared events are signed by invite
         'created_at': t_ms
     }
 
     # Sign with invite key (links peer_shared to user via invite)
-    event_data['invite_id'] = invite_id
-    event_data['signed_by'] = invite_id
     signed_event = crypto.sign_event(event_data, invite_private_key)
     log.info(f"peer_shared.create() signed with invite key (signed_by={invite_id[:20]}...)")
 
