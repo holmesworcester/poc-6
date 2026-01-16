@@ -131,16 +131,15 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # (same key_material = same key_id on all peers via content-addressed hashing)
 
     # Event types with NO dependencies (root events or self-signed)
+    # For v2 projectors, ensure EVENT_SPEC.requires is empty to match this behavior
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
-        'peer_shared',      # Self-signed, peer_id is foreign local
+        'peer_shared',      # Signed by invite, but deps checked internally (matches v2 empty requires)
         'connection',       # Ephemeral, auth handled in projection
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
-    # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
-    # and must wait for that invite to be valid before projecting
 
     if event_type in NO_DEPS_TYPES:
         return []
@@ -483,6 +482,17 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             from events.group.group_key_shared import retry_pending_name_updates
 
             retry_pending_name_updates(recorded_by, db)
+
+        if event_type == 'peer_shared':
+            from events.identity import peer_shared as peer_shared_module
+
+            peer_shared_module._seed_group_keys_for_linked_device(
+                ref_id,
+                resolve_result.ctx.event_data.get('invite_id'),
+                recorded_by,
+                recorded_at,
+                db,
+            )
 
         projected_id = ref_id
     else:

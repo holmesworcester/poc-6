@@ -13,8 +13,96 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+# v2 event specification - signed by invite, not encrypted
+# NOTE: No 'requires' deps because peer_shared is in NO_DEPS_TYPES in v1.
+# The invite lookup happens internally in project_pure (reading from invites table
+# or store blob), matching v1 behavior where peer_shared.project() handles this.
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},  # No deps - matches v1 NO_DEPS_TYPES behavior
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for peer_shared events.
+
+    peer_shared events are always signed by an invite (mode=peer). The user_id
+    comes from the invite's user_id field, which is resolved by the resolver
+    from the invites table or store blob and passed via ctx.signer.
+    """
+    event_data = ctx.event_data
+
+    peer_id = event_data.get('peer_id')
+    public_key = event_data.get('public_key')
+    invite_id = event_data.get('invite_id')
+    signed_by = event_data.get('signed_by')
+    created_at = event_data.get('created_at')
+
+    if not peer_id or not public_key or not signed_by or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if invite_id and signed_by != invite_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Get user_id from the invite signer (resolved by resolver from invites table or store blob)
+    user_id = None
+    if invite_id and ctx.signer:
+        user_id = ctx.signer.get('user_id')
+        if not user_id:
+            # Invite must have user_id for peer linking
+            return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='peers_shared',
+            values={
+                'peer_shared_id': ctx.event_id,
+                'peer_id': peer_id,
+                'public_key': public_key,
+                'user_id': user_id,
+                'device_name': None,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    if peer_id == ctx.recorded_by and user_id:
+        writes = writes + (
+            WriteOp(
+                op='delete',
+                table='peer_self',
+                values={},
+                where={
+                    'peer_id': peer_id,
+                },
+            ),
+            WriteOp(
+                op='insert',
+                table='peer_self',
+                values={
+                    'peer_id': peer_id,
+                    'peer_shared_id': ctx.event_id,
+                    'user_id': user_id,
+                    'recorded_by': ctx.recorded_by,
+                    'recorded_at': ctx.recorded_at,
+                },
+            ),
+        )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(peer_id: str, t_ms: int, db: Any,
@@ -49,6 +137,7 @@ def create(peer_id: str, t_ms: int, db: Any,
     # Create event dict
     # NOTE: device_name is NOT stored - device names come from encrypted peer_name_update events
     event_data = {
+        'signer_type': 'invite',
         'type': 'peer_shared',
         'public_key': crypto.b64encode(public_key),
         'peer_id': peer_id,  # Link back to local peer
@@ -186,68 +275,89 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
 
     # NOTE: validity is handled by recorded.project() after successful projection
 
-    # For invite-based peer_shared (device linking): Seed group keys for all groups this user belongs to
-    # This ensures new devices get keys for existing groups created after the invite
-    # Keys must be sealed to the SAME invite prekey that the device will use to decrypt them
-    if user_id and owner_peer_id != recorded_by and invite_id:
-        # Only seed if this is a peer_shared from another device (not our own)
-        # and it has an invite_id (invite-based linking)
-        log.info(f"peer_shared.project() seeding group keys for user {user_id[:20]}... new device {peer_shared_id[:20]}...")
-
-        # IMPORTANT: Use the invite_id from the peer_shared event itself, NOT a time-based query.
-        # The peer_shared event contains the exact invite_id that the new device used to join.
-        # Using ORDER BY created_at DESC would select the wrong invite if multiple exist.
-        # The invite_id variable was already extracted from event_data above (line 91).
-        log.info(f"peer_shared.project() using invite_id from event: {invite_id[:20]}...")
-
-        # Get our own peer_shared_id to sign the sealed keys
-        our_peer_shared_id = None
-        our_peer_row = safedb.query_one(
-            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-            (recorded_by, recorded_by)
-        )
-        if our_peer_row:
-            our_peer_shared_id = our_peer_row['peer_shared_id']
-
-        if not our_peer_shared_id:
-            log.warning(f"peer_shared.project() couldn't find our peer_shared_id, skipping device link seeding")
-        else:
-            # Query all groups this user is a member of
-            group_rows = safedb.query(
-                """SELECT DISTINCT g.group_id, g.key_id
-                   FROM group_members gm
-                   JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
-                   WHERE gm.user_id = ? AND gm.recorded_by = ?
-                   ORDER BY g.group_id""",
-                (user_id, recorded_by)
-            )
-
-            log.info(f"peer_shared.project() found {len(group_rows)} groups for user {user_id[:20]}...")
-
-            # For each group, create group_key_shared sealed to the invite prekey
-            from events.group import group_key_shared
-            key_share_ts = recorded_at + 1000  # Space out timestamps
-            for group_row in group_rows:
-                group_id = group_row['group_id']
-                key_id = group_row['key_id']
-
-                try:
-                    # Seal to the invite prekey (same mechanism as invite.create)
-                    # This allows the new device to decrypt with invite_private_key
-                    group_key_shared.create_for_invite(
-                        key_id=key_id,
-                        peer_id=recorded_by,  # Current peer creates the seal
-                        peer_shared_id=our_peer_shared_id,  # Our peer_shared signs it
-                        invite_id=invite_id,  # Seal to this invite's prekey
-                        t_ms=key_share_ts,
-                        db=db
-                    )
-                    log.info(f"peer_shared.project() sealed group key {key_id[:20]}... to invite prekey for new device {peer_shared_id[:20]}...")
-                    key_share_ts += 1
-                except Exception as e:
-                    log.warning(f"peer_shared.project() failed to seal group {group_id[:20]}... to invite prekey: {e}")
+    _seed_group_keys_for_linked_device(peer_shared_id, invite_id, recorded_by, recorded_at, db)
 
     return peer_shared_id
+
+
+def _seed_group_keys_for_linked_device(
+    peer_shared_id: str,
+    invite_id: str | None,
+    recorded_by: str,
+    recorded_at: int,
+    db: Any,
+) -> None:
+    """Seed group keys for a newly linked device (invite-based peer_shared)."""
+    if not invite_id:
+        return
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    row = safedb.query_one(
+        "SELECT user_id, peer_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by),
+    )
+    if not row or not row.get('user_id'):
+        return
+
+    user_id = row['user_id']
+    owner_peer_id = row['peer_id']
+
+    if owner_peer_id == recorded_by:
+        return
+
+    log.info(
+        f"peer_shared.project() seeding group keys for user {user_id[:20]}... new device {peer_shared_id[:20]}..."
+    )
+    log.info(f"peer_shared.project() using invite_id from event: {invite_id[:20]}...")
+
+    our_peer_shared_id = None
+    our_peer_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (recorded_by, recorded_by),
+    )
+    if our_peer_row:
+        our_peer_shared_id = our_peer_row['peer_shared_id']
+
+    if not our_peer_shared_id:
+        log.warning("peer_shared.project() couldn't find our peer_shared_id, skipping device link seeding")
+        return
+
+    group_rows = safedb.query(
+        """SELECT DISTINCT g.group_id, g.key_id
+           FROM group_members gm
+           JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
+           WHERE gm.user_id = ? AND gm.recorded_by = ?
+           ORDER BY g.group_id""",
+        (user_id, recorded_by),
+    )
+
+    log.info(f"peer_shared.project() found {len(group_rows)} groups for user {user_id[:20]}...")
+
+    from events.group import group_key_shared
+
+    key_share_ts = recorded_at + 1000
+    for group_row in group_rows:
+        group_id = group_row['group_id']
+        key_id = group_row['key_id']
+
+        try:
+            group_key_shared.create_for_invite(
+                key_id=key_id,
+                peer_id=recorded_by,
+                peer_shared_id=our_peer_shared_id,
+                invite_id=invite_id,
+                t_ms=key_share_ts,
+                db=db,
+            )
+            log.info(
+                f"peer_shared.project() sealed group key {key_id[:20]}... to invite prekey for new device {peer_shared_id[:20]}..."
+            )
+            key_share_ts += 1
+        except Exception as e:
+            log.warning(
+                f"peer_shared.project() failed to seal group {group_id[:20]}... to invite prekey: {e}"
+            )
 
 
 def get_public_key(peer_shared_id: str, recorded_by: str, db: Any) -> bytes:

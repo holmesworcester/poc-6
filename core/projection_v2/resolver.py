@@ -219,29 +219,51 @@ def _resolve_dep(
     return "reject", None, [], f"dep '{dep_name}' has unknown source"
 
 
+def _resolve_invite_data(
+    invite_id: str,
+    recorded_by: str,
+    safedb: Any,
+    unsafedb: Any,
+) -> tuple[bytes | None, str | None]:
+    """Resolve invite pubkey and user_id from invites table or store blob.
+
+    This matches v1 behavior in peer_shared.project() which reads from the
+    invites table first, then falls back to the store blob for bootstrap cases.
+
+    Returns:
+        (public_key_bytes, user_id) - either or both may be None
+    """
+    # Try invites table first (for projected invites)
+    row = safedb.query_one(
+        "SELECT invite_pubkey, user_id FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
+        (invite_id, recorded_by),
+    )
+    if row and row.get("invite_pubkey"):
+        return crypto.b64decode(row["invite_pubkey"]), row.get("user_id")
+
+    # Fallback to store blob (for bootstrap/device-linking before invite is projected)
+    blob = store.get(invite_id, unsafedb)
+    if not blob:
+        return None, None
+    try:
+        invite_data = crypto.parse_json(blob)
+    except Exception:
+        return None, None
+    invite_pubkey = invite_data.get("invite_pubkey")
+    if not invite_pubkey:
+        return None, None
+    return crypto.b64decode(invite_pubkey), invite_data.get("user_id")
+
+
 def _resolve_invite_pubkey(
     invite_id: str,
     recorded_by: str,
     safedb: Any,
     unsafedb: Any,
 ) -> bytes | None:
-    row = safedb.query_one(
-        "SELECT invite_pubkey FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
-        (invite_id, recorded_by),
-    )
-    if row and row.get("invite_pubkey"):
-        return crypto.b64decode(row["invite_pubkey"])
-    blob = store.get(invite_id, unsafedb)
-    if not blob:
-        return None
-    try:
-        invite_data = crypto.parse_json(blob)
-    except Exception:
-        return None
-    invite_pubkey = invite_data.get("invite_pubkey")
-    if not invite_pubkey:
-        return None
-    return crypto.b64decode(invite_pubkey)
+    """Resolve just the invite pubkey (for backward compatibility)."""
+    pubkey, _ = _resolve_invite_data(invite_id, recorded_by, safedb, unsafedb)
+    return pubkey
 
 
 def _resolve_signer(
@@ -300,11 +322,15 @@ def _resolve_signer(
                 )
                 signer_is_admin = admin_row is not None
     elif signer_type == "invite":
-        if not _is_event_valid(signer_id, recorded_by, safedb):
-            return "block", None, [signer_id], None
-        public_key = _resolve_invite_pubkey(signer_id, recorded_by, safedb, unsafedb)
+        # For invite signers, we DON'T require the invite to be in valid_events first.
+        # This matches v1 behavior where peer_shared is in NO_DEPS_TYPES and
+        # peer_shared.project() reads the invite pubkey directly from the store blob.
+        # This is needed for bootstrap/device-linking where the invite was created
+        # by another peer and may not be in this peer's valid_events yet.
+        public_key, invite_user_id = _resolve_invite_data(signer_id, recorded_by, safedb, unsafedb)
         if not public_key:
-            return "reject", None, [], "invite signer not available"
+            # Invite pubkey not available - block waiting for the invite to arrive
+            return "block", None, [signer_id], None
     elif signer_type == "network":
         if _field_looks_like_pubkey(id_field):
             try:
@@ -336,6 +362,9 @@ def _resolve_signer(
     if signer_type == "peer_shared":
         signer_info["user_id"] = signer_user_id
         signer_info["is_admin"] = signer_is_admin
+    elif signer_type == "invite":
+        # Include user_id from invite for peer_shared events that need it
+        signer_info["user_id"] = invite_user_id
     return "ok", signer_info, [], None
 
 

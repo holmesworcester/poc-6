@@ -519,6 +519,9 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility
     user_id = event_data.get('user_id')  # None for mode='user', set for mode='link' and mode='peer'
     group_id = event_data.get('group_id')  # None for mode='peer' (peer invites don't have group context)
+    if not group_id:
+        # TODO: migrate invites.group_id to nullable and store NULL instead of sentinel.
+        group_id = ''
 
     safedb.execute(
         """INSERT OR IGNORE INTO invites

@@ -14,8 +14,97 @@ from core import store
 from events.group import group_key, group as group_module, group_member
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'group': {
+            'source': 'table',
+            'table': 'groups',
+            'key': 'group_id',
+            'fields': ['group_id'],
+        },
+    },
+    'optional': {
+        'admin_grant': {
+            'source': 'table',
+            'table': 'admins',
+            'key': 'admin_id',
+            'key_from': 'admin_grant',
+            'fields': ['user_id'],
+            'required_if_present': True,
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for channel events."""
+    event_data = ctx.event_data
+
+    name = event_data.get('name')
+    group_id = event_data.get('group_id')
+    signed_by = event_data.get('signed_by')
+    created_at = event_data.get('created_at')
+    disappearing_time_ms = event_data.get('disappearing_time_ms')
+    is_main = event_data.get('is_main', 0)
+
+    if not name or not group_id or not signed_by or not isinstance(created_at, int):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    signer = ctx.signer or {}
+    if signer.get('type') != 'peer_shared':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    admin_grant = event_data.get('admin_grant')
+    if admin_grant:
+        admin_row = ctx.deps.get('admin_grant') or {}
+        signer_user_id = signer.get('user_id')
+        admin_user_id = admin_row.get('user_id')
+        if not signer_user_id or not admin_user_id or signer_user_id != admin_user_id:
+            return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if disappearing_time_ms is None:
+        disappearing_time_ms = 0
+    if not is_main:
+        is_main = 0
+
+    writes = (
+        WriteOp(
+            op='delete',
+            table='channels',
+            values={},
+            where={
+                'channel_id': ctx.event_id,
+            },
+        ),
+        WriteOp(
+            op='insert',
+            table='channels',
+            values={
+                'channel_id': ctx.event_id,
+                'name': name,
+                'group_id': group_id,
+                'signed_by': signed_by,
+                'created_at': created_at,
+                'disappearing_time_ms': disappearing_time_ms,
+                'is_main': is_main,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -228,6 +317,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'name': name,
         'group_id': group_id,
         'signed_by': peer_shared_id,  # References shareable peer identity
+        'signer_type': 'peer_shared',
         'created_at': t_ms,
         'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
         'is_main': 1 if is_main else 0  # Store is_main flag
