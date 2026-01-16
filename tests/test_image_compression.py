@@ -25,16 +25,15 @@ def create_test_image(width, height, color='red', format='JPEG', add_noise=False
     """Helper to create a test image and return as bytes."""
     img = Image.new('RGB', (width, height), color=color)
 
-    # Add noise/detail to prevent excessive compression
+    # Add detail to prevent excessive compression (creates gradient stripes)
     if add_noise:
         from PIL import ImageDraw
-        import random
         draw = ImageDraw.Draw(img)
-        for _ in range(width * height // 100):  # Add random pixels
-            x = random.randint(0, width-1)
-            y = random.randint(0, height-1)
-            color_noise = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-            draw.point((x, y), fill=color_noise)
+        # Draw horizontal gradient stripes - fast and creates compressible detail
+        for y in range(0, height, 4):
+            shade = (y * 255 // height)
+            color_stripe = (shade, (shade + 85) % 256, (shade + 170) % 256)
+            draw.rectangle([0, y, width, y + 3], fill=color_stripe)
 
     output = io.BytesIO()
     if format == 'JPEG':

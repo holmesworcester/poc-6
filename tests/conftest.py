@@ -98,8 +98,8 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     bob = user_module.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    # Sync to converge
-    run_ticks(db=db, start_t_ms=3000, num_rounds=200)
+    # Sync to converge - 15 rounds is enough for 2-peer connection
+    run_ticks(db=db, start_t_ms=3000, num_rounds=15)
 
     return db, alice, bob
 

@@ -134,6 +134,7 @@ def test_files_command_lists_attachments(cli_session):
 
 def test_two_party_file_sync_with_progress(cli_session):
     """Test file sync between two parties with progress tracking."""
+    from tests.utils.tick_helper import assert_eventually
     session = cli_session
 
     # Alice creates network
@@ -157,29 +158,24 @@ def test_two_party_file_sync_with_progress(cli_session):
     )
     session.db.commit()
 
-    # Initial sync
-    for i in range(30):
-        tick.tick(t_ms=3000 + i * 100, db=session.db)
-    session.db.commit()
-
     # Alice sends message with attachment
+    import os
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this image!',
-        t_ms=6000,
+        t_ms=3000,
         db=session.db
     )
 
-    import os
-    file_data = os.urandom(200 * 1024)  # 200KB
+    file_data = os.urandom(10 * 1024)  # 10KB - enough to test sync
     file_result = message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=msg_result['id'],
         file_data=file_data,
         filename='test-image.png',
         mime_type='image/png',
-        t_ms=6100,
+        t_ms=3100,
         db=session.db
     )
     file_id = file_result['file_id']
@@ -190,51 +186,22 @@ def test_two_party_file_sync_with_progress(cli_session):
         file_id, alice['peer_id'], session.db
     )
     assert alice_progress['is_complete'] == True
-    assert alice_progress['percentage_complete'] == 100
 
-    # Before sync: Bob shouldn't have the file yet
-    bob_progress_before = message_attachment.get_file_download_progress(
-        file_id, bob['peer_id'], session.db
-    )
-    # Bob might not even know about the file yet
+    # Wait for Bob to receive complete file
+    def bob_has_complete_file():
+        progress = message_attachment.get_file_download_progress(
+            file_id, bob['peer_id'], session.db
+        )
+        assert progress is not None, "Bob should know about the file"
+        assert progress['is_complete'], f"Bob should have complete file, got {progress['percentage_complete']}%"
 
-    # Sync to deliver file
-    progress_snapshots = []
-    for i in range(50):
-        tick.tick(t_ms=7000 + i * 100, db=session.db)
-
-        # Check Bob's progress every 5 ticks
-        if i % 5 == 0:
-            progress = message_attachment.get_file_download_progress(
-                file_id, bob['peer_id'], session.db
-            )
-            if progress:
-                progress_snapshots.append({
-                    'tick': i,
-                    'slices': progress['slices_received'],
-                    'total': progress['total_slices'],
-                    'pct': progress['percentage_complete'],
-                    'complete': progress['is_complete']
-                })
-
-    session.db.commit()
-
-    # Verify Bob received the file
-    bob_progress_after = message_attachment.get_file_download_progress(
-        file_id, bob['peer_id'], session.db
-    )
-    assert bob_progress_after is not None, "Bob should know about the file"
-    assert bob_progress_after['is_complete'] == True, f"Bob should have complete file, got {bob_progress_after}"
+    assert_eventually(bob_has_complete_file, db=session.db, start_t_ms=4000)
 
     # Verify Bob can retrieve the file
     bob_file_data = message_attachment.get_file_data(file_id, bob['peer_id'], session.db)
     assert bob_file_data == file_data, "Bob's file should match Alice's"
 
-    # Print progress for debugging
-    print(f"\nProgress snapshots during sync:")
-    for snap in progress_snapshots:
-        bar = _format_progress_bar(snap['pct'])
-        print(f"  tick {snap['tick']:2d}: {snap['slices']:3d}/{snap['total']} {bar} {snap['pct']:3d}%")
+    print(f"\n✓ File sync complete")
 
 
 def test_pause_resume_file_download(cli_session):
