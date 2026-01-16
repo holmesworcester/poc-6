@@ -389,12 +389,11 @@ When `invite_accepted.project()` runs, it:
 
 2. **Marks `network_id` as valid** — This is the trust anchor. By accepting the invite, the peer trusts this network.
 
-3. **Marks `invite_id` as valid** — This allows `user` and `peer_shared` events signed by this invite to project without waiting for the invite blob. Essential for distributed bootstrap where the invite blob hasn't synced yet.
+3. **Stores `invite_private_key` in `invite_accepteds`** — This enables the dependency checker to skip invite deps for self-created events (distributed bootstrap), and allows projectors to derive `invite_pubkey` for signature verification.
 
 4. **Creates the invite prekey from key material** — The invite link contains `invite_private_key` and `invite_prekey_id`. Rather than manual table insertion, projection creates a proper `group_prekey` event from this material. If `group_prekey` event IDs are deterministic from key content, this produces the same `prekey_id` and naturally cascades validity.
 
-5. **Cascades unblock** — Events blocked on `network_id`, `invite_id`, or `invite_prekey_id` now unblock:
-   - `user` and `peer_shared` events signed by this invite
+5. **Cascades unblock** — Events blocked on `network_id` or `invite_prekey_id` now unblock:
    - `invite`, `group`, `channel`, `admin` events signed by `network_id`
    - `group_key_shared` events sealed to `invite_prekey_id`
    - These cascade further to unblock messages, members, etc.
@@ -413,22 +412,22 @@ When `invite_accepted.project()` runs, it:
 
 A critical requirement is that **local events must project using only local data**. When joining a network or linking a device, the invite blob exists on the inviter's device, not locally. Projectors cannot wait for sync to complete.
 
-**Solution**: Projectors for `user` and `peer_shared` use a fallback mechanism:
+**Solution** — Two mechanisms work together:
 
-1. **Primary path**: Look up `invite_pubkey` from the `invites` table or store blob (normal sync case)
+1. **Dependency checking** (`check_deps`): Before an event can project, its dependencies must be valid. For events signed by an invite, `check_deps` looks up `invite_accepteds` — if we accepted this invite (have the private key), skip the invite dependency. This allows the event to proceed to projection without waiting for the invite blob to sync.
 
-2. **Fallback path**: For self-created events (where `owner_peer_id == recorded_by`), derive `invite_pubkey` from `invite_private_key` stored in the local `invite_accepteds` table
+2. **Projection fallback**: Projectors for `user` and `peer_shared` derive `invite_pubkey` from `invite_private_key` in `invite_accepteds` when the invite blob isn't available. This allows signature verification using local data.
 
-This is why `invite_accepted.create()` must happen **before** `user.create()` or `peer_shared.create()` — the fallback depends on the invite_private_key being in `invite_accepteds`.
+This is why `invite_accepted.create()` must happen **before** `user.create()` or `peer_shared.create()` — both mechanisms depend on the invite_private_key being in `invite_accepteds`.
 
 **Ordering in `peer_shared.join()`**:
 ```
 1. invite_accepted.create()   → stores invite_private_key locally
-2. peer_shared.create()       → projection derives pubkey from invite_accepteds
+2. peer_shared.create()       → check_deps skips invite dep, projection derives pubkey
 3. transit_prekey.create()    → can now reference the projected peer_shared
 ```
 
-This ensures local projection completes immediately. Synced events from other peers follow the primary path (reading from `invites` table or store blob).
+This ensures local projection completes immediately. Synced events from other peers go through normal dependency checking and use the `invites` table or store blob for verification.
 
 ### Deterministic Key Event IDs
 
