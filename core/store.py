@@ -1,10 +1,44 @@
 """Store management functions."""
+from __future__ import annotations
 from typing import Any
 import logging
 from . import crypto
 from .db import UnsafeDB
 
 log = logging.getLogger(__name__)
+
+
+def publish(event_data: dict, group_id: str, peer_id: str, t_ms: int, db: Any) -> str:
+    """Sign, encrypt, store, and project an event.
+
+    This is the standard path for creating group-encrypted events.
+    Signs with the peer's private key, encrypts with the group's current key,
+    stores the blob, and triggers projection.
+
+    Args:
+        event_data: Event dict (must include 'type' and other required fields)
+        group_id: Group ID for encryption key lookup
+        peer_id: Local peer ID (for signing and recording)
+        t_ms: Timestamp in milliseconds
+        db: Database connection
+
+    Returns:
+        event_id: The stored event's content-addressed ID
+    """
+    from events.identity import peer
+    from events.group import group
+
+    # Sign with peer's private key
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    signed_event = crypto.sign_event(event_data, private_key)
+
+    # Encrypt with group's current key
+    key_data = group.pick_key(group_id, peer_id, db)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, key_data, db)
+
+    # Store and project
+    return event(blob, peer_id, t_ms, db)
 
 # Batch mode flag for reducing logging during bulk operations
 _batch_mode = False

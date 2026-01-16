@@ -11,7 +11,9 @@ import json
 import logging
 from core import crypto
 from core import store
-from events.identity import peer
+from events.identity import peer, peer_shared, network
+from events.content import channel
+from events.group import group
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -31,29 +33,18 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     Returns:
         True if peer is an admin, False otherwise
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
     # Get network_id for admin table lookup
-    network_row = safedb.query_one(
-        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (recorded_by,)
-    )
-    if not network_row:
+    network_id = network.get_network_id(recorded_by, db)
+    if not network_id:
         return False
 
-    network_id = network_row['network_id']
-
-    # Get user_id for this peer_shared_id from peers_shared (user→peer relationship stored there)
-    peer_row = safedb.query_one(
-        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_shared_id, recorded_by)
-    )
-    if not peer_row or not peer_row['user_id']:
+    # Get user_id for this peer_shared_id
+    user_id = peer_shared.get_user_id(peer_shared_id, recorded_by, db)
+    if not user_id:
         return False
-
-    user_id = peer_row['user_id']
 
     # Check if user has an admin event in the admins table (per spec)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
     admin_row = safedb.query_one(
         "SELECT 1 FROM admins WHERE user_id = ? AND network_id = ? AND recorded_by = ? LIMIT 1",
         (user_id, network_id, recorded_by)
@@ -92,42 +83,29 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             raise ValueError("mode='peer' invites must have user_id set")
     else:
         raise ValueError(f"Invalid mode: {mode}. Must be 'user' or 'peer'")
+
     safedb = create_safe_db(db, recorded_by=peer_id)
     unsafedb = create_unsafe_db(db)
 
-    # Query peer_self to get peer_shared_id (subjective table)
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row or not peer_self_row['peer_shared_id']:
+    # Get peer identity
+    identity = peer_shared.get_self(peer_id, db)
+    if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set in peer_self table")
 
-    peer_shared_id = peer_self_row['peer_shared_id']
+    peer_shared_id = identity['peer_shared_id']
 
     # Get network
-    network_row = safedb.query_one(
-        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (peer_id,)
-    )
-    if not network_row:
+    network_id = network.get_network_id(peer_id, db)
+    if not network_id:
         raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
-    network_id = network_row['network_id']
-
     # Get all_users group by signature (network-signed group = all_users)
-    from events.identity import network as network_module
-    all_users_group_id = network_module.get_all_users_group_id(network_id, peer_id, db)
+    all_users_group_id = network.get_all_users_group_id(network_id, peer_id, db)
 
-    # Get inviter's user_id from peers_shared (user→peer relationship stored there)
-    peer_row = safedb.query_one(
-        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_shared_id, peer_id)
-    )
-    if not peer_row or not peer_row['user_id']:
+    # Get inviter's user_id
+    inviter_user_id = peer_shared.get_user_id(peer_shared_id, peer_id, db)
+    if not inviter_user_id:
         raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}. Cannot create invite.")
-
-    inviter_user_id = peer_row['user_id']
 
     # Authorization check depends on mode:
     # - mode='user' (network join invites): requires admin
@@ -151,20 +129,14 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
 
     # Get key from all_users group
-    group_row = safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (all_users_group_id, peer_id)
-    )
+    group_row = group.get_current_key(all_users_group_id, peer_id, db)
     if not group_row:
         raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
 
     key_id = group_row['key_id']
 
     # Get main channel
-    channel_row = safedb.query_one(
-        "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
-        (peer_id,)
-    )
+    channel_row = channel.get_main(peer_id, db)
     if not channel_row:
         raise ValueError(f"No main channel found for peer {peer_id}. Cannot create invite.")
 

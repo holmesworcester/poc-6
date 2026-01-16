@@ -35,6 +35,8 @@ import json
 from core import crypto
 from core import store
 from events.identity import peer
+from events.identity import peer_shared
+from events.group import group_prekey
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -90,13 +92,8 @@ def create_request(
 
     # If invite_id present, also sign with invite private key for bootstrap auth
     if invite_id:
-        safedb = create_safe_db(db, recorded_by=from_peer_id)
-        invite_key_row = safedb.query_one(
-            "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
-            (from_peer_id, from_peer_id)
-        )
-        if invite_key_row:
-            invite_private_key = invite_key_row['private_key']
+        invite_private_key = group_prekey.get_own_private_key(from_peer_id, db)
+        if invite_private_key:
             invite_sig_data = json.dumps(signed_event, sort_keys=True).encode()
             invite_signature = crypto.sign(invite_sig_data, invite_private_key)
             signed_event['invite_signature'] = crypto.b64encode(invite_signature)
@@ -342,15 +339,12 @@ def _send_ack_for_request(
     safedb = create_safe_db(db, recorded_by=local_peer_id)
 
     # Get our peer_shared_id
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-        (local_peer_id, local_peer_id)
-    )
-    if not peer_self_row:
+    self_identity = peer_shared.get_self(local_peer_id, db)
+    if not self_identity:
         log.warning(f"connection._send_ack: no peer_shared_id for {local_peer_id[:20]}...")
         return
 
-    local_peer_shared_id = peer_self_row['peer_shared_id']
+    local_peer_shared_id = self_identity['peer_shared_id']
 
     # Check if we already have a connection to this peer (from our own request)
     # If so, update it instead of creating a new one
@@ -462,14 +456,11 @@ def send_to_all(t_ms: int, db: Any) -> None:
         safedb = create_safe_db(db, recorded_by=peer_id)
 
         # Get our peer_shared_id
-        peer_self_row = safedb.query_one(
-            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-            (peer_id, peer_id)
-        )
-        if not peer_self_row:
+        self_identity = peer_shared.get_self(peer_id, db)
+        if not self_identity:
             continue
 
-        peer_shared_id = peer_self_row['peer_shared_id']
+        peer_shared_id = self_identity['peer_shared_id']
 
         # Get all known peers from peers_shared table
         all_peer_ids = set()

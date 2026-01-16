@@ -23,6 +23,7 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from events.identity import peer_shared
 
 log = logging.getLogger(__name__)
 
@@ -47,16 +48,12 @@ def create(
         intro_id: Event ID of the created intro event
     """
     # Get initiator's peer_shared_id for signing (this is the public identity)
-    safedb = create_safe_db(db, recorded_by=initiator_peer_id)
-    peer_self = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-        (initiator_peer_id, initiator_peer_id)
-    )
-    if not peer_self or not peer_self['peer_shared_id']:
+    self_identity = peer_shared.get_self(initiator_peer_id, db)
+    if not self_identity:
         log.warning(f"intro.create() no peer_shared_id for initiator {initiator_peer_id[:20]}...")
         raise ValueError(f"No peer_shared_id for initiator")
 
-    initiator_peer_shared_id = peer_self['peer_shared_id']
+    initiator_peer_shared_id = self_identity['peer_shared_id']
 
     log.info(
         f"intro.create() {initiator_peer_shared_id[:20]}... introducing "
@@ -138,7 +135,6 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
     # Verify signature
     # Note: Intros are time-sensitive for NAT hole punching. If the signer's
     # peer_shared isn't available, the intro is stale - just drop it.
-    from events.identity import peer_shared
     try:
         public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
     except ValueError:

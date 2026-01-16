@@ -1,4 +1,5 @@
 """Group event type (shareable, encrypted)."""
+from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'group'
@@ -199,11 +200,46 @@ def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     return group_key.get_key(row['key_id'], recorded_by, db)
 
 
-def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all groups for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query(
         "SELECT group_id, name, signed_by, created_at FROM groups WHERE recorded_by = ? ORDER BY created_at DESC",
+        (recorded_by,)
+    )
+
+
+def get(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get a group by ID.
+
+    Args:
+        group_id: Group ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Group dict with group_id, name, key_id, signed_by, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        "SELECT group_id, name, key_id, signed_by, created_at FROM groups WHERE group_id = ? AND recorded_by = ?",
+        (group_id, recorded_by)
+    )
+
+
+def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the main group for a peer.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Group dict with group_id, key_id, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        "SELECT group_id, name, key_id, signed_by, created_at FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
         (recorded_by,)
     )
 

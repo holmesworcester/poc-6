@@ -2,7 +2,7 @@
 Scenario tests for disappearing messages CLI support.
 
 Tests that the API returns the fields needed by the CLI:
-- channel.list_channels() returns disappearing_time_ms
+- channel.list() returns disappearing_time_ms
 - message.list() returns ttl_ms
 - channel_update works for turning off disappearing messages
 - Non-admin cannot update channel disappearing time
@@ -14,7 +14,7 @@ from core import tick
 
 
 def test_channel_list_returns_disappearing_time_ms(fresh_db):
-    """channel.list_channels() includes disappearing_time_ms field."""
+    """channel.list() includes disappearing_time_ms field."""
     db = fresh_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -32,7 +32,7 @@ def test_channel_list_returns_disappearing_time_ms(fresh_db):
     db.commit()
 
     # List channels and verify field is present
-    channels = channel.list_channels(alice['peer_id'], db)
+    channels = channel.list(alice['peer_id'], db)
 
     ephemeral_ch = next((c for c in channels if c['channel_id'] == channel_id), None)
     assert ephemeral_ch is not None
@@ -90,7 +90,7 @@ def test_message_in_permanent_channel_has_zero_ttl(fresh_db):
     db.commit()
 
     # Get #general channel (created by new_network)
-    channels = channel.list_channels(alice['peer_id'], db)
+    channels = channel.list(alice['peer_id'], db)
     general_ch = next((c for c in channels if c['name'] == 'general'), None)
 
     # Send message to permanent channel
@@ -129,7 +129,7 @@ def test_channel_update_turn_off_disappearing(fresh_db):
     db.commit()
 
     # Verify it's set
-    channels = channel.list_channels(alice['peer_id'], db)
+    channels = channel.list(alice['peer_id'], db)
     ch = next(c for c in channels if c['channel_id'] == channel_id)
     assert ch['disappearing_time_ms'] == 5000
 
@@ -146,7 +146,7 @@ def test_channel_update_turn_off_disappearing(fresh_db):
     db.commit()
 
     # Verify it's off
-    channels = channel.list_channels(alice['peer_id'], db)
+    channels = channel.list(alice['peer_id'], db)
     ch = next(c for c in channels if c['channel_id'] == channel_id)
     assert ch['disappearing_time_ms'] == 0
 
@@ -176,7 +176,7 @@ def test_non_admin_cannot_update_channel_disappearing(fresh_db):
     db.commit()
 
     # Get general channel
-    channels = channel.list_channels(alice['peer_id'], db)
+    channels = channel.list(alice['peer_id'], db)
     general_ch = next(c for c in channels if c['name'] == 'general')
 
     # Bob tries to update channel - should fail
