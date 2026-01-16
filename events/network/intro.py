@@ -48,7 +48,7 @@ def create(
         intro_id: Event ID of the created intro event
     """
     # Get initiator's peer_shared_id for signing (this is the public identity)
-    self_identity = peer_shared.get_self_identity(initiator_peer_id, db)
+    self_identity = peer_shared.get_self(initiator_peer_id, db)
     if not self_identity:
         log.warning(f"intro.create() no peer_shared_id for initiator {initiator_peer_id[:20]}...")
         raise ValueError(f"No peer_shared_id for initiator")

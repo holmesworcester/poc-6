@@ -1,4 +1,5 @@
 """Message event type."""
+from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'message'
@@ -10,8 +11,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.group import group
-from events.identity import peer, peer_shared, user_removed, username_update
+from events.identity import peer_shared, user
 from events.content import channel
 from core.db import create_safe_db, create_unsafe_db
 
@@ -47,7 +47,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     log.info(f"message.create() creating message in channel_id={channel_id}, content='{content[:50]}...'")
 
     # Query channel to get group_id and disappearing_time_ms
-    channel_row = channel.get_by_id(channel_id, peer_id, db)
+    channel_row = channel.get(channel_id, peer_id, db)
     if not channel_row:
         raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
 
@@ -56,7 +56,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
 
     # Look up our identity from peer_self (set when we created/linked our account)
     # This is the canonical source for "what user am I?" - single lookup, no fallback chain
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found in peer_self table")
     if not identity['user_id']:
@@ -66,12 +66,12 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     user_id = identity['user_id']
 
     # Check if user has been removed from the network
-    if user_removed.is_removed(user_id, peer_id, db):
+    if user.is_removed(user_id, peer_id, db):
         raise ValueError(f"User {user_id} has been removed from the network and cannot send messages.")
 
     # Check that user has a username set before allowing message creation
     # This ensures the author's name can be displayed with their message
-    if not username_update.has_username(user_id, peer_id, db):
+    if not user.has_username(user_id, peer_id, db):
         raise ValueError(f"No username found for user {user_id}. Username must be set before sending messages.")
 
     # Build standardized event structure
@@ -87,19 +87,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         'disappearing_time_ms': disappearing_time_ms  # TTL setting at creation time (0 = permanent)
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get key_data for encryption (group.pick_key uses peer_id for access control)
-    key_data = group.pick_key(group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper and projection
-    event_id = store.event(blob, peer_id, t_ms, db)
+    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"message.create() created message_id={event_id}")
 
@@ -114,7 +102,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     }
 
 
-def get_by_id(message_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get(message_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a single message by ID.
 
     Args:

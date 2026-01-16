@@ -10,8 +10,8 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.group import group_key, group
-from events.identity import peer, peer_shared, network
+from events.group import group
+from events.identity import peer_shared, network
 from core.db import create_safe_db, create_unsafe_db
 from core import queues
 
@@ -65,7 +65,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Validate group exists
-    group_row = group.get_by_id(group_id, peer_id, db)
+    group_row = group.get(group_id, peer_id, db)
     if not group_row:
         raise ValueError(f"Group {group_id} not found")
 
@@ -108,25 +108,13 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     if admin_grant_id:
         event_data['admin_grant'] = admin_grant_id
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get group key for encryption
-    key_data = group_key.get_key(group_row['key_id'], peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper and projection
-    member_id = store.event(blob, peer_id, t_ms, db)
+    member_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"group_member.create() created member_id={member_id}")
 
     # Share group key with new member
     # Get the new member's peer_shared_id from peers_shared (user→peer is one-to-many)
-    member_peer = peer_shared.get_by_user_id(user_id, peer_id, db)
+    member_peer = peer_shared.get_for_user(user_id, peer_id, db)
 
     if member_peer:
         from events.group import group_key_shared

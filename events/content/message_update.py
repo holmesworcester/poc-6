@@ -7,9 +7,8 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.group import group as group_module
 from events.content import message
-from events.identity import peer, peer_shared
+from events.identity import peer_shared
 from core import global_counter
 from core.db import create_safe_db, create_unsafe_db
 
@@ -47,7 +46,7 @@ def create(
         ValueError: If not authorized, message not found, or invalid parameters
     """
     # Get the original message to verify ownership and get group_id
-    message_row = message.get_by_id(message_id, peer_id, db)
+    message_row = message.get(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found")
 
@@ -55,7 +54,7 @@ def create(
     original_author_id = message_row['author_id']
 
     # Get our identity from peer_self
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found in peer_self table")
     if not identity['user_id']:
@@ -87,19 +86,7 @@ def create(
         'created_at': t_ms,
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get key_data for encryption
-    key_data = group_module.pick_key(group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event
-    event_id = store.event(blob, peer_id, t_ms, db)
+    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(
         f"message_update.create() created update_id={event_id} for message_id={message_id}, "

@@ -88,7 +88,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     unsafedb = create_unsafe_db(db)
 
     # Get peer identity
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set in peer_self table")
 

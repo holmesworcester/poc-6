@@ -18,8 +18,7 @@ import logging
 from PIL import Image
 from core import crypto
 from core import store
-from events.group import group
-from events.identity import peer, peer_shared
+from events.identity import peer_shared
 from events.content import file_slice, message
 from core.db import create_safe_db, create_unsafe_db
 
@@ -65,14 +64,14 @@ def create(peer_id: str, message_id: str, file_data: bytes,
                   f"file_size={len(file_data)}B")
 
     # Get message to verify access and get group_id
-    message_row = message.get_by_id(message_id, peer_id, db)
+    message_row = message.get(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found for peer {peer_id}")
 
     group_id = message_row['group_id']
 
     # Get peer_shared_id for signed_by field
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
 
@@ -130,7 +129,6 @@ def create(peer_id: str, message_id: str, file_data: bytes,
         'file_id': file_id,
         'filename': filename,
         'mime_type': mime_type,
-        # File descriptor fields (was in separate 'file' event)
         'blob_bytes': len(file_data),
         'nonce_prefix': crypto.b64encode(nonce_prefix),
         'enc_key': crypto.b64encode(enc_key),
@@ -140,19 +138,7 @@ def create(peer_id: str, message_id: str, file_data: bytes,
         'created_at': t_ms
     }
 
-    # Sign the event
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get group key for encryption
-    key_data = group.pick_key(group_id, peer_id, db)
-
-    # Wrap (canonicalize + group encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event
-    attachment_event_id = store.event(blob, peer_id, t_ms, db)
+    attachment_event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"message_attachment.create() created attachment_event_id={attachment_event_id[:20]}...")
 

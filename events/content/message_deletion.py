@@ -141,14 +141,14 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
     log.info(f"message_deletion.create() deleting message_id={message_id[:20]}... by peer={peer_id[:20]}...")
 
     # Get message to validate it exists and get group_id
-    message_row = message.get_by_id(message_id, peer_id, db)
+    message_row = message.get(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found for peer {peer_id}")
 
     message_group_id = message_row['group_id']
 
     # Get deleter's peer_shared_id
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
 
@@ -171,21 +171,7 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
         'created_at': t_ms
     }
 
-    # Sign the event
-    from events.identity import peer
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get group key for encryption (message was in this group, so deletion should be too)
-    from events.group import group
-    key_data = group.pick_key(message_group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event (no commit - caller owns transaction)
-    deletion_id = store.event(blob, peer_id, t_ms, db)
+    deletion_id = store.publish(event_data, message_group_id, peer_id, t_ms, db)
 
     log.info(f"message_deletion.create() created deletion_id={deletion_id[:20]}...")
     return deletion_id

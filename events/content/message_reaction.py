@@ -44,14 +44,14 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     log.info(f"message_reaction.create() reacting to message_id={message_id[:20]}... with emoji={emoji}")
 
     # Get message to validate it exists
-    message_row = message.get_by_id(message_id, peer_id, db)
+    message_row = message.get(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found for peer {peer_id}")
 
     message_group_id = message_row['group_id']
 
     # Get reactor's peer_shared_id and user_id
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
 
@@ -72,21 +72,7 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
         'global_count': global_count
     }
 
-    # Sign the event
-    from events.identity import peer
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get group key for encryption (reaction uses message's group key)
-    from events.group import group
-    key_data = group.pick_key(message_group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event
-    reaction_id = store.event(blob, peer_id, t_ms, db)
+    reaction_id = store.publish(event_data, message_group_id, peer_id, t_ms, db)
 
     log.info(f"message_reaction.create() created reaction_id={reaction_id[:20]}...")
     return reaction_id
@@ -113,7 +99,7 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     log.info(f"message_reaction.remove() removing reaction from message_id={message_id[:20]}... emoji={emoji}")
 
     # Get remover's user_id and peer_shared_id
-    identity = peer_shared.get_self_identity(peer_id, db)
+    identity = peer_shared.get_self(peer_id, db)
     if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
 
@@ -121,7 +107,7 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     remover_user_id = identity['user_id']
 
     # Find the reaction to remove
-    reaction_row = get_reaction(message_id, remover_user_id, emoji, peer_id, db)
+    reaction_row = get(message_id, remover_user_id, emoji, peer_id, db)
     if not reaction_row:
         raise ValueError(
             f"Reaction not found: message_id={message_id}, reactor_id={remover_user_id}, emoji={emoji}"
@@ -133,7 +119,7 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     # If not the reactor, check if remover is admin
     if remover_user_id != reaction_row['reactor_id']:
         from events.identity import invite
-        message_row = message.get_by_id(message_id, peer_id, db)
+        message_row = message.get(message_id, peer_id, db)
         if not message_row:
             raise ValueError(f"Message {message_id} not found")
 
@@ -145,7 +131,7 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     log.info(f"message_reaction.remove() authorization passed for reaction_id={reaction_id[:20]}...")
 
     # Get message group_id
-    message_row = message.get_by_id(message_id, peer_id, db)
+    message_row = message.get(message_id, peer_id, db)
     if not message_row:
         raise ValueError(f"Message {message_id} not found")
 
@@ -159,21 +145,7 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
         'created_at': t_ms
     }
 
-    # Sign the event
-    from events.identity import peer
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get group key for encryption (deletion uses message's group key)
-    from events.group import group
-    key_data = group.pick_key(message_group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event
-    deletion_id = store.event(blob, peer_id, t_ms, db)
+    deletion_id = store.publish(event_data, message_group_id, peer_id, t_ms, db)
 
     log.info(f"message_reaction.remove() created deletion_id={deletion_id[:20]}...")
     return deletion_id
@@ -347,7 +319,7 @@ def project_deletion(event_id: str, recorded_by: str, recorded_at: int, db: Any)
     log.debug(f"message_reaction.project_deletion() completed for deletion_id={event_id[:20]}...")
 
 
-def get_reaction(message_id: str, reactor_id: str, emoji: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get(message_id: str, reactor_id: str, emoji: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a specific reaction by message_id, reactor_id, and emoji.
 
     Args:

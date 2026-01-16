@@ -14,33 +14,11 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.group import group_key, group as group_module
 from events.content import channel
-from events.identity import peer, invite as invite_module
+from events.identity import invite as invite_module
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
-
-
-def get_next_global_count(channel_id: str, recorded_by: str, db: Any) -> int:
-    """Get the next global_count for a channel update.
-
-    Returns max existing global_count + 1, or 1 if no updates exist.
-
-    Args:
-        channel_id: Channel ID to check
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        Next global_count value to use
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    max_count_row = safedb.query_one(
-        "SELECT MAX(global_count) as max_count FROM channel_updates WHERE channel_id = ? AND recorded_by = ?",
-        (channel_id, recorded_by)
-    )
-    return (max_count_row['max_count'] or 0) + 1 if max_count_row else 1
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -95,7 +73,7 @@ def create(
         raise ValueError("At least one field (name or disappearing_time_ms) must be provided")
 
     # Get channel to find group_id
-    channel_row = channel.get_by_id(channel_id, peer_id, db)
+    channel_row = channel.get(channel_id, peer_id, db)
     if not channel_row:
         raise ValueError(f"Channel {channel_id} not found")
 
@@ -109,7 +87,7 @@ def create(
         raise ValueError("disappearing_time_ms must be non-negative")
 
     # Calculate global_count (max existing + 1)
-    global_count = get_next_global_count(channel_id, peer_id, db)
+    global_count = channel.get_next_update_count(channel_id, peer_id, db)
 
     # Build update event
     event_data = {
@@ -123,19 +101,7 @@ def create(
         'new_disappearing_time_ms': new_disappearing_time_ms,
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get key_data for encryption
-    key_data = group_module.pick_key(group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event
-    event_id = store.event(blob, peer_id, t_ms, db)
+    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(
         f"channel_update.create() created update_id={event_id} for channel_id={channel_id}, "

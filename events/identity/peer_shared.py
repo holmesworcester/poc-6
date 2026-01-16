@@ -328,7 +328,7 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
     return peer_id
 
 
-def get_by_user_id(user_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get_for_user(user_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get the first peer_shared for a user_id.
 
     Args:
@@ -365,7 +365,7 @@ def get_user_id(peer_shared_id: str, recorded_by: str, db: Any) -> str | None:
     return row['user_id'] if row and row['user_id'] else None
 
 
-def get_self_identity(peer_id: str, db: Any) -> dict[str, str] | None:
+def get_self(peer_id: str, db: Any) -> dict[str, str] | None:
     """Get the identity (peer_shared_id and user_id) for a local peer.
 
     Looks up the peer_self table to get the canonical mapping from local peer

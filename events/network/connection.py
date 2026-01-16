@@ -339,7 +339,7 @@ def _send_ack_for_request(
     safedb = create_safe_db(db, recorded_by=local_peer_id)
 
     # Get our peer_shared_id
-    self_identity = peer_shared.get_self_identity(local_peer_id, db)
+    self_identity = peer_shared.get_self(local_peer_id, db)
     if not self_identity:
         log.warning(f"connection._send_ack: no peer_shared_id for {local_peer_id[:20]}...")
         return
@@ -456,7 +456,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
         safedb = create_safe_db(db, recorded_by=peer_id)
 
         # Get our peer_shared_id
-        self_identity = peer_shared.get_self_identity(peer_id, db)
+        self_identity = peer_shared.get_self(peer_id, db)
         if not self_identity:
             continue
 

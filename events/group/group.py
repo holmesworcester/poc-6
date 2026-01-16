@@ -1,4 +1,5 @@
 """Group event type (shareable, encrypted)."""
+from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'group'
@@ -199,7 +200,7 @@ def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     return group_key.get_key(row['key_id'], recorded_by, db)
 
 
-def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all groups for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query(
@@ -208,7 +209,7 @@ def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
-def get_by_id(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a group by ID.
 
     Args:

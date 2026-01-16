@@ -207,25 +207,6 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     return event_id
 
 
-def is_removed(user_id: str, recorded_by: str, db: Any) -> bool:
-    """Check if a user has been removed from the network.
-
-    Args:
-        user_id: User ID to check
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        True if user is in removed_users table, False otherwise
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, recorded_by)
-    )
-    return row is not None
-
-
 def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:
     """Rotate group keys for all groups a removed user was a member of.
 
