@@ -287,6 +287,18 @@ def _resolve_signer(
             (signer_id, recorded_by),
         )
         signer_user_id = signer_user_row.get("user_id") if signer_user_row else None
+        signer_is_admin = None
+        if signer_user_id:
+            network_row = safedb.query_one(
+                "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+                (recorded_by,),
+            )
+            if network_row and network_row.get("network_id"):
+                admin_row = safedb.query_one(
+                    "SELECT 1 FROM admins WHERE user_id = ? AND network_id = ? AND recorded_by = ? LIMIT 1",
+                    (signer_user_id, network_row["network_id"], recorded_by),
+                )
+                signer_is_admin = admin_row is not None
     elif signer_type == "invite":
         if not _is_event_valid(signer_id, recorded_by, safedb):
             return "block", None, [signer_id], None
@@ -323,6 +335,7 @@ def _resolve_signer(
     }
     if signer_type == "peer_shared":
         signer_info["user_id"] = signer_user_id
+        signer_info["is_admin"] = signer_is_admin
     return "ok", signer_info, [], None
 
 

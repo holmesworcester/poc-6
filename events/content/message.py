@@ -48,8 +48,17 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Query channel to get group_id and disappearing_time_ms
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     channel_row = safedb.query_one(
-        "SELECT group_id, disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        f"""SELECT c.group_id,
+                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
+            FROM channels c
+            WHERE c.channel_id = ? AND c.recorded_by = ? LIMIT 1""",
         (channel_id, peer_id)
     )
     if not channel_row:

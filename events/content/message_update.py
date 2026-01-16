@@ -11,8 +11,76 @@ from events.group import group as group_module
 from events.identity import peer
 from core import global_counter
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'edited_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'message': {
+            'source': 'table',
+            'table': 'messages',
+            'key': 'message_id',
+            'fields': ['message_id', 'author_id', 'group_id'],
+        },
+    },
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for message_update events."""
+    event_data = ctx.event_data
+
+    message_id = event_data.get('message_id')
+    group_id = event_data.get('group_id')
+    edited_by = event_data.get('edited_by')
+    author_id = event_data.get('author_id')
+    global_count = event_data.get('global_count')
+    new_content = event_data.get('new_content')
+    created_at = event_data.get('created_at')
+
+    if not all([message_id, group_id, edited_by, author_id, global_count is not None, new_content, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if not new_content.strip():
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    message_row = ctx.deps.get('message')
+    if not message_row:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+    if message_row.get('author_id') != author_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+    if message_row.get('group_id') != group_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='message_updates',
+            values={
+                'update_id': ctx.event_id,
+                'message_id': message_id,
+                'group_id': group_id,
+                'edited_by': edited_by,
+                'author_id': author_id,
+                'global_count': global_count,
+                'new_content': new_content,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 # Event type registration
 EVENT_TYPE = 'message_update'
@@ -89,6 +157,7 @@ def create(
         'message_id': message_id,
         'group_id': group_id,
         'edited_by': peer_shared_id,
+        'signer_type': 'peer_shared',
         'author_id': user_id,
         'global_count': global_count,
         'new_content': new_content,
