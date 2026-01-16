@@ -11,6 +11,19 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
+
+
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'network_pubkey',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +59,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     event_data = {
         'type': 'network',
         'network_pubkey': crypto.b64encode(network_public_key),
+        'signer_type': 'network',
         'created_at': t_ms
     }
     # Note: no signed_by field - network events are self-signed (root of trust)
@@ -61,6 +75,34 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 
     log.info(f"network.create() created self-signed network_id={network_id}")
     return network_id, network_private_key
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for network events."""
+    event_data = ctx.event_data
+    network_pubkey = event_data.get('network_pubkey')
+    created_at = event_data.get('created_at')
+
+    if not network_pubkey or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='networks',
+            values={
+                'network_id': ctx.event_id,
+                'creator_user_id': '',
+                'network_pubkey': network_pubkey,
+                'signed_by': ctx.event_id,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:

@@ -53,6 +53,7 @@ def v2_network_state(v2_db):
     event_data = {
         'type': 'network',
         'network_pubkey': crypto.b64encode(network_public_key),
+        'signer_type': 'network',
         'created_at': 1000
     }
     signed_event = crypto.sign_event(event_data, network_private_key)

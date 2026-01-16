@@ -16,6 +16,35 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
+
+
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'network': {
+            'source': 'table',
+            'table': 'networks',
+            'key': 'network_id',
+            'fields': ['network_id'],
+        },
+    },
+    'optional': {
+        'admin_grant': {
+            'source': 'table',
+            'table': 'admins',
+            'key': 'admin_id',
+            'key_from': 'admin_grant',
+            'fields': ['admin_id', 'user_id'],
+            'required_if_present': True,
+        },
+    },
+    'cascade_on_delete': [],
+}
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +79,7 @@ def create(
         'user_id': user_id,
         'network_id': network_id,
         'signed_by': signed_by,
+        'signer_type': 'network' if signed_by == network_id else 'peer_shared',
         'created_at': t_ms,
     }
 
@@ -70,6 +100,74 @@ def create(
              f"signed_by={signed_by[:20]}...")
 
     return admin_id
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for admin events."""
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'admin':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    signed_by = event_data.get('signed_by')
+    network_id = event_data.get('network_id')
+    user_id = event_data.get('user_id')
+    admin_grant = event_data.get('admin_grant')
+
+    if not signed_by or not network_id or not user_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    signer = ctx.signer or {}
+    signer_type = signer.get('type')
+    is_bootstrap = signed_by == network_id
+
+    if is_bootstrap:
+        if signer_type and signer_type != 'network':
+            return ProjectorResult(writes=tuple(), valid_event=False)
+    else:
+        if not admin_grant:
+            return ProjectorResult(writes=tuple(), valid_event=False)
+        if signer_type and signer_type != 'peer_shared':
+            return ProjectorResult(writes=tuple(), valid_event=False)
+        signer_user_id = signer.get('user_id')
+        if not signer_user_id:
+            return ProjectorResult(writes=tuple(), valid_event=False)
+        grant_row = ctx.deps.get('admin_grant')
+        if not grant_row or grant_row.get('user_id') != signer_user_id:
+            return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = [
+        WriteOp(
+            op='insert',
+            table='admins',
+            values={
+                'admin_id': ctx.event_id,
+                'network_id': network_id,
+                'user_id': user_id,
+                'signed_by': signed_by,
+                'admin_grant': admin_grant,
+                'created_at': event_data.get('created_at'),
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    ]
+
+    if is_bootstrap:
+        writes.append(
+            WriteOp(
+                op='update',
+                table='networks',
+                values={'creator_user_id': user_id},
+                where={
+                    'network_id': network_id,
+                    'recorded_by': ctx.recorded_by,
+                    'creator_user_id': '',
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:

@@ -14,6 +14,7 @@ class DepSpec(TypedDict, total=False):
     fields: list[str]
     value: Any
     key_from: str
+    required_if_present: bool
 
 
 class SignerSpec(TypedDict, total=False):

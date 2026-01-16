@@ -99,11 +99,11 @@ def _resolve_table_dep(
         return "ok", None, [], None
     dep_id = event_data.get(value_field)
     if not isinstance(dep_id, str):
-        if required:
+        if required or dep_spec.get("required_if_present"):
             return "reject", None, [], f"dep '{dep_name}' invalid id type"
         return "ok", None, [], None
     if not _is_event_valid(dep_id, recorded_by, safedb):
-        if required:
+        if required or dep_spec.get("required_if_present"):
             return "block", None, [dep_id], None
         return "ok", None, [], None
     table = dep_spec.get("table")
@@ -282,6 +282,11 @@ def _resolve_signer(
             public_key = peer_shared.get_public_key(signer_id, recorded_by, db)
         except ValueError:
             return "reject", None, [], "peer_shared signer not available"
+        signer_user_row = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (signer_id, recorded_by),
+        )
+        signer_user_id = signer_user_row.get("user_id") if signer_user_row else None
     elif signer_type == "invite":
         if not _is_event_valid(signer_id, recorded_by, safedb):
             return "block", None, [signer_id], None
@@ -316,6 +321,8 @@ def _resolve_signer(
         "id": signer_id,
         "public_key": public_key,
     }
+    if signer_type == "peer_shared":
+        signer_info["user_id"] = signer_user_id
     return "ok", signer_info, [], None
 
 
