@@ -5,9 +5,12 @@ FastAPI server that wraps the event module functions.
 Runs on Unix socket to avoid port conflicts.
 
 Usage:
-    python -m api                           # Default socket
-    python -m api --socket /tmp/my.sock     # Custom socket
-    python -m api --port 8080               # TCP port (fallback)
+    python -m api --peer-id PEER123                    # Default socket
+    python -m api --peer-id PEER123 --socket /tmp/x.sock  # Custom socket
+    python -m api --peer-id PEER123 --port 8080        # TCP port
+
+On startup, generates a PSK token and writes it to ~/.quiet/{peer_id}/api_token
+Frontend reads this token and includes it in Authorization header.
 """
 
 import argparse
@@ -21,11 +24,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.core.database import get_db, init_db
+from api.core.database import get_db, init_db, set_peer_id
 from api.core.auth import AuthMiddleware, init_auth, disable_auth
 from api.routes import channels, messages, networks, users, files, sync
 
 DEFAULT_SOCKET = "/tmp/quiet-api.sock"
+
+# Global peer_id set at startup (used by lifespan)
+_startup_peer_id: str | None = None
 
 
 def cleanup_stale_socket(socket_path: str) -> None:
@@ -54,6 +60,15 @@ async def lifespan(app: FastAPI):
     # Startup
     print("Starting Quiet API...")
     init_db()
+
+    # Initialize auth with peer_id if provided
+    if _startup_peer_id:
+        set_peer_id(_startup_peer_id)
+        init_auth(_startup_peer_id)
+        print(f"Auth initialized for peer: {_startup_peer_id}")
+    else:
+        print("Warning: No peer_id provided, auth token not written to disk")
+
     yield
     # Shutdown
     print("Shutting down Quiet API...")
@@ -105,7 +120,14 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 def main():
     """CLI entry point."""
+    global _startup_peer_id
+
     parser = argparse.ArgumentParser(description="Quiet Protocol API Server")
+    parser.add_argument(
+        "--peer-id",
+        required=True,
+        help="Peer ID this API instance serves (required)",
+    )
     parser.add_argument(
         "--socket",
         default=DEFAULT_SOCKET,
@@ -127,6 +149,9 @@ def main():
         help="Enable auto-reload for development",
     )
     args = parser.parse_args()
+
+    # Set peer_id for lifespan to use
+    _startup_peer_id = args.peer_id
 
     import uvicorn
 

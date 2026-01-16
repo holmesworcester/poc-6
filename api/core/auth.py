@@ -20,6 +20,8 @@ from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from core import crypto
+
 
 # Token storage
 _api_token: bytes | None = None
@@ -27,8 +29,8 @@ _auth_enabled: bool = True
 
 
 def generate_token() -> bytes:
-    """Generate a new random 32-byte token."""
-    return secrets.token_bytes(32)
+    """Generate a new random 32-byte token using existing crypto."""
+    return crypto.generate_secret()
 
 
 def get_token_path(peer_id: str) -> Path:
@@ -37,12 +39,14 @@ def get_token_path(peer_id: str) -> Path:
     return quiet_dir / "api_token"
 
 
-def init_auth(peer_id: str | None = None) -> bytes:
+def init_auth(peer_id: str | None = None, token_dir: Path | None = None) -> bytes:
     """Initialize authentication by generating and storing a token.
 
     Args:
         peer_id: The peer ID for this API instance. If None, token is
                  generated but not written to disk.
+        token_dir: Override directory for token file (for testing).
+                   If None, uses ~/.quiet/{peer_id}/
 
     Returns:
         The generated token bytes.
@@ -52,7 +56,11 @@ def init_auth(peer_id: str | None = None) -> bytes:
     _api_token = generate_token()
 
     if peer_id:
-        token_path = get_token_path(peer_id)
+        if token_dir:
+            token_path = token_dir / "api_token"
+        else:
+            token_path = get_token_path(peer_id)
+
         token_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Write with restrictive permissions
@@ -62,6 +70,29 @@ def init_auth(peer_id: str | None = None) -> bytes:
         print(f"API token written to: {token_path}")
 
     return _api_token
+
+
+def read_token_from_file(peer_id: str, token_dir: Path | None = None) -> bytes | None:
+    """Read the API token from the token file.
+
+    This is used by frontend clients to get the token for authentication.
+
+    Args:
+        peer_id: The peer ID to read token for.
+        token_dir: Override directory (for testing).
+
+    Returns:
+        The token bytes, or None if file doesn't exist.
+    """
+    if token_dir:
+        token_path = token_dir / "api_token"
+    else:
+        token_path = get_token_path(peer_id)
+
+    if not token_path.exists():
+        return None
+
+    return token_path.read_bytes()
 
 
 def get_token() -> bytes | None:
