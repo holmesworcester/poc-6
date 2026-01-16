@@ -14,8 +14,92 @@ from core import store
 from events.group import group_key, group as group_module, group_member
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'group': {
+            'source': 'table',
+            'table': 'groups',
+            'key': 'group_id',
+            'fields': ['group_id', 'key_id'],
+        },
+    },
+    'optional': {
+        'admin_grant': {
+            'source': 'table',
+            'table': 'admins',
+            'key': 'admin_id',
+            'key_from': 'admin_grant',
+            'fields': ['user_id', 'admin_id'],
+            'required_if_present': True,  # If admin_grant field present, must be valid
+        },
+    },
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for channel events."""
+    event_data = ctx.event_data
+
+    name = event_data.get('name')
+    group_id = event_data.get('group_id')
+    signed_by = event_data.get('signed_by')
+    created_at = event_data.get('created_at')
+    disappearing_time_ms = event_data.get('disappearing_time_ms', 0) or 0
+    is_main = event_data.get('is_main', 0) or 0
+    admin_grant = event_data.get('admin_grant')
+
+    # Validate required fields
+    if not name or not group_id or not signed_by or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Verify group exists
+    group_row = ctx.deps.get('group')
+    if not group_row or not group_row.get('group_id'):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Verify admin authorization if admin_grant present
+    if admin_grant:
+        admin_row = ctx.deps.get('admin_grant')
+        if not admin_row:
+            # admin_grant specified but not valid - reject
+            return ProjectorResult(writes=tuple(), valid_event=False)
+        # Verify signer is authorized by admin_grant
+        signer_info = ctx.signer
+        if signer_info and signer_info.get('user_id'):
+            if admin_row.get('user_id') != signer_info['user_id']:
+                # Admin grant doesn't match signer
+                return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='channels',
+            values={
+                'channel_id': ctx.event_id,
+                'name': name,
+                'group_id': group_id,
+                'signed_by': signed_by,
+                'created_at': created_at,
+                'disappearing_time_ms': disappearing_time_ms,
+                'is_main': is_main,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -228,6 +312,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'name': name,
         'group_id': group_id,
         'signed_by': peer_shared_id,  # References shareable peer identity
+        'signer_type': 'peer_shared',  # Required for v2 resolver
         'created_at': t_ms,
         'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
         'is_main': 1 if is_main else 0  # Store is_main flag
