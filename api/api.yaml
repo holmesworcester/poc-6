@@ -1,0 +1,751 @@
+# API Specification
+# Maps HTTP endpoints to module functions
+# Frontend polls these endpoints; backend calls module functions
+
+openapi: "3.0.0"
+info:
+  title: Quiet Protocol API
+  version: "1.0.0"
+  description: |
+    REST API for desktop/mobile clients.
+    Designed for polling (100ms intervals when foreground).
+    All endpoints scoped to the peer running the API server.
+
+servers:
+  - url: http://localhost:8080
+    description: Local API server
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: PSK token from ~/.quiet/{peer_id}/api_token
+
+paths:
+  # ============== Networks ==============
+  /networks:
+    get:
+      summary: List networks this peer belongs to
+      operationId: listNetworks
+      x-module: network.get_for_peer
+      responses:
+        200:
+          description: List of networks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Network'
+
+  /networks/{network_id}:
+    get:
+      summary: Get network details
+      operationId: getNetwork
+      x-module: network.get_for_peer
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+
+  # ============== Channels ==============
+  /networks/{network_id}/channels:
+    get:
+      summary: List channels in network
+      operationId: listChannels
+      x-module: channel.list_channels
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: List of channels
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Channel'
+
+    post:
+      summary: Create channel (admin only)
+      operationId: createChannel
+      x-module: channel.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                disappearing_time_ms:
+                  type: integer
+                  default: 0
+      responses:
+        201:
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channel_id:
+                    type: string
+
+  /networks/{network_id}/channels/{channel_id}:
+    get:
+      summary: Get channel details
+      operationId: getChannel
+      x-module: channel.get_by_id
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: channel_id
+          in: path
+          required: true
+          schema:
+            type: string
+
+  # ============== Messages ==============
+  /networks/{network_id}/channels/{channel_id}/messages:
+    get:
+      summary: List messages in channel (paginated)
+      operationId: listMessages
+      x-module: message.list
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: channel_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          description: Message ID to paginate from
+          schema:
+            type: string
+        - name: direction
+          in: query
+          description: older (before cursor) or newer (after cursor)
+          schema:
+            type: string
+            enum: [older, newer]
+            default: older
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        200:
+          description: List of messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+                  cursors:
+                    type: object
+                    properties:
+                      older:
+                        type: string
+                        nullable: true
+                      newer:
+                        type: string
+                        nullable: true
+
+    post:
+      summary: Send message
+      operationId: sendMessage
+      x-module: message.create
+      x-attachment-module: message_attachment.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: channel_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                attachments:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        201:
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message_id:
+                    type: string
+                  attachments:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file_id:
+                          type: string
+                        filename:
+                          type: string
+                        status:
+                          type: string
+
+  /networks/{network_id}/messages/{message_id}:
+    get:
+      summary: Get message details
+      operationId: getMessage
+      x-module: message_update.get
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+
+    delete:
+      summary: Delete message
+      operationId: deleteMessage
+      x-module: message_deletion.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Message deleted
+
+    patch:
+      summary: Edit message
+      operationId: editMessage
+      x-module: message_update.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+
+  # ============== Reactions ==============
+  /networks/{network_id}/messages/{message_id}/reactions:
+    get:
+      summary: List reactions on message
+      operationId: listReactions
+      x-module: message_reaction.list_reactions
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+
+    post:
+      summary: Add reaction
+      operationId: addReaction
+      x-module: message_reaction.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emoji]
+              properties:
+                emoji:
+                  type: string
+
+  /networks/{network_id}/messages/{message_id}/reactions/{emoji}:
+    delete:
+      summary: Remove reaction
+      operationId: removeReaction
+      x-module: message_reaction_deletion.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: emoji
+          in: path
+          required: true
+          schema:
+            type: string
+
+  # ============== Users ==============
+  /networks/{network_id}/users:
+    get:
+      summary: List users in network
+      operationId: listUsers
+      x-module: |
+        network.get_all_users_group_id +
+        group_member.list_members
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+
+  /networks/{network_id}/users/{user_id}:
+    delete:
+      summary: Remove user from network (admin only)
+      operationId: removeUser
+      x-module: user_removed.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+
+  # ============== Invites ==============
+  /networks/{network_id}/invites:
+    post:
+      summary: Create invite link (admin only)
+      operationId: createInvite
+      x-module: invite.create
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        201:
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invite_link:
+                    type: string
+                    description: Base64 encoded invite data
+
+  /networks/join:
+    post:
+      summary: Join network via invite link
+      operationId: joinNetwork
+      x-module: user.join
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invite_link, username]
+              properties:
+                invite_link:
+                  type: string
+                username:
+                  type: string
+                device_name:
+                  type: string
+                  default: "Device"
+      responses:
+        201:
+          description: Joined network
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  network_id:
+                    type: string
+                  user_id:
+                    type: string
+                  peer_shared_id:
+                    type: string
+
+  # ============== Files ==============
+  /networks/{network_id}/files/{file_id}:
+    get:
+      summary: Download complete file
+      operationId: downloadFile
+      x-module: message_attachment.get_file_data
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: File binary
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /networks/{network_id}/files/{file_id}/status:
+    get:
+      summary: Get file sync status
+      operationId: getFileStatus
+      x-module: message_attachment.get_file_download_progress
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: File status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileStatus'
+
+  /networks/{network_id}/files/{file_id}/data:
+    get:
+      summary: Read partial file data
+      operationId: readFileData
+      x-module: message_attachment.get_file_data (with offset/length)
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: length
+          in: query
+          schema:
+            type: integer
+      responses:
+        200:
+          description: Partial file binary
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /networks/{network_id}/files/{file_id}/sync:
+    post:
+      summary: Request file sync with priority
+      operationId: requestFileSync
+      x-module: sync_file (priority sync)
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: file_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                priority:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 5
+
+  # ============== Sync Status ==============
+  /networks/{network_id}/sync/status:
+    get:
+      summary: Get sync status and peer connections
+      operationId: getSyncStatus
+      x-module: connection.list_all_for_display
+      parameters:
+        - name: network_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Sync status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncStatus'
+
+  # ============== Health ==============
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      security: []
+      responses:
+        200:
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  peer_id:
+                    type: string
+
+components:
+  schemas:
+    Network:
+      type: object
+      properties:
+        network_id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: integer
+
+    Channel:
+      type: object
+      properties:
+        channel_id:
+          type: string
+        name:
+          type: string
+        group_id:
+          type: string
+        disappearing_time_ms:
+          type: integer
+        is_main:
+          type: boolean
+        created_at:
+          type: integer
+
+    Message:
+      type: object
+      properties:
+        message_id:
+          type: string
+        channel_id:
+          type: string
+        author_id:
+          type: string
+        author_name:
+          type: string
+        content:
+          type: string
+        created_at:
+          type: integer
+        edited_at:
+          type: integer
+          nullable: true
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+        reactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReactionGroup'
+
+    Attachment:
+      type: object
+      properties:
+        file_id:
+          type: string
+        filename:
+          type: string
+        mime_type:
+          type: string
+        blob_bytes:
+          type: integer
+        status:
+          type: string
+          enum: [syncing, complete, failed]
+
+    ReactionGroup:
+      type: object
+      properties:
+        emoji:
+          type: string
+        count:
+          type: integer
+        user_ids:
+          type: array
+          items:
+            type: string
+
+    User:
+      type: object
+      properties:
+        user_id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: integer
+
+    FileStatus:
+      type: object
+      properties:
+        file_id:
+          type: string
+        status:
+          type: string
+          enum: [syncing, complete, failed]
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        bytes_synced:
+          type: integer
+        bytes_total:
+          type: integer
+
+    SyncStatus:
+      type: object
+      properties:
+        peers_connected:
+          type: integer
+        connections:
+          type: array
+          items:
+            type: object
+            properties:
+              peer_shared_id:
+                type: string
+              status:
+                type: string
+              last_sync_at:
+                type: integer
