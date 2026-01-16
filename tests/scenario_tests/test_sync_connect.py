@@ -272,34 +272,34 @@ def test_two_way_handshake(fresh_db):
     assert len(alice_conns) + len(bob_conns) >= 1, "Should have at least one connection after tick"
     print("✓ Connections established")
 
-    # Step 3: Run another tick to complete handshake if needed
-    print("\n=== Step 3: Run second tick ===")
-    tick.tick(t_ms=4000, db=db)
-    db.commit()
+    # Step 3: Wait for bidirectional handshake to complete
+    print("\n=== Step 3: Waiting for bidirectional handshake ===")
+
+    def both_can_send():
+        # Alice should be able to wrap to Bob
+        alice_to_bob_conn = conn_module.get_connection_by_peer(alice_peer_id, bob_peer_shared_id, 5000, db)
+        assert alice_to_bob_conn and alice_to_bob_conn.can_send(), \
+            "Alice should have Bob's key for sending"
+
+        # Bob should be able to wrap to Alice
+        bob_to_alice_conn = conn_module.get_connection_by_peer(bob_peer_id, alice_peer_shared_id, 5000, db)
+        assert bob_to_alice_conn and bob_to_alice_conn.can_send(), \
+            "Bob should have Alice's key for sending"
+
+    tick_helper.assert_eventually(both_can_send, db=db, start_t_ms=4000)
 
     # Verify final state: both peers have connections they can send on
     print("\n=== Verifying bidirectional connection state ===")
 
     # Get connections for both peers using the connection module
-    alice_connections = conn_module.get_connections(alice_peer_id, 4000, db)
-    bob_connections = conn_module.get_connections(bob_peer_id, 4000, db)
+    alice_connections = conn_module.get_connections(alice_peer_id, 5000, db)
+    bob_connections = conn_module.get_connections(bob_peer_id, 5000, db)
     print(f"Total connections: Alice={len(alice_connections)}, Bob={len(bob_connections)}")
 
     for conn in alice_connections + bob_connections:
         print(f"  Connection for {conn.recorded_by[:10]}... to {conn.label[:20]}...")
         print(f"    their_connection_id: {conn.their_connection_id[:20] if conn.their_connection_id else 'None'}...")
         print(f"    their_key: {'[present]' if conn.their_key else 'None'}")
-
-    # Verify both peers can wrap messages to each other using connection module
-    # Alice should be able to wrap to Bob
-    alice_to_bob_conn = conn_module.get_connection_by_peer(alice_peer_id, bob_peer_shared_id, 4000, db)
-    assert alice_to_bob_conn and alice_to_bob_conn.can_send(), \
-        "Alice should have Bob's key for sending"
-
-    # Bob should be able to wrap to Alice
-    bob_to_alice_conn = conn_module.get_connection_by_peer(bob_peer_id, alice_peer_shared_id, 4000, db)
-    assert bob_to_alice_conn and bob_to_alice_conn.can_send(), \
-        "Bob should have Alice's key for sending"
 
     print("\n✅ Two-way handshake test passed!")
     print("  ✓ Connection requests sent and acks received")

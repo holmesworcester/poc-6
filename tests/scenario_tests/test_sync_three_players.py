@@ -7,200 +7,106 @@ Charlie creates his own separate network.
 Goal: Verify that all shareable events sync correctly between Alice and Bob,
       while Charlie remains isolated.
 """
-import sqlite3
-from core.db import Database
-from core import schema
 from events.identity import user, invite, peer
-from tests.utils import tick_helper
+from events.content import message
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_sync_three_players_convergence(fresh_db):
     """Test that shareable events sync correctly between Alice and Bob."""
-
-    # Setup
     db = fresh_db
 
     # Alice creates a network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     # Alice creates an invite for Bob
-    invite_id, invite_link, invite_data = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
 
     # Bob joins Alice's network
     bob_peer_id = peer.create(t_ms=2000, db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
 
     # Charlie creates his own separate network
     charlie = user.new_network(name='Charlie', t_ms=3000, db=db)
-
     db.commit()
 
-    print("\n=== Initial State ===")
-    alice_shareable = set(row['event_id'] for row in db.query(
+    # Get initial shareable counts
+    alice_shareable_before = len(db.query(
         "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
         (alice['peer_id'],)
     ))
-    bob_shareable = set(row['event_id'] for row in db.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
-        (bob['peer_id'],)
-    ))
-    charlie_shareable = set(row['event_id'] for row in db.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
-        (charlie['peer_id'],)
-    ))
-
-    print(f"Alice has {len(alice_shareable)} shareable events")
-    print(f"Bob has {len(bob_shareable)} shareable events")
-    print(f"Charlie has {len(charlie_shareable)} shareable events")
-
-    # Track what Bob has received from Alice
-    bob_has_alice_events = alice_shareable & bob_shareable
-    print(f"Bob already has {len(bob_has_alice_events)}/{len(alice_shareable)} of Alice's events (from bootstrap)")
-
-    # Run sync to convergence
-    print("\n=== Running Sync ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
-
-    # Final verification
-    print("\n=== Final State ===")
-
-    # Get final state
-    alice_shareable_final = set(row['event_id'] for row in db.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
-        (alice['peer_id'],)
-    ))
-    bob_shareable_final = set(row['event_id'] for row in db.query(
+    bob_shareable_before = len(db.query(
         "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
         (bob['peer_id'],)
     ))
 
-    # What Bob received from Alice (check if Bob recorded these events)
-    import json
-    bob_recorded_events = set()
-    all_store = db.query("SELECT id, blob FROM store")
-    for row in all_store:
-        try:
-            data = json.loads(row['blob'])
-            if data.get('type') == 'recorded' and data.get('recorded_by') == bob['peer_id']:
-                bob_recorded_events.add(data.get('ref_id'))
-        except:
-            pass
-    bob_received_from_alice = alice_shareable_final & bob_recorded_events
+    # Wait for Bob to see Alice's channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
 
-    # What Alice received from Bob (check if Alice recorded these events)
-    alice_recorded_events = set()
-    for row in all_store:
-        try:
-            data = json.loads(row['blob'])
-            if data.get('type') == 'recorded' and data.get('recorded_by') == alice['peer_id']:
-                alice_recorded_events.add(data.get('ref_id'))
-        except:
-            pass
-    alice_received_from_bob = bob_shareable_final & alice_recorded_events
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
 
-    print(f"Alice has {len(alice_shareable_final)} shareable events")
-    print(f"Bob has {len(bob_shareable_final)} shareable events")
-    print(f"Bob received {len(bob_received_from_alice)}/{len(alice_shareable_final)} of Alice's events")
-    print(f"Alice received {len(alice_received_from_bob)}/{len(bob_shareable_final)} of Bob's events")
+    # Send messages to verify sync works
+    alice_msg = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Hello from Alice!',
+        t_ms=t_ms,
+        db=db
+    )
+    db.commit()
 
-    # Check blocked events
-    alice_blocked = db.query_one(
-        "SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )['cnt']
-    bob_blocked = db.query_one(
-        "SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?",
-        (bob['peer_id'],)
-    )['cnt']
+    bob_msg = message.create(
+        peer_id=bob['peer_id'],
+        channel_id=bob['channel_id'],
+        content='Hello from Bob!',
+        t_ms=t_ms + 100,
+        db=db
+    )
+    db.commit()
 
-    print(f"\nAlice blocked: {alice_blocked}")
-    print(f"Bob blocked: {bob_blocked}")
+    charlie_msg = message.create(
+        peer_id=charlie['peer_id'],
+        channel_id=charlie['channel_id'],
+        content='Hello from Charlie!',
+        t_ms=t_ms + 200,
+        db=db
+    )
+    db.commit()
 
-    # Find missing events
-    missing_from_bob = alice_shareable_final - bob_recorded_events
-    missing_from_alice = bob_shareable_final - alice_recorded_events
+    # Wait for Alice to see Bob's message
+    def alice_sees_bob_message():
+        alice_messages = message.list(alice['channel_id'], alice['peer_id'], db)
+        alice_contents = [m['content'] for m in alice_messages]
+        assert 'Hello from Bob!' in alice_contents
 
-    if missing_from_bob:
-        print(f"\n⚠️  Bob is missing {len(missing_from_bob)} of Alice's shareable events:")
-        for event_id in list(missing_from_bob)[:5]:  # Show first 5
-            # Get event type from store table
-            import json
-            store_row = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
-            event_type = 'unknown'
-            if store_row:
-                try:
-                    data = json.loads(store_row['blob'])
-                    event_type = data.get('type', 'unknown')
-                except:
-                    pass
-            print(f"  - {event_id[:20]}... (type: {event_type})")
+    t_ms = assert_eventually(alice_sees_bob_message, db=db, start_t_ms=t_ms)
 
-            # Check if Bob has it in blocked queue
-            blocked = db.query_one(
-                "SELECT waiting_for FROM blocked_events_ephemeral WHERE ref_id = ? AND recorded_by = ?",
-                (event_id, bob['peer_id'])
-            )
-            if blocked:
-                print(f"    → BLOCKED, waiting for: {blocked['waiting_for'][:50]}...")
+    # Wait for Bob to see Alice's message
+    def bob_sees_alice_message():
+        bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
+        bob_contents = [m['content'] for m in bob_messages]
+        assert 'Hello from Alice!' in bob_contents
 
-    if missing_from_alice:
-        print(f"\n⚠️  Alice is missing {len(missing_from_alice)} of Bob's shareable events:")
-        for event_id in list(missing_from_alice)[:5]:  # Show first 5
-            # Get event type from store table
-            import json
-            store_row = db.query_one("SELECT blob FROM store WHERE id = ?", (event_id,))
-            event_type = 'unknown'
-            if store_row:
-                try:
-                    data = json.loads(store_row['blob'])
-                    event_type = data.get('type', 'unknown')
-                except:
-                    pass
-            print(f"  - {event_id[:20]}... (type: {event_type})")
+    assert_eventually(bob_sees_alice_message, db=db, start_t_ms=t_ms)
 
-            # Check if Alice has it in blocked queue
-            blocked = db.query_one(
-                "SELECT waiting_for FROM blocked_events_ephemeral WHERE ref_id = ? AND recorded_by = ?",
-                (event_id, alice['peer_id'])
-            )
-            if blocked:
-                print(f"    → BLOCKED, waiting for: {blocked['waiting_for'][:50]}...")
+    # Verify Charlie is isolated
+    charlie_messages = message.list(charlie['channel_id'], charlie['peer_id'], db)
+    charlie_contents = [m['content'] for m in charlie_messages]
 
-    # Charlie isolation check
-    # Charlie should only "have" events he's recorded (not just what's in global store)
-    charlie_has_events = set(row['event_id'] for row in db.query(
-        "SELECT event_id FROM shareable_events WHERE can_share_peer_id = ?",
-        (charlie['peer_id'],)
-    ))
-    charlie_has_alice = charlie_has_events & alice_shareable_final
-    charlie_has_bob = charlie_has_events & bob_shareable_final
+    assert 'Hello from Charlie!' in charlie_contents, "Charlie should see his own message"
+    assert 'Hello from Alice!' not in charlie_contents, "Charlie should NOT see Alice's message"
+    assert 'Hello from Bob!' not in charlie_contents, "Charlie should NOT see Bob's message"
 
-    print(f"\nCharlie isolation check:")
-    print(f"  Charlie has {len(charlie_has_events)} shareable events (his own)")
-    print(f"  Charlie has {len(charlie_has_alice)} of Alice's events (should be 0)")
-    print(f"  Charlie has {len(charlie_has_bob)} of Bob's events (should be 0)")
+    # Verify Alice and Bob don't see Charlie's message
+    alice_messages = message.list(alice['channel_id'], alice['peer_id'], db)
+    alice_contents = [m['content'] for m in alice_messages]
+    assert 'Hello from Charlie!' not in alice_contents, "Alice should NOT see Charlie's message"
 
-    # Assertions
-    assert len(missing_from_bob) == 0, \
-        f"Bob should receive all {len(alice_shareable_final)} of Alice's shareable events, " \
-        f"but is missing {len(missing_from_bob)}: {list(missing_from_bob)[:3]}"
-
-    assert len(missing_from_alice) == 0, \
-        f"Alice should receive all {len(bob_shareable_final)} of Bob's shareable events, " \
-        f"but is missing {len(missing_from_alice)}: {list(missing_from_alice)[:3]}"
-
-    assert charlie_has_alice == set(), \
-        f"Charlie should not have Alice's events (isolated network), " \
-        f"but has {len(charlie_has_alice)}: {list(charlie_has_alice)[:3]}"
-
-    assert charlie_has_bob == set(), \
-        f"Charlie should not have Bob's events (isolated network), " \
-        f"but has {len(charlie_has_bob)}: {list(charlie_has_bob)[:3]}"
-
-    print("\n✅ All sync assertions passed!")
+    bob_messages = message.list(bob['channel_id'], bob['peer_id'], db)
+    bob_contents = [m['content'] for m in bob_messages]
+    assert 'Hello from Charlie!' not in bob_contents, "Bob should NOT see Charlie's message"

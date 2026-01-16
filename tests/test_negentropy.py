@@ -1,6 +1,6 @@
 """Tests for negentropy-style deterministic sync protocol.
 
-Tests the unified time+hash prefix-based bucketing system.
+Tests the hash-only prefix-based bucketing system.
 """
 import pytest
 import sqlite3
@@ -19,45 +19,41 @@ def db():
 
 
 class TestUnifiedKey:
-    """Test unified key computation."""
+    """Test unified key computation (hash-only variant)."""
 
     def test_unified_key_format(self):
         """Unified key is 16 hex chars (64 bits)."""
         event_id = 'test_event_abc123'
-        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
-        key = negentropy.compute_unified_key(event_id, ts_ms)
+        key = negentropy.compute_unified_key(event_id)
         assert len(key) == 16
         assert all(c in '0123456789abcdef' for c in key)
 
-    def test_unified_key_timestamp_ordering(self):
-        """Earlier timestamps produce lexicographically smaller keys."""
+    def test_unified_key_ignores_timestamp(self):
+        """Timestamp is ignored - same event_id always produces same key."""
         event_id = 'test_event'
-        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # Earlier
-        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Later
-        assert key1 < key2
+        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # With timestamp
+        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Different timestamp
+        key3 = negentropy.compute_unified_key(event_id)  # No timestamp
+        assert key1 == key2 == key3  # All same because only event_id matters
 
     def test_unified_key_deterministic(self):
-        """Same inputs produce same key."""
-        key1 = negentropy.compute_unified_key('evt1', 1718451045000)
-        key2 = negentropy.compute_unified_key('evt1', 1718451045000)
+        """Same event_id produces same key."""
+        key1 = negentropy.compute_unified_key('evt1')
+        key2 = negentropy.compute_unified_key('evt1')
         assert key1 == key2
 
-    def test_unified_key_different_events_same_time(self):
-        """Different events at same time produce different keys."""
-        ts_ms = 1718451045000
-        key1 = negentropy.compute_unified_key('evt1', ts_ms)
-        key2 = negentropy.compute_unified_key('evt2', ts_ms)
-        # First 12 chars (timestamp) same, last 4 (hash) different
-        assert key1[:12] == key2[:12]
-        assert key1[12:] != key2[12:]
+    def test_unified_key_different_events(self):
+        """Different events produce different keys."""
+        key1 = negentropy.compute_unified_key('evt1')
+        key2 = negentropy.compute_unified_key('evt2')
+        assert key1 != key2
 
     def test_decode_unified_key(self):
-        """Can decode unified key back to timestamp."""
-        ts_ms = 1718451045000
-        key = negentropy.compute_unified_key('evt1', ts_ms)
+        """Decode returns (0, full_hash) in hash-only mode."""
+        key = negentropy.compute_unified_key('evt1')
         decoded_ts, hash_hex = negentropy.decode_unified_key(key)
-        assert decoded_ts == ts_ms
-        assert len(hash_hex) == 4
+        assert decoded_ts == 0  # No timestamp in hash-only mode
+        assert hash_hex == key  # Full hash returned
 
 
 class TestPrefixLevels:
@@ -98,13 +94,11 @@ class TestFormatHuman:
     """Test human-readable unified key formatting."""
 
     def test_format_unified_key_human(self):
-        """Format shows ISO timestamp and hash suffix."""
-        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
-        key = negentropy.compute_unified_key('evt1', ts_ms)
+        """Format shows hash prefix in hash-only mode."""
+        key = negentropy.compute_unified_key('evt1')
         formatted = negentropy.format_unified_key_human(key)
-        assert '2024-06-15' in formatted
-        assert '11:30:45' in formatted
-        assert ':' in formatted  # Has separator between timestamp and hash
+        assert 'hash:' in formatted
+        assert key[:8] in formatted  # Shows hash prefix
 
 
 class TestHashComputation:
@@ -311,28 +305,41 @@ class TestSyncProtocol:
         """When bucket has many events (> EVENTS_THRESHOLD), drill down instead."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        base_ts = 1718451045000  # Some point in 2024
 
-        # Add more events than EVENTS_THRESHOLD (100)
-        for i in range(150):
-            # Spread across different times to ensure they're in the same prefix_2 bucket
-            negentropy.add_event_to_sync(db, peer_id, f'evt{i}', base_ts + i * 60000)
+        # In hash-only mode, we need to find events that hash to the same prefix_2 bucket.
+        # Generate events and group by their prefix_2 bucket until we have > 100 in one bucket.
+        target_prefix = None
+        events_by_prefix: dict[str, list[str]] = {}
+        i = 0
+        while True:
+            event_id = f'evt{i}'
+            unified_key = negentropy.compute_unified_key(event_id)
+            prefix = unified_key[:2]
+            if prefix not in events_by_prefix:
+                events_by_prefix[prefix] = []
+            events_by_prefix[prefix].append(event_id)
+            if len(events_by_prefix[prefix]) > 150:
+                target_prefix = prefix
+                break
+            i += 1
+            if i > 100000:  # Safety limit
+                pytest.skip("Could not find 150 events with same prefix_2 in reasonable iterations")
 
-        # Get the prefix for prefix_2 level
-        unified_key = negentropy.compute_unified_key('evt0', base_ts)
-        prefix = unified_key[:2]
+        # Add the events that share the same prefix_2 bucket
+        for event_id in events_by_prefix[target_prefix]:
+            negentropy.add_event_to_sync(db, peer_id, event_id, 1000)
 
         # Receive request at prefix_2 level with different hash
         msg = {
             'type': 'range_request',
             'range_id': 'remote_1',
             'level': 'prefix_2',
-            'prefix': prefix,
+            'prefix': target_prefix,
             'hash': 'deadbeef',  # Different hash
         }
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
-        # With 150 events (> 100 threshold), should drill down to child level
+        # With > 100 events, should drill down to child level
         assert any(r['type'] == 'range_request' for r in responses)
         # Should NOT send events directly at this level
         assert not any(r['type'] == 'range_events' for r in responses)

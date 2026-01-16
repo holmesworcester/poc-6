@@ -17,7 +17,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
-from tests.utils import tick_helper
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_link_device_sees_new_groups_after_invite(fresh_db):
@@ -53,10 +53,6 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
     )
     db.commit()
 
-    # Sync for group creation
-    print("\n=== Sync for Group A creation ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=2500, max_rounds=200, check_interval=1)
-
     # Alice creates peer invite for device linking
     print("\n=== Alice creates peer invite for device linking ===")
 
@@ -91,10 +87,6 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
     )
     db.commit()
 
-    # Sync for Group B creation
-    print("\n=== Sync for Group B creation ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
-
     # Alice links second device via the link URL
     print("\n=== Alice links second device via peer invite ===")
 
@@ -124,50 +116,43 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
     assert alice_device2['user_id'] == alice_device1['user_id']
     print(f"✅ Both devices share user_id")
 
-    # Sync multiple rounds for convergence (more rounds needed for key sharing)
-    print("\n=== Sync for link and group key propagation ===")
-    tick_helper.sync_until_converged(db=db, start_t_ms=6000, max_rounds=200, check_interval=1)
+    # Wait for device 2 to sync group keys
+    print("\n=== Waiting for device 2 to sync group keys ===")
+
+    def device2_has_both_keys():
+        has_key_a = db.query_one(
+            "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (group_a_key_id, alice_device2['peer_id'])
+        )
+        has_key_b = db.query_one(
+            "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            (group_b_key_id, alice_device2['peer_id'])
+        )
+        assert has_key_a, "Device 2 should have key for Group A"
+        assert has_key_b, "Device 2 should have key for Group B"
+
+    t_ms = assert_eventually(device2_has_both_keys, db=db, start_t_ms=6000)
 
     # Verify device 2 is member of BOTH groups
     print("\n=== Verifying device 2 group memberships ===")
 
-    is_member_a = group_member.is_member(
-        alice_device1['user_id'],
-        group_a_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group A: {is_member_a}")
-    assert is_member_a, "Device 2 should be member of Group A (existed before invite)"
+    def device2_is_member_of_both_groups():
+        is_member_a = group_member.is_member(
+            alice_device1['user_id'],
+            group_a_id,
+            alice_device2['peer_id'],
+            db
+        )
+        is_member_b = group_member.is_member(
+            alice_device1['user_id'],
+            group_b_id,
+            alice_device2['peer_id'],
+            db
+        )
+        assert is_member_a, "Device 2 should be member of Group A (existed before invite)"
+        assert is_member_b, "Device 2 should be member of Group B (created after invite)"
 
-    is_member_b = group_member.is_member(
-        alice_device1['user_id'],
-        group_b_id,
-        alice_device2['peer_id'],
-        db
-    )
-    print(f"Device 2 is member of Group B: {is_member_b}")
-    assert is_member_b, "Device 2 should be member of Group B (created after invite)"
-
-    print("✅ Device 2 is member of both groups")
-
-    # Verify device 2 has keys for BOTH groups
-    print("\n=== Verifying device 2 has group keys ===")
-
-    has_key_a = db.query_one(
-        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (group_a_key_id, alice_device2['peer_id'])
-    )
-    print(f"Device 2 has key for Group A: {bool(has_key_a)}")
-    assert has_key_a, "Device 2 should have key for Group A"
-
-    has_key_b = db.query_one(
-        "SELECT 1 FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (group_b_key_id, alice_device2['peer_id'])
-    )
-    print(f"Device 2 has key for Group B: {bool(has_key_b)}")
-    assert has_key_b, "Device 2 should have key for Group B (even though created after invite)"
-
-    print("✅ Device 2 has keys for both groups")
+    assert_eventually(device2_is_member_of_both_groups, db=db, start_t_ms=t_ms)
+    print("✅ Device 2 is member of both groups and has keys for both")
 
     print(f"\n✅ All assertions passed!")

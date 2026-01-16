@@ -3,8 +3,87 @@
 Provides consistent defaults for timing across all tests to match production job frequencies,
 plus utilities to detect when sync has converged rather than using hard-coded round counts.
 """
-from typing import Any
+from typing import Any, Callable
 from core import tick as tick_module
+
+
+# Global test timeout - increase this if tests are timing out
+# 500 rounds = 50 seconds of simulated time at 100ms intervals
+DEFAULT_MAX_ROUNDS = 500
+
+
+def assert_eventually(
+    check: Callable[[], Any],
+    db: Any,
+    start_t_ms: int,
+    max_rounds: int = None,
+    interval_ms: int = 100,
+    msg: str = None
+) -> int:
+    """Run ticks until check() passes or timeout.
+
+    This is the preferred way to write sync tests. Instead of guessing
+    how many rounds sync takes, just assert what you care about and
+    let this helper tick until it's true.
+
+    Args:
+        check: Callable that raises AssertionError if condition not met.
+               Can also return a value - truthy = pass, falsy = fail.
+        db: Database connection
+        start_t_ms: Starting timestamp
+        max_rounds: Maximum ticks before giving up (default: DEFAULT_MAX_ROUNDS)
+        interval_ms: Time between ticks (default 100ms)
+        msg: Optional message for timeout failure
+
+    Returns:
+        Final timestamp after check passed
+
+    Raises:
+        AssertionError: If check doesn't pass within max_rounds
+
+    Example:
+        # Wait until Bob can see Alice's message
+        t_ms = assert_eventually(
+            lambda: db.query_one(
+                "SELECT * FROM messages WHERE id = ? AND recorded_by = ?",
+                (msg_id, bob_peer_id)
+            ),
+            db=db,
+            start_t_ms=5000
+        )
+    """
+    if max_rounds is None:
+        max_rounds = DEFAULT_MAX_ROUNDS
+
+    last_error = None
+
+    for i in range(max_rounds):
+        t_ms = start_t_ms + i * interval_ms
+        tick_module.tick(t_ms=t_ms, db=db)
+        db.commit()
+
+        try:
+            result = check()
+            # Support both assertion-style (raises) and return-style (truthy/falsy)
+            if result is not None and not result:
+                raise AssertionError(f"Check returned falsy: {result}")
+            return t_ms + interval_ms  # Return next available timestamp
+        except Exception as e:
+            # Catch all exceptions - sync may not have propagated data yet
+            # ValueError, KeyError, etc. are all retryable until timeout
+            last_error = e
+            continue
+
+    # Final attempt with real error
+    timeout_msg = msg or f"Condition not met after {max_rounds} rounds ({max_rounds * interval_ms}ms)"
+    try:
+        result = check()
+        if result is not None and not result:
+            raise AssertionError(f"{timeout_msg}: check returned {result}")
+    except Exception as e:
+        raise AssertionError(f"{timeout_msg}: {e}") from None
+
+    return start_t_ms + max_rounds * interval_ms
 
 
 # Production job frequencies (from jobs.py):
@@ -85,90 +164,3 @@ def convergence_sync(db: Any, start_t_ms: int, max_rounds: int = CONVERGENCE_ROU
         Final timestamp
     """
     return run_ticks(db, start_t_ms, max_rounds)
-
-
-def sync_until_converged(
-    db: Any,
-    start_t_ms: int,
-    max_rounds: int = 500,
-    check_interval: int = 1,
-    verbose: bool = False,
-    stability_threshold: int = 3,  # Reduced: negentropy detection is deterministic
-    sync_only: bool = True  # Use sync-only ticks (no event creation)
-) -> tuple[int, int, bool, dict]:
-    """Run ticks until all connections are synced or max_rounds reached.
-
-    Uses negentropy-based detection: checks if all active connections have
-    matching root hashes. This is deterministic - no need for long stability
-    thresholds.
-
-    By default uses sync-only ticks to prevent event-creating jobs from
-    causing infinite sync loops.
-
-    Args:
-        db: Database connection
-        start_t_ms: Starting timestamp
-        max_rounds: Maximum sync rounds (default 500)
-        check_interval: Check progress every N rounds (default 1)
-        verbose: Print progress status (default False)
-        stability_threshold: Confirm sync for N consecutive checks (default 3)
-        sync_only: Use sync-only ticks, no event creation (default True)
-
-    Returns:
-        (final_t_ms, rounds_used, converged, status_dict)
-
-    Status dict contains:
-        - 'converged': bool (True if all synced and queue empty)
-        - 'all_synced': bool (True if all connections synced)
-        - 'queue_empty': bool (True if no pending blobs)
-        - 'total_connections': count of active connections
-        - 'synced_connections': count of synced connections
-    """
-    from events.network import sync as sync_module
-
-    tick_fn = tick_module.tick_sync_only if sync_only else tick_module.tick
-    synced_count = 0
-
-    for round_num in range(max_rounds):
-        t_ms = start_t_ms + (round_num * TICK_INTERVAL_MS)
-        tick_fn(t_ms=t_ms, db=db)
-
-        # Check progress every check_interval rounds
-        if (round_num + 1) % check_interval == 0:
-            status = sync_module.get_global_sync_status(db, t_ms)
-
-            if verbose:
-                synced = status['synced_connections']
-                total = status['total_connections']
-                queue = 'empty' if status['queue_empty'] else 'pending'
-                print(f"Round {round_num + 1}: {synced}/{total} connections synced, queue={queue}")
-
-            # Check if fully synced
-            if status['all_synced'] and status['queue_empty']:
-                synced_count += 1
-                if synced_count >= stability_threshold:
-                    final_t_ms = start_t_ms + ((round_num + 1) * TICK_INTERVAL_MS)
-                    if verbose:
-                        print(f"✓ Converged at round {round_num + 1}")
-                    return (final_t_ms, round_num + 1, True, {
-                        'converged': True,
-                        'all_synced': True,
-                        'queue_empty': True,
-                        'total_connections': status['total_connections'],
-                        'synced_connections': status['synced_connections'],
-                    })
-            else:
-                synced_count = 0
-
-    # Did not converge within max_rounds
-    final_t_ms = start_t_ms + (max_rounds * TICK_INTERVAL_MS)
-    final_status = sync_module.get_global_sync_status(db, final_t_ms)
-    if verbose:
-        print(f"✗ Did not converge within {max_rounds} rounds")
-    return (final_t_ms, max_rounds, False, {
-        'converged': False,
-        'all_synced': final_status['all_synced'],
-        'queue_empty': final_status['queue_empty'],
-        'total_connections': final_status['total_connections'],
-        'synced_connections': final_status['synced_connections'],
-    })

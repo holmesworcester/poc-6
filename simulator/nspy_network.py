@@ -33,7 +33,9 @@ class NetworkConfig:
     All times are in milliseconds.
     """
     # Latency settings
-    latency_ms: float = 0.0
+    # Note: Use latency_ms >= 1, not 0. SimPy has an edge case where events
+    # scheduled at the current time may not be processed correctly.
+    latency_ms: float = 1.0
     jitter_ms: float = 0.0  # Standard deviation of gaussian jitter
 
     # Packet loss settings
@@ -230,6 +232,7 @@ class NetworkSimulator:
         self._delivered: list[DeliveredPacket] = []
         self._partitioned_peers: set[str] = set()
         self._packet_id_counter = 0
+        self._link_seed_counter = 0  # Counter for deterministic link seeds
         self._seed = 42  # Default seed for reproducibility
 
     def configure(self, config: NetworkConfig) -> None:
@@ -239,12 +242,14 @@ class NetworkSimulator:
         """
         self.config = config
         self._links.clear()
+        self._link_seed_counter = 0  # Reset for deterministic behavior
 
     def set_seed(self, seed: int) -> None:
         """Set random seed for reproducibility."""
         self._seed = seed
         # Clear links so they get recreated with new seed
         self._links.clear()
+        self._link_seed_counter = 0  # Reset for deterministic behavior
 
     def register_peer(self,
                       peer_id: str,
@@ -323,8 +328,10 @@ class NetworkSimulator:
         # Get or create link
         link_key = (from_peer, to_peer)
         if link_key not in self._links:
-            # Create unique seed for this link
-            link_seed = hash((self._seed, from_peer, to_peer)) & 0xFFFFFFFF
+            # Create deterministic seed for this link using counter (not peer IDs)
+            # This ensures reproducibility regardless of cryptographic peer ID generation
+            self._link_seed_counter += 1
+            link_seed = hash((self._seed, self._link_seed_counter)) & 0xFFFFFFFF
             self._links[link_key] = Link(
                 env=self.env,
                 collector=self._collector,
@@ -455,6 +462,7 @@ class NetworkSimulator:
         self._delivered.clear()
         self._partitioned_peers.clear()
         self._packet_id_counter = 0
+        self._link_seed_counter = 0  # Reset for deterministic behavior
         self.nat_engine = NatEngine(self.nat_engine.config)
         log.info("nspy: reset")
 
@@ -464,7 +472,7 @@ class NetworkSimulator:
 # ============================================================================
 
 def create_simulator(
-    latency_ms: float = 0.0,
+    latency_ms: float = 1.0,
     jitter_ms: float = 0.0,
     packet_loss_rate: float = 0.0,
     bandwidth_kbps: int = None,
