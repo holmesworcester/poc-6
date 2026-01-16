@@ -18,6 +18,12 @@ Types (`core/projection_v2/types.py`):
 - `ResolveResult(status, ctx, missing=(), error=None)`
 - `EventSpec`, `DepSpec`, `SignerSpec` (TypedDict shapes)
 
+DepSpec notes:
+- `required_if_present` (bool): when `True`, treat the dependency as optional
+  unless the event field is present; if present but missing/invalid, block
+  instead of treating it as `None`. This preserves legacy “conditional deps”
+  (e.g., `admin_grant`).
+
 Functions (stubs in scaffolding):
 - `resolve_event(event_id, recorded_by, recorded_at, db) -> ResolveResult`
 - `project_batch(recorded_ids, db) -> list[str | None]`
