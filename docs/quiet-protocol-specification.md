@@ -100,6 +100,8 @@ All events except `peer` and `peer_shared` include a `created_by` field that ref
 
 Note: `created_by` is deprecated. Where prior drafts used `created_by = peer_shared_id`, prefer `signed_by = peer_shared_id` and resolve the signer’s public key by signer type (`network_id` | `user_id` | `peer_shared_id` | `invite_id`).
 
+Events include a `signer_type` field (e.g., `peer_shared`, `invite`, `network`) so receivers can deterministically resolve which keyspace the `signed_by` value refers to without guessing.
+
 
 TODO: how does `recorded_by` work again? What events can't include `created_by`?
 
