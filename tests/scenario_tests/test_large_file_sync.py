@@ -3,10 +3,10 @@ Scenario test: Large file sync with progress tracking.
 
 Tests realistic file sizes:
 1. Alice creates network, Bob joins
-2. Alice attaches 5 MB file to message
+2. Alice attaches a small file to a message
 3. Track progress as Bob downloads
-4. Verify integrity with root_hash
-5. Test 50 MB file as well
+4. Verify integrity by retrieving file data
+5. Optional slow 10 MB file sync
 
 This tests the scalability of the file sync system.
 """
@@ -22,7 +22,7 @@ from core import tick
 
 
 def test_1mb_file_download_with_progress(fresh_db):
-    """Test downloading a 1 MB file with progress tracking."""
+    """Test downloading a small file with progress tracking."""
 
     # Setup
     db = fresh_db
@@ -164,153 +164,74 @@ def test_1mb_file_download_with_progress(fresh_db):
     print(f"✓ Bob retrieved and verified {len(bob_retrieved):,} byte file")
 
     elapsed_time = time.time() - start_time
-    print(f"\n✅ Test passed! 1 MB file synced in {elapsed_time:.2f}s")
+    print(f"\n✅ Test passed! small file synced in {elapsed_time:.2f}s")
 
 
-@pytest.mark.skip(reason="Too slow for regular test runs - takes 2+ minutes")
-def test_50mb_file_download(fresh_db):
-    """Test downloading a very large 50 MB file."""
+@pytest.mark.slow
+def test_10mb_file_download(fresh_db):
+    """Perf gut-check: sync a 10MB file between two peers.
 
-    # Setup
+    Expected: ~30-60 seconds
+    Run with: pytest -m slow
+    """
+    from tests.utils.tick_helper import assert_eventually
+
     db = fresh_db
 
-    print("\n=== Setup: Create network ===")
-
-    # Alice creates network
+    # Setup
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-
-    # Alice creates invite
-    invite_id, invite_link, invite_data = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
-
-    # Bob joins
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
-    print(f"✓ Bob joined network")
-
     db.commit()
 
-    # Initial sync
-    print("\n=== Initial sync ===")
-    for i in range(5):
-        tick.tick(t_ms=3000 + i*100, db=db)
-        db.commit()
+    # Alice creates 10MB file
+    print("\nCreating 10MB file...")
+    file_size = 10 * 1024 * 1024  # 10 MB (~22,222 slices)
+    file_data = b'Y' * file_size
 
-    print("\n=== Alice creates message with 50 MB file ===")
-
-    # Alice sends message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
-        content='Check out this 50 MB file!',
-        t_ms=4000,
+        content='Large file',
+        t_ms=3000,
         db=db
     )
-    message_id = msg_result['id']
 
-    # Create 50 MB file
-    file_size = 50 * 1024 * 1024  # 50 MB
-    file_data = b'Y' * file_size
-    print(f"✓ Created {file_size:,} byte file")
-
-    expected_slices = (file_size + 449) // 450
-    print(f"✓ Expected slices: {expected_slices:,}")
-
-    # Alice attaches file
     start_time = time.time()
     file_result = message_attachment.create(
         peer_id=alice['peer_id'],
-        message_id=message_id,
+        message_id=msg_result['id'],
         file_data=file_data,
-        filename='very_large_file.dat',
+        filename='large_file.dat',
         mime_type='application/octet-stream',
-        t_ms=5000,
+        t_ms=3100,
         db=db
     )
     file_id = file_result['file_id']
-    slice_count = file_result['slice_count']
-
-    creation_time = time.time() - start_time
-    print(f"✓ Alice created file in {creation_time:.2f}s: {slice_count:,} slices")
-
+    print(f"✓ Created {file_size:,} bytes ({file_result['slice_count']:,} slices) in {time.time()-start_time:.1f}s")
     db.commit()
 
-    print("\n=== Bob starts focused file sync ===")
-
-    # Bob requests the file
+    # Bob requests focused sync for the file
     sync_file.request_file_sync(
         file_id=file_id,
         peer_id=bob['peer_id'],
         priority=10,
         ttl_ms=0,
-        t_ms=6000,
+        t_ms=4000,
         db=db
     )
-
     db.commit()
 
-    # Sync with progress tracking
-    print("\n=== Syncing large file ===")
-    print("(This may take a while...)")
+    # Wait for Bob to receive complete file
+    def bob_has_complete_file():
+        progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
+        assert progress and progress['is_complete'], f"Bob at {progress['percentage_complete'] if progress else 0}%"
 
-    start_time = time.time()
-    prev_progress = None
-    last_print_time = start_time
+    print("Syncing...")
+    assert_eventually(bob_has_complete_file, db=db, start_t_ms=4000, max_rounds=1000)
 
-    for round_num in range(1000):  # Many rounds for 50 MB
-        current_time_ms = 7000 + round_num * 100
-
-        tick.tick(t_ms=current_time_ms, db=db)
-        db.commit()
-
-        # Print progress every 20 rounds
-        if round_num % 20 == 0:
-            current_time = time.time()
-            elapsed_ms = int((current_time - last_print_time) * 1000)
-
-            progress = message_attachment.get_file_download_progress(
-                file_id=file_id,
-                recorded_by=bob['peer_id'],
-                db=db,
-                prev_progress=prev_progress,
-                elapsed_ms=elapsed_ms if prev_progress else None
-            )
-
-            if progress:
-                print(f"Round {round_num:4d}: {progress['percentage_complete']:3d}% - "
-                      f"{progress.get('speed_human', 'N/A'):>10s}")
-
-                if progress['is_complete']:
-                    print(f"\n✓ Download complete in {round_num} rounds!")
-                    break
-
-                prev_progress = progress
-                last_print_time = current_time
-
-    # NOTE: We trust that file sync worked correctly.
-    # The download_progress API already verified completion.
-    # Removed DB query for file_slices table.
-    print(f"\n✓ 50 MB file sync completed (verified via progress API)")
-
-    elapsed_time = time.time() - start_time
-    print(f"\n✅ Test passed! 50 MB file synced in {elapsed_time:.2f}s")
-
-
-if __name__ == '__main__':
-    print("=" * 80)
-    print("TEST 1: 1 MB file download with progress tracking")
-    print("=" * 80)
-    test_1mb_file_download_with_progress()
-
-    print("\n" + "=" * 80)
-    print("TEST 2: 50 MB file download")
-    print("=" * 80)
-    test_50mb_file_download()
-
-    print("\n" + "=" * 80)
-    print("ALL TESTS PASSED!")
-    print("=" * 80)
+    # Verify file integrity
+    bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
+    assert bob_data == file_data, "File data should match"
+    print(f"✓ Bob received and verified {len(bob_data):,} byte file")

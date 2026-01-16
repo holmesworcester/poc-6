@@ -1,171 +1,65 @@
 """
 Performance test: Alice creates 10,000 messages, Bob syncs them.
 
-Tracks how many tick() calls are needed to transfer all messages from
-Alice to Bob, using the realistic user.join() API.
+This is a perf gut-check - verifies sync can handle bulk message transfer.
+Run with: pytest -m slow
 """
-import sqlite3
-import logging
 import pytest
-from core.db import Database
-from core import schema
-from core import tick
-from events.identity import user, peer
+from events.identity import user, invite, peer
 from events.content import message
-
-# Enable logging
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
+from tests.utils.tick_helper import assert_eventually
 
 
-@pytest.mark.skip(reason="Known issue: Bob doesn't receive messages during sync. 100-message sync works fine. Needs investigation.")
-def test_sync_perf_10k():
-    """Test sync performance: Alice creates 10k messages, Bob syncs them."""
+@pytest.mark.slow
+def test_sync_perf_10k(fresh_db):
+    """Perf gut-check: sync 10k messages between two peers.
 
-    # Setup: Initialize in-memory database
-    conn = sqlite3.Connection(":memory:")
-    db = Database(conn)
-    schema.create_all(db)
-
-    # Alice creates a network
-    log.info("Creating Alice's network...")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    alice_peer_id = alice['peer_id']
-    alice_peer_shared_id = alice['peer_shared_id']
-    alice_key_id = alice['key_id']
-    alice_group_id = alice['group_id']
-    alice_channel_id = alice['channel_id']
-
-    # Alice creates an invite for Bob
-    from events.identity import invite
-    invite_id, invite_link, invite_data = invite.create(
-        peer_id=alice['peer_id'],
-        t_ms=1500,
-        db=db
-    )
-
-    # Bob joins Alice's network via invite
-    log.info("Bob joining Alice's network...")
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_id = bob['peer_id']
-    bob_peer_shared_id = bob['peer_shared_id']
-    bob_user_id = bob['user_id']
-    bob_key_id = bob['key_id']
-    bob_group_id = bob['group_id']
-    bob_channel_id = alice_channel_id  # Same channel as Alice
-
-    # Bootstrap: Initial sync rounds to establish connection using tick()
-    log.info("Running initial sync rounds to establish connection...")
-    for i in range(5):
-        tick.tick(t_ms=4000 + i*200, db=db)
-
-    db.commit()
-    log.info("Bootstrap complete - Alice and Bob are connected")
-
-    # Alice creates 10,000 messages
-    log.info("Alice creating 10,000 messages...")
+    Expected: ~60-90 seconds
+    """
+    db = fresh_db
     num_messages = 10000
+
+    # Setup
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+
+    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+
+    # Alice creates messages in bulk
+    print(f"\nCreating {num_messages} messages...")
     for i in range(num_messages):
         message.create(
-            peer_id=alice_peer_id,
-            channel_id=alice_channel_id,
+            peer_id=alice['peer_id'],
+            channel_id=alice['channel_id'],
             content=f'Message {i}',
-            t_ms=10000 + i,
+            t_ms=3000 + i,
             db=db,
-            return_latest=False  # Skip fetching messages for bulk creation performance
+            return_latest=False
         )
-
-        if (i + 1) % 1000 == 0:
-            log.info(f"  Created {i + 1} messages")
-
+        if (i + 1) % 2000 == 0:
+            print(f"  {i + 1}/{num_messages}")
     db.commit()
-    log.info(f"Alice created {num_messages} messages")
+    print(f"✓ Created {num_messages} messages")
 
-    # Check Alice's message count
-    alice_messages = db.query(
-        "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
-        (alice_peer_id,)
-    )
-    alice_msg_count = alice_messages[0]['count']
-    log.info(f"Alice has {alice_msg_count} messages in messages table")
+    # Wait for Bob to receive all messages
+    def bob_has_all_messages():
+        count = db.query_one(
+            "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )['count']
+        assert count >= num_messages, f"Bob has {count}/{num_messages} messages"
 
-    # Now sync: track how many ticks it takes for Bob to get all messages
-    log.info("\nStarting sync performance test...")
-    tick_count = 0
-    max_ticks = 100  # Safety limit (typically completes in ~20 ticks)
+    print("Syncing...")
+    assert_eventually(bob_has_all_messages, db=db, start_t_ms=20000, max_rounds=500)
 
-    while tick_count < max_ticks:
-        tick_count += 1
-        tick.tick(t_ms=30000 + tick_count * 100, db=db)
+    # Verify message content matches
+    alice_ids = {r['message_id'] for r in db.query(
+        "SELECT message_id FROM messages WHERE recorded_by = ?", (alice['peer_id'],)
+    )}
+    bob_ids = {r['message_id'] for r in db.query(
+        "SELECT message_id FROM messages WHERE recorded_by = ?", (bob['peer_id'],)
+    )}
+    assert alice_ids == bob_ids, "Message IDs should match"
 
-        # Check completion every 10 ticks
-        if tick_count % 10 == 0:
-            bob_msg_count = db.query_one(
-                "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
-                (bob_peer_id,)
-            )['count']
-
-            log.info(f"  Tick {tick_count}: Bob has {bob_msg_count}/{num_messages} messages")
-            if bob_msg_count >= num_messages:
-                break
-
-    # Final count
-    bob_msg_count = db.query_one(
-        "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
-        (bob_peer_id,)
-    )['count']
-    sync_step = tick_count
-
-    db.commit()
-
-    # Final verification
-    alice_final_messages = db.query(
-        "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
-        (alice_peer_id,)
-    )
-    bob_final_messages = db.query(
-        "SELECT COUNT(*) as count FROM messages WHERE recorded_by = ?",
-        (bob_peer_id,)
-    )
-
-    alice_final_count = alice_final_messages[0]['count']
-    bob_final_count = bob_final_messages[0]['count']
-
-    # Get actual message lists to verify they match
-    alice_message_list = db.query(
-        "SELECT message_id FROM messages WHERE recorded_by = ? ORDER BY created_at",
-        (alice_peer_id,)
-    )
-    bob_message_list = db.query(
-        "SELECT message_id FROM messages WHERE recorded_by = ? ORDER BY created_at",
-        (bob_peer_id,)
-    )
-
-    alice_msg_ids = {row['message_id'] for row in alice_message_list}
-    bob_msg_ids = {row['message_id'] for row in bob_message_list}
-
-    # Print performance summary
-    log.info("\n" + "="*60)
-    log.info("SYNC PERFORMANCE SUMMARY")
-    log.info("="*60)
-    log.info(f"Messages created:        {num_messages}")
-    log.info(f"Alice message count:     {alice_final_count}")
-    log.info(f"Bob message count:       {bob_final_count}")
-    log.info(f"Ticks taken:             {tick_count}")
-    log.info(f"Messages match:          {alice_msg_ids == bob_msg_ids}")
-    log.info("="*60)
-
-    # Assertions
-    assert alice_final_count == num_messages, f"Alice should have {num_messages} messages, has {alice_final_count}"
-    assert bob_final_count == num_messages, f"Bob should have {num_messages} messages, has {bob_final_count}"
-    assert alice_msg_ids == bob_msg_ids, "Alice and Bob should have the same message list"
-    assert tick_count > 0, "Should take at least 1 tick"
-    assert tick_count < max_ticks, f"Sync took too many ticks ({tick_count}), something is wrong"
-
-    log.info("\n✓ All assertions passed! Sync performance test successful.")
-
-
-if __name__ == '__main__':
-    test_sync_perf_10k()
+    print(f"✓ Bob received all {num_messages} messages")
