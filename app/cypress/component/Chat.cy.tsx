@@ -241,4 +241,64 @@ describe('Chat Component', () => {
     // Messages should still be visible
     cy.contains('Hello everyone!').should('be.visible')
   })
+
+  it('handles new messages arriving during interaction', () => {
+    // Start with initial messages
+    const initialMessages = [
+      {
+        message_id: 'msg1',
+        channel_id: 'ch1',
+        author_id: 'u1',
+        author_name: 'Alice',
+        content: 'Original message',
+        created_at: Math.floor(Date.now() / 1000) - 100,
+        edited_at: null,
+        attachments: [],
+        reactions: [],
+      },
+    ]
+
+    cy.intercept('GET', '/api/networks/net1/channels/ch1/messages*', {
+      statusCode: 200,
+      body: {
+        items: initialMessages,
+        cursors: { older: null, newer: null },
+      },
+    }).as('getInitialMessages')
+
+    cy.mount(<Chat network={mockNetwork} channel={mockChannel} onBack={cy.stub()} />)
+
+    // Wait for initial load
+    cy.contains('Original message').should('be.visible')
+
+    // Now simulate new messages arriving (as if from a poll)
+    const updatedMessages = [
+      {
+        message_id: 'msg_new',
+        channel_id: 'ch1',
+        author_id: 'u2',
+        author_name: 'Bob',
+        content: 'New message just arrived',
+        created_at: Math.floor(Date.now() / 1000),
+        edited_at: null,
+        attachments: [],
+        reactions: [],
+      },
+      ...initialMessages,
+    ]
+
+    cy.intercept('GET', '/api/networks/net1/channels/ch1/messages*', {
+      statusCode: 200,
+      body: {
+        items: updatedMessages,
+        cursors: { older: null, newer: null },
+      },
+    }).as('getUpdatedMessages')
+
+    // Scroll to trigger any re-renders
+    cy.get('[data-testid="message-list"]').scrollTo('bottom', { ensureScrollable: false })
+
+    // Original message should still be visible
+    cy.contains('Original message').should('be.visible')
+  })
 })

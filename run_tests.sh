@@ -23,6 +23,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 RUN_PYTHON=true
 RUN_FRONTEND=true
+RUN_E2E=true
 SEQUENTIAL=false
 PYTEST_ARGS=""
 
@@ -34,6 +35,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --frontend)
             RUN_PYTHON=false
+            shift
+            ;;
+        --quick)
+            # Skip E2E tests for faster feedback
+            RUN_E2E=false
             shift
             ;;
         --sequential)
@@ -174,15 +180,17 @@ print_summary() {
 
     if $RUN_FRONTEND && [ -d "app" ]; then
         if [ "$COMPONENT_EXIT" -eq 0 ]; then
-            echo -e "${GREEN}[PASS]${NC} Component tests (31 tests)"
+            echo -e "${GREEN}[PASS]${NC} Component tests (32 tests)"
         else
             echo -e "${RED}[FAIL]${NC} Component tests"
         fi
 
-        if [ "$E2E_EXIT" -eq 0 ]; then
-            echo -e "${GREEN}[PASS]${NC} E2E tests (10 tests)"
-        else
-            echo -e "${RED}[FAIL]${NC} E2E tests"
+        if $RUN_E2E; then
+            if [ "$E2E_EXIT" -eq 0 ]; then
+                echo -e "${GREEN}[PASS]${NC} E2E tests (10 tests)"
+            else
+                echo -e "${RED}[FAIL]${NC} E2E tests"
+            fi
         fi
     fi
 
@@ -223,7 +231,7 @@ if $SEQUENTIAL; then
     # Run sequentially
     $RUN_PYTHON && run_python_tests
     $RUN_FRONTEND && run_component_tests
-    $RUN_FRONTEND && run_e2e_tests
+    $RUN_FRONTEND && $RUN_E2E && run_e2e_tests
 else
     # Run Python and Component tests in parallel
     if $RUN_PYTHON; then
@@ -236,12 +244,12 @@ else
         COMPONENT_PID=$!
     fi
 
-    # Wait for parallel tests
+    # Wait for Python and Component tests (running in parallel)
     $RUN_PYTHON && wait $PYTHON_PID
     $RUN_FRONTEND && [ -d "app" ] && wait $COMPONENT_PID
 
-    # E2E runs after component (needs dev server)
-    $RUN_FRONTEND && run_e2e_tests
+    # E2E runs after component (both use Cypress - avoid contention)
+    $RUN_FRONTEND && $RUN_E2E && [ -d "app" ] && run_e2e_tests
 fi
 
 END_TIME=$(date +%s)
