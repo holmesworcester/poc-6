@@ -282,12 +282,89 @@ class NetworkSimulator:
             behind_nat=behind_nat
         )
 
+    def calculate_delivery(self,
+                           from_peer: str,
+                           to_peer: str,
+                           blob: bytes,
+                           t_ms: int) -> tuple[bool, int]:
+        """Calculate packet fate without storing (stateless physics calculation).
+
+        This method applies all network physics (partitions, NAT, loss, latency)
+        but does NOT store the packet. The caller is responsible for storage.
+
+        Args:
+            from_peer: Source peer ID
+            to_peer: Destination peer ID
+            blob: Packet payload
+            t_ms: Current simulation time in milliseconds
+
+        Returns:
+            (should_drop, deliver_at) tuple:
+            - should_drop: True if packet should be dropped
+            - deliver_at: Timestamp when packet should be delivered (only valid if not dropped)
+        """
+        # Check partitions
+        if from_peer in self._partitioned_peers:
+            log.debug(f"nspy: calculate_delivery - drop (from partitioned peer {from_peer[:12]}...)")
+            return (True, 0)
+        if to_peer in self._partitioned_peers:
+            log.debug(f"nspy: calculate_delivery - drop (to partitioned peer {to_peer[:12]}...)")
+            return (True, 0)
+
+        # Check packet size
+        if len(blob) > self.config.max_packet_size:
+            log.debug(f"nspy: calculate_delivery - drop (oversized: {len(blob)}B > {self.config.max_packet_size}B)")
+            return (True, 0)
+
+        # Check NAT - create mapping for sender if behind NAT
+        from_endpoint = self.nat_engine.get_endpoint(from_peer)
+        to_endpoint = self.nat_engine.get_endpoint(to_peer)
+
+        if from_endpoint and from_endpoint.behind_nat:
+            self.nat_engine.create_outbound_mapping(from_peer, to_peer, t_ms)
+
+        # Check if destination is behind NAT and has mapping
+        if to_endpoint and to_endpoint.behind_nat:
+            has_mapping = self._check_nat_mapping(to_peer, from_peer, t_ms)
+            if not has_mapping:
+                log.debug(f"nspy: calculate_delivery - drop ({to_peer[:12]}... behind NAT, no hole punch)")
+                return (True, 0)
+
+        # Apply loss model (use deterministic seed based on packet content for reproducibility)
+        packet_hash = hash((from_peer, to_peer, blob[:32] if len(blob) > 32 else blob, t_ms))
+        loss_rng = random.Random(packet_hash & 0xFFFFFFFF)
+
+        # Build combined loss probability
+        loss_prob = 0.0
+        if self.config.packet_loss_rate > 0:
+            loss_prob = max(loss_prob, self.config.packet_loss_rate)
+
+        if loss_rng.random() < loss_prob:
+            log.debug(f"nspy: calculate_delivery - drop (loss model, p={loss_prob:.2f})")
+            return (True, 0)
+
+        # Calculate delivery time with jitter
+        if self.config.jitter_ms == 0:
+            latency = self.config.latency_ms
+        else:
+            latency = loss_rng.gauss(self.config.latency_ms, self.config.jitter_ms)
+            latency = max(0.0, latency)  # Clamp to non-negative
+
+        deliver_at = t_ms + int(latency)
+
+        log.debug(f"nspy: calculate_delivery - deliver at t={deliver_at}ms (latency={latency:.1f}ms)")
+        return (False, deliver_at)
+
     def send(self,
              from_peer: str,
              to_peer: str,
              blob: bytes,
              t_ms: int) -> bool:
         """Send a packet through the simulated network.
+
+        NOTE: This method stores packets in the in-memory SimPy queue.
+        For the unified SQLite queue, use calculate_delivery() instead and
+        store the packet in SQLite yourself.
 
         Args:
             from_peer: Source peer ID
@@ -465,6 +542,28 @@ class NetworkSimulator:
         self._link_seed_counter = 0  # Reset for deterministic behavior
         self.nat_engine = NatEngine(self.nat_engine.config)
         log.info("nspy: reset")
+
+    def inject(self, blob: bytes, t_ms: int, from_peer: str = "external", to_peer: str = "local") -> None:
+        """Inject a packet directly into the delivered queue.
+
+        Use this to feed packets from external sources (e.g., real UDP)
+        into the sync system without going through simulated network.
+
+        Args:
+            blob: Packet payload
+            t_ms: Timestamp for the packet
+            from_peer: Source peer ID (for metadata)
+            to_peer: Destination peer ID (for metadata)
+        """
+        delivered = DeliveredPacket(
+            blob=blob,
+            from_peer=from_peer,
+            to_peer=to_peer,
+            sent_at_ms=t_ms,
+            delivered_at_ms=t_ms
+        )
+        self._delivered.append(delivered)
+        log.debug(f"nspy: injected {len(blob)}B packet from external source")
 
 
 # ============================================================================

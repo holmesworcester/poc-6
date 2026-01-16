@@ -1,11 +1,45 @@
 """Queue management for incoming events and blocked event resolution."""
-from typing import Any
+from typing import Any, Callable, Optional
 import json
 import logging
 from .db import UnsafeDB, SafeDB
 from . import network_config
 
 log = logging.getLogger(__name__)
+
+# Maximum age of packets in queue before bankruptcy (time-based, not count-based)
+# This ensures we're never more than a few seconds behind, keeping message latency low
+MAX_QUEUE_AGE_MS = 3000  # 3 seconds
+
+
+# ===== Transport Callback =====
+# Optional callback for real network transport (e.g., UDP)
+# Signature: (blob: bytes, from_peer: str, to_peer: str, t_ms: int) -> bool
+# Returns True if packet was handled (sent via real network), False to use simulator
+_transport_callback: Optional[Callable[[bytes, str, str, int], bool]] = None
+
+
+def set_transport_callback(callback: Optional[Callable[[bytes, str, str, int], bool]]) -> None:
+    """Set a transport callback for real network integration.
+
+    When set, the callback is called for each outgoing packet. If it returns True,
+    the packet is considered sent via real network and won't go through the simulator.
+    If it returns False, the packet goes through the simulator as normal.
+
+    Args:
+        callback: Function (blob, from_peer, to_peer, t_ms) -> bool, or None to clear
+    """
+    global _transport_callback
+    _transport_callback = callback
+    if callback:
+        log.info("queues: transport callback set")
+    else:
+        log.info("queues: transport callback cleared")
+
+
+def get_transport_callback() -> Optional[Callable[[bytes, str, str, int], bool]]:
+    """Get the current transport callback."""
+    return _transport_callback
 
 
 # ===== Incoming Queue =====
@@ -15,32 +49,47 @@ class incoming:
 
     Uses the ns.py-based NetworkSimulator for realistic network simulation
     with proper token bucket bandwidth limiting and pluggable loss models.
+
+    When a transport callback is set (via set_transport_callback), outgoing
+    packets are first offered to the callback. If the callback handles the
+    packet (returns True), it bypasses the simulator.
     """
 
     @staticmethod
     def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB, from_peer: str = None, to_peer: str = None) -> bool:
         """Add an incoming transit blob to the queue with network simulation.
 
-        Packets may be dropped based on:
-        - Configured packet loss rate (random)
-        - Burst loss (correlated consecutive drops)
-        - Network partitions (blocked peers)
-        - Oversized packets
-        - Bandwidth limits (token bucket)
+        If a transport callback is set, the packet is first offered to the callback.
+        If the callback returns True (handled), the packet bypasses the local queue
+        (it was sent over real network to another instance).
 
-        Delivery is delayed by the configured latency with optional jitter.
+        For local delivery (no transport callback or callback returns False):
+        - Simulator calculates physics (partitions, NAT, loss, latency)
+        - If not dropped, packet is INSERTed into SQLite queue with deliver_at
 
         Args:
             blob: The packet data
             t_ms: Current simulation time in milliseconds
-            unsafedb: Database connection (not used for packet queue, kept for API compat)
+            unsafedb: Database connection for queue storage
             from_peer: Source peer ID (for partition/NAT checking)
             to_peer: Destination peer ID (for partition/NAT checking)
 
         Returns:
-            True if packet was enqueued, False if dropped
+            True if packet was enqueued/sent, False if dropped
         """
         log.debug(f"queues.incoming.add() adding blob size={len(blob)}B, t_ms={t_ms}")
+
+        # Check if transport callback wants to handle this packet
+        callback = _transport_callback
+        if callback is not None:
+            try:
+                handled = callback(blob, from_peer or "unknown", to_peer or "unknown", t_ms)
+                if handled:
+                    log.debug(f"queues.incoming.add() packet handled by transport callback")
+                    return True
+            except Exception as e:
+                log.warning(f"queues.incoming.add() transport callback error: {e}")
+                # Fall through to local queue
 
         sim = network_config.get_simulator()
 
@@ -50,38 +99,133 @@ class incoming:
         if to_peer and not sim.nat_engine.get_endpoint(to_peer):
             sim.register_peer(to_peer, behind_nat=False)
 
-        # Send through simulator (handles partitions, NAT, loss, bandwidth, latency)
-        result = sim.send(from_peer or "unknown", to_peer or "unknown", blob, t_ms)
+        # Use simulator for physics calculation (stateless - doesn't store)
+        should_drop, deliver_at = sim.calculate_delivery(
+            from_peer or "unknown",
+            to_peer or "unknown",
+            blob,
+            t_ms
+        )
 
-        if result:
-            log.debug(f"queues.incoming.add() enqueued blob")
-        else:
-            log.debug(f"queues.incoming.add() dropped blob")
+        if should_drop:
+            log.debug(f"queues.incoming.add() dropped blob (simulator physics)")
+            return False
 
-        return result
+        # Store in SQLite queue
+        unsafedb.execute(
+            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at) VALUES (?, ?, ?)",
+            (blob, t_ms, deliver_at)
+        )
+        log.debug(f"queues.incoming.add() enqueued blob, deliver_at={deliver_at}")
+        return True
 
     @staticmethod
     def drain(batch_size: int, current_time_ms: int, unsafedb: UnsafeDB) -> list[bytes]:
         """Drain incoming transit blobs that are ready for delivery.
 
-        Only blobs where deliver_at <= current_time_ms are returned.
+        Reads from SQLite queue with time-based bankruptcy protection:
+        - Drops packets older than MAX_QUEUE_AGE_MS to ensure low latency
+        - Returns packets where deliver_at <= current_time_ms
 
         Args:
             batch_size: Maximum number of packets to return
             current_time_ms: Current simulation time
-            unsafedb: Database connection (not used, kept for API compat)
+            unsafedb: Database connection for queue storage
 
         Returns:
             List of packet payloads
         """
         log.debug(f"queues.incoming.drain() draining up to {batch_size} blobs at t_ms={current_time_ms}")
 
-        sim = network_config.get_simulator()
-        sim.advance_to(current_time_ms)
+        # Time-based bankruptcy: drop packets older than MAX_QUEUE_AGE_MS
+        # This ensures we're never more than a few seconds behind
+        cutoff_time = current_time_ms - MAX_QUEUE_AGE_MS
+        unsafedb.execute(
+            "DELETE FROM incoming_blobs WHERE deliver_at < ? AND NOT dropped",
+            (cutoff_time,)
+        )
+        dropped_count = unsafedb.changes()
+        if dropped_count > 0:
+            log.warning(f"queues.incoming.drain() BANKRUPTCY: dropped {dropped_count} packets older than {MAX_QUEUE_AGE_MS}ms")
 
-        result = sim.drain(batch_size)
+        # Try DELETE ... RETURNING (SQLite 3.35+) for atomic drain
+        try:
+            rows = unsafedb.execute_returning(
+                """DELETE FROM incoming_blobs
+                   WHERE id IN (
+                       SELECT id FROM incoming_blobs
+                       WHERE deliver_at <= ? AND NOT dropped
+                       ORDER BY deliver_at
+                       LIMIT ?
+                   )
+                   RETURNING blob""",
+                (current_time_ms, batch_size)
+            )
+            result = [row['blob'] for row in rows]
+        except Exception as e:
+            # Fallback for older SQLite: SELECT then DELETE
+            log.debug(f"queues.incoming.drain() RETURNING not supported, using fallback: {e}")
+            rows = unsafedb.query(
+                """SELECT id, blob FROM incoming_blobs
+                   WHERE deliver_at <= ? AND NOT dropped
+                   ORDER BY deliver_at
+                   LIMIT ?""",
+                (current_time_ms, batch_size)
+            )
+
+            if not rows:
+                log.info(f"queues.incoming.drain() drained 0 blobs")
+                return []
+
+            # Delete the rows we're returning
+            ids = [row['id'] for row in rows]
+            placeholders = ','.join('?' * len(ids))
+            unsafedb.execute(
+                f"DELETE FROM incoming_blobs WHERE id IN ({placeholders})",
+                tuple(ids)
+            )
+            result = [row['blob'] for row in rows]
+
         log.info(f"queues.incoming.drain() drained {len(result)} blobs")
         return result
+
+    @staticmethod
+    def add_immediate(blob: bytes, t_ms: int, unsafedb: UnsafeDB) -> None:
+        """Add a packet directly to queue with immediate delivery (no simulation).
+
+        Use this for real networking where packets arrive from external sources
+        (UDP, QUIC, WebSocket) and should be processed immediately.
+
+        Args:
+            blob: The packet data
+            t_ms: Current time in milliseconds (used as both sent_at and deliver_at)
+            unsafedb: Database connection for queue storage
+        """
+        unsafedb.execute(
+            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at) VALUES (?, ?, ?)",
+            (blob, t_ms, t_ms)  # deliver_at = sent_at for immediate delivery
+        )
+        log.debug(f"queues.incoming.add_immediate() queued {len(blob)}B for immediate delivery")
+
+    @staticmethod
+    def pending_count(current_time_ms: int, unsafedb: UnsafeDB) -> int:
+        """Get count of packets pending delivery.
+
+        Returns the number of packets in the queue that are ready for delivery
+        (deliver_at <= current_time_ms) and not dropped.
+
+        Args:
+            current_time_ms: Current time in milliseconds
+            unsafedb: Database connection for queue storage
+
+        Returns:
+            Count of pending packets
+        """
+        row = unsafedb.query_one(
+            "SELECT COUNT(*) as cnt FROM incoming_blobs WHERE deliver_at <= ? AND NOT dropped",
+            (current_time_ms,)
+        )
+        return row['cnt'] if row else 0
 
 
 # ===== Blocked Queue =====
