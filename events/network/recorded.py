@@ -205,7 +205,7 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     return missing_deps
 
 def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
-                skip_negentropy: bool = False) -> list[list[str | None]]:
+                skip_negentropy: bool = False, _cache: Any = None) -> list[list[str | None]]:
     """Since `recorded` is the event that triggers projection, this is the central function for projection."""
     """It calls the necessary project functions in other modules for the given event types."""
 
@@ -213,11 +213,16 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
         log.error(f"[PROJECT_IDS] RECURSION LIMIT EXCEEDED depth={_recursion_depth} - possible infinite loop!")
         return []
 
+    # RETE optimization: Create shared cache for the batch at depth=0
+    if _cache is None and _recursion_depth == 0:
+        from core.projection_v2.types import ResolverCache
+        _cache = ResolverCache()
+
     log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth}, skip_neg={skip_negentropy})")
     projected_ids = []
     for recorded_id in recorded_ids:
         try:
-            result = project(recorded_id, db, _recursion_depth, skip_negentropy=skip_negentropy)
+            result = project(recorded_id, db, _recursion_depth, skip_negentropy=skip_negentropy, _cache=_cache)
             projected_ids.append(result)
         except Exception as e:
             log.error(f"[PROJECT_IDS_EXCEPTION] ❌ EXCEPTION projecting recorded_id={recorded_id[:20]}... depth={_recursion_depth}: {str(e)[:200]}")
@@ -229,7 +234,7 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
 
 
 def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial',
-            skip_negentropy: bool = False) -> list[str | None]:
+            skip_negentropy: bool = False, _cache: Any = None) -> list[str | None]:
     """Project recorded event with two-phase dependency checking.
 
     1. Check encryption keys (block if missing).
@@ -397,6 +402,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             recorded_by=recorded_by,
             recorded_at=recorded_at,
             db=db,
+            cache=_cache,
         )
 
         if resolve_result.status == 'block':
@@ -645,12 +651,16 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         )
         log.debug(f"Added {event_type} {ref_id[:20]}... to projected_events with created_at={event_data['created_at']}")
 
+    # RETE optimization: Update cache with newly valid event
+    if _cache is not None:
+        _cache.set_event_valid(ref_id, recorded_by, True)
+
     # Notify blocked queue - unblock events that were waiting for this event
     unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
     if unblocked_ids:
         log.warning(f"Unblocked {len(unblocked_ids)} events after {ref_id[:20]}... became valid for peer {recorded_by[:20]}...")
-        # Re-project unblocked events recursively
-        project_ids(unblocked_ids, db, _recursion_depth + 1)
+        # Re-project unblocked events recursively (pass cache for efficiency)
+        project_ids(unblocked_ids, db, _recursion_depth + 1, _cache=_cache)
         # Clean up successfully projected events from blocked queue
         _cleanup_successfully_projected_events(unblocked_ids, recorded_by, db)
     else:

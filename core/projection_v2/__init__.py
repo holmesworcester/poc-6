@@ -5,6 +5,7 @@ from .types import (  # noqa: F401
     ProjectionContext,
     ProjectorResult,
     ResolveResult,
+    ResolverCache,
     SignerSpec,
     WriteOp,
 )

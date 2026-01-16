@@ -6,7 +6,7 @@ from typing import Any
 from core import crypto, store
 from core.db import SUBJECTIVE_TABLES, create_safe_db, create_unsafe_db
 from events import registry
-from .types import ProjectionContext, ResolveResult
+from .types import ProjectionContext, ResolveResult, ResolverCache
 
 _CONTEXT_KEYS = {
     "@recorded_by",
@@ -16,12 +16,24 @@ _CONTEXT_KEYS = {
 }
 
 
-def _is_event_valid(event_id: str, recorded_by: str, safedb: Any) -> bool:
+def _is_event_valid(event_id: str, recorded_by: str, safedb: Any, cache: ResolverCache | None = None) -> bool:
+    # Check cache first (RETE alpha memory pattern)
+    if cache is not None:
+        cached = cache.is_event_valid(event_id, recorded_by)
+        if cached is not None:
+            return cached
+
     row = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
         (event_id, recorded_by),
     )
-    return row is not None
+    is_valid = row is not None
+
+    # Update cache if present
+    if cache is not None:
+        cache.set_event_valid(event_id, recorded_by, is_valid)
+
+    return is_valid
 
 
 def _context_value(
@@ -88,6 +100,7 @@ def _resolve_table_dep(
     safedb: Any,
     unsafedb: Any,
     required: bool,
+    cache: ResolverCache | None = None,
 ) -> tuple[str, Any | None, list[str], str | None]:
     key_field = dep_spec.get("key")
     if not key_field:
@@ -102,7 +115,7 @@ def _resolve_table_dep(
         if required or dep_spec.get("required_if_present"):
             return "reject", None, [], f"dep '{dep_name}' invalid id type"
         return "ok", None, [], None
-    if not _is_event_valid(dep_id, recorded_by, safedb):
+    if not _is_event_valid(dep_id, recorded_by, safedb, cache):
         if required or dep_spec.get("required_if_present"):
             return "block", None, [dep_id], None
         return "ok", None, [], None
@@ -195,11 +208,12 @@ def _resolve_dep(
     safedb: Any,
     unsafedb: Any,
     required: bool,
+    cache: ResolverCache | None = None,
 ) -> tuple[str, Any | None, list[str], str | None]:
     source = dep_spec.get("source")
     if source == "table":
         return _resolve_table_dep(
-            dep_name, dep_spec, event_data, recorded_by, safedb, unsafedb, required
+            dep_name, dep_spec, event_data, recorded_by, safedb, unsafedb, required, cache
         )
     if source == "value":
         return _resolve_value_dep(dep_name, dep_spec, event_data, required)
@@ -254,6 +268,7 @@ def _resolve_signer(
     db: Any,
     safedb: Any,
     unsafedb: Any,
+    cache: ResolverCache | None = None,
 ) -> tuple[str, dict[str, Any] | None, list[str], str | None]:
     signer_spec = event_spec.get("signer")
     if not signer_spec:
@@ -274,7 +289,7 @@ def _resolve_signer(
     public_key: bytes | None = None
 
     if signer_type == "peer_shared":
-        if not _is_event_valid(signer_id, recorded_by, safedb):
+        if not _is_event_valid(signer_id, recorded_by, safedb, cache):
             return "block", None, [signer_id], None
         from events.identity import peer_shared
 
@@ -300,7 +315,7 @@ def _resolve_signer(
                 )
                 signer_is_admin = admin_row is not None
     elif signer_type == "invite":
-        if not _is_event_valid(signer_id, recorded_by, safedb):
+        if not _is_event_valid(signer_id, recorded_by, safedb, cache):
             return "block", None, [signer_id], None
         public_key = _resolve_invite_pubkey(signer_id, recorded_by, safedb, unsafedb)
         if not public_key:
@@ -312,7 +327,7 @@ def _resolve_signer(
             except Exception:
                 return "reject", None, [], "invalid network pubkey"
         else:
-            if not _is_event_valid(signer_id, recorded_by, safedb):
+            if not _is_event_valid(signer_id, recorded_by, safedb, cache):
                 return "block", None, [signer_id], None
             from events.identity import network
 
@@ -323,7 +338,7 @@ def _resolve_signer(
                 return "block", None, [signer_id], None
     elif signer_type == "user":
         # User signer - used by first peer invite (signed by user_id during bootstrap)
-        if not _is_event_valid(signer_id, recorded_by, safedb):
+        if not _is_event_valid(signer_id, recorded_by, safedb, cache):
             return "block", None, [signer_id], None
         # Get user's public key from users table
         user_row = safedb.query_one(
@@ -362,8 +377,14 @@ def resolve_event(
     recorded_by: str,
     recorded_at: int,
     db: Any,
+    cache: ResolverCache | None = None,
 ) -> ResolveResult:
-    """Verify signatures and resolve dependencies for a single event."""
+    """Verify signatures and resolve dependencies for a single event.
+
+    Args:
+        cache: Optional ResolverCache for batch operations. When provided,
+               valid_events lookups are cached to reduce DB queries (RETE-style optimization).
+    """
     if not isinstance(event_data, dict):
         return ResolveResult(status="reject", ctx=None, error="event_data must be dict")
     if not event_type:
@@ -398,6 +419,7 @@ def resolve_event(
             safedb,
             unsafedb,
             required=True,
+            cache=cache,
         )
         if status == "reject":
             return ResolveResult(status="reject", ctx=None, error=error)
@@ -424,6 +446,7 @@ def resolve_event(
             safedb,
             unsafedb,
             required=False,
+            cache=cache,
         )
         if status == "reject":
             return ResolveResult(status="reject", ctx=None, error=error)
@@ -449,6 +472,7 @@ def resolve_event(
         db,
         safedb,
         unsafedb,
+        cache,
     )
     if signer_status == "block":
         return ResolveResult(status="block", ctx=None, missing=tuple(signer_missing))
