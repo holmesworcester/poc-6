@@ -2,10 +2,84 @@
 
 ## Context
 
-Building a RESTful API for desktop/mobile apps to interact with the Quiet Protocol backend. Key requirements:
-- **Polling-first**: No WebSockets, use HTTP polling for updates
-- **Lazy loading**: Paginated messages, chunked file downloads
-- **Simple client model**: Frontend knows what queries are visible, polls them directly
+Building a RESTful API for mobile apps (React Native) with web-based development workflow.
+
+**Target platforms:**
+- iOS / Android via Expo (production)
+- React Native Web (development + Cypress testing)
+
+**Key requirements:**
+- Polling-first (100ms intervals when foreground)
+- Lazy loading (paginated messages, chunked files)
+- Cypress-testable via RN Web
+- Maestro for native smoke tests
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Development (fast iteration)                               │
+│                                                             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
+│  │   Cypress   │───▶│  RN Web     │───▶│  Python Backend │ │
+│  │   Tests     │    │  (browser)  │    │  (Unix socket)  │ │
+│  └─────────────┘    └─────────────┘    └─────────────────┘ │
+│                            │                    │           │
+│                            ▼                    ▼           │
+│                     ┌─────────────┐    ┌─────────────────┐ │
+│                     │   sql.js    │    │     SQLite      │ │
+│                     │   (WASM)    │    │     (file)      │ │
+│                     └─────────────┘    └─────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  Production (native)                                        │
+│                                                             │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
+│  │   Maestro   │───▶│  Expo App   │───▶│  Python Backend │ │
+│  │   Tests     │    │  (iOS/And)  │    │  (Unix socket)  │ │
+│  └─────────────┘    └─────────────┘    └─────────────────┘ │
+│                            │                    │           │
+│                            ▼                    ▼           │
+│                     ┌─────────────┐    ┌─────────────────┐ │
+│                     │  op-sqlite  │    │     SQLite      │ │
+│                     │   (JSI)     │    │     (file)      │ │
+│                     └─────────────┘    └─────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Local Dev: No Ports via Vite Proxy
+
+Frontend uses relative URLs. Vite proxies to Unix socket.
+
+```
+Frontend: fetch('/api/messages')
+    │
+    ▼
+Vite Dev Server (:5173)
+    │ proxy /api/* → socket
+    ▼
+Python Backend (Unix socket: /tmp/quiet-dev.sock)
+```
+
+**vite.config.ts:**
+```typescript
+export default defineConfig({
+  server: {
+    proxy: {
+      '/api': {
+        target: { socketPath: '/tmp/quiet-dev.sock' },
+      }
+    }
+  }
+});
+```
+
+**Benefits:**
+- Zero port configuration in frontend
+- No CORS (same origin)
+- No port conflicts
+- Same code works in prod
 
 ## Design Philosophy: Keep It Simple
 
@@ -127,39 +201,83 @@ Direction semantics:
 - `newer`: messages after cursor (catching up)
 - No cursor + `older`: most recent 50
 
-## Directory Structure
+## Project Structure
 
 ```
-api/
-  __init__.py
-  app.py                 # FastAPI app, middleware, startup/shutdown
-  config.py              # Settings from env/PSK
+quiet/
+├── app/                          # React Native app
+│   ├── src/
+│   │   ├── components/           # Shared UI components
+│   │   ├── screens/              # Screen components
+│   │   ├── db/
+│   │   │   ├── index.ts          # Platform-agnostic interface
+│   │   │   ├── native.ts         # op-sqlite (iOS/Android)
+│   │   │   └── web.ts            # sql.js (browser)
+│   │   ├── api/
+│   │   │   └── client.ts         # fetch('/api/...') wrapper
+│   │   └── queries/              # Shared SQL queries
+│   │
+│   ├── cypress/
+│   │   ├── component/            # Component tests
+│   │   ├── e2e/                  # Full flow tests
+│   │   └── support/
+│   │
+│   ├── e2e/                      # Maestro tests (YAML)
+│   │   └── send-message.yaml
+│   │
+│   ├── vite.config.ts            # Proxy config for dev
+│   ├── metro.config.js           # Metro for native
+│   └── package.json
+│
+├── backend/                       # Python backend
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── app.py                # FastAPI app
+│   │   ├── routes/               # HTTP endpoints
+│   │   └── core/                 # DB, auth
+│   │
+│   ├── events/                   # Event modules (existing)
+│   ├── core/                     # Core infrastructure (existing)
+│   └── tests/
+│
+└── docs/
+    └── api-design.md             # This file
+```
 
-  routes/
-    __init__.py
-    networks.py          # GET/POST/DELETE /networks
-    channels.py          # Channel CRUD
-    messages.py          # Message CRUD + reactions
-    users.py             # User/peer management
-    invites.py           # Invite creation/acceptance
-    files.py             # File access + sync control
-    groups.py            # Group management
-    sync.py              # Sync status
+## Testing Strategy
 
-  schemas/
-    __init__.py
-    common.py            # Pagination, cursors, meta
-    network.py
-    channel.py
-    message.py
-    user.py
-    file.py
+| Test Type | Tool | Speed | When |
+|-----------|------|-------|------|
+| Component tests | Cypress + RN Web | ~1s | Every save |
+| E2E (web) | Cypress + RN Web | ~5s | Every commit |
+| Native smoke | Maestro + Expo | ~30s | CI / pre-release |
 
-  core/
-    __init__.py
-    database.py          # DB session management
-    auth.py              # PSK authentication
-    context.py           # Request context (peer_id, network_id)
+**Cypress component test:**
+```typescript
+// cypress/component/MessageList.cy.tsx
+describe('MessageList', () => {
+  beforeEach(() => {
+    cy.request('POST', '/api/test/seed', { fixture: 'messages' });
+  });
+
+  it('renders messages', () => {
+    cy.mount(<MessageList channelId="ch1" />);
+    cy.contains('Hello').should('be.visible');
+  });
+});
+```
+
+**Maestro native test:**
+```yaml
+# e2e/send-message.yaml
+appId: com.quiet.app
+---
+- launchApp
+- tapOn: "general"
+- tapOn: { id: "message-input" }
+- inputText: "Hello from Maestro"
+- tapOn: { id: "send-button" }
+- assertVisible: "Hello from Maestro"
 ```
 
 ## Key Implementation Details
