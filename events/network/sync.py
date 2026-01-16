@@ -410,7 +410,7 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
         sync_file.project(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
     elif event_type == 'connection':
         from events.network import connection
-        connection.project(event_id, recorded_by, t_ms, db)
+        connection.project(event_id, recorded_by, t_ms, db, connection_data=event_data)
     elif event_type == 'negentropy':
         from events.network import negentropy
         # The envelope contains:
@@ -939,8 +939,8 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
 
     request_blob = crypto.wrap(canonical, to_key, db)
 
-    # simulate sending - add to incoming queue
-    queues.incoming.add(request_blob, t_ms, db)
+    # Send via queue (with peer IDs for transport callback routing)
+    queues.incoming.add(request_blob, t_ms, db, from_peer=from_peer_id, to_peer=to_peer_shared_id)
 
     # Mark window as synced (optimistically - in production might wait for response)
     mark_window_synced(from_peer_id, to_peer_shared_id, window_id, t_ms, db)
@@ -1168,7 +1168,8 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         from core.db import create_unsafe_db
         unsafedb = create_unsafe_db(db)
         before_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
-        queues.incoming.add(wrapped_blob, t_ms, db)
+        # Send via queue (with peer IDs for transport callback routing)
+        queues.incoming.add(wrapped_blob, t_ms, db, from_peer=from_peer_id, to_peer=to_peer_shared_id)
         after_count = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")['cnt']
         log.debug(f"[SYNC_RESPONSE] added blob to incoming queue: before={before_count}, after={after_count}, hint={actual_hint_in_blob}")
 

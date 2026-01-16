@@ -20,7 +20,8 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
            invite_id: str,
            invite_private_key: bytes,
            # Deprecated parameters kept for compatibility - not used
-           peer_shared_id: str | None = None) -> tuple[str, bytes]:
+           peer_shared_id: str | None = None,
+           network_id: str | None = None) -> tuple[str, bytes]:
     """Create a user event representing network membership.
 
     User events are signed by invite (signed_by=invite_id) with user's own keypair.
@@ -40,6 +41,7 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
         invite_id: Reference to invite event (required - all users join via invite)
         invite_private_key: Invite private key for signing (required - proves invite possession)
         peer_shared_id: Deprecated, not used (kept for compatibility)
+        network_id: Network ID (optional - if not provided, extracted from invite blob)
 
     Returns:
         (user_id, user_private_key): The stored user event ID and user_private_key
@@ -51,13 +53,14 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
     if not invite_private_key:
         raise ValueError("invite_private_key is required - proves possession of invite")
 
-    # Extract metadata from invite (only network_id is used in user event creation)
-    invite_blob = store.get(invite_id, db)
-    if not invite_blob:
-        raise ValueError(f"invite event not found: {invite_id}")
-
-    invite_event_data = crypto.parse_json(invite_blob)
-    network_id = invite_event_data.get('network_id')
+    # Get network_id - either passed directly or extracted from invite blob
+    if network_id is None:
+        # Extract from invite blob (requires invite to be in local store)
+        invite_blob = store.get(invite_id, db)
+        if not invite_blob:
+            raise ValueError(f"invite event not found: {invite_id}. Pass network_id directly for real networking.")
+        invite_event_data = crypto.parse_json(invite_blob)
+        network_id = invite_event_data.get('network_id')
 
     # Generate user's OWN unique keypair
     # This is separate from invite keypair - each user has their own identity
@@ -709,6 +712,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     invite_prekey_id = invite_data['invite_prekey_id']
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
     inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
+    network_id = invite_data.get('network_id')  # For real networking without blob
     channel_id = invite_data.get('channel_id')
     key_id = invite_data.get('key_id')
 
@@ -751,7 +755,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         invite_id=invite_id,
-        invite_private_key=invite_private_key
+        invite_private_key=invite_private_key,
+        network_id=network_id  # Pass directly for real networking (no blob lookup)
     )
 
     # invite_proof removed - proof IS the signature on user event (signed_by=invite_id)

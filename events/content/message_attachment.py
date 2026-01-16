@@ -18,7 +18,8 @@ import logging
 from PIL import Image
 from core import crypto
 from core import store
-from events.identity import peer_shared
+from events.identity import peer, peer_shared
+from events.group import group
 from events.content import file_slice, message
 from core.db import create_safe_db, create_unsafe_db
 

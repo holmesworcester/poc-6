@@ -160,7 +160,7 @@ def create_ack(
     return connection_id, symmetric_key
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, connection_data: dict = None) -> str | None:
     """Project connection event into connections table.
 
     For mode=req: Creates new connection entry with our_key
@@ -171,6 +171,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         recorded_by: Local peer who received this event
         recorded_at: When received
         db: Database connection
+        connection_data: Optional pre-parsed event data (for ephemeral events not stored in blobs)
 
     Returns:
         event_id on success, None on failure
@@ -180,13 +181,16 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get blob from store
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        log.warning(f"connection.project: blob not found for {event_id[:20]}...")
-        return None
-
-    event_data = crypto.parse_json(blob)
+    # Use provided event_data or fetch from store
+    if connection_data is not None:
+        event_data = connection_data
+    else:
+        # Get blob from store
+        blob = store.get(event_id, unsafedb)
+        if not blob:
+            log.warning(f"connection.project: blob not found for {event_id[:20]}...")
+            return None
+        event_data = crypto.parse_json(blob)
     mode = event_data.get('mode')
 
     if mode == 'req':
