@@ -14,9 +14,48 @@ from events.group import group_key
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core import queues
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'group': {
+            'source': 'table',
+            'table': 'groups',
+            'key': 'group_id',
+            'fields': ['group_id'],
+        },
+        'user': {
+            'source': 'table',
+            'table': 'users',
+            'key': 'user_id',
+            'fields': ['user_id'],
+        },
+        'adder': {
+            'source': 'table',
+            'table': 'peers_shared',
+            'key': 'peer_shared_id',
+            'key_from': 'added_by',
+            'fields': ['user_id'],
+        },
+        'admin_grant': {
+            'source': 'table',
+            'table': 'admins',
+            'key': 'admin_id',
+            'key_from': 'admin_grant',
+            'fields': ['user_id'],
+        },
+    },
+    'optional': {},
+    'cascade_on_delete': [],
+}
 
 def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
     """Validate that added_by has authorization to add members to the group.
@@ -37,6 +76,50 @@ def validate(group_id: str, added_by: str, recorded_by: str, db: Any) -> bool:
     """
     from events.identity import invite
     return invite.is_admin(added_by, recorded_by, db)
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for group_member events."""
+    event_data = ctx.event_data
+
+    group_id = event_data.get('group_id')
+    user_id = event_data.get('user_id')
+    added_by = event_data.get('added_by')
+    signed_by = event_data.get('signed_by')
+    admin_grant = event_data.get('admin_grant')
+    created_at = event_data.get('created_at')
+
+    if not all([group_id, user_id, added_by, signed_by, admin_grant, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if added_by != signed_by:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    adder_row = ctx.deps.get('adder') or {}
+    admin_row = ctx.deps.get('admin_grant') or {}
+    adder_user_id = adder_row.get('user_id')
+    admin_user_id = admin_row.get('user_id')
+
+    if not adder_user_id or not admin_user_id or adder_user_id != admin_user_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='group_members',
+            values={
+                'member_id': ctx.event_id,
+                'group_id': group_id,
+                'user_id': user_id,
+                'added_by': added_by,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
@@ -110,6 +193,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         'user_id': user_id,
         'added_by': peer_shared_id,
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 

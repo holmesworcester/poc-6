@@ -17,14 +17,72 @@ SHAREABLE = True  # Intros sync for NAT traversal
 EPHEMERAL = False
 PROJECTION_TABLE = None
 
+# Intros are time-sensitive; drop if too old on receipt.
+INTRO_TTL_MS = 30_000
+
 from typing import Any, Optional, List
 import json
 import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+# v2 event specification - signed by peer_shared, no deps
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def is_stale_intro(created_at: int | None, recorded_at: int | None) -> bool:
+    """Return True when an intro is too old to act on."""
+    if not isinstance(created_at, int) or not isinstance(recorded_at, int):
+        return False
+    return (recorded_at - created_at) > INTRO_TTL_MS
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for intro events."""
+    event_data = ctx.event_data
+
+    signed_by = event_data.get('signed_by')
+    peer1_id = event_data.get('peer1_id')
+    peer2_id = event_data.get('peer2_id')
+    created_at = event_data.get('created_at')
+
+    if not all([signed_by, peer1_id, peer2_id, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if is_stale_intro(created_at, ctx.recorded_at):
+        return ProjectorResult(writes=tuple(), valid_event=True)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='pending_intros',
+            values={
+                'intro_id': ctx.event_id,
+                'initiator_peer_id': signed_by,
+                'peer1_id': peer1_id,
+                'peer2_id': peer2_id,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+                'processed': False,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(
@@ -67,6 +125,7 @@ def create(
     event_data = {
         'type': 'network_intro',
         'signed_by': initiator_peer_shared_id,
+        'signer_type': 'peer_shared',
         'peer1_id': peer1_id,
         'peer2_id': peer2_id,
         'created_at': t_ms
@@ -134,6 +193,13 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
     if not all([signed_by, peer1_id, peer2_id, created_at]):
         log.warning(f"intro.project() missing required fields")
         return None
+
+    if is_stale_intro(created_at, recorded_at):
+        log.info(
+            f"intro.project() dropping stale intro {intro_id[:20]}... "
+            f"age_ms={recorded_at - created_at}"
+        )
+        return intro_id
 
     # Verify signature
     # Note: Intros are time-sensitive for NAT hole punching. If the signer's

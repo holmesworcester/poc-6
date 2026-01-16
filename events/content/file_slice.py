@@ -23,8 +23,68 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - unsigned, not encrypted
+# Integrity verified via root_hash in message_attachment
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,  # Not signed - integrity via root_hash chain
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for file_slice events."""
+    event_data = ctx.event_data
+
+    file_id = event_data.get('file_id')
+    slice_number = event_data.get('slice_number')
+    nonce_b64 = event_data.get('nonce')
+    ciphertext_b64 = event_data.get('ciphertext')
+    poly_tag_b64 = event_data.get('poly_tag')
+
+    if not all([file_id, slice_number is not None, nonce_b64, ciphertext_b64, poly_tag_b64]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode from base64
+    nonce = crypto.b64decode(nonce_b64)
+    ciphertext = crypto.b64decode(ciphertext_b64)
+    poly_tag = crypto.b64decode(poly_tag_b64)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='file_slices',
+            values={
+                'file_id': file_id,
+                'slice_number': slice_number,
+                'nonce': nonce,
+                'ciphertext': ciphertext,
+                'poly_tag': poly_tag,
+                'event_id': ctx.event_id,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+        WriteOp(
+            op='insert',
+            table='event_dependencies',
+            values={
+                'child_event_id': ctx.event_id,
+                'parent_event_id': file_id,
+                'recorded_by': ctx.recorded_by,
+                'dependency_type': 'file',
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 # Disable per-slice logging during batch operations
 _batch_mode = False

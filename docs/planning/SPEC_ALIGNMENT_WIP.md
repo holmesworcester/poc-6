@@ -11,8 +11,8 @@ This branch contains work to align the protocol specification with the implement
 2. **Sign network_intro events** (`events/network/intro.py`)
    - Added signing in `create()` using `signed_by` field
    - Added signature verification in `project()`
-   - Stale intros (signer's peer_shared not available) are dropped, not blocked
-     - Intros are time-sensitive for NAT hole punching; blocking is pointless
+   - Intros older than `INTRO_TTL_MS` are dropped (no pending intro writes)
+     - Intros are time-sensitive for NAT hole punching
    - All 217 tests pass
 
 ## Moved to Separate Worktrees

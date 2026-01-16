@@ -1,0 +1,267 @@
+"""
+Scenario test: Distributed bootstrap - local-only projection.
+
+Tests that device linking works correctly when the invite blob is NOT accessible
+locally (simulating the distributed case where phone and laptop have separate stores).
+
+The fix: Projectors derive invite_pubkey from invite_private_key stored in
+invite_accepteds, eliminating the need to fetch invite blobs from remote peers.
+"""
+import sqlite3
+from unittest import mock
+from core.db import Database
+from core import schema, store
+from events.identity import user, invite, peer_shared, peer
+from tests.utils import tick_helper
+
+
+def test_device_link_without_remote_invite_blob(fresh_db):
+    """Device linking works when invite blob is not in local store.
+
+    This simulates the distributed case where:
+    - Phone creates the peer invite (stored in phone's store)
+    - Laptop accepts the invite but cannot access phone's store
+    - Laptop's projection derives invite_pubkey from invite_private_key locally
+    """
+    db = fresh_db
+
+    print("\n=== Setup: Alice creates network on phone ===")
+
+    # Alice creates a network on her phone
+    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    db.commit()
+    print(f"Alice created network on phone: peer_id={alice_phone['peer_id'][:20]}...")
+
+    # Alice creates a peer invite on her phone for device linking
+    print("\n=== Alice creates peer invite for laptop ===")
+
+    invite_id, link_url, invite_data = invite.create(
+        peer_id=alice_phone['peer_id'],
+        t_ms=2000,
+        db=db,
+        mode='peer',
+        user_id=alice_phone['user_id']
+    )
+    db.commit()
+    print(f"Peer invite created: {invite_id[:20]}...")
+
+    # Record the invite_id for patching
+    peer_invite_id = invite_id
+
+    # Create laptop peer
+    print("\n=== Create laptop peer ===")
+    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    print(f"Created laptop peer: {alice_laptop_peer_id[:20]}...")
+
+    # Accept the invite to get the private key
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    assert accepted['mode'] == 'peer'
+    print(f"Accepted peer invite")
+
+    db.commit()
+
+    # Now simulate the distributed case: patch store.get() to return None for
+    # the peer invite blob when called during laptop's projection
+    print("\n=== Link laptop with patched store (simulating distributed isolation) ===")
+
+    # Save original store.get
+    original_store_get = store.get
+
+    # Track if fallback was used (via logging or explicit check)
+    fallback_used = {'value': False}
+
+    def patched_store_get(blob_id, db_conn):
+        """Return None for the peer invite blob, simulating distributed isolation."""
+        if blob_id == peer_invite_id:
+            print(f"  [PATCHED] store.get({blob_id[:20]}...) -> None (simulating distributed)")
+            return None
+        return original_store_get(blob_id, db_conn)
+
+    # Patch store.get for the duration of peer_shared.join()
+    with mock.patch.object(store, 'get', side_effect=patched_store_get):
+        # Complete the peer linking
+        alice_laptop = peer_shared.join(
+            peer_id=alice_laptop_peer_id,
+            peer_invite_id=accepted['invite_id'],
+            peer_invite_private_key=accepted['invite_private_key'],
+            user_id=accepted['user_id'],
+            prekey_id=accepted['invite_prekey_id'],
+            t_ms=3002,
+            db=db,
+            device_name='Laptop'
+        )
+
+    db.commit()
+    print(f"Laptop linked successfully via fallback mechanism")
+    print(f"  peer_id={alice_laptop['peer_id'][:20]}...")
+    print(f"  user_id={alice_laptop['user_id'][:20]}...")
+
+    # Verify both devices have the same user_id
+    assert alice_laptop['user_id'] == alice_phone['user_id'], \
+        "Both devices should have same user_id"
+    print(f"OK: Both devices share user_id: {alice_laptop['user_id'][:20]}...")
+
+    # Verify peer_shared was projected correctly (is in peers_shared table)
+    laptop_peer_shared = db.query_one(
+        "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+        (alice_laptop['peer_shared_id'], alice_laptop['peer_id'])
+    )
+    assert laptop_peer_shared is not None, "peer_shared should be projected"
+    assert laptop_peer_shared['user_id'] == alice_phone['user_id'], \
+        "peer_shared should have correct user_id"
+    print(f"OK: peer_shared projected with correct user_id")
+
+    # Verify peer_self was updated correctly
+    peer_self_row = db.query_one(
+        "SELECT * FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (alice_laptop['peer_id'], alice_laptop['peer_id'])
+    )
+    assert peer_self_row is not None, "peer_self should be populated"
+    assert peer_self_row['user_id'] == alice_phone['user_id'], \
+        "peer_self should have correct user_id"
+    print(f"OK: peer_self updated with correct user_id")
+
+    print(f"\nPASSED: Distributed bootstrap worked without remote invite blob!")
+
+
+def test_user_join_without_remote_invite_blob(fresh_db):
+    """User joining works when invite blob is not in local store.
+
+    This simulates the distributed case where:
+    - Phone creates network and user invite (stored in phone's store)
+    - Bob's laptop accepts the invite but cannot access phone's store
+    - Bob's projection derives invite_pubkey from invite_private_key locally
+    """
+    db = fresh_db
+
+    print("\n=== Setup: Alice creates network on phone ===")
+
+    # Alice creates a network
+    alice = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    db.commit()
+    print(f"Alice created network: user_id={alice['user_id'][:20]}...")
+
+    # Alice creates a user invite for Bob
+    print("\n=== Alice creates user invite for Bob ===")
+
+    invite_id, link_url, invite_data = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=2000,
+        db=db,
+        mode='user'
+    )
+    db.commit()
+    print(f"User invite created: {invite_id[:20]}...")
+
+    # Record the invite_id for patching
+    user_invite_id = invite_id
+
+    # Create Bob's peer
+    print("\n=== Create Bob's peer ===")
+    bob_peer_id = peer.create(t_ms=3000, db=db)
+    print(f"Created Bob's peer: {bob_peer_id[:20]}...")
+
+    db.commit()
+
+    # Simulate distributed case: patch store.get() to return None for the invite blob
+    print("\n=== Bob joins with patched store (simulating distributed isolation) ===")
+
+    original_store_get = store.get
+
+    def patched_store_get(blob_id, db_conn):
+        """Return None for the user invite blob, simulating distributed isolation."""
+        if blob_id == user_invite_id:
+            print(f"  [PATCHED] store.get({blob_id[:20]}...) -> None (simulating distributed)")
+            return None
+        return original_store_get(blob_id, db_conn)
+
+    with mock.patch.object(store, 'get', side_effect=patched_store_get):
+        # Bob joins the network (user.join takes the link_url string)
+        bob = user.join(
+            peer_id=bob_peer_id,
+            invite_link=link_url,
+            name='Bob',
+            t_ms=3002,
+            db=db,
+            device_name='Laptop'
+        )
+
+    db.commit()
+    print(f"Bob joined successfully via fallback mechanism")
+    print(f"  user_id={bob['user_id'][:20]}...")
+    print(f"  peer_shared_id={bob['peer_shared_id'][:20]}...")
+
+    # Verify Bob's user was created correctly
+    bob_user = db.query_one(
+        "SELECT * FROM users WHERE user_id = ? AND recorded_by = ?",
+        (bob['user_id'], bob['peer_id'])
+    )
+    assert bob_user is not None, "Bob's user should be projected"
+    assert bob_user['network_id'] == alice['network_id'], \
+        "Bob should be in Alice's network"
+    print(f"OK: Bob's user projected in correct network")
+
+    # Verify Bob's peer_shared was created and linked
+    bob_peer_shared = db.query_one(
+        "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+        (bob['peer_shared_id'], bob['peer_id'])
+    )
+    assert bob_peer_shared is not None, "Bob's peer_shared should be projected"
+    assert bob_peer_shared['user_id'] == bob['user_id'], \
+        "peer_shared should link to Bob's user"
+    print(f"OK: Bob's peer_shared projected with correct user_id")
+
+    print(f"\nPASSED: User join worked without remote invite blob!")
+
+
+def test_invite_accepteds_stores_user_id_for_device_link(fresh_db):
+    """Verify invite_accepteds stores user_id correctly for device linking fallback."""
+    db = fresh_db
+
+    print("\n=== Setup: Create network and device link invite ===")
+
+    alice = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    db.commit()
+
+    invite_id, link_url, invite_data = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=2000,
+        db=db,
+        mode='peer',
+        user_id=alice['user_id']
+    )
+    db.commit()
+    print(f"Peer invite for device link: {invite_id[:20]}...")
+
+    # Create and accept on laptop
+    laptop_peer_id = peer.create(t_ms=3000, db=db)
+    accepted = invite.accept(laptop_peer_id, link_url, t_ms=3001, db=db)
+
+    # Join with the invite
+    laptop = peer_shared.join(
+        peer_id=laptop_peer_id,
+        peer_invite_id=accepted['invite_id'],
+        peer_invite_private_key=accepted['invite_private_key'],
+        user_id=accepted['user_id'],
+        prekey_id=accepted['invite_prekey_id'],
+        t_ms=3002,
+        db=db,
+        device_name='Laptop'
+    )
+    db.commit()
+
+    # Verify invite_accepteds has the user_id for fallback lookups
+    print("\n=== Verify invite_accepteds table ===")
+
+    ia_row = db.query_one(
+        "SELECT * FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+        (invite_id, laptop_peer_id)
+    )
+    assert ia_row is not None, "invite_accepted should be stored"
+    assert ia_row['invite_private_key'] is not None, "invite_private_key should be stored"
+    assert ia_row['user_id'] == alice['user_id'], \
+        f"user_id should be stored for device link fallback, got {ia_row['user_id']}"
+    print(f"OK: invite_accepteds has user_id={ia_row['user_id'][:20]}...")
+    print(f"OK: invite_accepteds has invite_private_key (for deriving pubkey)")
+
+    print(f"\nPASSED: invite_accepteds stores user_id correctly!")

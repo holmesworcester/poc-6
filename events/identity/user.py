@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 def create(peer_id: str, name: str, t_ms: int, db: Any,
            invite_id: str,
            invite_private_key: bytes,
+           network_id: str | None = None,
            # Deprecated parameters kept for compatibility - not used
            peer_shared_id: str | None = None) -> tuple[str, bytes]:
     """Create a user event representing network membership.
@@ -39,6 +40,7 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
         db: Database connection
         invite_id: Reference to invite event (required - all users join via invite)
         invite_private_key: Invite private key for signing (required - proves invite possession)
+        network_id: Network ID from invite link (passed directly to avoid reading invite blob)
         peer_shared_id: Deprecated, not used (kept for compatibility)
 
     Returns:
@@ -51,13 +53,8 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
     if not invite_private_key:
         raise ValueError("invite_private_key is required - proves possession of invite")
 
-    # Extract metadata from invite (only network_id is used in user event creation)
-    invite_blob = store.get(invite_id, db)
-    if not invite_blob:
-        raise ValueError(f"invite event not found: {invite_id}")
-
-    invite_event_data = crypto.parse_json(invite_blob)
-    network_id = invite_event_data.get('network_id')
+    # network_id is now passed as parameter from invite link data
+    # This avoids reading the invite blob which may not be available in distributed scenarios
 
     # Generate user's OWN unique keypair
     # This is separate from invite keypair - each user has their own identity
@@ -153,8 +150,23 @@ def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | 
                 invite_pubkey_bytes = crypto.b64decode(invite_pubkey_b64)
                 log.info(f"[USER_PROJECT] Got invite_pubkey from store blob (bootstrap case)")
 
+    # Fallback: Derive invite_pubkey from invite_private_key in invite_accepteds
+    # This handles distributed scenario where invite blob hasn't synced yet
+    # but we accepted the invite ourselves (have the private key)
     if not invite_pubkey_bytes:
-        # Neither table nor store has invite - return None, will retry later
+        ia_row = safedb.query_one(
+            "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+            (invite_id, recorded_by)
+        )
+        if ia_row and ia_row['invite_private_key']:
+            from nacl.signing import SigningKey
+            priv_key = ia_row['invite_private_key']
+            signing_key = SigningKey(priv_key)
+            invite_pubkey_bytes = bytes(signing_key.verify_key)
+            log.info(f"[USER_PROJECT] Derived invite_pubkey from invite_accepteds (distributed bootstrap)")
+
+    if not invite_pubkey_bytes:
+        # Neither table, store, nor invite_accepteds has invite - return None, will retry later
         log.warning(f"[USER_PROJECT_EARLY_RETURN] invite_id={invite_id[:20]}... not available yet")
         return None
 
@@ -342,7 +354,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         invite_id=invite_id,
-        invite_private_key=invite_private_key
+        invite_private_key=invite_private_key,
+        network_id=network_id  # Pass directly (available locally in new_network)
     )
     log.info(f"new_network() created user: user_id={user_id[:20]}...")
 
@@ -562,6 +575,29 @@ def try_create_username(user_id: str, name: str, peer_id: str, peer_shared_id: s
         return None, True
 
 
+def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
+    """Return the best available display name for a user_id.
+
+    Prefers decrypted usernames (user_names). Falls back to users.name if present.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row and row.get("name"):
+        return row["name"]
+
+    row = safedb.query_one(
+        "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row and row.get("name"):
+        return row["name"]
+
+    return None
+
+
 def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
          device_name: str = "Device") -> dict[str, Any]:
     """Join an existing network via invite link.
@@ -670,7 +706,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         invite_id=invite_id,
-        invite_private_key=invite_private_key
+        invite_private_key=invite_private_key,
+        network_id=invite_data.get('network_id')  # Pass from invite link data
     )
 
     # invite_proof removed - proof IS the signature on user event (signed_by=invite_id)

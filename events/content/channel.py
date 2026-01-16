@@ -394,10 +394,27 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    name_subquery = (
+        "SELECT cu.new_channel_name FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_channel_name IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     return safedb.query(
-        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
-           FROM channels
-           WHERE recorded_by = ?
+        f"""SELECT c.channel_id,
+                   COALESCE(({name_subquery}), c.name) AS name,
+                   c.group_id,
+                   c.signed_by,
+                   c.created_at,
+                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
+           FROM channels c
+           WHERE c.recorded_by = ?
            ORDER BY created_at DESC""",
         (recorded_by,)
     )
@@ -417,9 +434,26 @@ def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
         List of dicts with channel_id, name, group_id, key_id, etc.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    name_subquery = (
+        "SELECT cu.new_channel_name FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_channel_name IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     return safedb.query(
-        """SELECT c.channel_id, c.name, c.group_id, c.signed_by, c.created_at,
-                  c.disappearing_time_ms, g.key_id
+        f"""SELECT c.channel_id,
+                  COALESCE(({name_subquery}), c.name) AS name,
+                  c.group_id,
+                  c.signed_by,
+                  c.created_at,
+                  COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms,
+                  g.key_id
            FROM channels c
            LEFT JOIN groups g ON c.group_id = g.group_id AND c.recorded_by = g.recorded_by
            WHERE c.recorded_by = ?
@@ -440,10 +474,27 @@ def get_by_id(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | No
         Channel dict with channel_id, name, group_id, etc., or None if not found
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    name_subquery = (
+        "SELECT cu.new_channel_name FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_channel_name IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     return safedb.query_one(
-        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
-           FROM channels
-           WHERE channel_id = ? AND recorded_by = ?""",
+        f"""SELECT c.channel_id,
+                   COALESCE(({name_subquery}), c.name) AS name,
+                   c.group_id,
+                   c.signed_by,
+                   c.created_at,
+                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
+           FROM channels c
+           WHERE c.channel_id = ? AND c.recorded_by = ?""",
         (channel_id, recorded_by)
     )
 

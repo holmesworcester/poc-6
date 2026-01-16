@@ -118,7 +118,24 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
             recorded_module.project_ids(unblocked_by_network, db)
 
     # =========================================================================
-    # 2. STORE INVITER'S PEER_SHARED FROM LINK DATA
+    # 2. MARK INVITE_ID AS VALID (FOR EVENTS SIGNED BY THIS INVITE)
+    # This enables user and peer_shared events signed by this invite to project
+    # without waiting for the invite blob to arrive via sync.
+    # =========================================================================
+    safedb.execute(
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (invite_id, recorded_by)
+    )
+    log.info(f"[INVITE_ACCEPTED_PROJECT] marked invite_id={invite_id[:20]}... as valid (DISTRIBUTED BOOTSTRAP)")
+
+    # Unblock events that were waiting for invite_id (user, peer_shared events)
+    unblocked_by_invite = queues.blocked.notify_event_valid(invite_id, recorded_by, safedb)
+    if unblocked_by_invite:
+        log.info(f"invite_accepted.project() unblocked {len(unblocked_by_invite)} events waiting for invite_id")
+        recorded_module.project_ids(unblocked_by_invite, db)
+
+    # =========================================================================
+    # 3. STORE INVITER'S PEER_SHARED FROM LINK DATA
     # This allows Bob to know Alice for sync purposes
     # =========================================================================
     inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
@@ -139,7 +156,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         log.info(f"[INVITE_ACCEPTED_PROJECT] created recorded wrapper for inviter peer_shared")
 
     # =========================================================================
-    # 3. MARK INVITE_ACCEPTED AS VALID
+    # 4. MARK INVITE_ACCEPTED AS VALID
     # =========================================================================
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
@@ -147,7 +164,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     )
 
     # =========================================================================
-    # 4. STORE CONNECTION METADATA IN invite_accepteds TABLE
+    # 5. STORE CONNECTION METADATA IN invite_accepteds TABLE
     # =========================================================================
     address = invite_link_data.get('ip')
     port = invite_link_data.get('port')
@@ -160,18 +177,22 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     if invite_link_data.get('inviter_transit_prekey_public_key'):
         inviter_transit_prekey_public_key = crypto.b64decode(invite_link_data['inviter_transit_prekey_public_key'])
 
+    # Extract user_id for device linking (peer invites carry the user_id being linked to)
+    link_user_id = invite_link_data.get('user_id')
+
     safedb.execute("""
         INSERT OR IGNORE INTO invite_accepteds
-        (invite_id, inviter_peer_shared_id, address, port, network_id,
+        (invite_id, inviter_peer_shared_id, address, port, network_id, user_id,
          inviter_transit_prekey_id, inviter_transit_prekey_public_key,
          invite_private_key, created_at, recorded_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         invite_id,
         inviter_peer_shared_id,
         address,
         port,
         network_id,
+        link_user_id,
         inviter_transit_prekey_id,
         inviter_transit_prekey_public_key,
         invite_private_key,

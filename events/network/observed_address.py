@@ -21,8 +21,58 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by peer_shared, no deps
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for observed_address events.
+
+    Observed addresses are signed plaintext events recording peer endpoints.
+    """
+    event_data = ctx.event_data
+
+    observed_peer_id = event_data.get('observed_peer_id')
+    signed_by = event_data.get('signed_by')
+    ip = event_data.get('ip')
+    port = event_data.get('port')
+    created_at = event_data.get('created_at')
+
+    if not all([observed_peer_id, signed_by, ip, port is not None, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='network_addresses',
+            values={
+                'address_id': ctx.event_id,
+                'observed_peer_id': observed_peer_id,
+                'signed_by': signed_by,
+                'ip': ip,
+                'port': port,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(
@@ -58,6 +108,7 @@ def create(
         'type': 'observed_address',
         'observed_peer_id': observed_peer_id,
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',  # Required for v2 resolver
         'ip': ip,
         'port': port,
         'created_at': t_ms

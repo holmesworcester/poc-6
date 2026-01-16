@@ -12,11 +12,65 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 # Group prekeys expire after 30 days (in milliseconds)
 GROUP_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+
+# v2 event specification - no signer, no deps (local-only deterministic event)
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for group_prekey events.
+
+    Group prekeys are local-only deterministic events (no timestamp in blob).
+    Uses recorded_at as created_at and recorded_by as owner_peer_id.
+    """
+    event_data = ctx.event_data
+
+    public_key_b64 = event_data.get('public_key')
+    private_key_b64 = event_data.get('private_key')
+
+    if not public_key_b64 or not private_key_b64:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode keys from base64 to bytes
+    public_key = crypto.b64decode(public_key_b64)
+    private_key = crypto.b64decode(private_key_b64)
+
+    # Use recorded_at as created_at (deterministic blobs have no timestamp)
+    created_at = ctx.recorded_at
+
+    # Calculate TTL: absolute time when this prekey expires
+    ttl_ms = created_at + GROUP_PREKEY_TTL_MS
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='group_prekeys',
+            values={
+                'prekey_id': ctx.event_id,
+                'owner_peer_id': ctx.recorded_by,
+                'public_key': public_key,
+                'private_key': private_key,
+                'created_at': created_at,
+                'ttl_ms': ttl_ms,
+                'recorded_by': ctx.recorded_by,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 # Prekey replenishment configuration
 MIN_GROUP_PREKEYS = 10  # Minimum number of non-expired prekeys to maintain per peer

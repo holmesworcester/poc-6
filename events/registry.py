@@ -77,6 +77,8 @@ def _discover_events() -> None:
                 'shareable': getattr(module, 'SHAREABLE', False),  # Safe default
                 'ephemeral': getattr(module, 'EPHEMERAL', False),
                 'projection_table': getattr(module, 'PROJECTION_TABLE', None),
+                'event_spec': getattr(module, 'EVENT_SPEC', None),
+                'project_pure': getattr(module, 'project_pure', None),
             }
 
             log.debug(f"Registered event type '{event_type}' from {module_name}")
@@ -105,6 +107,22 @@ def get_project_fn(event_type: str) -> Callable | None:
         return None
 
     return module.project
+
+
+def get_project_pure_fn(event_type: str) -> Callable | None:
+    """Get pure projector function for an event type, if available."""
+    _discover_events()
+    if event_type not in _registry:
+        return None
+    return _registry[event_type].get('project_pure')
+
+
+def get_event_spec(event_type: str) -> dict[str, Any] | None:
+    """Get EVENT_SPEC for an event type, if available."""
+    _discover_events()
+    if event_type not in _registry:
+        return None
+    return _registry[event_type].get('event_spec')
 
 
 def is_shareable(event_type: str) -> bool:

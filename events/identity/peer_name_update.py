@@ -13,6 +13,40 @@ from core import store
 from events.group import group
 from events.identity import peer
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
+
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'peer_shared': {
+            'source': 'table',
+            'table': 'peers_shared',
+            'key': 'peer_shared_id',
+            'key_from': 'peer_id',
+            'fields': ['peer_shared_id'],
+        },
+        'group_key': {
+            'source': 'table',
+            'table': 'group_keys',
+            'key': 'key_id',
+            'fields': ['key_id'],
+        },
+    },
+    'optional': {
+        'existing_name': {
+            'source': 'table',
+            'table': 'peer_names',
+            'key': 'peer_id',
+            'key_from': 'peer_id',
+            'fields': ['peer_id', 'global_count'],
+        },
+    },
+    'cascade_on_delete': [],
+}
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +115,7 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
         'key_id': key_id,  # Track which key was used
         'global_count': 0,  # For LWW (last-writer-wins)
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 
@@ -97,6 +132,64 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
 
     log.info(f"peer_name_update.create() created peer_name_update_id={peer_name_update_id[:20]}...")
     return peer_name_update_id
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for peer_name_update events."""
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'peer_name_update':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    peer_target_id = event_data.get('peer_id')
+    name = event_data.get('name')
+    key_id = event_data.get('key_id')
+    global_count = event_data.get('global_count', 0)
+
+    if not peer_target_id or not name:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    existing = ctx.deps.get('existing_name')
+    writes: list[WriteOp] = []
+
+    if existing is None:
+        writes.append(
+            WriteOp(
+                op='insert',
+                table='peer_names',
+                values={
+                    'peer_id': peer_target_id,
+                    'name': name,
+                    'event_id': ctx.event_id,
+                    'global_count': global_count,
+                    'key_id': key_id,
+                    'created_at': event_data.get('created_at'),
+                    'signed_by': event_data.get('signed_by'),
+                    'recorded_at': ctx.recorded_at,
+                },
+            )
+        )
+    elif existing.get('global_count', 0) < global_count:
+        writes.append(
+            WriteOp(
+                op='update',
+                table='peer_names',
+                values={
+                    'name': name,
+                    'event_id': ctx.event_id,
+                    'global_count': global_count,
+                    'key_id': key_id,
+                    'created_at': event_data.get('created_at'),
+                    'signed_by': event_data.get('signed_by'),
+                    'recorded_at': ctx.recorded_at,
+                },
+                where={
+                    'peer_id': peer_target_id,
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def validate(event_id: str, recorded_by: str, db: Any) -> str | None:

@@ -12,8 +12,54 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by peer_shared, no deps
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for group_prekey_shared events."""
+    event_data = ctx.event_data
+
+    group_prekey_id = event_data.get('group_prekey_id')
+    peer_id = event_data.get('peer_id')
+    public_key_b64 = event_data.get('public_key')
+    created_at = event_data.get('created_at')
+
+    if not all([group_prekey_id, peer_id, public_key_b64, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    public_key = crypto.b64decode(public_key_b64)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='group_prekeys_shared',
+            values={
+                'group_prekey_shared_id': ctx.event_id,
+                'group_prekey_id': group_prekey_id,
+                'peer_id': peer_id,
+                'public_key': public_key,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(prekey_id: str, peer_id: str, peer_shared_id: str,
@@ -73,6 +119,7 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
         'peer_id': peer_shared_id,
         'public_key': prekey_public_b64,
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',  # Required for v2 resolver
         'created_at': t_ms,
     }
 

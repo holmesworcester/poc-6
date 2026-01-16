@@ -13,11 +13,114 @@ from core import store
 from events.group import group
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 # Default message TTL: 1 week (in milliseconds)
 DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+
+# v2 event specification - signed by peer_shared, encrypted
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'channel': {
+            'source': 'table',
+            'table': 'channels',
+            'key': 'channel_id',
+            'fields': ['group_id'],
+        },
+        'author': {
+            'source': 'table',
+            'table': 'users',
+            'key': 'user_id',
+            'key_from': 'author_id',
+            'fields': ['user_id'],
+        },
+    },
+    'optional': {
+        'store_blob': {
+            'source': 'context',
+            'table': 'store',
+            'key': 'id',
+            'key_from': '@event_id',
+            'fields': ['blob'],
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for message events."""
+    event_data = ctx.event_data
+
+    channel_id = event_data.get('channel_id')
+    author_id = event_data.get('author_id')
+    signed_by = event_data.get('signed_by')
+    content = event_data.get('content')
+    created_at = event_data.get('created_at')
+    disappearing_time_ms = event_data.get('disappearing_time_ms', 0) or 0
+
+    if not channel_id or not author_id or not signed_by or created_at is None or content is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    channel_row = ctx.deps.get('channel')
+    if not channel_row or not channel_row.get('group_id'):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    store_row = ctx.deps.get('store_blob') or {}
+    event_blob = store_row.get('blob')
+    if not event_blob:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    group_id = channel_row['group_id']
+
+    if disappearing_time_ms > 0:
+        ttl_ms = created_at + disappearing_time_ms
+    else:
+        ttl_ms = 0
+
+    key_id_bytes = event_blob[:crypto.ID_SIZE]
+    key_id_b64 = crypto.b64encode(key_id_bytes)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='messages',
+            values={
+                'message_id': ctx.event_id,
+                'channel_id': channel_id,
+                'group_id': group_id,
+                'author_id': author_id,
+                'signed_by': signed_by,
+                'content': content,
+                'created_at': created_at,
+                'ttl_ms': ttl_ms,
+                'key_id': key_id_b64,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+        WriteOp(
+            op='insert',
+            table='event_dependencies',
+            values={
+                'child_event_id': ctx.event_id,
+                'parent_event_id': channel_id,
+                'recorded_by': ctx.recorded_by,
+                'dependency_type': 'channel',
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
+
 
 
 def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, return_latest: bool = True) -> dict[str, Any]:
@@ -48,8 +151,17 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Query channel to get group_id and disappearing_time_ms
+    ttl_subquery = (
+        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
+        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
+        "AND cu.new_disappearing_time_ms IS NOT NULL "
+        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
+    )
     channel_row = safedb.query_one(
-        "SELECT group_id, disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        f"""SELECT c.group_id,
+                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
+            FROM channels c
+            WHERE c.channel_id = ? AND c.recorded_by = ? LIMIT 1""",
         (channel_id, peer_id)
     )
     if not channel_row:
@@ -96,6 +208,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         'type': 'message',
         'channel_id': channel_id,
         'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
+        'signer_type': 'peer_shared',
         'author_id': user_id,  # User who authored the message content (for display)
         'content': content,
         'created_at': t_ms,

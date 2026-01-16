@@ -14,6 +14,34 @@ from core import store
 from events.group import group_key
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
+
+EVENT_SPEC = {
+    'encrypted': True,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'group_key': {
+            'source': 'table',
+            'table': 'group_keys',
+            'key': 'key_id',
+            'fields': ['key_id'],
+        },
+    },
+    'optional': {
+        'network': {
+            'source': 'table',
+            'table': 'networks',
+            'key': 'network_id',
+            'key_from': 'network_id',
+            'fields': ['network_id'],
+            'required_if_present': True,
+        },
+    },
+    'cascade_on_delete': [],
+}
 
 log = logging.getLogger(__name__)
 
@@ -52,11 +80,14 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
     log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}, signed_by={actual_signer_id}")
 
+    signer_type = 'network' if signer_id and network_id and signer_id == network_id else 'peer_shared'
+
     # Create event dict
     event_data = {
         'type': 'group',
         'name': name,
         'signed_by': actual_signer_id,  # Network ID or peer_shared_id
+        'signer_type': signer_type,
         'created_at': t_ms,
         'key_id': key_id,  # Store key_id in event for later retrieval
         'is_main': 1 if is_main else 0  # Store is_main flag
@@ -85,6 +116,54 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
     log.info(f"group.create() created group_id={event_id}, key_id={key_id}")
     return (event_id, key_id)
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for group events."""
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'group':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    name = event_data.get('name')
+    signed_by = event_data.get('signed_by')
+    key_id = event_data.get('key_id')
+    created_at = event_data.get('created_at')
+
+    if not name or not signed_by or not key_id or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    is_main = event_data.get('is_main', 0)
+    network_id = event_data.get('network_id') or ''
+
+    values = {
+        'group_id': ctx.event_id,
+        'name': name,
+        'signed_by': signed_by,
+        'created_at': created_at,
+        'key_id': key_id,
+        'is_main': is_main,
+        'network_id': network_id,
+        'recorded_at': ctx.recorded_at,
+    }
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='groups',
+            values=values,
+        ),
+        WriteOp(
+            op='update',
+            table='groups',
+            values=values,
+            where={
+                'group_id': ctx.event_id,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:

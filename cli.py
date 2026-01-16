@@ -1309,22 +1309,10 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
 
     # Fallback: try to get from database (might work after sync)
     if not username:
-        from core.db import create_safe_db
-        safedb = create_safe_db(session.db, recorded_by=peer_id)
-        user_row = safedb.query_one(
-            "SELECT name FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-            (user_id, peer_id)
-        )
-        username = user_row['name'] if user_row else "unknown"
+        username = user.get_display_name(user_id, peer_id, session.db) or "unknown"
 
     if not network_id:
-        from core.db import create_safe_db
-        safedb = create_safe_db(session.db, recorded_by=peer_id)
-        network_row = safedb.query_one(
-            "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
-            (peer_id,)
-        )
-        network_id = network_row['network_id'] if network_row else None
+        network_id = network.get_network_id_for_peer(peer_id, session.db)
 
     # Create account context
     account = AccountContext(
@@ -1527,19 +1515,7 @@ def cmd_files(session: CLISession):
 
     account = session.get_selected_account()
 
-    # Query all attachments visible to this peer
-    from core.db import create_safe_db
-    safedb = create_safe_db(session.db, recorded_by=account.peer_id)
-
-    attachments = safedb.query_all(
-        """SELECT ma.file_id, ma.filename, ma.mime_type, ma.blob_bytes, ma.total_slices,
-                  m.content as message_content
-           FROM message_attachments ma
-           JOIN messages m ON ma.message_id = m.message_id AND m.recorded_by = ma.recorded_by
-           WHERE ma.recorded_by = ?
-           ORDER BY ma.recorded_at DESC""",
-        (account.peer_id,)
-    )
+    attachments = message_attachment.list_attachments(account.peer_id, session.db)
 
     if not attachments:
         print("FILES: (no files)")

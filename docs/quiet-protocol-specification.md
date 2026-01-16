@@ -100,6 +100,8 @@ All events except `peer` and `peer_shared` include a `created_by` field that ref
 
 Note: `created_by` is deprecated. Where prior drafts used `created_by = peer_shared_id`, prefer `signed_by = peer_shared_id` and resolve the signer’s public key by signer type (`network_id` | `user_id` | `peer_shared_id` | `invite_id`).
 
+Events include a `signer_type` field (e.g., `peer_shared`, `invite`, `network`) so receivers can deterministically resolve which keyspace the `signed_by` value refers to without guessing.
+
 
 TODO: how does `recorded_by` work again? What events can't include `created_by`?
 
@@ -353,18 +355,29 @@ The `invite_accepted` event stores the **raw invite link data** as received:
 invite_accepted = {
     type: 'invite_accepted',
     invite_link_data: {
-        invite_blob,              // The signed invite event (contains network_id, group_id, etc.)
-        invite_private_key,       // Private key for invite proof and prekey decryption
+        invite_id,                // ID of the invite event (for reference)
+        invite_private_key,       // Private key for signing and deriving invite_pubkey
         invite_prekey_id,         // Crypto hint for group_key_shared decryption
-        inviter_peer_shared_blob, // Inviter's peer_shared for immediate projection
+        user_id,                  // (device linking) User being linked to
+        network_id,               // (network join) Which network we're joining
+        inviter_peer_shared_id,   // Inviter's peer_shared_id
+        inviter_peer_shared_blob, // (optional) Inviter's peer_shared for immediate projection
         inviter_transit_prekey,   // For initial sync connection
-        network_id,               // Which network we're joining
         // ... other invite link fields
     },
     signed_by: peer_id,           // Local peer accepting the invite
     created_at: t_ms
 }
 ```
+
+**Key insight**: The `invite_private_key` is sufficient to derive `invite_pubkey` locally:
+```python
+from nacl.signing import SigningKey
+signing_key = SigningKey(invite_private_key)
+invite_pubkey = bytes(signing_key.verify_key)
+```
+
+This eliminates the need to fetch the invite blob from remote peers during bootstrap. The projector can verify signatures using locally-derived keys.
 
 This design follows the event-sourcing principle: **events are immutable facts containing raw input; projectors interpret those facts into state.**
 
@@ -376,9 +389,12 @@ When `invite_accepted.project()` runs, it:
 
 2. **Marks `network_id` as valid** — This is the trust anchor. By accepting the invite, the peer trusts this network.
 
-3. **Creates the invite prekey from key material** — The invite link contains `invite_private_key` and `invite_prekey_id`. Rather than manual table insertion, projection creates a proper `group_prekey` event from this material. If `group_prekey` event IDs are deterministic from key content, this produces the same `prekey_id` and naturally cascades validity.
+3. **Marks `invite_id` as valid** — This allows `user` and `peer_shared` events signed by this invite to project without waiting for the invite blob. Essential for distributed bootstrap where the invite blob hasn't synced yet.
 
-4. **Cascades unblock** — Events blocked on `network_id` or `invite_prekey_id` now unblock:
+4. **Creates the invite prekey from key material** — The invite link contains `invite_private_key` and `invite_prekey_id`. Rather than manual table insertion, projection creates a proper `group_prekey` event from this material. If `group_prekey` event IDs are deterministic from key content, this produces the same `prekey_id` and naturally cascades validity.
+
+5. **Cascades unblock** — Events blocked on `network_id`, `invite_id`, or `invite_prekey_id` now unblock:
+   - `user` and `peer_shared` events signed by this invite
    - `invite`, `group`, `channel`, `admin` events signed by `network_id`
    - `group_key_shared` events sealed to `invite_prekey_id`
    - These cascade further to unblock messages, members, etc.
@@ -392,6 +408,27 @@ When `invite_accepted.project()` runs, it:
 3. **Future-proof**: If invite link format changes, old events still contain their original data.
 
 4. **Natural cascade**: Uses the standard blocking/unblocking mechanism rather than manual `notify_event_valid()` calls.
+
+### Distributed Bootstrap: Local-Only Projection
+
+A critical requirement is that **local events must project using only local data**. When joining a network or linking a device, the invite blob exists on the inviter's device, not locally. Projectors cannot wait for sync to complete.
+
+**Solution**: Projectors for `user` and `peer_shared` use a fallback mechanism:
+
+1. **Primary path**: Look up `invite_pubkey` from the `invites` table or store blob (normal sync case)
+
+2. **Fallback path**: For self-created events (where `owner_peer_id == recorded_by`), derive `invite_pubkey` from `invite_private_key` stored in the local `invite_accepteds` table
+
+This is why `invite_accepted.create()` must happen **before** `user.create()` or `peer_shared.create()` — the fallback depends on the invite_private_key being in `invite_accepteds`.
+
+**Ordering in `peer_shared.join()`**:
+```
+1. invite_accepted.create()   → stores invite_private_key locally
+2. peer_shared.create()       → projection derives pubkey from invite_accepteds
+3. transit_prekey.create()    → can now reference the projected peer_shared
+```
+
+This ensures local projection completes immediately. Synced events from other peers follow the primary path (reading from `invites` table or store blob).
 
 ### Deterministic Key Event IDs
 
@@ -423,7 +460,7 @@ This ensures:
 ## Validation
 
 - `invite(mode=peer)` must reference `network_id`, `user_id`, and `invite_pubkey`. It is authorized when signed_by a `peer_shared_id` that is already linked to that `user_id`.
-- `peer_shared` is signed_by = `invite_id`; projectors load the invite and verify the signature with `invite_pubkey`. On success, they establish the peer↔user link.
+- `peer_shared` is signed_by = `invite_id`; projectors verify the signature with `invite_pubkey`. The pubkey is obtained from: (1) the `invites` projection table, (2) the invite blob in store, or (3) derived from `invite_private_key` in `invite_accepteds` for self-created events (distributed bootstrap fallback).
 - Any linked peer can subsequently publish updates for that `user_id` (e.g., profile updates) subject to normal validation.
 # Encryption
 
@@ -975,7 +1012,7 @@ Missed items in one pass will surface on the next pass with probability
 
 Peers periodically create an `intro` events naming the `public_ip` and `public_port` and `peer_shared_id` of two peers. (The peer sending the `intro` might know the peers' external ports when they themselves do not.)
 
-Upon receiving a valid `intro`, each peer immediately sends UDP bursts of `connection` events to the other, which then result in `sync` requests as responses. `intro` events should be processed as quickly as possible, and `intro` events need not be blocked because they will likely be too-late and useless by the time they are unblocked.
+Upon receiving a valid `intro`, each peer immediately sends UDP bursts of `connection` events to the other, which then result in `sync` requests as responses. `intro` events should be processed as quickly as possible. Peers SHOULD ignore intros whose `created_at` is older than `INTRO_TTL_MS` (default 30 seconds) at receipt time; stale intros are dropped (not blocked) because they are likely too late and useless by the time they are unblocked.
 
 Periodic re-sending of `connection` and `sync_request` events have sufficient frequency to be a "keep alive".
 

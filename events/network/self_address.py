@@ -12,8 +12,53 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by peer_shared, no deps
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for self_address events."""
+    event_data = ctx.event_data
+
+    peer_shared_id = event_data.get('peer_id')  # Note: field is 'peer_id' not 'peer_shared_id'
+    ip = event_data.get('ip')
+    port = event_data.get('port')
+    created_at = event_data.get('created_at')
+
+    if not all([peer_shared_id, ip, port is not None, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='addresses',
+            values={
+                'address_id': ctx.event_id,
+                'peer_shared_id': peer_shared_id,
+                'ip': ip,
+                'port': port,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db: Any) -> str:
@@ -40,6 +85,7 @@ def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db:
         'type': 'self_address',
         'peer_id': peer_shared_id,
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',  # Required for v2 resolver
         'ip': ip,
         'port': port,
         'created_at': t_ms
