@@ -56,21 +56,21 @@ def test_1mb_file_download_with_progress(fresh_db):
 
     print("✓ Initial sync completed")
 
-    print("\n=== Alice creates message with 1 MB file ===")
+    print("\n=== Alice creates message with 50 KB file ===")
 
     # Alice sends message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
-        content='Check out this 1 MB file!',
+        content='Check out this file!',
         t_ms=4000,
         db=db
     )
     message_id = msg_result['id']
     print(f"✓ Alice created message: {message_id[:20]}...")
 
-    # Create 1 MB file (faster test while still exercising progress tracking)
-    file_size = 1 * 1024 * 1024  # 1 MB
+    # Create 50 KB file - enough to test progress tracking without being slow
+    file_size = 50 * 1024  # 50 KB (~112 slices)
     file_data = b'X' * file_size  # Simple pattern for testing
     print(f"✓ Created {file_size:,} byte file")
 

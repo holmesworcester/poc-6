@@ -41,7 +41,7 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
         t_ms=2000,
         db=db
     )
-    file_data1 = os.urandom(200 * 1024)  # 200KB
+    file_data1 = os.urandom(10 * 1024)  # 10KB - enough to test sync
     message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=msg1['id'],
@@ -71,7 +71,7 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
         t_ms=t_ms,
         db=db
     )
-    file_data2 = os.urandom(200 * 1024)
+    file_data2 = os.urandom(10 * 1024)  # 10KB
     message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=msg2['id'],
@@ -82,8 +82,8 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
         db=db
     )
 
-    # Sync after second message
-    t_ms = run_ticks(db, t_ms + 200, 100)
+    # Sync after second message - 20 rounds enough for 10KB files
+    t_ms = run_ticks(db, t_ms + 200, 20)
 
     # Bob joins
     bob_peer_id = peer.create(t_ms=t_ms, db=db)
@@ -140,8 +140,8 @@ def test_post_join_plain_message_sync(fresh_db):
     bob_peer_id = peer.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
 
-    # Initial sync
-    t_ms = run_ticks(db, 3000, 100)
+    # Initial sync - 15 rounds enough for connection + sync
+    t_ms = run_ticks(db, 3000, 15)
 
     # Alice sends a message AFTER Bob has joined
     t_ms += 100

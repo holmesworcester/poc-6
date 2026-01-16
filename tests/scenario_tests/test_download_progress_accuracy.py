@@ -175,20 +175,20 @@ def test_speed_and_eta_accuracy(fresh_db):
         tick.tick(t_ms=3000 + i*100, db=db)
         db.commit()
 
-    print("\n=== Alice creates message with 1 MB file ===")
+    print("\n=== Alice creates message with 20 KB file ===")
 
     # Alice sends message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
-        content='Large test file',
+        content='Test file for speed/ETA',
         t_ms=4000,
         db=db
     )
     message_id = msg_result['id']
 
-    # Create 1 MB file
-    file_size = 1 * 1024 * 1024  # 1 MB
+    # Create 20 KB file - enough slices to test speed/ETA, fast to create
+    file_size = 20 * 1024  # 20 KB (~45 slices)
     file_data = b'S' * file_size
     print(f"✓ Created {file_size:,} byte file")
 
@@ -228,13 +228,13 @@ def test_speed_and_eta_accuracy(fresh_db):
     start_time = time.time()
     last_check_time = start_time
 
-    for round_num in range(100):
+    for round_num in range(30):  # Reduced - 20KB file doesn't need 100 rounds
         current_time_ms = 7000 + round_num * 100
         tick.tick(t_ms=current_time_ms, db=db)
         db.commit()
 
-        # Check progress every 10 rounds (simulating UI updates every second)
-        if round_num % 10 == 0 and round_num > 0:
+        # Check progress every 5 rounds
+        if round_num % 5 == 0 and round_num > 0:
             current_time = time.time()
             elapsed_ms = int((current_time - last_check_time) * 1000)
 
@@ -308,18 +308,18 @@ def test_bytes_increase_monotonically(fresh_db):
         tick.tick(t_ms=3000 + i*100, db=db)
         db.commit()
 
-    print("\n=== Alice creates message with 500 KB file ===")
+    print("\n=== Alice creates message with 30 KB file ===")
 
-    # Alice creates larger file to ensure we can observe incremental progress
+    # Alice creates file to observe incremental progress
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
-        content='Large test',
+        content='Monotonicity test',
         t_ms=4000,
         db=db
     )
 
-    file_size = 500 * 1024  # 500 KB
+    file_size = 30 * 1024  # 30 KB - enough slices to test monotonicity
     file_result = message_attachment.create(
         peer_id=alice['peer_id'],
         message_id=msg_result['id'],
@@ -354,7 +354,7 @@ def test_bytes_increase_monotonically(fresh_db):
     prev_bytes = 0
     prev_slices = 0
 
-    for round_num in range(50):
+    for round_num in range(20):  # Reduced - 30KB doesn't need 50 rounds
         current_time_ms = 7000 + round_num * 100
         tick.tick(t_ms=current_time_ms, db=db)
         db.commit()

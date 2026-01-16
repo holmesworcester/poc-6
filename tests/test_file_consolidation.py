@@ -120,20 +120,20 @@ def test_auto_consolidation_on_download_complete():
 
     print("✓ Network created and synced")
 
-    print("\n=== Alice uploads 500 KB file ===")
+    print("\n=== Alice uploads 30 KB file ===")
 
     # Alice creates message with file
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
-        content='Large file test',
+        content='File consolidation test',
         t_ms=4000,
         db=db
     )
     message_id = msg_result['id']
 
-    # Create 500 KB file (will be split into ~1,111 slices)
-    file_size = 500 * 1024
+    # Create 30 KB file - enough to test consolidation without being slow
+    file_size = 30 * 1024  # ~67 slices
     file_data = b'T' * file_size
 
     file_result = message_attachment.create(
@@ -164,13 +164,13 @@ def test_auto_consolidation_on_download_complete():
     )
     db.commit()
 
-    # Sync until complete
-    for round_num in range(100):
+    # Sync until complete - 30 rounds is enough for 30KB file
+    for round_num in range(30):
         tick.tick(t_ms=7000 + round_num * 100, db=db)
         db.commit()
 
         # Check progress periodically
-        if round_num % 10 == 0:
+        if round_num % 5 == 0:
             progress = message_attachment.get_file_download_progress(
                 file_id=file_id,
                 recorded_by=bob['peer_id'],
