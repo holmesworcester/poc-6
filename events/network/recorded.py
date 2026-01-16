@@ -396,6 +396,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         )
 
         if resolve_result.status == 'block':
+            # TODO(end): network_intro is time-sensitive; consider dropping when signer is missing instead of blocking.
             missing_deps = list(resolve_result.missing)
             if registry.is_ephemeral(event_type):
                 log.warning(
@@ -477,6 +478,12 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             )
             timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
             return [None, recorded_id]
+
+        if event_type == 'group':
+            # Legacy group.project triggers pending name retries; keep behavior during v2 migration.
+            from events.group.group_key_shared import retry_pending_name_updates
+
+            retry_pending_name_updates(recorded_by, db)
 
         projected_id = ref_id
     else:

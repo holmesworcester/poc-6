@@ -23,8 +23,53 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+# v2 event specification - signed by peer_shared, no deps
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for intro events."""
+    event_data = ctx.event_data
+
+    signed_by = event_data.get('signed_by')
+    peer1_id = event_data.get('peer1_id')
+    peer2_id = event_data.get('peer2_id')
+    created_at = event_data.get('created_at')
+
+    if not all([signed_by, peer1_id, peer2_id, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='pending_intros',
+            values={
+                'intro_id': ctx.event_id,
+                'initiator_peer_id': signed_by,
+                'peer1_id': peer1_id,
+                'peer2_id': peer2_id,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+                'processed': False,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(
@@ -67,6 +112,7 @@ def create(
     event_data = {
         'type': 'network_intro',
         'signed_by': initiator_peer_shared_id,
+        'signer_type': 'peer_shared',
         'peer1_id': peer1_id,
         'peer2_id': peer2_id,
         'created_at': t_ms

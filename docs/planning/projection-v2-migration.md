@@ -76,3 +76,8 @@ Once coverage is complete:
 - Delete legacy `project()` implementations.
 - Remove any compatibility shims (e.g., legacy signer inference).
 - Update docs to reflect pure-only projector pipeline.
+
+## Open Issues (TODO at End)
+- TODO(end): `network_intro` events are time-sensitive; legacy projection drops stale intros
+  when the signer's `peer_shared` is unavailable, while v2 resolver currently blocks on
+  missing signer. Decide whether to special-case `network_intro` (drop vs block) before cutover.
