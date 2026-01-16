@@ -2,6 +2,9 @@ import { useEffect, useRef, useCallback } from 'react'
 
 const POLL_INTERVAL_MS = 100
 
+// Disable automatic polling in tests - tests call pollNow() explicitly
+const IS_TEST = typeof window !== 'undefined' && (window as any).Cypress
+
 interface UsePollingOptions {
   enabled?: boolean
   interval?: number
@@ -54,6 +57,15 @@ export function usePolling({ enabled = true, interval = POLL_INTERVAL_MS, onPoll
 
   // Handle visibility change
   useEffect(() => {
+    // In tests, do one initial poll but don't start interval polling
+    // Tests can call pollNow() when they need fresh data
+    if (IS_TEST) {
+      if (enabled) {
+        poll()
+      }
+      return
+    }
+
     if (!enabled) {
       stopPolling()
       return
@@ -78,7 +90,7 @@ export function usePolling({ enabled = true, interval = POLL_INTERVAL_MS, onPoll
       stopPolling()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [enabled, startPolling, stopPolling])
+  }, [enabled, startPolling, stopPolling, poll])
 
   return { pollNow, isPolling: isPollingRef.current }
 }

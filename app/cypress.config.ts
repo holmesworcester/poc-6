@@ -1,6 +1,9 @@
 import { defineConfig } from 'cypress'
 
 export default defineConfig({
+  // Fast timeouts - tests should pass quickly or fail fast
+  defaultCommandTimeout: 3000,
+
   component: {
     devServer: {
       framework: 'react',

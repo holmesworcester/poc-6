@@ -2,7 +2,7 @@
 # Comprehensive test runner for poc-6
 #
 # Usage:
-#   ./run_tests.sh                 # Run all tests in parallel
+#   ./run_tests.sh                 # Run all tests in parallel (Python + Frontend)
 #   ./run_tests.sh --python        # Run only Python tests
 #   ./run_tests.sh --frontend      # Run only frontend tests
 #   ./run_tests.sh --sequential    # Run all tests sequentially
@@ -13,19 +13,12 @@
 #   - Frontend component tests (Cypress)
 #   - Frontend E2E tests (Cypress + Vite dev server)
 
-set -e
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
-
-# Track exit codes
-PYTHON_EXIT=0
-COMPONENT_EXIT=0
-E2E_EXIT=0
 
 # Parse arguments
 RUN_PYTHON=true
@@ -63,58 +56,66 @@ fi
 
 export PYTHONPATH=.
 
-# Temporary files for output
-PYTHON_LOG=$(mktemp)
-COMPONENT_LOG=$(mktemp)
-E2E_LOG=$(mktemp)
+# Temporary files for output and exit codes
+TMPDIR=$(mktemp -d)
+PYTHON_LOG="$TMPDIR/python.log"
+COMPONENT_LOG="$TMPDIR/component.log"
+E2E_LOG="$TMPDIR/e2e.log"
+PYTHON_EXIT_FILE="$TMPDIR/python.exit"
+COMPONENT_EXIT_FILE="$TMPDIR/component.exit"
+E2E_EXIT_FILE="$TMPDIR/e2e.exit"
+
+# Initialize exit files
+echo "0" > "$PYTHON_EXIT_FILE"
+echo "0" > "$COMPONENT_EXIT_FILE"
+echo "0" > "$E2E_EXIT_FILE"
 
 cleanup() {
-    rm -f "$PYTHON_LOG" "$COMPONENT_LOG" "$E2E_LOG"
+    rm -rf "$TMPDIR"
     # Kill any background processes
     jobs -p | xargs -r kill 2>/dev/null || true
 }
 trap cleanup EXIT
 
+find_free_port() {
+    local port=${1:-5173}
+    while lsof -i:$port > /dev/null 2>&1; do
+        port=$((port + 1))
+        if [ $port -gt 5200 ]; then
+            echo "5173"
+            return
+        fi
+    done
+    echo $port
+}
+
 run_python_tests() {
     echo -e "${BLUE}[Python]${NC} Starting pytest..."
     if pytest -v tests/ $PYTEST_ARGS > "$PYTHON_LOG" 2>&1; then
-        PYTHON_EXIT=0
+        echo "0" > "$PYTHON_EXIT_FILE"
         echo -e "${GREEN}[Python]${NC} All tests passed!"
     else
-        PYTHON_EXIT=1
+        echo "1" > "$PYTHON_EXIT_FILE"
         echo -e "${RED}[Python]${NC} Tests failed!"
     fi
 }
 
 run_component_tests() {
     if [ ! -d "app" ]; then
-        echo -e "${YELLOW}[Component]${NC} No app directory, skipping frontend tests"
+        echo -e "${YELLOW}[Component]${NC} No app directory, skipping"
         return 0
     fi
 
     echo -e "${BLUE}[Component]${NC} Starting Cypress component tests..."
-    cd app
+    pushd app > /dev/null
     if npm run test > "$COMPONENT_LOG" 2>&1; then
-        COMPONENT_EXIT=0
+        echo "0" > "$COMPONENT_EXIT_FILE"
         echo -e "${GREEN}[Component]${NC} All tests passed!"
     else
-        COMPONENT_EXIT=1
+        echo "1" > "$COMPONENT_EXIT_FILE"
         echo -e "${RED}[Component]${NC} Tests failed!"
     fi
-    cd ..
-}
-
-find_free_port() {
-    # Find a free port starting from the given base
-    local port=${1:-5173}
-    while lsof -i:$port > /dev/null 2>&1; do
-        port=$((port + 1))
-        if [ $port -gt 5200 ]; then
-            echo "5173"  # Fallback
-            return
-        fi
-    done
-    echo $port
+    popd > /dev/null
 }
 
 run_e2e_tests() {
@@ -122,13 +123,13 @@ run_e2e_tests() {
         return 0
     fi
 
-    cd app
+    pushd app > /dev/null
 
     # Find a free port to avoid conflicts with other worktrees
     VITE_PORT=$(find_free_port 5173)
-    echo -e "${BLUE}[E2E]${NC} Starting Vite dev server on port $VITE_PORT..."
+    echo -e "${BLUE}[E2E]${NC} Starting Vite on port $VITE_PORT..."
 
-    # Start dev server in background on dynamic port
+    # Start dev server in background
     npx vite --port $VITE_PORT > /dev/null 2>&1 &
     DEV_PID=$!
 
@@ -141,71 +142,73 @@ run_e2e_tests() {
     done
 
     echo -e "${BLUE}[E2E]${NC} Running Cypress E2E tests..."
-    # Override baseUrl with dynamic port
     if CYPRESS_BASE_URL="http://localhost:$VITE_PORT" npm run test:e2e > "$E2E_LOG" 2>&1; then
-        E2E_EXIT=0
+        echo "0" > "$E2E_EXIT_FILE"
         echo -e "${GREEN}[E2E]${NC} All tests passed!"
     else
-        E2E_EXIT=1
+        echo "1" > "$E2E_EXIT_FILE"
         echo -e "${RED}[E2E]${NC} Tests failed!"
     fi
 
-    # Stop dev server
     kill $DEV_PID 2>/dev/null || true
-    cd ..
+    popd > /dev/null
 }
 
 print_summary() {
+    local PYTHON_EXIT=$(cat "$PYTHON_EXIT_FILE")
+    local COMPONENT_EXIT=$(cat "$COMPONENT_EXIT_FILE")
+    local E2E_EXIT=$(cat "$E2E_EXIT_FILE")
+
     echo ""
     echo "============================================"
     echo "                TEST SUMMARY                "
     echo "============================================"
 
     if $RUN_PYTHON; then
-        if [ $PYTHON_EXIT -eq 0 ]; then
+        if [ "$PYTHON_EXIT" -eq 0 ]; then
             echo -e "${GREEN}[PASS]${NC} Python tests"
         else
             echo -e "${RED}[FAIL]${NC} Python tests"
-            echo "       Log: $PYTHON_LOG"
         fi
     fi
 
     if $RUN_FRONTEND && [ -d "app" ]; then
-        if [ $COMPONENT_EXIT -eq 0 ]; then
-            echo -e "${GREEN}[PASS]${NC} Component tests"
+        if [ "$COMPONENT_EXIT" -eq 0 ]; then
+            echo -e "${GREEN}[PASS]${NC} Component tests (31 tests)"
         else
             echo -e "${RED}[FAIL]${NC} Component tests"
-            echo "       Log: $COMPONENT_LOG"
         fi
 
-        if [ $E2E_EXIT -eq 0 ]; then
-            echo -e "${GREEN}[PASS]${NC} E2E tests"
+        if [ "$E2E_EXIT" -eq 0 ]; then
+            echo -e "${GREEN}[PASS]${NC} E2E tests (10 tests)"
         else
             echo -e "${RED}[FAIL]${NC} E2E tests"
-            echo "       Log: $E2E_LOG"
         fi
     fi
 
     echo "============================================"
 
     # Show failed test output
-    if [ $PYTHON_EXIT -ne 0 ] && [ -f "$PYTHON_LOG" ]; then
-        echo ""
-        echo -e "${RED}Python test failures:${NC}"
+    if [ "$PYTHON_EXIT" -ne 0 ] && [ -f "$PYTHON_LOG" ]; then
+        echo -e "\n${RED}Python test failures:${NC}"
         tail -50 "$PYTHON_LOG"
     fi
 
-    if [ $COMPONENT_EXIT -ne 0 ] && [ -f "$COMPONENT_LOG" ]; then
-        echo ""
-        echo -e "${RED}Component test failures:${NC}"
+    if [ "$COMPONENT_EXIT" -ne 0 ] && [ -f "$COMPONENT_LOG" ]; then
+        echo -e "\n${RED}Component test failures:${NC}"
         tail -50 "$COMPONENT_LOG"
     fi
 
-    if [ $E2E_EXIT -ne 0 ] && [ -f "$E2E_LOG" ]; then
-        echo ""
-        echo -e "${RED}E2E test failures:${NC}"
+    if [ "$E2E_EXIT" -ne 0 ] && [ -f "$E2E_LOG" ]; then
+        echo -e "\n${RED}E2E test failures:${NC}"
         tail -50 "$E2E_LOG"
     fi
+
+    # Return overall exit code
+    if [ "$PYTHON_EXIT" -ne 0 ] || [ "$COMPONENT_EXIT" -ne 0 ] || [ "$E2E_EXIT" -ne 0 ]; then
+        return 1
+    fi
+    return 0
 }
 
 # Main execution
@@ -214,13 +217,15 @@ echo "           RUNNING ALL TESTS               "
 echo "============================================"
 echo ""
 
+START_TIME=$(date +%s)
+
 if $SEQUENTIAL; then
     # Run sequentially
     $RUN_PYTHON && run_python_tests
     $RUN_FRONTEND && run_component_tests
     $RUN_FRONTEND && run_e2e_tests
 else
-    # Run in parallel
+    # Run Python and Component tests in parallel
     if $RUN_PYTHON; then
         run_python_tests &
         PYTHON_PID=$!
@@ -231,25 +236,23 @@ else
         COMPONENT_PID=$!
     fi
 
-    # Wait for Python and Component tests
-    if $RUN_PYTHON; then
-        wait $PYTHON_PID || true
-    fi
+    # Wait for parallel tests
+    $RUN_PYTHON && wait $PYTHON_PID
+    $RUN_FRONTEND && [ -d "app" ] && wait $COMPONENT_PID
 
-    if $RUN_FRONTEND && [ -d "app" ]; then
-        wait $COMPONENT_PID || true
-        # E2E runs after component (needs its own dev server)
-        run_e2e_tests
-    fi
+    # E2E runs after component (needs dev server)
+    $RUN_FRONTEND && run_e2e_tests
 fi
 
-print_summary
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
 
-# Exit with error if any tests failed
-if [ $PYTHON_EXIT -ne 0 ] || [ $COMPONENT_EXIT -ne 0 ] || [ $E2E_EXIT -ne 0 ]; then
+if print_summary; then
+    echo ""
+    echo -e "${GREEN}All tests passed in ${ELAPSED}s!${NC}"
+    exit 0
+else
+    echo ""
+    echo -e "${RED}Some tests failed (${ELAPSED}s)${NC}"
     exit 1
 fi
-
-echo ""
-echo -e "${GREEN}All tests passed!${NC}"
-exit 0
