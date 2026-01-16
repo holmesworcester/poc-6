@@ -12,6 +12,14 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
+
+EVENT_SPEC = {
+    'encrypted': False,
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +79,37 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
 
     log.info(f"group_key.create_with_material() created key_id={key_id}")
     return key_id
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for group_key events."""
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'group_key':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    key_b64 = event_data.get('key')
+    if not key_b64:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    try:
+        key_bytes = crypto.b64decode(key_b64)
+    except Exception:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='group_keys',
+            values={
+                'key_id': ctx.event_id,
+                'key': key_bytes,
+                'created_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
