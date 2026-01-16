@@ -14,39 +14,48 @@ Building a RESTful API for mobile apps (React Native) with web-based development
 - Cypress-testable via RN Web
 - Maestro for native smoke tests
 
-## Architecture Overview
+## Phased Approach
+
+### Phase 1 (Current): RN Web + Python HTTP API
+
+Focus on web-first development. No native mobile complexity yet.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Development (fast iteration)                               │
+│  Browser (dev) / Electron (prod)                            │
 │                                                             │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
 │  │   Cypress   │───▶│  RN Web     │───▶│  Python Backend │ │
-│  │   Tests     │    │  (browser)  │    │  (Unix socket)  │ │
+│  │   Tests     │    │  (browser)  │    │  (HTTP/socket)  │ │
 │  └─────────────┘    └─────────────┘    └─────────────────┘ │
 │                            │                    │           │
 │                            ▼                    ▼           │
 │                     ┌─────────────┐    ┌─────────────────┐ │
 │                     │   sql.js    │    │     SQLite      │ │
-│                     │   (WASM)    │    │     (file)      │ │
-│                     └─────────────┘    └─────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│  Production (native)                                        │
-│                                                             │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐ │
-│  │   Maestro   │───▶│  Expo App   │───▶│  Python Backend │ │
-│  │   Tests     │    │  (iOS/And)  │    │  (Unix socket)  │ │
-│  └─────────────┘    └─────────────┘    └─────────────────┘ │
-│                            │                    │           │
-│                            ▼                    ▼           │
-│                     ┌─────────────┐    ┌─────────────────┐ │
-│                     │  op-sqlite  │    │     SQLite      │ │
-│                     │   (JSI)     │    │     (file)      │ │
+│                     │   (reads)   │    │     (writes)    │ │
 │                     └─────────────┘    └─────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Deliverables:**
+- Full UI in React Native Web
+- Python HTTP API (maps to event modules)
+- Cypress component + E2E tests
+- Works in browser and Electron
+
+### Phase 2 (Future): Native Mobile
+
+Requires solving:
+- Python on mobile (hard) OR Rust core (big project)
+- iOS NSE for push notification decryption
+- Background sync on Android
+
+**Options to evaluate after Phase 1:**
+1. Rust core with uniffi bindings (Signal's approach)
+2. TypeScript port + native crypto shim for NSE
+3. Server-assisted mode (simpler but less local-first)
+
+Phase 1 gives us a working product and validated API design before tackling native complexity.
 
 ## Local Dev: No Ports via Vite Proxy
 
@@ -201,56 +210,52 @@ Direction semantics:
 - `newer`: messages after cursor (catching up)
 - No cursor + `older`: most recent 50
 
-## Project Structure
+## Project Structure (Phase 1)
 
 ```
-quiet/
-├── app/                          # React Native app
+poc-6-api/
+├── app/                          # React Native Web app
 │   ├── src/
-│   │   ├── components/           # Shared UI components
+│   │   ├── components/           # UI components
 │   │   ├── screens/              # Screen components
 │   │   ├── db/
-│   │   │   ├── index.ts          # Platform-agnostic interface
-│   │   │   ├── native.ts         # op-sqlite (iOS/Android)
-│   │   │   └── web.ts            # sql.js (browser)
+│   │   │   └── index.ts          # sql.js wrapper (read-only queries)
 │   │   ├── api/
 │   │   │   └── client.ts         # fetch('/api/...') wrapper
-│   │   └── queries/              # Shared SQL queries
+│   │   └── hooks/                # React hooks for data fetching
 │   │
 │   ├── cypress/
 │   │   ├── component/            # Component tests
 │   │   ├── e2e/                  # Full flow tests
 │   │   └── support/
 │   │
-│   ├── e2e/                      # Maestro tests (YAML)
-│   │   └── send-message.yaml
-│   │
-│   ├── vite.config.ts            # Proxy config for dev
-│   ├── metro.config.js           # Metro for native
+│   ├── vite.config.ts            # Proxy /api → Unix socket
 │   └── package.json
 │
-├── backend/                       # Python backend
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── app.py                # FastAPI app
-│   │   ├── routes/               # HTTP endpoints
-│   │   └── core/                 # DB, auth
-│   │
-│   ├── events/                   # Event modules (existing)
-│   ├── core/                     # Core infrastructure (existing)
-│   └── tests/
+├── api/                          # Python HTTP API
+│   ├── __init__.py
+│   ├── app.py                    # FastAPI app
+│   ├── routes/                   # HTTP endpoints
+│   └── api.yaml                  # OpenAPI spec
+│
+├── events/                       # Event modules (existing)
+├── core/                         # Core infrastructure (existing)
+├── cli.py                        # CLI (existing)
+├── tests/                        # Python tests (existing)
 │
 └── docs/
     └── api-design.md             # This file
 ```
 
-## Testing Strategy
+Note: Python backend stays at repo root (existing structure). `app/` is added for the React Native Web frontend.
+
+## Testing Strategy (Phase 1)
 
 | Test Type | Tool | Speed | When |
 |-----------|------|-------|------|
 | Component tests | Cypress + RN Web | ~1s | Every save |
 | E2E (web) | Cypress + RN Web | ~5s | Every commit |
-| Native smoke | Maestro + Expo | ~30s | CI / pre-release |
+| Python unit tests | pytest | ~2s | Every commit |
 
 **Cypress component test:**
 ```typescript
@@ -264,20 +269,43 @@ describe('MessageList', () => {
     cy.mount(<MessageList channelId="ch1" />);
     cy.contains('Hello').should('be.visible');
   });
+
+  it('loads more on scroll', () => {
+    cy.mount(<MessageList channelId="ch1" />);
+    cy.get('[data-testid="message-list"]').scrollTo('top');
+    // Should trigger fetch for older messages
+  });
 });
 ```
 
-**Maestro native test:**
-```yaml
-# e2e/send-message.yaml
-appId: com.quiet.app
----
-- launchApp
-- tapOn: "general"
-- tapOn: { id: "message-input" }
-- inputText: "Hello from Maestro"
-- tapOn: { id: "send-button" }
-- assertVisible: "Hello from Maestro"
+**Cypress E2E test:**
+```typescript
+// cypress/e2e/send-message.cy.ts
+describe('Send message flow', () => {
+  beforeEach(() => {
+    cy.request('POST', '/api/test/reset');
+    cy.request('POST', '/api/test/seed', { fixture: 'basic-network' });
+    cy.visit('/');
+  });
+
+  it('sends a message and sees it appear', () => {
+    cy.get('[data-testid="channel-general"]').click();
+    cy.get('[data-testid="message-input"]').type('Hello from Cypress');
+    cy.get('[data-testid="send-button"]').click();
+    cy.contains('Hello from Cypress').should('be.visible');
+  });
+});
+```
+
+**Python backend test endpoints (dev only):**
+```python
+@app.post("/api/test/reset")
+async def reset():
+    """Wipe test database"""
+
+@app.post("/api/test/seed")
+async def seed(fixture: str):
+    """Load test fixture into database"""
 ```
 
 ## Key Implementation Details
