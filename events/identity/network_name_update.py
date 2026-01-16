@@ -40,16 +40,11 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
     """
     log.info(f"network_name_update.create() creating network name for network_id={network_id[:20]}..., name='{name}'")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
     # NOTE: network_id is passed as param - no need to check networks table
     # The event will have network_id as a dependency and will block until network is valid
 
     # Get main group (all_members) - use is_main flag since name varies
-    main_group = safedb.query_one(
-        "SELECT group_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
-        (peer_id,)
-    )
+    main_group = group.get_main(peer_id, db)
     if not main_group:
         # Main group not available yet (will come from sync)
         log.info(f"network_name_update.create() main group not found yet")

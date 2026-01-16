@@ -10,8 +10,8 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.group import group_key
-from events.identity import peer
+from events.group import group_key, group
+from events.identity import peer, peer_shared, network
 from core.db import create_safe_db, create_unsafe_db
 from core import queues
 
@@ -65,11 +65,8 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Validate group exists
-    group = safedb.query_one(
-        "SELECT signed_by, key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
-        (group_id, peer_id)
-    )
-    if not group:
+    group_row = group.get_by_id(group_id, peer_id, db)
+    if not group_row:
         raise ValueError(f"Group {group_id} not found")
 
     # Check authorization - caller must be admin to add members
@@ -83,20 +80,14 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
 
     if not admin_grant_id:
         # Look up admin_grant from admins table
-        # Get adder's user_id from peers_shared (user→peer relationship stored there)
-        adder_user_row = safedb.query_one(
-            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
-            (peer_shared_id, peer_id)
-        )
-        if adder_user_row and adder_user_row['user_id']:
+        # Get adder's user_id
+        adder_user_id = peer_shared.get_user_id(peer_shared_id, peer_id, db)
+        if adder_user_id:
             # Get network_id
-            network_row = safedb.query_one(
-                "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
-                (peer_id,)
-            )
-            if network_row:
+            network_id = network.get_network_id(peer_id, db)
+            if network_id:
                 from events.identity import admin as admin_module
-                admin_grant_id = admin_module.my_grant(adder_user_row['user_id'], network_row['network_id'], peer_id, db)
+                admin_grant_id = admin_module.my_grant(adder_user_id, network_id, peer_id, db)
 
     if admin_grant_id:
         log.info(f"group_member.create() including admin_grant={admin_grant_id[:20]}...")
@@ -122,7 +113,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     signed_event = crypto.sign_event(event_data, private_key)
 
     # Get group key for encryption
-    key_data = group_key.get_key(group['key_id'], peer_id, db)
+    key_data = group_key.get_key(group_row['key_id'], peer_id, db)
 
     # Wrap (canonicalize + encrypt)
     canonical = crypto.canonicalize_json(signed_event)
@@ -135,16 +126,13 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
 
     # Share group key with new member
     # Get the new member's peer_shared_id from peers_shared (user→peer is one-to-many)
-    member_peer = safedb.query_one(
-        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
-        (user_id, peer_id)
-    )
+    member_peer = peer_shared.get_by_user_id(user_id, peer_id, db)
 
     if member_peer:
         from events.group import group_key_shared
         try:
             group_key_shared.create(
-                key_id=group['key_id'],
+                key_id=group_row['key_id'],
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
                 recipient_peer_id=member_peer['peer_shared_id'],
@@ -172,7 +160,7 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         try:
             # Share key with other device by creating group_key_shared sealed to their identity
             group_key_shared.create(
-                key_id=group['key_id'],
+                key_id=group_row['key_id'],
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
                 recipient_peer_id=other_peer_shared_id,

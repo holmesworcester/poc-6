@@ -289,6 +289,26 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
     return stats
 
 
+def get_own_private_key(peer_id: str, db: Any) -> bytes | None:
+    """Get the private key for one of the peer's own group prekeys.
+
+    Used for signing (e.g., invite signatures).
+
+    Args:
+        peer_id: Local peer ID
+        db: Database connection
+
+    Returns:
+        Private key bytes or None if no prekey found
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    row = safedb.query_one(
+        "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    return row['private_key'] if row else None
+
+
 def list(peer_id: str, t_ms: int, db: Any) -> list[dict[str, Any]]:
     """List all group prekeys with status and group_key counts.
 

@@ -208,6 +208,24 @@ def list_all_groups(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
+def get_by_id(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get a group by ID.
+
+    Args:
+        group_id: Group ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Group dict with group_id, name, key_id, signed_by, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        "SELECT group_id, name, key_id, signed_by, created_at FROM groups WHERE group_id = ? AND recorded_by = ?",
+        (group_id, recorded_by)
+    )
+
+
 def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get the main group for a peer.
 
