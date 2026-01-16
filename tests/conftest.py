@@ -2,6 +2,10 @@
 import pytest
 import sqlite3
 import logging
+import uuid
+import os
+import shutil
+from pathlib import Path
 from core.db import Database
 from core import schema
 from core import tick
@@ -10,6 +14,20 @@ from core import jobs
 # Disable all logging during tests for performance
 # Use pytest -o log_cli=true to re-enable if needed for debugging
 logging.disable(logging.CRITICAL)
+
+# Real disk path for disk-based tests (NOT tmpfs)
+# Uses project directory which is on real disk
+_DISK_TEST_DIR = Path(__file__).parent.parent / ".test_dbs"
+
+
+def _cleanup_test_dbs():
+    """Clean up test database directory."""
+    if _DISK_TEST_DIR.exists():
+        shutil.rmtree(_DISK_TEST_DIR)
+
+
+# Clean up at import time (before any tests run)
+_cleanup_test_dbs()
 
 
 @pytest.fixture(autouse=True)
@@ -39,12 +57,41 @@ def reset_global_state():
 
 @pytest.fixture
 def fresh_db():
-    """Create a fresh in-memory database with all tables initialized.
+    """Create a file-based database on REAL DISK with WAL mode.
 
-    Eliminates boilerplate setup:
-        conn = sqlite3.Connection(":memory:")
-        db = Database(conn)
-        schema.create_all(db)
+    Default for all tests - uses real disk I/O for realistic performance.
+    WAL mode makes it nearly as fast as in-memory while testing real I/O paths.
+
+    For pure in-memory testing, use mem_db instead.
+    """
+    _DISK_TEST_DIR.mkdir(exist_ok=True)
+    db_path = _DISK_TEST_DIR / f"test_{uuid.uuid4().hex}.db"
+    conn = sqlite3.connect(str(db_path))
+    db = Database(conn)
+
+    # Performance optimizations (WAL already enabled in Database.__init__)
+    conn.execute("PRAGMA synchronous = NORMAL")  # Faster than FULL, still safe
+    conn.execute("PRAGMA cache_size = -64000")   # 64MB cache
+    conn.execute("PRAGMA temp_store = MEMORY")
+
+    schema.create_all(db)
+    yield db
+    conn.close()
+
+    # Cleanup DB files
+    for suffix in ["", "-wal", "-shm"]:
+        try:
+            os.unlink(str(db_path) + suffix)
+        except FileNotFoundError:
+            pass
+
+
+@pytest.fixture
+def mem_db():
+    """Create a fresh in-memory database.
+
+    Use this when you explicitly need in-memory behavior (faster but less realistic).
+    Most tests should use fresh_db (disk-based) for realistic I/O testing.
     """
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
@@ -104,27 +151,7 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     return db, alice, bob
 
 
-@pytest.fixture
-def perf_db(tmp_path):
-    """Create a file-based database for performance testing.
-
-    Unlike fresh_db which uses :memory:, this writes to a real file to test
-    actual disk I/O performance. Uses WAL mode and performance pragmas.
-
-    Usage:
-        def test_perf(perf_db):
-            db = perf_db
-            # Operations hit real disk
-    """
-    db_path = tmp_path / "perf_test.db"
-    conn = sqlite3.connect(str(db_path))
-    db = Database(conn)
-
-    # Performance optimizations (WAL already enabled in Database.__init__)
-    conn.execute("PRAGMA synchronous = NORMAL")  # Faster than FULL, still safe
-    conn.execute("PRAGMA cache_size = -64000")   # 64MB cache
-    conn.execute("PRAGMA temp_store = MEMORY")
-
-    schema.create_all(db)
-    yield db
-    conn.close()
+# Aliases for backwards compatibility
+disk_db = fresh_db
+perf_db = fresh_db
+wal_db = fresh_db

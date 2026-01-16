@@ -40,3 +40,4 @@ tests/debug/output/
 # Common test artifacts
 *.db-journal
 .pytest_cache/
+.test_dbs/
