@@ -2,17 +2,19 @@
 
 ## Context
 
-Building a RESTful API for mobile apps (React Native) with web-based development workflow.
+Building a RESTful API and isomorphic React Native prototype.
 
-**Target platforms:**
-- iOS / Android via Expo (production)
-- React Native Web (development + Cypress testing)
+**What this is:**
+- An easy-to-develop, easy-to-test prototype of the mobile app
+- Same React Native code runs in browser (dev) and on device (prod)
+- Browser-first development: hot reload, Chrome DevTools, Cypress
+- API design validated before tackling native mobile complexity
 
 **Key requirements:**
 - Polling-first (100ms intervals when foreground)
-- Lazy loading (paginated messages, chunked files)
+- Lazy loading via FlatList/FlashList (works isomorphically)
 - Cypress-testable via RN Web
-- Maestro for native smoke tests
+- Python HTTP API maps directly to event module functions
 
 ## Phased Approach
 
