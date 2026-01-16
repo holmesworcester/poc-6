@@ -271,24 +271,35 @@ def add_events_to_sync_batch(
                 bucket_xors[bucket_key] = fingerprint
                 bucket_counts[bucket_key] = 1
 
-    # Apply accumulated XORs to buckets
+    # Batch read all existing bucket hashes (single query)
+    existing_buckets = {}
+    rows = safedb.query("""
+        SELECT level, prefix, hash, event_count FROM negentropy_buckets
+        WHERE recorded_by = ?
+    """, (recorded_by,))
+    for row in rows:
+        existing_buckets[(row['level'], row['prefix'])] = (row['hash'], row['event_count'] or 0)
+
+    # Compute new hashes and batch write
+    updates = []
     for (level, prefix), xor_contribution in bucket_xors.items():
         count = bucket_counts[(level, prefix)]
 
-        # Get current hash
-        row = safedb.query_one("""
-            SELECT hash, event_count FROM negentropy_buckets
-            WHERE recorded_by = ? AND level = ? AND prefix = ?
-        """, (recorded_by, level, prefix))
-
-        if row and row['hash']:
-            new_hash = xor_bytes(row['hash'], xor_contribution)
-            new_count = (row['event_count'] or 0) + count
+        if (level, prefix) in existing_buckets:
+            current_hash, current_count = existing_buckets[(level, prefix)]
+            if current_hash:
+                new_hash = xor_bytes(current_hash, xor_contribution)
+            else:
+                new_hash = xor_contribution
+            new_count = current_count + count
         else:
             new_hash = xor_contribution
             new_count = count
 
-        # Upsert bucket
+        updates.append((recorded_by, level, prefix, new_hash, new_count, now))
+
+    # Upsert all buckets
+    for row_peer, level, prefix, new_hash, new_count, updated_at in updates:
         safedb.execute("""
             INSERT INTO negentropy_buckets
             (recorded_by, level, prefix, hash, event_count, updated_at)
@@ -297,7 +308,7 @@ def add_events_to_sync_batch(
                 hash = excluded.hash,
                 event_count = excluded.event_count,
                 updated_at = excluded.updated_at
-        """, (recorded_by, level, prefix, new_hash, new_count, now))
+        """, (row_peer, level, prefix, new_hash, new_count, updated_at))
 
 
 def add_event_to_sync(
