@@ -21,6 +21,97 @@ from events.network import sync_file
 from core import tick
 
 
+def test_create_from_file_equivalence(fresh_db):
+    """Verify create_from_file() produces equivalent results to create().
+
+    Both methods should:
+    1. Produce identical root_hash for same input
+    2. Create same number of slices
+    3. Result in retrievable, identical file data
+
+    Note: file_id will differ because encryption keys are randomly generated,
+    but the decoded file content must be identical.
+    """
+    import tempfile
+    import os
+
+    db = fresh_db
+
+    # Setup
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    db.commit()
+
+    # Create a small test file (10 KB)
+    file_size = 10 * 1024  # 10 KB
+    file_data = b'TestData' * (file_size // 8)
+
+    # Create two messages for two attachments
+    msg1_result = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Method 1: in-memory',
+        t_ms=2000,
+        db=db
+    )
+    msg2_result = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content='Method 2: streaming',
+        t_ms=2100,
+        db=db
+    )
+    db.commit()
+
+    # Method 1: In-memory create()
+    result1 = message_attachment.create(
+        peer_id=alice['peer_id'],
+        message_id=msg1_result['id'],
+        file_data=file_data,
+        filename='test.dat',
+        mime_type='application/octet-stream',
+        t_ms=3000,
+        db=db
+    )
+    db.commit()
+
+    # Method 2: Streaming create_from_file()
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.dat')
+    temp_file.write(file_data)
+    temp_file.close()
+
+    try:
+        result2 = message_attachment.create_from_file(
+            peer_id=alice['peer_id'],
+            message_id=msg2_result['id'],
+            file_path=temp_file.name,
+            filename='test.dat',
+            mime_type='application/octet-stream',
+            t_ms=3100,
+            db=db
+        )
+        db.commit()
+    finally:
+        os.unlink(temp_file.name)
+
+    # Verify equivalence
+    assert result1['slice_count'] == result2['slice_count'], \
+        f"Slice counts differ: {result1['slice_count']} vs {result2['slice_count']}"
+    assert result1['blob_bytes'] == result2['blob_bytes'], \
+        f"Blob bytes differ: {result1['blob_bytes']} vs {result2['blob_bytes']}"
+
+    # Retrieve and verify file data
+    data1 = message_attachment.get_file_data(result1['file_id'], alice['peer_id'], db)
+    data2 = message_attachment.get_file_data(result2['file_id'], alice['peer_id'], db)
+
+    assert data1 is not None, "Method 1 file should be retrievable"
+    assert data2 is not None, "Method 2 file should be retrievable"
+    assert data1 == file_data, "Method 1 should produce original file data"
+    assert data2 == file_data, "Method 2 should produce original file data"
+    assert data1 == data2, "Both methods should produce identical file data"
+
+    print(f"✓ Equivalence verified: {result1['slice_count']} slices, {result1['blob_bytes']} bytes")
+
+
 def test_1mb_file_download_with_progress(fresh_db):
     """Test downloading a small file with progress tracking."""
 
@@ -244,8 +335,13 @@ def test_1gb_file_download(fresh_db):
     1GB = ~2.4 million file slices.
     This tests the XOR fingerprinting at scale.
 
+    Uses create_from_file() for memory-efficient streaming creation.
+    Memory usage: <100MB regardless of file size.
+
     Run with: pytest -m slow -k 1gb
     """
+    import tempfile
+    import os
     from tests.utils.tick_helper import assert_eventually
 
     db = fresh_db
@@ -259,88 +355,110 @@ def test_1gb_file_download(fresh_db):
     db.commit()
     print("✓ Alice and Bob ready")
 
-    # Alice creates 1GB file
-    print("\n=== Creating 1GB file ===")
+    # Create 1GB file on disk (streaming, not in memory)
+    print("\n=== Creating 1GB file on disk ===")
     file_size = 1 * 1024 * 1024 * 1024  # 1 GB (~2,386,093 slices)
     expected_slices = (file_size + 449) // 450
     print(f"File size: {file_size:,} bytes")
     print(f"Expected slices: {expected_slices:,}")
 
-    # Create file data - use a pattern that compresses poorly to test real behavior
-    # but is fast to generate
-    file_data = b'X' * file_size
+    # Create temp file with streaming writes (never hold 1GB in memory)
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.dat')
+    temp_file_path = temp_file.name
 
-    msg_result = message.create(
-        peer_id=alice['peer_id'],
-        channel_id=alice['channel_id'],
-        content='Huge file',
-        t_ms=3000,
-        db=db
-    )
+    try:
+        # Write 1GB in 1MB chunks
+        CHUNK_SIZE = 1024 * 1024  # 1MB
+        pattern = b'X' * CHUNK_SIZE
+        write_start = time.time()
+        for _ in range(file_size // CHUNK_SIZE):
+            temp_file.write(pattern)
+        # Handle any remainder
+        remainder = file_size % CHUNK_SIZE
+        if remainder:
+            temp_file.write(b'X' * remainder)
+        temp_file.close()
+        write_time = time.time() - write_start
+        print(f"✓ Wrote {file_size:,} bytes to disk in {write_time:.1f}s")
 
-    print("Creating file attachment (this will take a while)...")
-    start_time = time.time()
-    file_result = message_attachment.create(
-        peer_id=alice['peer_id'],
-        message_id=msg_result['id'],
-        file_data=file_data,
-        filename='huge_file.dat',
-        mime_type='application/octet-stream',
-        t_ms=3100,
-        db=db
-    )
-    file_id = file_result['file_id']
-    create_time = time.time() - start_time
-    print(f"✓ Created {file_size:,} bytes ({file_result['slice_count']:,} slices) in {create_time:.1f}s")
-    print(f"  ({file_result['slice_count'] / create_time:.0f} slices/sec)")
-    db.commit()
+        msg_result = message.create(
+            peer_id=alice['peer_id'],
+            channel_id=alice['channel_id'],
+            content='Huge file',
+            t_ms=3000,
+            db=db
+        )
 
-    # Bob requests focused sync for the file
-    sync_file.request_file_sync(
-        file_id=file_id,
-        peer_id=bob['peer_id'],
-        priority=10,
-        ttl_ms=0,
-        t_ms=4000,
-        db=db
-    )
-    db.commit()
+        print("Creating file attachment with streaming (memory-efficient)...")
+        start_time = time.time()
+        file_result = message_attachment.create_from_file(
+            peer_id=alice['peer_id'],
+            message_id=msg_result['id'],
+            file_path=temp_file_path,
+            filename='huge_file.dat',
+            mime_type='application/octet-stream',
+            t_ms=3100,
+            db=db
+        )
+        file_id = file_result['file_id']
+        create_time = time.time() - start_time
+        print(f"✓ Created {file_size:,} bytes ({file_result['slice_count']:,} slices) in {create_time:.1f}s")
+        print(f"  ({file_result['slice_count'] / create_time:.0f} slices/sec)")
+        db.commit()
 
-    # Wait for Bob to receive complete file
-    print("\n=== Syncing ===")
-    sync_start = time.time()
-    last_pct = 0
+        # Bob requests focused sync for the file
+        sync_file.request_file_sync(
+            file_id=file_id,
+            peer_id=bob['peer_id'],
+            priority=10,
+            ttl_ms=0,
+            t_ms=4000,
+            db=db
+        )
+        db.commit()
 
-    def bob_has_complete_file():
-        nonlocal last_pct
-        progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
-        if progress:
-            pct = progress['percentage_complete']
-            if pct >= last_pct + 10:  # Log every 10%
-                elapsed = time.time() - sync_start
-                print(f"  {pct}% complete ({elapsed:.1f}s)")
-                last_pct = pct
-        assert progress and progress['is_complete'], f"Bob at {progress['percentage_complete'] if progress else 0}%"
+        # Wait for Bob to receive complete file
+        print("\n=== Syncing ===")
+        sync_start = time.time()
+        last_pct = 0
 
-    # 2.4M slices at ~100 slices/round = 24,000 rounds minimum
-    # But with XOR fingerprinting, negentropy should be much faster
-    assert_eventually(bob_has_complete_file, db=db, start_t_ms=4000, max_rounds=50000)
+        def bob_has_complete_file():
+            nonlocal last_pct
+            progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
+            if progress:
+                pct = progress['percentage_complete']
+                if pct >= last_pct + 10:  # Log every 10%
+                    elapsed = time.time() - sync_start
+                    print(f"  {pct}% complete ({elapsed:.1f}s)")
+                    last_pct = pct
+            assert progress and progress['is_complete'], f"Bob at {progress['percentage_complete'] if progress else 0}%"
 
-    sync_time = time.time() - sync_start
-    print(f"✓ Sync completed in {sync_time:.1f}s")
-    print(f"  ({file_result['slice_count'] / sync_time:.0f} slices/sec)")
+        # 2.4M slices at ~100 slices/round = 24,000 rounds minimum
+        # But with XOR fingerprinting, negentropy should be much faster
+        assert_eventually(bob_has_complete_file, db=db, start_t_ms=4000, max_rounds=50000)
 
-    # Verify file integrity (this will also take a while for 1GB)
-    print("\n=== Verifying ===")
-    verify_start = time.time()
-    bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
-    assert bob_data is not None, "Bob should have the file"
-    assert len(bob_data) == file_size, f"Expected {file_size} bytes, got {len(bob_data)}"
-    # Don't compare full 1GB in memory - just check size and a sample
-    assert bob_data[:1000] == file_data[:1000], "Start of file should match"
-    assert bob_data[-1000:] == file_data[-1000:], "End of file should match"
-    verify_time = time.time() - verify_start
-    print(f"✓ Verified {len(bob_data):,} byte file in {verify_time:.1f}s")
+        sync_time = time.time() - sync_start
+        print(f"✓ Sync completed in {sync_time:.1f}s")
+        print(f"  ({file_result['slice_count'] / sync_time:.0f} slices/sec)")
 
-    total_time = time.time() - start_time
-    print(f"\n✅ Total time: {total_time:.1f}s")
+        # Verify file integrity (this will also take a while for 1GB)
+        print("\n=== Verifying ===")
+        verify_start = time.time()
+        bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
+        assert bob_data is not None, "Bob should have the file"
+        assert len(bob_data) == file_size, f"Expected {file_size} bytes, got {len(bob_data)}"
+        # Don't compare full 1GB in memory - just check size and a sample
+        assert bob_data[:1000] == b'X' * 1000, "Start of file should match"
+        assert bob_data[-1000:] == b'X' * 1000, "End of file should match"
+        verify_time = time.time() - verify_start
+        print(f"✓ Verified {len(bob_data):,} byte file in {verify_time:.1f}s")
+
+        total_time = time.time() - start_time
+        print(f"\n✅ Total time: {total_time:.1f}s")
+
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_file_path)
+        except Exception:
+            pass

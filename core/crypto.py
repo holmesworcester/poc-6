@@ -810,3 +810,52 @@ def derive_slice_nonce(nonce_prefix: bytes, slice_number: int) -> bytes:
     """
     slice_no_bytes = slice_number.to_bytes(4, byteorder='little')
     return nonce_prefix + slice_no_bytes
+
+
+# ===== Incremental Hash Builder =====
+
+class HashBuilder:
+    """Incremental BLAKE2b hash builder for streaming hash computation.
+
+    Uses nacl.hashlib.blake2b which supports .update() for streaming.
+    Produces identical results to compute_file_id() and compute_root_hash()
+    when fed the same concatenated data.
+
+    Example:
+        # Streaming root_hash computation (equivalent to compute_root_hash)
+        builder = HashBuilder(size=32)
+        for ciphertext in slice_ciphertexts:
+            builder.update(ciphertext)
+        root_hash = builder.digest()
+
+        # Streaming file_id computation (equivalent to compute_file_id)
+        builder = HashBuilder(size=16)
+        for ciphertext in slice_ciphertexts:
+            builder.update(ciphertext)
+        file_id = b64encode(builder.digest())
+    """
+
+    def __init__(self, size: int = 32):
+        """Initialize hash builder.
+
+        Args:
+            size: Digest size in bytes (16 for file_id, 32 for root_hash)
+        """
+        from nacl import hashlib as nacl_hashlib
+        self._hasher = nacl_hashlib.blake2b(digest_size=size)
+
+    def update(self, data: bytes) -> None:
+        """Add data to the hash computation.
+
+        Args:
+            data: Bytes to add (e.g., a slice ciphertext)
+        """
+        self._hasher.update(data)
+
+    def digest(self) -> bytes:
+        """Return the current hash digest.
+
+        Returns:
+            Hash bytes (length determined by size parameter)
+        """
+        return self._hasher.digest()
