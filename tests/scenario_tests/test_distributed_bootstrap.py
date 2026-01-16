@@ -125,12 +125,18 @@ def test_device_link_without_remote_invite_blob(fresh_db):
 
 
 def test_user_join_without_remote_invite_blob(fresh_db):
-    """User joining works when invite blob is not in local store.
+    """User joining blocks events (cascade-via-sync) when invite blob is not in local store.
 
     This simulates the distributed case where:
     - Phone creates network and user invite (stored in phone's store)
     - Bob's laptop accepts the invite but cannot access phone's store
-    - Bob's projection derives invite_pubkey from invite_private_key locally
+    - Bob's events are BLOCKED until invite blob arrives via sync
+
+    The cascade flow:
+    1. invite_accepted marks network_id valid (trust anchor)
+    2. Bob's user event blocks on invite_id (waiting for sync)
+    3. Bootstrap connection uses invite_accepteds (has inviter's address)
+    4. When invite blob syncs and projects, cascade unblocks user -> peer_shared
     """
     db = fresh_db
 
@@ -187,31 +193,37 @@ def test_user_join_without_remote_invite_blob(fresh_db):
         )
 
     db.commit()
-    print(f"Bob joined successfully via fallback mechanism")
+    print(f"Bob join() returned (events stored)")
     print(f"  user_id={bob['user_id'][:20]}...")
     print(f"  peer_shared_id={bob['peer_shared_id'][:20]}...")
 
-    # Verify Bob's user was created correctly
+    # With cascade-via-sync, Bob's user should be BLOCKED (not projected) until invite arrives
     bob_user = db.query_one(
         "SELECT * FROM users WHERE user_id = ? AND recorded_by = ?",
         (bob['user_id'], bob['peer_id'])
     )
-    assert bob_user is not None, "Bob's user should be projected"
-    assert bob_user['network_id'] == alice['network_id'], \
-        "Bob should be in Alice's network"
-    print(f"OK: Bob's user projected in correct network")
+    # User should NOT be projected yet - it's blocked waiting for invite_id
+    assert bob_user is None, "Bob's user should be BLOCKED (not projected) until invite syncs"
+    print(f"OK: Bob's user is blocked (waiting for invite_id via sync)")
 
-    # Verify Bob's peer_shared was created and linked
-    bob_peer_shared = db.query_one(
-        "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
-        (bob['peer_shared_id'], bob['peer_id'])
+    # Verify Bob has blocked events (user and peer_shared waiting for invite_id via sync)
+    blocked_count = db.query_one(
+        "SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?",
+        (bob['peer_id'],)
     )
-    assert bob_peer_shared is not None, "Bob's peer_shared should be projected"
-    assert bob_peer_shared['user_id'] == bob['user_id'], \
-        "peer_shared should link to Bob's user"
-    print(f"OK: Bob's peer_shared projected with correct user_id")
+    assert blocked_count['cnt'] > 0, "Bob should have blocked events waiting for invite sync"
+    print(f"OK: Bob has {blocked_count['cnt']} blocked events (waiting for invite_id via sync)")
 
-    print(f"\nPASSED: User join worked without remote invite blob!")
+    # Verify invite_accepteds was created (needed for bootstrap connection)
+    ia_row = db.query_one(
+        "SELECT * FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+        (user_invite_id, bob['peer_id'])
+    )
+    assert ia_row is not None, "invite_accepted should be stored for bootstrap connection"
+    assert ia_row['network_id'] == alice['network_id'], "invite_accepted should have network_id"
+    print(f"OK: invite_accepteds has connection info for bootstrap")
+
+    print(f"\nPASSED: User join correctly blocks until invite syncs (cascade-via-sync)!")
 
 
 def test_invite_accepteds_stores_user_id_for_device_link(fresh_db):

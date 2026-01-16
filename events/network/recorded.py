@@ -188,18 +188,6 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             log.debug(f"recorded.check_deps() skipping foreign local dep: {field}={dep_id}")
             continue
 
-        # Skip invite deps for invites we accepted (distributed bootstrap)
-        # We have the invite_private_key in invite_accepteds, so projectors can
-        # derive invite_pubkey and verify signatures without waiting for the blob
-        if field in ('signed_by', 'invite_id'):
-            accepted_invite = safedb.query_one(
-                "SELECT 1 FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
-                (dep_id, recorded_by)
-            )
-            if accepted_invite:
-                log.debug(f"recorded.check_deps() skipping accepted invite dep: {field}={dep_id[:20]}...")
-                continue
-
         # Check if this dep is valid for this peer
         valid = safedb.query_one(
             "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",

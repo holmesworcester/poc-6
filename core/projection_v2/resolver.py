@@ -76,8 +76,8 @@ def _fetch_dep_row(
         where_clauses.append("recorded_by = ?")
         params.append(recorded_by)
     sql = f"SELECT {columns} FROM {table} WHERE {' AND '.join(where_clauses)}"
-    db = safedb if use_safe else unsafedb
-    return db.query_one(sql, tuple(params))
+    target_db = safedb if use_safe else unsafedb
+    return target_db.query_one(sql, tuple(params))
 
 
 def _resolve_table_dep(

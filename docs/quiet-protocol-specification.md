@@ -389,7 +389,7 @@ When `invite_accepted.project()` runs, it:
 
 2. **Marks `network_id` as valid** — This is the trust anchor. By accepting the invite, the peer trusts this network.
 
-3. **Stores `invite_private_key` in `invite_accepteds`** — This enables the dependency checker to skip invite deps for self-created events (distributed bootstrap), and allows projectors to derive `invite_pubkey` for signature verification.
+3. **Stores `invite_private_key` in `invite_accepteds`** — This enables bootstrap connection to the inviter (address, transit prekey) and allows projectors to derive `invite_pubkey` for signature verification when the invite blob arrives.
 
 4. **Creates the invite prekey from key material** — The invite link contains `invite_private_key` and `invite_prekey_id`. Rather than manual table insertion, projection creates a proper `group_prekey` event from this material. If `group_prekey` event IDs are deterministic from key content, this produces the same `prekey_id` and naturally cascades validity.
 
@@ -408,26 +408,22 @@ When `invite_accepted.project()` runs, it:
 
 4. **Natural cascade**: Uses the standard blocking/unblocking mechanism rather than manual `notify_event_valid()` calls.
 
-### Distributed Bootstrap: Local-Only Projection
+### Distributed Bootstrap: Cascade via Sync
 
-A critical requirement is that **local events must project using only local data**. When joining a network or linking a device, the invite blob exists on the inviter's device, not locally. Projectors cannot wait for sync to complete.
+When joining a network or linking a device, the invite blob exists on the inviter's device, not locally. Events signed by this invite will **block** until the invite blob arrives via sync.
 
-**Solution** — Two mechanisms work together:
+**Bootstrap flow:**
 
-1. **Dependency checking** (`check_deps`): Before an event can project, its dependencies must be valid. For events signed by an invite, `check_deps` looks up `invite_accepteds` — if we accepted this invite (have the private key), skip the invite dependency. This allows the event to proceed to projection without waiting for the invite blob to sync.
+1. `invite_accepted.create()` — Stores invite_private_key and inviter's connection info locally
+2. `user.create()` / `peer_shared.create()` — Events are stored but **block** (invite not yet valid)
+3. Bootstrap connection initiated using `invite_accepteds` (has inviter's address and transit prekey)
+4. Sync with inviter — invite blob arrives
+5. Invite projects (network_id already valid from step 1)
+6. **Cascade unblock** — user → peer_invite → peer_shared → transit_prekey_shared
 
-2. **Projection fallback**: Projectors for `user` and `peer_shared` derive `invite_pubkey` from `invite_private_key` in `invite_accepteds` when the invite blob isn't available. This allows signature verification using local data.
+This relies on the standard validity cascade rather than special-casing bootstrap. Events block until their dependencies are satisfied, then unblock naturally when the invite blob syncs.
 
-This is why `invite_accepted.create()` must happen **before** `user.create()` or `peer_shared.create()` — both mechanisms depend on the invite_private_key being in `invite_accepteds`.
-
-**Ordering in `peer_shared.join()`**:
-```
-1. invite_accepted.create()   → stores invite_private_key locally
-2. peer_shared.create()       → check_deps skips invite dep, projection derives pubkey
-3. transit_prekey.create()    → can now reference the projected peer_shared
-```
-
-This ensures local projection completes immediately. Synced events from other peers go through normal dependency checking and use the `invites` table or store blob for verification.
+**Projection fallback**: When projecting events signed by an invite, projectors can derive `invite_pubkey` from `invite_private_key` in `invite_accepteds` if the invite is in the local store but not yet in the `invites` projection table. This handles the window between receiving the blob and projecting it.
 
 ### Deterministic Key Event IDs
 
