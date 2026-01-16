@@ -11,9 +11,9 @@ import json
 import logging
 from core import crypto
 from core import store
-from events.identity import peer, peer_shared, network as network_module
+from events.identity import peer, peer_shared, network
 from events.content import channel
-from events.group import group as group_module
+from events.group import group
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
         True if peer is an admin, False otherwise
     """
     # Get network_id for admin table lookup
-    network_id = network_module.get_network_id(recorded_by, db)
+    network_id = network.get_network_id(recorded_by, db)
     if not network_id:
         return False
 
@@ -95,12 +95,12 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     peer_shared_id = identity['peer_shared_id']
 
     # Get network
-    network_id = network_module.get_network_id(peer_id, db)
+    network_id = network.get_network_id(peer_id, db)
     if not network_id:
         raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
     # Get all_users group by signature (network-signed group = all_users)
-    all_users_group_id = network_module.get_all_users_group_id(network_id, peer_id, db)
+    all_users_group_id = network.get_all_users_group_id(network_id, peer_id, db)
 
     # Get inviter's user_id
     inviter_user_id = peer_shared.get_user_id(peer_shared_id, peer_id, db)
@@ -129,7 +129,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
 
     # Get key from all_users group
-    group_row = group_module.get_current_key(all_users_group_id, peer_id, db)
+    group_row = group.get_current_key(all_users_group_id, peer_id, db)
     if not group_row:
         raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
 

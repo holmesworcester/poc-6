@@ -10,7 +10,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.identity import peer_shared, user, network as network_module
+from events.identity import peer_shared, user, network
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -92,10 +92,10 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
     from events.group import group_member
 
     # Get network_id to find all_users group
-    network_id = network_module.get_network_id(removed_by_local_peer_id, db)
+    network_id = network.get_network_id(removed_by_local_peer_id, db)
     members = []
     if network_id:
-        all_users_group_id = network_module.get_all_users_group_id(
+        all_users_group_id = network.get_all_users_group_id(
             network_id, removed_by_local_peer_id, db
         )
         if all_users_group_id:
