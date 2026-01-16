@@ -59,38 +59,115 @@ Requires solving:
 
 Phase 1 gives us a working product and validated API design before tackling native complexity.
 
-## Local Dev: No Ports via Vite Proxy
+## Local Dev: Zero Port Management
 
-Frontend uses relative URLs. Vite proxies to Unix socket.
+Unix sockets eliminate "address already in use" errors and port conflicts entirely.
 
 ```
-Frontend: fetch('/api/messages')
-    │
-    ▼
-Vite Dev Server (:5173)
-    │ proxy /api/* → socket
-    ▼
-Python Backend (Unix socket: /tmp/quiet-dev.sock)
+┌─────────────────────────────────────────────────────────────┐
+│ Browser (RN Web / Cypress)                                  │
+│                                                             │
+│   fetch('/api/messages')   ← relative URL, no port          │
+│         │                                                   │
+│         ▼ (HTTP)                                            │
+└─────────┼───────────────────────────────────────────────────┘
+          │
+┌─────────▼───────────────────────────────────────────────────┐
+│ Vite Dev Server (:5173)                    ← only port      │
+│                                                             │
+│   /api/* → proxy to Unix socket                             │
+│   /*     → serve RN Web bundle                              │
+│         │                                                   │
+│         ▼ (Unix socket)                                     │
+└─────────┼───────────────────────────────────────────────────┘
+          │
+┌─────────▼───────────────────────────────────────────────────┐
+│ Python Backend                             ← no port        │
+│                                                             │
+│   listening on /tmp/quiet-api.sock                          │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**vite.config.ts:**
+### Single Dev Command
+
+```json
+// package.json
+{
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "python -m api --socket /tmp/quiet-api.sock",
+    "dev:frontend": "vite"
+  }
+}
+```
+
+```bash
+# Just run this, every time, no thinking
+npm run dev
+
+# Handles:
+# ✓ Cleans up stale sockets automatically
+# ✓ Starts backend + frontend together
+# ✓ No port selection needed
+# ✓ No "address in use" errors
+# ✓ Ctrl+C kills both
+```
+
+### Stale Socket Cleanup
+
+```python
+# api/app.py
+import os
+import socket
+from pathlib import Path
+
+SOCKET_PATH = "/tmp/quiet-api.sock"
+
+def cleanup_stale_socket():
+    """Remove socket file if no server is listening"""
+    sock_path = Path(SOCKET_PATH)
+    if not sock_path.exists():
+        return
+
+    # Try connecting to see if a server is running
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(SOCKET_PATH)
+        s.close()
+        # Server is running - bail out
+        raise SystemExit("Error: API already running on socket")
+    except ConnectionRefusedError:
+        # Stale socket from crashed process - safe to remove
+        sock_path.unlink()
+        print(f"Cleaned up stale socket: {SOCKET_PATH}")
+
+@app.on_event("startup")
+async def startup():
+    cleanup_stale_socket()
+```
+
+### Vite Config
+
 ```typescript
+// vite.config.ts
 export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: { socketPath: '/tmp/quiet-dev.sock' },
+        target: { socketPath: '/tmp/quiet-api.sock' },
       }
     }
   }
 });
 ```
 
-**Benefits:**
-- Zero port configuration in frontend
-- No CORS (same origin)
-- No port conflicts
-- Same code works in prod
+### Benefits
+
+- **No port conflicts** - Unix socket, not TCP port
+- **No stale processes** - Auto-cleanup on startup
+- **No configuration** - Just `npm run dev`
+- **Cypress just works** - Same relative URLs
+- **Frontend code is portable** - No hardcoded URLs
 
 ## Design Philosophy: Keep It Simple
 
