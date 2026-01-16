@@ -10,6 +10,7 @@ from core.projection_v2 import apply as v2_apply
 from core.projection_v2 import resolver as v2_resolver
 from events.group import group_key as group_key_module
 from events.identity import network_name_update as network_name_module
+from events.identity import peer_name_update as peer_name_module
 from events.identity import username_update as username_module
 
 from tests.projection_v2.helpers import get_table_rows
@@ -290,6 +291,71 @@ def test_username_update_parity():
 
     legacy_rows = get_table_rows('user_names', recorded_by, legacy_db)
     v2_rows = get_table_rows('user_names', recorded_by, v2_db)
+
+    assert legacy_rows == v2_rows
+
+
+def test_peer_name_update_parity():
+    recorded_by = 'peer1'
+    recorded_at = 2500
+
+    key_id, _, _, key_bytes, key_data = _build_group_key_event()
+
+    signer_private_key, signer_public_key = crypto.generate_keypair()
+    signer_peer_shared_id = crypto.b64encode(crypto.hash(signer_public_key))
+    signer_peer_shared_pub_b64 = crypto.b64encode(signer_public_key)
+
+    _, target_public_key = crypto.generate_keypair()
+    target_peer_shared_id = crypto.b64encode(crypto.hash(target_public_key))
+    target_peer_shared_pub_b64 = crypto.b64encode(target_public_key)
+
+    legacy_db = _new_db()
+    v2_db = _new_db()
+
+    for db in (legacy_db, v2_db):
+        _insert_group_key(db, recorded_by, key_id, key_bytes, created_at=150)
+        _insert_peer_shared(
+            db,
+            recorded_by,
+            signer_peer_shared_id,
+            peer_id='peer_signer_local',
+            public_key_b64=signer_peer_shared_pub_b64,
+            user_id=None,
+            created_at=150,
+            recorded_at=recorded_at,
+        )
+        _insert_peer_shared(
+            db,
+            recorded_by,
+            target_peer_shared_id,
+            peer_id='peer_target_local',
+            public_key_b64=target_peer_shared_pub_b64,
+            user_id=None,
+            created_at=150,
+            recorded_at=recorded_at,
+        )
+        _mark_valid(db, recorded_by, key_id)
+        _mark_valid(db, recorded_by, signer_peer_shared_id)
+        _mark_valid(db, recorded_by, target_peer_shared_id)
+
+    event_id, signed_event, blob = _build_name_update_event(
+        event_type='peer_name_update',
+        entity_field='peer_id',
+        entity_id=target_peer_shared_id,
+        name='Device X',
+        key_id=key_id,
+        key_data=key_data,
+        signed_by=signer_peer_shared_id,
+        signer_private_key=signer_private_key,
+        created_at=recorded_at,
+        db=legacy_db,
+    )
+
+    _project_name_legacy(peer_name_module, legacy_db, recorded_by, recorded_at, blob, event_id)
+    _project_name_v2(peer_name_module, v2_db, recorded_by, recorded_at, event_id, signed_event)
+
+    legacy_rows = get_table_rows('peer_names', recorded_by, legacy_db)
+    v2_rows = get_table_rows('peer_names', recorded_by, v2_db)
 
     assert legacy_rows == v2_rows
 
