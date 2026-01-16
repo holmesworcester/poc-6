@@ -65,7 +65,7 @@ def cleanup_db(db_path: Path | None):
                 pass
 
 
-def bench_message_sync(mode: str, num_messages: int) -> dict:
+def bench_message_sync(mode: str, num_messages: int, use_batch: bool = False) -> dict:
     reset_state()
     db, db_path = create_db(mode)
 
@@ -78,15 +78,25 @@ def bench_message_sync(mode: str, num_messages: int) -> dict:
 
     # Create messages
     start = time.time()
-    for i in range(num_messages):
-        message.create(
+    if use_batch:
+        contents = [f'Message {i}' for i in range(num_messages)]
+        message.batch_create(
             peer_id=alice['peer_id'],
             channel_id=alice['channel_id'],
-            content=f'Message {i}',
-            t_ms=3000 + i,
-            db=db,
-            return_latest=False
+            contents=contents,
+            start_t_ms=3000,
+            db=db
         )
+    else:
+        for i in range(num_messages):
+            message.create(
+                peer_id=alice['peer_id'],
+                channel_id=alice['channel_id'],
+                content=f'Message {i}',
+                t_ms=3000 + i,
+                db=db,
+                return_latest=False
+            )
     db.commit()
     create_time = time.time() - start
 
@@ -108,6 +118,14 @@ def bench_message_sync(mode: str, num_messages: int) -> dict:
             break
 
     sync_time = time.time() - start
+
+    # Debug: verify final counts
+    alice_count = db.query_one(
+        "SELECT COUNT(*) as c FROM messages WHERE recorded_by = ?",
+        (alice['peer_id'],)
+    )['c']
+    bob_count = count
+
     cleanup_db(db_path)
 
     return {
@@ -116,7 +134,9 @@ def bench_message_sync(mode: str, num_messages: int) -> dict:
         'create_time': create_time,
         'sync_time': sync_time,
         'rounds': rounds,
-        'total': create_time + sync_time
+        'total': create_time + sync_time,
+        'alice_count': alice_count,
+        'bob_count': bob_count
     }
 
 
@@ -125,36 +145,42 @@ def main():
         shutil.rmtree(BENCH_DIR)
 
     print("=" * 70)
-    print("Message Sync Scaling Benchmark")
+    print("Batch vs Individual Creation (small test)")
     print("=" * 70)
 
-    sizes = [100, 500, 1000, 2000]
-    modes = ["memory", "wal", "no-wal"]
+    # Just test 500 messages with all 3 methods
+    size = 500
+    print(f"\n### {size} messages (memory) - CREATE TIME ONLY ###\n")
+    print(f"{'Method':<20} {'Create':<10}")
+    print("-" * 30)
 
-    results = {mode: [] for mode in modes}
+    r_individual = bench_message_sync("memory", size, use_batch=False)
+    print(f"{'individual':<20} {r_individual['create_time']:.2f}s")
 
-    for size in sizes:
-        print(f"\n### {size} messages ###\n")
-        print(f"{'Mode':<10} {'Create':<10} {'Sync':<10} {'Rounds':<8} {'Total':<10}")
-        print("-" * 48)
+    r_batch = bench_message_sync("memory", size, use_batch=True)
+    print(f"{'batch+projection':<20} {r_batch['create_time']:.2f}s")
 
-        for mode in modes:
-            r = bench_message_sync(mode, size)
-            results[mode].append(r)
-            print(f"{r['mode']:<10} {r['create_time']:.2f}s      {r['sync_time']:.2f}s      {r['rounds']:<8} {r['total']:.2f}s")
+    # Test skip_projection (blob creation only)
+    reset_state()
+    db, _ = create_db("memory")
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    db.commit()
 
-    # Estimate 10k
-    print("\n" + "=" * 70)
-    print("Estimates for 10,000 messages (linear extrapolation from 2000):")
-    print("=" * 70 + "\n")
+    start = time.time()
+    contents = [f'Message {i}' for i in range(size)]
+    message.batch_create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        contents=contents,
+        start_t_ms=3000,
+        db=db,
+        skip_projection=True
+    )
+    db.commit()
+    skip_proj_time = time.time() - start
+    print(f"{'batch+skip_proj':<20} {skip_proj_time:.2f}s")
 
-    for mode in modes:
-        r2k = results[mode][-1]  # 2000 message result
-        scale = 10000 / 2000
-        est_create = r2k['create_time'] * scale
-        est_sync = r2k['sync_time'] * scale
-        est_total = est_create + est_sync
-        print(f"{mode:<10}: ~{est_total:.0f}s total (~{est_create:.0f}s create + ~{est_sync:.0f}s sync)")
+    print(f"\nProjection overhead: {r_batch['create_time'] - skip_proj_time:.2f}s ({(r_batch['create_time']/skip_proj_time):.1f}x slower with projection)")
 
     if BENCH_DIR.exists():
         shutil.rmtree(BENCH_DIR)
