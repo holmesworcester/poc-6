@@ -975,7 +975,7 @@ Missed items in one pass will surface on the next pass with probability
 
 Peers periodically create an `intro` events naming the `public_ip` and `public_port` and `peer_shared_id` of two peers. (The peer sending the `intro` might know the peers' external ports when they themselves do not.)
 
-Upon receiving a valid `intro`, each peer immediately sends UDP bursts of `connection` events to the other, which then result in `sync` requests as responses. `intro` events should be processed as quickly as possible, and `intro` events need not be blocked because they will likely be too-late and useless by the time they are unblocked.
+Upon receiving a valid `intro`, each peer immediately sends UDP bursts of `connection` events to the other, which then result in `sync` requests as responses. `intro` events should be processed as quickly as possible. Peers SHOULD ignore intros whose `created_at` is older than `INTRO_TTL_MS` (default 30 seconds) at receipt time; stale intros are dropped (not blocked) because they are likely too late and useless by the time they are unblocked.
 
 Periodic re-sending of `connection` and `sync_request` events have sufficient frequency to be a "keep alive".
 

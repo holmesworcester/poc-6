@@ -17,6 +17,9 @@ SHAREABLE = True  # Intros sync for NAT traversal
 EPHEMERAL = False
 PROJECTION_TABLE = None
 
+# Intros are time-sensitive; drop if too old on receipt.
+INTRO_TTL_MS = 30_000
+
 from typing import Any, Optional, List
 import json
 import logging
@@ -40,6 +43,13 @@ EVENT_SPEC = {
 }
 
 
+def is_stale_intro(created_at: int | None, recorded_at: int | None) -> bool:
+    """Return True when an intro is too old to act on."""
+    if not isinstance(created_at, int) or not isinstance(recorded_at, int):
+        return False
+    return (recorded_at - created_at) > INTRO_TTL_MS
+
+
 def project_pure(ctx: Any) -> ProjectorResult:
     """Pure projector for intro events."""
     event_data = ctx.event_data
@@ -51,6 +61,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not all([signed_by, peer1_id, peer2_id, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if is_stale_intro(created_at, ctx.recorded_at):
+        return ProjectorResult(writes=tuple(), valid_event=True)
 
     writes = (
         WriteOp(
@@ -180,6 +193,13 @@ def project(intro_id: str, recorded_by: str, recorded_at: int, db: Any) -> Optio
     if not all([signed_by, peer1_id, peer2_id, created_at]):
         log.warning(f"intro.project() missing required fields")
         return None
+
+    if is_stale_intro(created_at, recorded_at):
+        log.info(
+            f"intro.project() dropping stale intro {intro_id[:20]}... "
+            f"age_ms={recorded_at - created_at}"
+        )
+        return intro_id
 
     # Verify signature
     # Note: Intros are time-sensitive for NAT hole punching. If the signer's

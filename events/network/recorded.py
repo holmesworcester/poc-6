@@ -396,7 +396,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         )
 
         if resolve_result.status == 'block':
-            # TODO(end): network_intro is time-sensitive; consider dropping when signer is missing instead of blocking.
             missing_deps = list(resolve_result.missing)
             if registry.is_ephemeral(event_type):
                 log.warning(
