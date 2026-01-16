@@ -101,52 +101,55 @@ class TestFormatHuman:
         assert key[:8] in formatted  # Shows hash prefix
 
 
-class TestHashComputation:
-    """Test hash computation for buckets."""
+class TestXORFingerprinting:
+    """Test XOR fingerprinting for bucket hashes."""
 
-    def test_empty_leaf_hash(self):
-        """Empty bucket has empty hash."""
-        assert negentropy.compute_leaf_hash([]) == b''
+    def test_fingerprint_is_16_bytes(self):
+        """Fingerprint is always 16 bytes."""
+        fp = negentropy.compute_fingerprint('abc123')
+        assert len(fp) == 16
 
-    def test_single_event_hash(self):
-        """Single event gets hashed."""
-        h = negentropy.compute_leaf_hash(['abc123'])
-        assert len(h) == 16  # 128-bit hash
-        assert h != b''
+    def test_fingerprint_deterministic(self):
+        """Same event_id produces same fingerprint."""
+        fp1 = negentropy.compute_fingerprint('evt1')
+        fp2 = negentropy.compute_fingerprint('evt1')
+        assert fp1 == fp2
 
-    def test_leaf_hash_deterministic(self):
-        """Same events produce same hash regardless of order."""
-        h1 = negentropy.compute_leaf_hash(['abc', 'def', 'ghi'])
-        h2 = negentropy.compute_leaf_hash(['ghi', 'abc', 'def'])
-        assert h1 == h2
+    def test_fingerprint_different_for_different_events(self):
+        """Different events produce different fingerprints."""
+        fp1 = negentropy.compute_fingerprint('evt1')
+        fp2 = negentropy.compute_fingerprint('evt2')
+        assert fp1 != fp2
 
-    def test_leaf_hash_different_for_different_events(self):
-        """Different events produce different hashes."""
-        h1 = negentropy.compute_leaf_hash(['abc'])
-        h2 = negentropy.compute_leaf_hash(['def'])
-        assert h1 != h2
+    def test_xor_bytes(self):
+        """XOR bytes works correctly."""
+        a = b'\x01\x02\x03\x04'
+        b = b'\x10\x20\x30\x40'
+        result = negentropy.xor_bytes(a, b)
+        assert result == b'\x11\x22\x33\x44'
 
-    def test_parent_hash_empty(self):
-        """Empty children produce empty parent hash."""
-        assert negentropy.compute_parent_hash({}) == b''
-        assert negentropy.compute_parent_hash({'aa': b''}) == b''
+    def test_xor_self_inverse(self):
+        """XORing a value twice returns to original."""
+        original = b'\xaa\xbb\xcc\xdd' * 4
+        fp = negentropy.compute_fingerprint('test')
+        xored = negentropy.xor_bytes(original, fp)
+        restored = negentropy.xor_bytes(xored, fp)
+        assert restored == original
 
-    def test_parent_hash_non_empty(self):
-        """Non-empty children produce hash."""
-        h = negentropy.compute_parent_hash({'aa': b'x' * 16})
-        assert len(h) == 16
+    def test_xor_commutative(self):
+        """XOR order doesn't matter (a^b^c = c^a^b)."""
+        fp1 = negentropy.compute_fingerprint('evt1')
+        fp2 = negentropy.compute_fingerprint('evt2')
+        fp3 = negentropy.compute_fingerprint('evt3')
 
-    def test_parent_hash_deterministic(self):
-        """Parent hash is deterministic regardless of dict order."""
-        h1 = negentropy.compute_parent_hash({
-            'aa': b'a' * 16,
-            'bb': b'b' * 16,
-        })
-        h2 = negentropy.compute_parent_hash({
-            'bb': b'b' * 16,
-            'aa': b'a' * 16,
-        })
-        assert h1 == h2
+        # Order 1: fp1 ^ fp2 ^ fp3
+        result1 = negentropy.xor_bytes(negentropy.xor_bytes(fp1, fp2), fp3)
+        # Order 2: fp3 ^ fp1 ^ fp2
+        result2 = negentropy.xor_bytes(negentropy.xor_bytes(fp3, fp1), fp2)
+        # Order 3: fp2 ^ fp3 ^ fp1
+        result3 = negentropy.xor_bytes(negentropy.xor_bytes(fp2, fp3), fp1)
+
+        assert result1 == result2 == result3
 
 
 class TestEventTracking:
@@ -184,11 +187,11 @@ class TestEventTracking:
             assert row['cnt'] >= 1, f"No bucket at level {level}"
 
 
-class TestHashRecomputation:
-    """Test lazy hash recomputation."""
+class TestXORBucketHashes:
+    """Test XOR fingerprinting produces correct bucket hashes."""
 
-    def test_recompute_leaf_hash(self, db):
-        """Leaf hash computed from events."""
+    def test_bucket_hash_is_xor_of_fingerprints(self, db):
+        """Bucket hash equals XOR of event fingerprints in that bucket."""
         peer_id = 'peer1'
         ts_ms = 1718451045000
 
@@ -199,12 +202,14 @@ class TestHashRecomputation:
         unified_key = negentropy.compute_unified_key('evt1', ts_ms)
         prefix = unified_key[:16]  # Full prefix for prefix_16 level
 
-        h = negentropy.recompute_bucket_hash(db, peer_id, 'prefix_16', prefix)
+        h = negentropy.get_bucket_hash(db, peer_id, 'prefix_16', prefix)
 
-        # Hash should match computation from event IDs in that bucket
-        # Note: evt1 and evt2 may be in different buckets if their hash suffixes differ
+        # Hash should be XOR of fingerprints of events in that bucket
         events_in_bucket = negentropy.get_events_in_bucket(db, peer_id, prefix)
-        expected = negentropy.compute_leaf_hash(events_in_bucket)
+        expected = negentropy.ZERO_HASH
+        for event_id in events_in_bucket:
+            expected = negentropy.xor_bytes(expected, negentropy.compute_fingerprint(event_id))
+
         assert h == expected
 
     def test_get_hashes_at_level(self, db):

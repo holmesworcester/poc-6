@@ -160,40 +160,61 @@ def get_child_prefix_len(level: str) -> int:
 
 
 # ============================================================================
-# Hash computation
+# XOR Fingerprint Hashing (O(1) bucket updates)
 # ============================================================================
 
-def compute_leaf_hash(event_ids: list[str]) -> bytes:
-    """Compute hash for a leaf bucket.
+# Zero hash for empty buckets (16 bytes)
+ZERO_HASH = b'\x00' * 16
 
-    BLAKE2b-128 of sorted concatenated event IDs.
+
+def compute_fingerprint(event_id: str) -> bytes:
+    """Compute fingerprint for an event.
+
+    Returns a 16-byte BLAKE2b hash of the event_id.
+    This is O(1) and works with any event_id format.
+
+    Note: While production event_ids are already hashes, this handles
+    arbitrary formats (like test strings "event_0") consistently.
     """
-    if not event_ids:
-        return b''  # Empty bucket has empty hash
-
-    # Sort for determinism
-    sorted_ids = sorted(event_ids)
-    # Concatenate (event IDs are hex strings, so just join)
-    data = ''.join(sorted_ids).encode('utf-8')
-    # BLAKE2b with 16-byte (128-bit) digest
-    return hashlib.blake2b(data, digest_size=16).digest()
+    return hashlib.blake2b(event_id.encode('utf-8'), digest_size=16).digest()
 
 
-def compute_parent_hash(child_hashes: dict[str, bytes]) -> bytes:
-    """Compute hash for a parent bucket from child hashes.
+def xor_bytes(a: bytes, b: bytes) -> bytes:
+    """XOR two byte strings of equal length."""
+    return bytes(x ^ y for x, y in zip(a, b))
 
-    BLAKE2b-128 of sorted (prefix, hash) pairs, excluding empty children.
+
+def xor_into_bucket(db, recorded_by: str, level: str, prefix: str, fingerprint: bytes, t_ms: int) -> None:
+    """XOR a fingerprint into a bucket hash.
+
+    Creates bucket with the fingerprint if it doesn't exist.
+    Updates existing bucket by XORing the fingerprint into its hash.
     """
-    # Filter out empty children
-    non_empty = {k: v for k, v in child_hashes.items() if v}
-    if not non_empty:
-        return b''  # All children empty -> parent empty
+    safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Sort by prefix for determinism
-    items = sorted(non_empty.items())
-    # Concatenate prefix (as utf-8) + hash
-    data = b''.join(k.encode('utf-8') + h for k, h in items)
-    return hashlib.blake2b(data, digest_size=16).digest()
+    # Get current hash (or zero if bucket doesn't exist)
+    row = safedb.query_one("""
+        SELECT hash FROM negentropy_buckets
+        WHERE recorded_by = ? AND level = ? AND prefix = ?
+    """, (recorded_by, level, prefix))
+
+    if row and row['hash']:
+        current_hash = row['hash']
+        new_hash = xor_bytes(current_hash, fingerprint)
+    else:
+        # New bucket starts with just this fingerprint
+        new_hash = fingerprint
+
+    # Upsert the bucket with new hash
+    safedb.execute("""
+        INSERT INTO negentropy_buckets
+        (recorded_by, level, prefix, hash, event_count, updated_at)
+        VALUES (?, ?, ?, ?, 1, ?)
+        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
+            hash = excluded.hash,
+            event_count = event_count + 1,
+            updated_at = excluded.updated_at
+    """, (recorded_by, level, prefix, new_hash, t_ms))
 
 
 # ============================================================================
@@ -207,8 +228,8 @@ def add_events_to_sync_batch(
 ) -> None:
     """Add multiple events to the sync system efficiently.
 
-    Batches inserts and marks each unique bucket stale only once.
-    Much faster than calling add_event_to_sync() in a loop.
+    Uses XOR fingerprinting for O(1) bucket hash updates.
+    Each event's fingerprint is XORed into all ancestor bucket hashes.
 
     Args:
         db: Database connection
@@ -221,38 +242,62 @@ def add_events_to_sync_batch(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    # Collect unique buckets per level
-    buckets_by_level: dict[str, set[str]] = {level: set() for level in LEVELS}
+    # Accumulate XOR contributions per bucket for batch update
+    # bucket_key = (level, prefix) -> accumulated fingerprint XOR
+    bucket_xors: dict[tuple[str, str], bytes] = {}
+    bucket_counts: dict[tuple[str, str], int] = {}
 
-    # Batch insert events and collect bucket prefixes
     for event_id, created_at in events:
         unified_key = compute_unified_key(event_id, created_at)
+        fingerprint = compute_fingerprint(event_id)
 
-        # Insert event
+        # Insert event into negentropy_events table
         safedb.execute("""
             INSERT OR IGNORE INTO negentropy_events
             (recorded_by, event_id, unified_key, created_at)
             VALUES (?, ?, ?, ?)
         """, (recorded_by, event_id, unified_key, created_at))
 
-        # Collect unique bucket prefixes at each level
+        # XOR fingerprint into all ancestor buckets
         for level in LEVELS:
             prefix_len = LEVEL_PREFIX_LEN[level]
             prefix = unified_key[:prefix_len]
-            buckets_by_level[level].add(prefix)
+            bucket_key = (level, prefix)
 
-    # Mark all affected buckets as stale (NULL hash)
-    # Hash computation is deferred to get_root_hash() when outgoing sync needs it
-    # This allows many events to be inserted before a single hash recomputation pass
-    for level, prefixes in buckets_by_level.items():
-        for prefix in prefixes:
-            safedb.execute("""
-                INSERT INTO negentropy_buckets
-                (recorded_by, level, prefix, hash, event_count, updated_at)
-                VALUES (?, ?, ?, NULL, 0, ?)
-                ON CONFLICT (recorded_by, level, prefix)
-                DO UPDATE SET hash = NULL, updated_at = ?
-            """, (recorded_by, level, prefix, now, now))
+            if bucket_key in bucket_xors:
+                bucket_xors[bucket_key] = xor_bytes(bucket_xors[bucket_key], fingerprint)
+                bucket_counts[bucket_key] += 1
+            else:
+                bucket_xors[bucket_key] = fingerprint
+                bucket_counts[bucket_key] = 1
+
+    # Apply accumulated XORs to buckets
+    for (level, prefix), xor_contribution in bucket_xors.items():
+        count = bucket_counts[(level, prefix)]
+
+        # Get current hash
+        row = safedb.query_one("""
+            SELECT hash, event_count FROM negentropy_buckets
+            WHERE recorded_by = ? AND level = ? AND prefix = ?
+        """, (recorded_by, level, prefix))
+
+        if row and row['hash']:
+            new_hash = xor_bytes(row['hash'], xor_contribution)
+            new_count = (row['event_count'] or 0) + count
+        else:
+            new_hash = xor_contribution
+            new_count = count
+
+        # Upsert bucket
+        safedb.execute("""
+            INSERT INTO negentropy_buckets
+            (recorded_by, level, prefix, hash, event_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
+                hash = excluded.hash,
+                event_count = excluded.event_count,
+                updated_at = excluded.updated_at
+        """, (recorded_by, level, prefix, new_hash, new_count, now))
 
 
 def add_event_to_sync(
@@ -271,82 +316,31 @@ def add_event_to_sync(
     add_events_to_sync_batch(db, recorded_by, [(event_id, created_at)])
 
 
-def recompute_bucket_hash(
+def get_bucket_hash(
     db,
     recorded_by: str,
     level: str,
     prefix: str
 ) -> bytes:
-    """Recompute hash for a bucket if stale.
+    """Get hash for a bucket.
 
-    For leaf buckets: hash of sorted event IDs.
-    For parent buckets: hash of sorted (child_prefix, child_hash) pairs.
+    With XOR fingerprinting, hashes are always current - just read from DB.
+    Returns empty bytes if bucket doesn't exist.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Check if already computed
     row = safedb.query_one("""
         SELECT hash FROM negentropy_buckets
         WHERE recorded_by = ? AND level = ? AND prefix = ?
     """, (recorded_by, level, prefix))
 
-    if row and row['hash'] is not None:
+    if row and row['hash']:
         return row['hash']
+    return b''
 
-    # Compute hash
-    if level == 'prefix_16':
-        # Leaf: hash of event IDs
-        prefix_pattern = prefix + '%'
-        events = safedb.query("""
-            SELECT event_id FROM negentropy_events
-            WHERE recorded_by = ? AND unified_key LIKE ?
-            ORDER BY event_id
-        """, (recorded_by, prefix_pattern))
-        event_ids = [r['event_id'] for r in events]
-        hash_val = compute_leaf_hash(event_ids)
-    else:
-        # Parent: hash of child hashes
-        child_level = get_child_level(level)
-        child_prefix_len = LEVEL_PREFIX_LEN[child_level]
 
-        if level == 'root':
-            # Root's children are all prefix_2 buckets
-            children = safedb.query("""
-                SELECT prefix, hash FROM negentropy_buckets
-                WHERE recorded_by = ? AND level = ?
-            """, (recorded_by, child_level))
-        else:
-            # Find children with matching prefix start
-            prefix_pattern = prefix + '%'
-            children = safedb.query("""
-                SELECT prefix, hash FROM negentropy_buckets
-                WHERE recorded_by = ? AND level = ?
-                AND prefix LIKE ? AND length(prefix) = ?
-            """, (recorded_by, child_level, prefix_pattern, child_prefix_len))
-
-        # Recursively ensure children are computed
-        child_hashes = {}
-        for child_row in children:
-            child_prefix = child_row['prefix']
-            child_hash = child_row['hash']
-            if child_hash is None:
-                child_hash = recompute_bucket_hash(db, recorded_by, child_level, child_prefix)
-            child_hashes[child_prefix] = child_hash
-
-        hash_val = compute_parent_hash(child_hashes)
-
-    # Store computed hash
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    safedb.execute("""
-        INSERT INTO negentropy_buckets
-        (recorded_by, level, prefix, hash, event_count, updated_at)
-        VALUES (?, ?, ?, ?, 0, ?)
-        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
-            hash = excluded.hash,
-            updated_at = excluded.updated_at
-    """, (recorded_by, level, prefix, hash_val, now))
-
-    return hash_val
+# Alias for backwards compatibility
+recompute_bucket_hash = get_bucket_hash
 
 
 def get_hashes_at_level(
@@ -357,10 +351,10 @@ def get_hashes_at_level(
 ) -> dict[str, bytes]:
     """Get all bucket hashes at a level, optionally filtered by parent prefix.
 
-    Recomputes stale hashes as needed.
+    With XOR fingerprinting, hashes are always current - just read from DB.
 
     Returns:
-        Dict mapping prefix -> hash
+        Dict mapping prefix -> hash (excludes empty buckets)
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     level_prefix_len = LEVEL_PREFIX_LEN[level]
@@ -372,23 +366,17 @@ def get_hashes_at_level(
             SELECT prefix, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
             AND prefix LIKE ? AND length(prefix) = ?
+            AND hash IS NOT NULL
         """, (recorded_by, level, prefix_pattern, level_prefix_len))
     else:
         # All buckets at this level
         rows = safedb.query("""
             SELECT prefix, hash FROM negentropy_buckets
             WHERE recorded_by = ? AND level = ?
+            AND hash IS NOT NULL
         """, (recorded_by, level))
 
-    result = {}
-    for row in rows:
-        prefix = row['prefix']
-        hash_val = row['hash']
-        if hash_val is None:
-            hash_val = recompute_bucket_hash(db, recorded_by, level, prefix)
-        result[prefix] = hash_val
-
-    return result
+    return {row['prefix']: row['hash'] for row in rows}
 
 
 def get_events_in_bucket(
@@ -930,29 +918,8 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     for peer_row in local_peers:
         peer_id = peer_row['peer_id']
 
-        # OPTIMIZATION: Check for stale buckets before expensive hash recomputation
-        # If no stale buckets, use cached root hash from DB
-        safedb = create_safe_db(db, recorded_by=peer_id)
-        stale_check = safedb.query_one(
-            "SELECT COUNT(*) as c FROM negentropy_buckets WHERE recorded_by = ? AND hash IS NULL",
-            (peer_id,)
-        )
-        has_stale = stale_check and stale_check['c'] > 0
-
-        if not has_stale:
-            # No stale buckets - try to use cached root hash
-            cached_root = safedb.query_one(
-                "SELECT hash FROM negentropy_buckets WHERE recorded_by = ? AND level = 'root' AND prefix = ''",
-                (peer_id,)
-            )
-            if cached_root and cached_root['hash']:
-                our_root_hash = cached_root['hash']
-            else:
-                # No cached root, need to compute
-                our_root_hash = get_root_hash(db, peer_id)
-        else:
-            # Has stale buckets - must recompute
-            our_root_hash = get_root_hash(db, peer_id)
+        # With XOR fingerprinting, root hash is always current - just read it
+        our_root_hash = get_root_hash(db, peer_id)
 
         # Get all active connections using connection module interface
         connections = conn_module.get_connections(peer_id, t_ms, db)
