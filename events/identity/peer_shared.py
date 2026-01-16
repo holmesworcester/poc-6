@@ -127,6 +127,22 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
                     user_id = invite_data.get('user_id')
                     log.info(f"peer_shared.project() got invite_pubkey from store blob (bootstrap case)")
 
+        # Fallback: Derive invite_pubkey from invite_private_key in invite_accepteds
+        # This supports distributed bootstrap where invite blob is on a different device
+        owner_peer_id = event_data['peer_id']
+        if not invite_pubkey_bytes and owner_peer_id == recorded_by:
+            ia_row = safedb.query_one(
+                "SELECT invite_private_key, user_id FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+                (invite_id, recorded_by)
+            )
+            if ia_row and ia_row['invite_private_key']:
+                from nacl.signing import SigningKey
+                priv_key = ia_row['invite_private_key']
+                signing_key = SigningKey(priv_key)
+                invite_pubkey_bytes = bytes(signing_key.verify_key)
+                user_id = ia_row['user_id']
+                log.info(f"[PEER_SHARED_PROJECT] Derived invite_pubkey from invite_accepteds (distributed bootstrap)")
+
         if not invite_pubkey_bytes:
             log.warning(f"peer_shared.project() invite_id={invite_id[:20]}... not available yet")
             return None
@@ -408,24 +424,15 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         )
         log.info(f"peer_shared.join() stored invite prekey: {created_prekey_id[:20]}... (expected: {prekey_id[:20]}...)")
 
-    # 1. Create peer_shared signed by peer_invite (proves access to invite)
-    peer_shared_id = create(
-        peer_id=peer_id,
-        t_ms=t_ms,
-        db=db,
-        invite_id=peer_invite_id,
-        invite_private_key=peer_invite_private_key,
-        device_name=device_name
-    )
-    log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
-
-    # 2. Create invite_accepted to event-source the secrets (triggers notify_event_valid cascade)
-    # Build invite_link_data for peer invites (mode=peer) - no network_id since this is device linking
+    # 1. Create invite_accepted FIRST - stores invite_private_key in invite_accepteds
+    # This MUST happen before peer_shared.create() so peer_shared.project() can
+    # derive invite_pubkey from the stored private key (distributed bootstrap case)
     from events.identity import invite_accepted
     peer_invite_link_data = {
         'invite_id': peer_invite_id,
         'invite_prekey_id': prekey_id,
         'invite_private_key': crypto.b64encode(peer_invite_private_key),
+        'user_id': user_id,  # User being linked to (for device linking)
         # Peer invites don't have network_id - they link devices to existing users
     }
     invite_accepted_id = invite_accepted.create(
@@ -435,6 +442,17 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         db=db
     )
     log.info(f"peer_shared.join() created invite_accepted: {invite_accepted_id[:20]}...")
+
+    # 2. NOW create peer_shared - projection can derive invite_pubkey from invite_accepteds
+    peer_shared_id = create(
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db,
+        invite_id=peer_invite_id,
+        invite_private_key=peer_invite_private_key,
+        device_name=device_name
+    )
+    log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
 
     # 3. Auto-create transit_prekey + transit_prekey_shared for sync
     from events.network import transit_prekey, transit_prekey_shared
