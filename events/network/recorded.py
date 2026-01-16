@@ -133,14 +133,13 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # Event types with NO dependencies (root events or self-signed)
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
-        'peer_shared',      # Self-signed, peer_id is foreign local
         'connection',       # Ephemeral, auth handled in projection
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
     }
-    # Note: peer_shared is NOT in NO_DEPS_TYPES - it's signed by invite_id
-    # and must wait for that invite to be valid before projecting
+    # Note: peer_shared is NOT in NO_DEPS_TYPES - invite-based peer_shared
+    # is signed by invite_id and must wait for that invite to be valid
 
     if event_type in NO_DEPS_TYPES:
         return []
@@ -148,7 +147,8 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # For invite events, only check signed_by (group/channel are metadata copied into invite)
     # For message_deletion, only check signed_by (message may not exist yet)
     # For group_key_shared, only check signed_by (key_id is BEING PROVIDED, not a dependency)
-    SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared'}
+    # For peer_shared, only check signed_by (invite_id for invite-based, self-signed otherwise)
+    SIGNER_ONLY_TYPES = {'invite', 'message_deletion', 'group_key_shared', 'peer_shared'}
     if event_type in SIGNER_ONLY_TYPES:
         dep_fields = ['signed_by']
     # For user events, check invite (which contains group/channel stubs) not group/channel directly
@@ -487,6 +487,41 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             from events.group.group_key_shared import retry_pending_name_updates
 
             retry_pending_name_updates(recorded_by, db)
+
+        if event_type == 'invite_accepted':
+            # v2 projector writes to invite_accepteds table, but we also need to:
+            # 1. Store network_id in trust_anchors (NOT valid_events - network validates when it arrives)
+            # 2. Store inviter's peer_shared blob from link data
+            import base64
+
+            invite_link_data = event_data.get('invite_link_data', {})
+            network_id = invite_link_data.get('network_id')
+            inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
+            inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
+
+            if network_id:
+                # Store in trust_anchors - network will validate when it arrives via sync
+                safedb.execute(
+                    "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
+                    (network_id, recorded_by, recorded_at)
+                )
+                log.warning(f"[INVITE_ACCEPTED_V2] stored network_id={network_id[:20]}... in trust_anchors (will validate on arrival)")
+            else:
+                log.warning(f"[INVITE_ACCEPTED_V2] no network_id in invite_link_data, keys={list(invite_link_data.keys())}")
+
+            # Store inviter's peer_shared blob from link data (for sync)
+            if inviter_peer_shared_blob_b64 and inviter_peer_shared_id:
+                padding = 4 - len(inviter_peer_shared_blob_b64) % 4
+                if padding != 4:
+                    inviter_peer_shared_blob_b64 += '=' * padding
+                inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64)
+
+                stored_ps_id = store.blob(inviter_peer_shared_blob, recorded_at, True, unsafedb)
+                log.warning(f"[INVITE_ACCEPTED_V2] stored inviter peer_shared blob, id={stored_ps_id[:20]}...")
+
+                # Create recorded wrapper for inviter's peer_shared so it can be projected
+                ps_recorded_id = create(stored_ps_id, recorded_by, recorded_at, db, return_dupes=False)
+                log.warning(f"[INVITE_ACCEPTED_V2] created recorded wrapper for inviter peer_shared")
 
         projected_id = ref_id
     else:

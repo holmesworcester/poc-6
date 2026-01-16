@@ -13,8 +13,104 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - polymorphic signer (network, peer_shared, or user)
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {
+        'admin_grant': {
+            'source': 'table',
+            'table': 'admins',
+            'key': 'admin_id',
+            'key_from': 'admin_grant',
+            'fields': ['admin_id', 'user_id'],
+            'required_if_present': True,
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for invite events.
+
+    Invites can be signed by network (bootstrap) or peer_shared (ongoing).
+    The resolver handles signature verification. This projector just writes
+    the invite to the invites table.
+
+    Writes to: invites
+    """
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'invite':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    signed_by = event_data.get('signed_by')
+    if not signed_by:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract fields
+    invite_pubkey = event_data.get('invite_pubkey')
+    if not invite_pubkey:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    mode = event_data.get('mode', 'user')
+    network_id = event_data.get('network_id')
+    group_id = event_data.get('group_id')
+    user_id = event_data.get('user_id')  # For mode='peer'
+    created_at = event_data.get('created_at')
+
+    # Determine inviter_id from signed_by
+    # For ongoing invites, signed_by IS the inviter's peer_shared_id
+    # For bootstrap invites signed by network_id, use inviter_peer_shared_id if available
+    inviter_id = signed_by
+    if signed_by == network_id:
+        # Bootstrap invite signed by network - use inviter_peer_shared_id if available
+        inviter_id = event_data.get('inviter_peer_shared_id') or signed_by
+
+    # Validate admin_grant chain for ongoing invites (mode=user) if present
+    signer = ctx.signer or {}
+    admin_grant = event_data.get('admin_grant')
+
+    if admin_grant and signed_by != network_id:
+        # Ongoing invite with admin_grant - verify signer is admin
+        # The signer's user_id should match the admin_grant's user_id
+        signer_user_id = signer.get('user_id')
+        grant_row = ctx.deps.get('admin_grant')
+        if not grant_row or not signer_user_id:
+            # Can't validate admin chain - let legacy projector handle
+            pass
+        elif grant_row.get('user_id') != signer_user_id:
+            # Admin grant doesn't authorize this signer
+            return ProjectorResult(writes=tuple(), valid_event=False)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='invites',
+            values={
+                'invite_id': ctx.event_id,
+                'invite_pubkey': invite_pubkey,
+                'group_id': group_id or '',  # Empty string if None (schema has NOT NULL)
+                'inviter_id': inviter_id,
+                'mode': mode,
+                'user_id': user_id,  # For mode='peer'
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -255,6 +351,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'group_id': all_users_group_id,  # All users group (for adding joiner)
         'inviter_user_id': inviter_user_id,  # For admin validation during projection
         'signed_by': peer_shared_id,  # Also serves as inviter_peer_shared_id (redundancy removed)
+        'signer_type': 'peer_shared',  # v2: ongoing invites are signed by peer_shared
         'created_at': t_ms
     }
 
@@ -576,12 +673,17 @@ def create_peer_invite(
     invite_private_key, invite_pubkey = crypto.generate_keypair()
 
     # Create peer invite event
+    # Determine signer_type: user_id for first peer (bootstrap), peer_shared_id for later
+    # If signer_id matches user_id, it's a bootstrap case (self-signed by user)
+    signer_type = 'user' if signer_id == user_id else 'peer_shared'
+
     event_data = {
         'type': 'invite',
         'mode': 'peer',
         'user_id': user_id,  # Which user this peer will link to
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': signer_id,  # user_id for first peer, peer_shared_id for later
+        'signer_type': signer_type,  # v2: type of signer for verification
         'created_at': t_ms
     }
 
@@ -638,6 +740,7 @@ def create_bootstrap_user_invite(
         'network_id': network_id,
         'invite_pubkey': crypto.b64encode(invite_pubkey),
         'signed_by': network_id,  # Bootstrap: signed by network key
+        'signer_type': 'network',  # v2: bootstrap invites signed by network
         'created_at': t_ms
     }
 

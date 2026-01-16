@@ -12,8 +12,103 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - signed by invite_id
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {
+        'invite': {
+            'source': 'table',
+            'table': 'invites',
+            'key': 'invite_id',
+            'key_from': 'invite_id',
+            'fields': ['invite_id', 'invite_pubkey', 'group_id'],
+        },
+    },
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for user events.
+
+    User events represent network membership, signed by invite_id.
+    The resolver handles signature verification with invite_pubkey.
+
+    Writes to: users, group_members (if invite has group_id)
+    """
+    event_data = ctx.event_data
+
+    if event_data.get('type') != 'user':
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    invite_id = event_data.get('invite_id')
+    signed_by = event_data.get('signed_by')
+
+    if not invite_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if signed_by != invite_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract user fields
+    user_pubkey = event_data.get('user_pubkey', '')
+    network_id = event_data.get('network_id')
+    created_at = event_data.get('created_at')
+
+    # Try to get network_id from invite dep if not in event
+    invite_row = ctx.deps.get('invite')
+    if not network_id and invite_row:
+        # network_id might be in invite event, but invites table doesn't store it
+        # Leave as None - legacy projector has more complex logic
+        pass
+
+    writes = [
+        WriteOp(
+            op='insert',
+            table='users',
+            values={
+                'user_id': ctx.event_id,
+                'name': '',  # Placeholder - real name from encrypted username_update
+                'network_id': network_id,
+                'created_at': created_at,
+                'user_pubkey': user_pubkey,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    ]
+
+    # Add to group_members if invite has group_id
+    if invite_row and invite_row.get('group_id'):
+        group_id = invite_row['group_id']
+        inviter_peer_shared_id = invite_row.get('inviter_id', signed_by)
+        writes.append(
+            WriteOp(
+                op='insert',
+                table='group_members',
+                values={
+                    'member_id': ctx.event_id,  # Use user_id as member_id
+                    'group_id': group_id,
+                    'user_id': ctx.event_id,
+                    'added_by': inviter_peer_shared_id,
+                    'created_at': created_at,
+                    'recorded_by': ctx.recorded_by,
+                    'recorded_at': ctx.recorded_at,
+                },
+            )
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def create(peer_id: str, name: str, t_ms: int, db: Any,
@@ -69,6 +164,7 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
         'type': 'user',
         'invite_id': invite_id,  # Reference to invite that authorized this user
         'signed_by': invite_id,  # Polymorphic signer field (verified with invite_pubkey)
+        'signer_type': 'invite',  # v2: user events are signed by invite
         'user_pubkey': crypto.b64encode(user_pubkey),  # User's OWN public key (for signing first peer invite)
         'created_at': t_ms
     }

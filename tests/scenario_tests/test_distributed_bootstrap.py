@@ -1,11 +1,9 @@
 """
-Scenario test: Distributed bootstrap - local-only projection.
+Scenario test: Distributed bootstrap - cascade via sync.
 
-Tests that device linking works correctly when the invite blob is NOT accessible
-locally (simulating the distributed case where phone and laptop have separate stores).
-
-The fix: Projectors derive invite_pubkey from invite_private_key stored in
-invite_accepteds, eliminating the need to fetch invite blobs from remote peers.
+Tests that device linking works correctly in a distributed scenario where phone
+and laptop eventually sync to exchange events. The v2 projection model blocks
+until dependencies are valid (delivered via sync), ensuring proper causal ordering.
 """
 import sqlite3
 from unittest import mock
@@ -16,12 +14,18 @@ from tests.utils import tick_helper
 
 
 def test_device_link_without_remote_invite_blob(fresh_db):
-    """Device linking works when invite blob is not in local store.
+    """Device linking blocks events (cascade-via-sync) when invite blob is not in local store.
 
     This simulates the distributed case where:
     - Phone creates the peer invite (stored in phone's store)
     - Laptop accepts the invite but cannot access phone's store
-    - Laptop's projection derives invite_pubkey from invite_private_key locally
+    - Laptop's peer_shared is BLOCKED until invite blob arrives via sync
+
+    The cascade flow:
+    1. invite_accepted stores invite_private_key locally
+    2. peer_shared event blocks on invite_id (waiting for sync)
+    3. Bootstrap connection uses invite_accepteds (has inviter's address)
+    4. When invite blob syncs and projects, cascade unblocks peer_shared
     """
     db = fresh_db
 
@@ -67,9 +71,6 @@ def test_device_link_without_remote_invite_blob(fresh_db):
     # Save original store.get
     original_store_get = store.get
 
-    # Track if fallback was used (via logging or explicit check)
-    fallback_used = {'value': False}
-
     def patched_store_get(blob_id, db_conn):
         """Return None for the peer invite blob, simulating distributed isolation."""
         if blob_id == peer_invite_id:
@@ -92,36 +93,42 @@ def test_device_link_without_remote_invite_blob(fresh_db):
         )
 
     db.commit()
-    print(f"Laptop linked successfully via fallback mechanism")
+    print(f"Laptop join() returned (events stored)")
     print(f"  peer_id={alice_laptop['peer_id'][:20]}...")
     print(f"  user_id={alice_laptop['user_id'][:20]}...")
 
-    # Verify both devices have the same user_id
+    # Verify both devices have the same user_id (from invite_accepteds, not peer_shared)
     assert alice_laptop['user_id'] == alice_phone['user_id'], \
         "Both devices should have same user_id"
     print(f"OK: Both devices share user_id: {alice_laptop['user_id'][:20]}...")
 
-    # Verify peer_shared was projected correctly (is in peers_shared table)
+    # With cascade-via-sync, peer_shared should be BLOCKED (not projected) until invite arrives
     laptop_peer_shared = db.query_one(
         "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
         (alice_laptop['peer_shared_id'], alice_laptop['peer_id'])
     )
-    assert laptop_peer_shared is not None, "peer_shared should be projected"
-    assert laptop_peer_shared['user_id'] == alice_phone['user_id'], \
-        "peer_shared should have correct user_id"
-    print(f"OK: peer_shared projected with correct user_id")
+    # peer_shared should NOT be projected yet - it's blocked waiting for invite_id
+    assert laptop_peer_shared is None, "peer_shared should be BLOCKED (not projected) until invite syncs"
+    print(f"OK: peer_shared is blocked (waiting for invite_id via sync)")
 
-    # Verify peer_self was updated correctly
-    peer_self_row = db.query_one(
-        "SELECT * FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-        (alice_laptop['peer_id'], alice_laptop['peer_id'])
+    # Verify laptop has blocked events waiting for invite sync
+    blocked_count = db.query_one(
+        "SELECT COUNT(*) as cnt FROM blocked_events_ephemeral WHERE recorded_by = ?",
+        (alice_laptop['peer_id'],)
     )
-    assert peer_self_row is not None, "peer_self should be populated"
-    assert peer_self_row['user_id'] == alice_phone['user_id'], \
-        "peer_self should have correct user_id"
-    print(f"OK: peer_self updated with correct user_id")
+    assert blocked_count['cnt'] > 0, "Laptop should have blocked events waiting for invite sync"
+    print(f"OK: Laptop has {blocked_count['cnt']} blocked events (waiting for invite_id via sync)")
 
-    print(f"\nPASSED: Distributed bootstrap worked without remote invite blob!")
+    # Verify invite_accepteds was created (needed for bootstrap connection)
+    ia_row = db.query_one(
+        "SELECT * FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
+        (peer_invite_id, alice_laptop['peer_id'])
+    )
+    assert ia_row is not None, "invite_accepted should be stored for bootstrap connection"
+    assert ia_row['user_id'] == alice_phone['user_id'], "invite_accepted should have user_id"
+    print(f"OK: invite_accepteds has connection info for bootstrap")
+
+    print(f"\nPASSED: Device link correctly blocks until invite syncs (cascade-via-sync)!")
 
 
 def test_user_join_without_remote_invite_blob(fresh_db):
