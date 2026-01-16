@@ -8,7 +8,7 @@ Provides utilities for:
 from typing import Any
 from core import crypto
 from core import store
-from core.db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db
 
 
 def build_signed_event(
@@ -157,52 +157,3 @@ def get_blocked_deps(recorded_id: str, recorded_by: str, db: Any) -> list[str]:
         (recorded_id, recorded_by)
     )
     return [row['dep_event_id'] for row in rows]
-
-
-class MockResolveResult:
-    """Mock ResolveResult for testing before resolver is implemented.
-
-    This mirrors the real ResolveResult from core/projection_v2/types.py
-    """
-
-    def __init__(
-        self,
-        status: str,
-        ctx: Any = None,
-        missing: tuple[str, ...] = (),
-        error: str | None = None,
-    ):
-        self.status = status
-        self.ctx = ctx
-        self.missing = missing
-        self.error = error
-
-    def __repr__(self) -> str:
-        return f"MockResolveResult(status={self.status!r}, missing={self.missing}, error={self.error!r})"
-
-
-def mock_resolve_missing_deps(missing_dep_ids: list[str]) -> MockResolveResult:
-    """Create a mock block result for missing dependencies."""
-    return MockResolveResult(
-        status='block',
-        ctx=None,
-        missing=tuple(missing_dep_ids),
-    )
-
-
-def mock_resolve_invalid_signature() -> MockResolveResult:
-    """Create a mock reject result for invalid signature."""
-    return MockResolveResult(
-        status='reject',
-        ctx=None,
-        error='invalid signature',
-    )
-
-
-def mock_resolve_missing_signer_type() -> MockResolveResult:
-    """Create a mock reject result for missing signer_type."""
-    return MockResolveResult(
-        status='reject',
-        ctx=None,
-        error='missing signer_type in event_data',
-    )

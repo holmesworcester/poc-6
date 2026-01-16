@@ -4,6 +4,7 @@ import sqlite3
 from core.db import Database
 from core import schema
 from core import crypto
+from events import registry
 
 
 @pytest.fixture
@@ -67,3 +68,30 @@ def v2_network_state(v2_db):
         'network_pubkey': network_public_key,
         'peer_id': peer_id,
     }
+
+
+@pytest.fixture
+def register_event(monkeypatch):
+    """Register a minimal event_spec/project_pure in the registry for tests."""
+    monkeypatch.setattr(registry, "_registry", {})
+    monkeypatch.setattr(registry, "_discovered", True)
+
+    def _register(
+        event_type: str,
+        event_spec: dict,
+        project_pure=None,
+        shareable: bool = False,
+        ephemeral: bool = False,
+        projection_table: tuple[str, str] | None = None,
+    ) -> None:
+        registry._registry[event_type] = {
+            "module": None,
+            "module_name": "tests.projection_v2",
+            "shareable": shareable,
+            "ephemeral": ephemeral,
+            "projection_table": projection_table,
+            "event_spec": event_spec,
+            "project_pure": project_pure,
+        }
+
+    return _register
