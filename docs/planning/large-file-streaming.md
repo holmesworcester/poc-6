@@ -167,12 +167,17 @@ def create_from_file(peer_id, message_id, file_path, ...):
 
 ## Implementation Steps
 
-1. [ ] Add `HashBuilder` class for incremental root_hash computation
-2. [ ] Add `create_from_file()` function to `message_attachment.py`
-3. [ ] Modify `file_slice.batch_create_slices()` to accept a generator
-4. [ ] Update 1GB test to use `create_from_file()` with a temp file on disk
-5. [ ] Add tests for streaming creation
-6. [ ] Update docs
+1. [x] Add `HashBuilder` class for incremental root_hash computation
+   - Added to `core/crypto.py` using `nacl.hashlib.blake2b` (pure nacl primitives)
+2. [x] Add `create_from_file()` function to `message_attachment.py`
+   - Two-pass streaming algorithm with temp file for slice data
+3. [x] ~~Modify `file_slice.batch_create_slices()` to accept a generator~~
+   - Not needed: calling in batches of 1000 slices works well
+4. [x] Update 1GB test to use `create_from_file()` with a temp file on disk
+   - Test creates file on disk, streams to attachment, cleans up
+5. [x] Add tests for streaming creation
+   - `test_create_from_file_equivalence` verifies identical output
+6. [x] Update docs
 
 ## Memory Budget
 

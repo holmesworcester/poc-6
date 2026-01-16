@@ -176,6 +176,229 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     }
 
 
+def create_from_file(peer_id: str, message_id: str, file_path: str,
+                     filename: str | None, mime_type: str | None,
+                     t_ms: int, db: Any) -> dict[str, Any]:
+    """Create message_attachment event by streaming from a file path.
+
+    This is the memory-efficient alternative to create() for large files.
+    Streams the file from disk, avoiding loading the entire file into memory.
+
+    Memory usage: <10MB regardless of file size (processes in batches).
+
+    Algorithm:
+    1. Pass 1: Stream file, encrypt slices, write to temp file, compute hashes incrementally
+    2. Pass 2: Read temp file in batches, create file_slice events
+    3. Create message_attachment event with computed metadata
+
+    Args:
+        peer_id: Local peer creating this event
+        message_id: Message being attached to
+        file_path: Path to file on disk
+        filename: Optional filename (defaults to basename of file_path)
+        mime_type: Optional MIME type
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Same as create(): {
+            'file_id': file_id,
+            'slice_count': number_of_slices,
+            'blob_bytes': file_size,
+            'attachment_event_id': attachment_event_id
+        }
+    """
+    import os
+    import struct
+    import tempfile
+    from pathlib import Path
+
+    file_path = Path(file_path)
+    file_size = file_path.stat().st_size
+
+    # Use basename as filename if not provided
+    if filename is None:
+        filename = file_path.name
+
+    log.info(f"message_attachment.create_from_file() message_id={message_id[:20]}..., "
+             f"file_path={file_path.name}, file_size={file_size:,}B")
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Get message to verify access and get group_id
+    message_row = safedb.query_one(
+        "SELECT group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
+        (message_id, peer_id)
+    )
+    if not message_row:
+        raise ValueError(f"Message {message_id} not found for peer {peer_id}")
+
+    group_id = message_row['group_id']
+
+    # Get peer_shared_id for signed_by field
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if not peer_self_row or not peer_self_row['peer_shared_id']:
+        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
+
+    peer_shared_id = peer_self_row['peer_shared_id']
+
+    # Generate encryption key and nonce prefix
+    enc_key = crypto.generate_secret()  # 32 bytes
+    nonce_prefix = crypto.generate_secret()[:20]  # Use first 20 bytes
+
+    # Create temp file for encrypted slice data
+    temp_file = tempfile.NamedTemporaryFile(delete=False, mode='wb')
+    temp_file_path = temp_file.name
+
+    # Incremental hashers for file_id (16 bytes) and root_hash (32 bytes)
+    file_id_hasher = crypto.HashBuilder(size=16)
+    root_hash_hasher = crypto.HashBuilder(size=32)
+
+    slice_count = 0
+
+    try:
+        # ===== PASS 1: Stream, encrypt, hash, write to temp file =====
+        log.debug(f"create_from_file() Pass 1: streaming and encrypting...")
+
+        with open(file_path, 'rb') as f:
+            slice_offset = 0  # Byte offset (used as slice_number)
+            while True:
+                plaintext_slice = f.read(SLICE_SIZE)
+                if not plaintext_slice:
+                    break
+
+                # Derive nonce for this slice
+                slice_nonce = crypto.derive_slice_nonce(nonce_prefix, slice_offset)
+
+                # Encrypt slice
+                ciphertext, poly_tag = crypto.encrypt_file_slice(plaintext_slice, enc_key, slice_nonce)
+
+                # Update incremental hashes
+                file_id_hasher.update(ciphertext)
+                root_hash_hasher.update(ciphertext)
+
+                # Write to temp file: slice_offset(4) + nonce_len(1) + nonce + ct_len(2) + ciphertext + poly_tag(16)
+                temp_file.write(struct.pack('<I', slice_offset))  # 4 bytes
+                temp_file.write(struct.pack('<B', len(slice_nonce)))  # 1 byte
+                temp_file.write(slice_nonce)
+                temp_file.write(struct.pack('<H', len(ciphertext)))  # 2 bytes
+                temp_file.write(ciphertext)
+                temp_file.write(poly_tag)  # 16 bytes
+
+                slice_offset += SLICE_SIZE
+                slice_count += 1
+
+        temp_file.close()
+
+        # Compute final hashes
+        file_id = crypto.b64encode(file_id_hasher.digest())
+        root_hash = root_hash_hasher.digest()
+
+        log.debug(f"create_from_file() Pass 1 complete: {slice_count} slices, file_id={file_id[:20]}...")
+
+        # ===== PASS 2: Read temp file in batches, create slice events =====
+        log.debug(f"create_from_file() Pass 2: creating slice events in batches...")
+
+        BATCH_SIZE = 1000
+        slices_batch = []
+        slices_created = 0
+
+        with open(temp_file_path, 'rb') as f:
+            for _ in range(slice_count):
+                # Read: slice_offset(4) + nonce_len(1) + nonce + ct_len(2) + ciphertext + poly_tag(16)
+                slice_offset = struct.unpack('<I', f.read(4))[0]
+                nonce_len = struct.unpack('<B', f.read(1))[0]
+                nonce = f.read(nonce_len)
+                ct_len = struct.unpack('<H', f.read(2))[0]
+                ciphertext = f.read(ct_len)
+                poly_tag = f.read(16)
+
+                slices_batch.append((slice_offset, nonce, ciphertext, poly_tag))
+
+                if len(slices_batch) >= BATCH_SIZE:
+                    # Defer bucket rebuild for all batches - we'll do one rebuild at the end
+                    file_slice.batch_create_slices(
+                        file_id=file_id,
+                        slices_data=slices_batch,
+                        peer_id=peer_id,
+                        t_ms=t_ms,
+                        db=db,
+                        defer_bucket_rebuild=True
+                    )
+                    slices_created += len(slices_batch)
+                    log.debug(f"create_from_file() created {slices_created}/{slice_count} slices...")
+                    slices_batch.clear()
+
+            # Final batch
+            if slices_batch:
+                file_slice.batch_create_slices(
+                    file_id=file_id,
+                    slices_data=slices_batch,
+                    peer_id=peer_id,
+                    t_ms=t_ms,
+                    db=db,
+                    defer_bucket_rebuild=True
+                )
+                slices_created += len(slices_batch)
+
+        # Rebuild negentropy buckets once after all batches (much more efficient)
+        from events.network import negentropy
+        negentropy.rebuild_buckets_for_peer(db, peer_id)
+
+        log.info(f"create_from_file() created {slices_created} slices, file_id={file_id[:20]}...")
+
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_file_path)
+        except Exception:
+            pass
+
+    # ===== Create message_attachment event =====
+    event_data = {
+        'type': 'message_attachment',
+        'message_id': message_id,
+        'file_id': file_id,
+        'filename': filename,
+        'mime_type': mime_type,
+        # File descriptor fields
+        'blob_bytes': file_size,
+        'nonce_prefix': crypto.b64encode(nonce_prefix),
+        'enc_key': crypto.b64encode(enc_key),
+        'root_hash': crypto.b64encode(root_hash),
+        'total_slices': slice_count,
+        'signed_by': peer_shared_id,
+        'created_at': t_ms
+    }
+
+    # Sign the event
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    signed_event = crypto.sign_event(event_data, private_key)
+
+    # Get group key for encryption
+    key_data = group.pick_key(group_id, peer_id, db)
+
+    # Wrap (canonicalize + group encrypt)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, key_data, db)
+
+    # Store event
+    attachment_event_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"create_from_file() created attachment_event_id={attachment_event_id[:20]}...")
+
+    return {
+        'file_id': file_id,
+        'slice_count': slice_count,
+        'blob_bytes': file_size,
+        'attachment_event_id': attachment_event_id,
+        'file_id_for_consolidation': file_id
+    }
+
+
 def compress_image_if_needed(file_data: bytes, mime_type: str | None,
                              target_size_kb: int = 200,
                              max_dimension: int = 2048) -> tuple[bytes, dict[str, Any]]:

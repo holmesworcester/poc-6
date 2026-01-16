@@ -128,7 +128,7 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
 
 
 def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
-                        t_ms: int, db: Any) -> int:
+                        t_ms: int, db: Any, defer_bucket_rebuild: bool = False) -> int:
     """Efficiently create many file slices in batch mode.
 
     Uses optimized batch storage without immediate projection for massive performance gains.
@@ -140,6 +140,8 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         peer_id: Local peer creating these events
         t_ms: Timestamp
         db: Database connection
+        defer_bucket_rebuild: If True, skip negentropy bucket rebuild (caller must call
+                              negentropy.rebuild_buckets_for_peer() after all batches)
 
     Returns:
         Number of slices created
@@ -209,8 +211,9 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         # Defer bucket computation for efficiency - we'll rebuild once at the end
         sync.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=True)
 
-        # Rebuild all bucket hashes in one efficient pass
-        negentropy.rebuild_buckets_for_peer(db, peer_id)
+        # Rebuild all bucket hashes in one efficient pass (unless caller defers)
+        if not defer_bucket_rebuild:
+            negentropy.rebuild_buckets_for_peer(db, peer_id)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)
