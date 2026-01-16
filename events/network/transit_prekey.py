@@ -12,11 +12,59 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_unsafe_db, create_safe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 # Transit prekeys expire after 30 days (in milliseconds)
 TRANSIT_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+
+# v2 event specification - no signer, no deps (local-only unsigned)
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for transit_prekey events."""
+    event_data = ctx.event_data
+
+    public_key_b64 = event_data.get('public_key')
+    private_key_b64 = event_data.get('private_key')
+    owner_peer_id = event_data.get('signed_by')  # signed_by is the owner
+    created_at = event_data.get('created_at')
+
+    if not all([public_key_b64, private_key_b64, owner_peer_id, created_at is not None]):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode keys from base64 to bytes
+    public_key = crypto.b64decode(public_key_b64)
+    private_key = crypto.b64decode(private_key_b64)
+
+    # Calculate TTL
+    ttl_ms = created_at + TRANSIT_PREKEY_TTL_MS
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='transit_prekeys',
+            values={
+                'transit_prekey_id': ctx.event_id,
+                'owner_peer_id': owner_peer_id,
+                'public_key': public_key,
+                'private_key': private_key,
+                'created_at': created_at,
+                'ttl_ms': ttl_ms,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 # Prekey replenishment configuration

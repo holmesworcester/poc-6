@@ -11,8 +11,52 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - no signer, no deps (local-only unsigned event)
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': None,
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for peer events.
+
+    Peer events are local-only (unsigned, unencrypted) and write to local_peers.
+    """
+    event_data = ctx.event_data
+
+    public_key = event_data.get('public_key')
+    private_key_b64 = event_data.get('private_key')
+    created_at = event_data.get('created_at')
+
+    if not public_key or not private_key_b64 or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode private key from base64 to bytes for storage
+    private_key = crypto.b64decode(private_key_b64)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='local_peers',
+            values={
+                'peer_id': ctx.event_id,
+                'public_key': public_key,  # Keep as base64 string
+                'private_key': private_key,  # Store as bytes
+                'created_at': created_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create(t_ms: int, db: Any) -> str:
