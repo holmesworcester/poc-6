@@ -267,6 +267,44 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     return event_id
 
 
+def has_username(user_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if a user has a username set.
+
+    Args:
+        user_id: User ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if user has a name in user_names table, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT 1 FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+    return row is not None
+
+
+def get_username(user_id: str, recorded_by: str, db: Any) -> str | None:
+    """Get a user's current username.
+
+    Args:
+        user_id: User ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Username string if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+    return row['name'] if row else None
+
+
 class KeyNotAvailableError(Exception):
     """Raised when group key is not available for encryption."""
     pass
