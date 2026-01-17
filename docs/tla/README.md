@@ -11,6 +11,7 @@ Files
 - `docs/tla/EventGraphSchema.tla`: schema-level model of the full event graph
   and validation relationships (bounded via ActiveEvents, per-peer via Peers).
 - `docs/tla/event_graph_schema.cfg`: TLC config for the core schema slice.
+- `docs/tla/event_graph_schema_fast.cfg`: TLC config for the smallest core slice.
 - `docs/tla/event_graph_schema_expanded.cfg`: TLC config for an expanded slice.
 - `docs/tla/states/`: TLC output directory (generated; not tracked).
 
@@ -39,6 +40,13 @@ For the schema-level model (bounded):
 ```bash
 java -cp /tmp/tla2tools.jar tlc2.TLC \
   -config docs/tla/event_graph_schema.cfg \
+  docs/tla/EventGraphSchema.tla
+```
+
+For a fast core check:
+```bash
+java -cp /tmp/tla2tools.jar tlc2.TLC \
+  -config docs/tla/event_graph_schema_fast.cfg \
   docs/tla/EventGraphSchema.tla
 ```
 
