@@ -2,8 +2,8 @@
 EXTENDS Naturals
 
 \* Model of the user-auth invite chain and bootstrap connection upgrade.
-\* This models a single peer's view (joiner/Bob) where network validity is
-\* gated by a local trust anchor (invite_accepted).
+\* Focuses on v2 projection semantics (EVENT_SPEC deps + signer gating),
+\* plus the bootstrap connection path that uses invite_accepteds.
 \*
 \* Sources:
 \* - docs/planning/network-root-linking-design.md
@@ -33,7 +33,7 @@ Deps(e) ==
     CASE e = Net -> {}
        [] e = InviteUserBoot -> {Net}
        [] e = UserAlice -> {InviteUserBoot}
-       [] e = AdminGrantAlice -> {Net, UserAlice}
+       [] e = AdminGrantAlice -> {Net}
        [] e = InvitePeerAlice -> {UserAlice}
        [] e = PeerSharedAlice -> {InvitePeerAlice}
        [] e = InviteUserOngoing -> {PeerSharedAlice, AdminGrantAlice}
@@ -43,8 +43,7 @@ Deps(e) ==
        [] e = PeerSharedBob -> {InvitePeerBob}
        [] OTHER -> {}
 
-Guard(e) ==
-    IF e = Net THEN trustAnchor ELSE TRUE
+Guard(e) == TRUE
 
 Init ==
     /\ recorded = {}
@@ -71,8 +70,8 @@ Project(e) ==
 \* Bootstrap connection: invite-labeled connection before peer_shared is known.
 ConnectByInvite ==
     /\ ~connInvite
-    /\ InviteUserOngoing \in valid
     /\ InviteAcceptedBob \in valid
+    /\ InviteUserOngoing \in recorded
     /\ connInvite' = TRUE
     /\ UNCHANGED <<recorded, valid, trustAnchor, connPeer>>
 
@@ -109,11 +108,8 @@ TypeOK ==
 InvDeps ==
     \A e \in valid: Deps(e) \subseteq valid
 
-InvNetworkTrust ==
-    Net \in valid => trustAnchor
-
 InvConnInvite ==
-    connInvite => (InviteUserOngoing \in valid /\ InviteAcceptedBob \in valid)
+    connInvite => (InviteUserOngoing \in recorded /\ InviteAcceptedBob \in valid)
 
 InvConnPeer ==
     connPeer => (connInvite /\ PeerSharedAlice \in valid /\ PeerSharedBob \in valid)
