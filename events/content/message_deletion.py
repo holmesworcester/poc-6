@@ -18,8 +18,134 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification
+EVENT_SPEC = {
+    'encrypted': True,  # Encrypted with group key
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {
+        # Message may not exist yet (pre-block case)
+        'message': {
+            'source': 'table',
+            'table': 'messages',
+            'key': 'message_id',  # Column in messages table to match
+            'key_from': 'message_id',  # Field in event_data containing the value
+            'fields': ['author_id', 'group_id', 'key_id'],  # key_id for forward secrecy
+            'required_if_present': False,
+        },
+    },
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for message_deletion events.
+
+    Creates message_deletion record and deletes the message.
+    Cascade delete from valid_events is handled via cascade_deletes.
+    """
+    event_data = ctx.event_data
+    message_id = event_data.get('message_id')
+    deleted_by = event_data.get('signed_by')
+    created_at = event_data.get('created_at', ctx.recorded_at)
+
+    if not message_id:
+        log.warning(f"message_deletion.project_pure: missing message_id")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if not deleted_by:
+        log.warning(f"message_deletion.project_pure: missing signed_by")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Authorization check: signer must be author or admin
+    # Get message info from deps (may be None if message not yet arrived)
+    message_dep = ctx.deps.get('message')
+    key_id_for_purge = None
+    if message_dep:
+        message_author_id = message_dep.get('author_id')
+        key_id_for_purge = message_dep.get('key_id')  # For forward secrecy
+        # If signer is author, authorized
+        if deleted_by != message_author_id:
+            # Not author, must check admin status
+            # For v2 purity, we rely on signer verification done by resolver
+            # and admin check via deps. For now, accept if signer is valid peer.
+            # Full admin check requires context not available in pure projector.
+            pass  # Authorization will be validated by full project() for now
+
+    writes = [
+        # Insert deletion record
+        WriteOp(
+            op='insert',
+            table='message_deletions',
+            values={
+                'deletion_id': ctx.event_id,
+                'message_id': message_id,
+                'deleted_by': deleted_by,
+                'created_at': created_at,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+        # Mark message as deleted to prevent future projection
+        WriteOp(
+            op='insert',
+            table='deleted_events',
+            values={
+                'event_id': message_id,
+                'deleted_at': ctx.recorded_at,
+            },
+        ),
+        # Delete message from messages table
+        WriteOp(
+            op='delete',
+            table='messages',
+            values={},
+            where={'message_id': message_id},
+        ),
+        # Delete from shareable_events
+        WriteOp(
+            op='delete',
+            table='shareable_events',
+            values={},
+            where={'event_id': message_id},
+        ),
+        # Delete blob from store (device-wide)
+        WriteOp(
+            op='delete',
+            table='store',
+            values={},
+            where={'id': message_id},
+        ),
+    ]
+
+    # Mark key for purging (forward secrecy) if we know the key_id
+    if key_id_for_purge:
+        writes.append(
+            WriteOp(
+                op='insert',
+                table='keys_to_purge',
+                values={
+                    'key_id': key_id_for_purge,
+                    'marked_at': ctx.recorded_at,
+                },
+            )
+        )
+
+    # Cascade delete from valid_events (message and all dependents)
+    cascade_deletes = (message_id,)
+
+    return ProjectorResult(
+        writes=tuple(writes),
+        valid_event=True,
+        cascade_deletes=cascade_deletes,
+    )
 
 
 def _cascade_delete_from_valid_events(
@@ -174,6 +300,7 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
         'type': 'message_deletion',
         'message_id': message_id,
         'signed_by': deleter_peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 

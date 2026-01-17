@@ -399,3 +399,37 @@ Replace direct queue/table access with ConnectionManager methods.
 3. **Bootstrap support**: invite_id labeling works before peer_shared syncs
 4. **Performance**: Early routing avoids processing blobs for unknown keys
 5. **Extensibility**: Connection class can add metrics, rate limiting, etc.
+
+---
+
+## V2 Projector Model Note
+
+### Why connection acks are NOT emitted via EmitEvent
+
+The v2 projector model uses `EmitEvent` for **deterministic** event creation (same input → same output).
+Connection acks contain a **fresh random symmetric key** generated via `crypto.generate_secret()`,
+making them non-deterministic.
+
+**V2 Architecture for connection events**:
+
+```
+Request arrives → project_pure(mode=req):
+  - WriteOp: insert into pending_connection_requests
+  - NO EmitEvent (ack created by job)
+
+Tick job (send_to_all):
+  - Processes pending_connection_requests
+  - Creates ack with fresh symmetric key
+  - Wraps and queues for delivery
+
+Ack arrives → project_pure(mode=ack):
+  - WriteOp: update connections table
+```
+
+**Why this is correct**:
+1. Projector remains pure (no key generation, no network I/O)
+2. Ack creation deferred to tick job which already handles pending requests
+3. Fresh key generation happens in job context, not projection context
+4. Unit tests verify projector purity; integration tests verify job behavior
+
+See `docs/planning/v2-projector-side-effects.md` for full v2 projector model.

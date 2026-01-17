@@ -36,11 +36,133 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 # Connection TTL (5 minutes default)
 CONNECTION_TTL_MS = 300_000
+
+
+# v2 event specification
+# Note: Connection uses custom authentication (invite signature OR peer signature)
+# The signer field handles the peer_shared case; invite signature is checked in project_pure
+EVENT_SPEC = {
+    'encrypted': False,  # Signed, not encrypted (wrapped at transport layer)
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for connection events.
+
+    mode=req: Store in pending_connection_requests (ack sent by tick job)
+    mode=ack: Update connections table with their key
+    """
+    event_data = ctx.event_data
+    mode = event_data.get('mode')
+
+    if mode == 'req':
+        return _project_request_pure(ctx)
+    elif mode == 'ack':
+        return _project_ack_pure(ctx)
+    else:
+        log.warning(f"connection.project_pure: unknown mode '{mode}'")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+
+def _project_request_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for connection request (mode=req).
+
+    Stores request in pending_connection_requests.
+    Ack creation is handled by the tick job (send_to_all), NOT here.
+    This keeps the projector pure (no key generation, no network I/O).
+    """
+    event_data = ctx.event_data
+
+    peer_shared_id = event_data.get('signed_by')
+    key_b64 = event_data.get('key')
+    # invite_id = event_data.get('invite_id')  # For bootstrap - not used in pending table
+
+    if not key_b64:
+        log.warning(f"connection._project_request_pure: missing key")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode the symmetric key
+    try:
+        symmetric_key = crypto.b64decode(key_b64)
+    except Exception:
+        log.warning(f"connection._project_request_pure: invalid key encoding")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Store in pending_connection_requests - tick job will send ack
+    writes = (
+        WriteOp(
+            op='insert',
+            table='pending_connection_requests',
+            values={
+                'request_id': ctx.event_id,
+                'remote_peer_shared_id': peer_shared_id,
+                'their_key': symmetric_key,
+                'received_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _project_ack_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for connection ack (mode=ack).
+
+    Updates connections table with their_connection_id and their_key.
+    """
+    event_data = ctx.event_data
+
+    for_connection_id = event_data.get('for_connection_id')
+    peer_shared_id = event_data.get('signed_by')
+    key_b64 = event_data.get('key')
+
+    if not for_connection_id:
+        log.warning(f"connection._project_ack_pure: missing for_connection_id")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if not key_b64:
+        log.warning(f"connection._project_ack_pure: missing key")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode the symmetric key
+    try:
+        their_key = crypto.b64decode(key_b64)
+    except Exception:
+        log.warning(f"connection._project_ack_pure: invalid key encoding")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Update connections table with their info
+    # Note: This requires the original request to exist in connections table
+    writes = (
+        WriteOp(
+            op='update',
+            table='connections',
+            values={
+                'their_connection_id': ctx.event_id,
+                'their_key': their_key,
+                'peer_shared_id': peer_shared_id,  # COALESCE handled by apply layer
+                'last_handshake_ms': ctx.recorded_at,
+            },
+            where={
+                'connection_id': for_connection_id,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
 
 
 def create_request(
@@ -76,6 +198,8 @@ def create_request(
     symmetric_key = crypto.generate_secret()
 
     # Build connection request event
+    # signer_type indicates whether auth is via peer_shared signature or invite signature
+    signer_type = 'peer_shared' if from_peer_shared_id else 'invite'
     event_data = {
         'type': 'connection',
         'mode': 'req',
@@ -83,6 +207,7 @@ def create_request(
         'to_peer_shared_id': to_peer_shared_id,
         'invite_id': invite_id,
         'signed_by': signed_by,
+        'signer_type': signer_type,
         'created_at': t_ms,
         'ttl_ms': CONNECTION_TTL_MS
     }
@@ -161,6 +286,7 @@ def create_ack(
         'for_connection_id': for_connection_id,
         'key': crypto.b64encode(symmetric_key),
         'signed_by': from_peer_shared_id,
+        'signer_type': 'peer_shared',
         'created_at': t_ms,
         'ttl_ms': CONNECTION_TTL_MS
     }

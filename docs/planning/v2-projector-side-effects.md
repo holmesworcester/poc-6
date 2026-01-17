@@ -52,15 +52,39 @@ def project_pure(ctx) -> ProjectorResult:
 
 ### connection (ack creation)
 **Current**: `_project_request` calls `_send_ack_for_request` to create ack event.
-**V2**: Emit the ack event.
+**V2**: Projector stores request; tick job creates ack.
+
+**Why NOT EmitEvent?**
+Connection acks contain a **fresh random symmetric key** (`crypto.generate_secret()`).
+EmitEvent is for **deterministic** events (same input → same output).
+The ack key is randomly generated, making the ack non-deterministic.
+
+**V2 Architecture**:
 ```python
+# Projector (pure) - just stores the pending request
 def project_pure(ctx) -> ProjectorResult:
     if mode == 'req':
         return ProjectorResult(
             writes=(WriteOp(op='insert', table='pending_connection_requests', values={...}),),
-            emit_events=(EmitEvent(event_type='connection', event_data={'mode': 'ack', ...}),),
+            # NO emit_events - ack created by tick job
         )
+    elif mode == 'ack':
+        return ProjectorResult(
+            writes=(WriteOp(op='update', table='connections', values={...}, where={...}),),
+        )
+
+# Tick job (impure) - creates and sends acks
+def send_to_all():
+    for pending in pending_connection_requests:
+        ack_id, ack_key = create_ack(...)  # Generates fresh key
+        wrap_and_queue(ack_id, their_key)
 ```
+
+**Why this works**:
+1. Projector remains pure (no key generation, no network I/O)
+2. Ack creation deferred to tick job which already handles pending requests
+3. Fresh key generation happens in job context, not projection context
+4. Testable: unit test projector purity, integration test job behavior
 
 ### message_deletion
 **Current**: Cascade deletes from valid_events via recursive `_cascade_delete_from_valid_events()`.
