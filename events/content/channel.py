@@ -1,4 +1,5 @@
 """Channel event type (shareable, encrypted)."""
+from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'channel'
@@ -11,8 +12,7 @@ import json
 import logging
 from core import crypto
 from core import store
-from events.group import group_key, group as group_module, group_member
-from events.identity import peer
+from events.group import group as group_module, group_member
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -314,27 +314,15 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         'signed_by': peer_shared_id,  # References shareable peer identity
         'signer_type': 'peer_shared',  # Required for v2 resolver
         'created_at': t_ms,
-        'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
-        'is_main': 1 if is_main else 0  # Store is_main flag
+        'disappearing_time_ms': disappearing_time_ms,
+        'is_main': 1 if is_main else 0
     }
 
     # Include admin_grant for projection-time verification (if available)
     if admin_grant_id:
         event_data['admin_grant'] = admin_grant_id
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get key_data for encryption
-    key_data = group_key.get_key(key_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper and projection
-    event_id = store.event(blob, peer_id, t_ms, db)
+    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"channel.create() created channel_id={event_id}")
     return event_id
@@ -476,7 +464,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     return event_id
 
 
-def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     name_subquery = (
@@ -505,7 +493,7 @@ def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
-def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels with their current group keys.
 
     Returns channel info plus the current key_id from the associated group,
@@ -547,7 +535,26 @@ def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
-def get_by_id(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the main channel for a peer.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Channel dict with channel_id, name, group_id, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
+           FROM channels
+           WHERE recorded_by = ? AND is_main = 1""",
+        (recorded_by,)
+    )
+
+
+def get(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a single channel by ID.
 
     Args:
@@ -582,6 +589,27 @@ def get_by_id(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | No
            WHERE c.channel_id = ? AND c.recorded_by = ?""",
         (channel_id, recorded_by)
     )
+
+
+def get_next_update_count(channel_id: str, recorded_by: str, db: Any) -> int:
+    """Get the next global_count for a channel update.
+
+    Returns max existing global_count + 1, or 1 if no updates exist.
+
+    Args:
+        channel_id: Channel ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Next global_count value to use
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    max_count_row = safedb.query_one(
+        "SELECT MAX(global_count) as max_count FROM channel_updates WHERE channel_id = ? AND recorded_by = ?",
+        (channel_id, recorded_by)
+    )
+    return (max_count_row['max_count'] or 0) + 1 if max_count_row else 1
 
 
 def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:

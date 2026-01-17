@@ -10,6 +10,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from events.identity import peer_shared, user, network
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -31,17 +32,10 @@ def validate(removed_user_id: str, removed_by_peer_id: str, recorded_by: str, db
     Returns:
         True if authorized, False otherwise
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get removed_by's user_id from peers_shared (user→peer relationship stored there)
-    peer_row = safedb.query_one(
-        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (removed_by_peer_id, recorded_by)
-    )
-    if not peer_row or not peer_row['user_id']:
+    # Get removed_by's user_id
+    removed_by_user_id = peer_shared.get_user_id(removed_by_peer_id, recorded_by, db)
+    if not removed_by_user_id:
         return False
-
-    removed_by_user_id = peer_row['user_id']
 
     # Rule 1: User can remove themselves
     if removed_by_user_id == removed_user_id:
@@ -69,17 +63,8 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
         - removed_user_name: Name of the removed user (for display)
         - members: Updated list of group members (excluding the removed user)
     """
-    safedb = create_safe_db(db, recorded_by=removed_by_local_peer_id)
-
     # Get removed user's name for the return value (before removal)
-    user_row = safedb.query_one(
-        """SELECT COALESCE(un.name, u.name) as name
-           FROM users u
-           LEFT JOIN user_names un ON u.user_id = un.user_id AND u.recorded_by = un.recorded_by
-           WHERE u.user_id = ? AND u.recorded_by = ? LIMIT 1""",
-        (removed_user_id, removed_by_local_peer_id)
-    )
-    removed_user_name = user_row['name'] if user_row else '???'
+    removed_user_name = user.get_display_name(removed_user_id, removed_by_local_peer_id, db) or '???'
 
     # Validate authorization
     if not validate(removed_user_id, removed_by_peer_id, removed_by_local_peer_id, db):
@@ -104,18 +89,14 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
 
     # Get updated member list after removal (for immediate UI feedback)
-    from events.identity import network
     from events.group import group_member
 
     # Get network_id to find all_users group
-    network_row = safedb.query_one(
-        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
-        (removed_by_local_peer_id,)
-    )
+    network_id = network.get_network_id(removed_by_local_peer_id, db)
     members = []
-    if network_row:
+    if network_id:
         all_users_group_id = network.get_all_users_group_id(
-            network_row['network_id'], removed_by_local_peer_id, db
+            network_id, removed_by_local_peer_id, db
         )
         if all_users_group_id:
             members = group_member.list_members(all_users_group_id, removed_by_local_peer_id, db)

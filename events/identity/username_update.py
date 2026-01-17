@@ -11,7 +11,6 @@ import logging
 from core import crypto
 from core import store
 from events.group import group
-from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -73,16 +72,11 @@ def create(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int
     """
     log.info(f"username_update.create() creating username for user_id={user_id[:20]}..., name='{name}'")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
     # NOTE: user_id is passed as param - no need to check users table
     # The event will have user_id as a dependency and will block until user is valid
 
     # Get main group (all_members) - use is_main flag since name varies
-    main_group = safedb.query_one(
-        "SELECT group_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
-        (peer_id,)
-    )
+    main_group = group.get_main(peer_id, db)
     if not main_group:
         # Main group not available yet (will come from sync)
         log.info(f"username_update.create() main group not found yet")
@@ -100,35 +94,25 @@ def create(user_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int
     if not key_data:
         raise KeyNotAvailableError("No group key available for all_members group")
 
-    # Extract key_id from key_data - key_data has {'id': bytes, 'key': bytes}
+    # Extract key_id from key_data to include in event
     key_id_bytes = key_data.get('id')
     if not key_id_bytes:
         raise KeyNotAvailableError("Key ID not found in group key data")
     key_id = crypto.b64encode(key_id_bytes)
 
     # Build username_update event
-    # Note: We don't store user_id as field name since design doc uses descriptive field names
     event_data = {
         'type': 'username_update',
-        'user_id': user_id,  # Identifies which user this name is for
-        'name': name,  # Will be encrypted
-        'key_id': key_id,  # Track which key was used
-        'global_count': 0,  # For LWW (last-writer-wins)
+        'user_id': user_id,
+        'name': name,
+        'key_id': key_id,
+        'global_count': 0,
         'signed_by': peer_shared_id,
         'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Encrypt to group (using key_data for wrapping)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper
-    username_update_id = store.event(blob, peer_id, t_ms, db)
+    username_update_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"username_update.create() created username_update_id={username_update_id[:20]}...")
     return username_update_id

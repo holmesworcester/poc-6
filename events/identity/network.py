@@ -272,6 +272,24 @@ def get_public_key_from_store(network_id: str, db: Any) -> bytes | None:
         return None
 
 
+def get_network_id(recorded_by: str, db: Any) -> str | None:
+    """Get the network_id for a peer's view.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        network_id string if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1",
+        (recorded_by,)
+    )
+    return row['network_id'] if row else None
+
+
 def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict | None:
     """Get network info for a peer.
 

@@ -442,6 +442,66 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
     return peer_id
 
 
+def get_for_user(user_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the first peer_shared for a user_id.
+
+    Args:
+        user_id: User ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Dict with peer_shared_id, or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+
+
+def get_user_id(peer_shared_id: str, recorded_by: str, db: Any) -> str | None:
+    """Get the user_id associated with a peer_shared_id.
+
+    Args:
+        peer_shared_id: Public peer ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        user_id string if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_shared_id, recorded_by)
+    )
+    return row['user_id'] if row and row['user_id'] else None
+
+
+def get_self(peer_id: str, db: Any) -> dict[str, str] | None:
+    """Get the identity (peer_shared_id and user_id) for a local peer.
+
+    Looks up the peer_self table to get the canonical mapping from local peer
+    to its public peer_shared identity and associated user.
+
+    Args:
+        peer_id: Local peer ID
+        db: Database connection
+
+    Returns:
+        Dict with 'peer_shared_id' and 'user_id' if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    row = safedb.query_one(
+        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if not row:
+        return None
+    return {'peer_shared_id': row['peer_shared_id'], 'user_id': row['user_id']}
+
+
 def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
     """Get device name for a peer_shared_id.
 
