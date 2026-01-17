@@ -410,7 +410,7 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
         sync_file.project(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
     elif event_type == 'connection':
         from events.network import connection
-        connection.project(event_id, recorded_by, t_ms, db, connection_data=event_data)
+        connection.project(event_id, recorded_by, t_ms, db)
     elif event_type == 'negentropy':
         from events.network import negentropy
         # The envelope contains:
