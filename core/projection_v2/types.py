@@ -50,9 +50,25 @@ class WriteOp:
 
 
 @dataclass(frozen=True)
+class EmitEvent:
+    """Deterministic event to be created by projection.
+
+    Some projectors must emit new events (e.g., group_key_shared emits group_key).
+    These must be deterministic - same input produces same event.
+    The apply layer handles creation/storage of emitted events.
+    """
+    event_type: str
+    event_data: dict[str, Any]
+    # Optional: specify the peer_id to use for signing/storing
+    # If None, uses recorded_by from projection context
+    peer_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ProjectorResult:
     writes: tuple[WriteOp, ...]
     valid_event: bool = True
+    emit_events: tuple[EmitEvent, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -26,8 +26,8 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db
-from events.identity import peer_shared
 from core.projection_v2.types import ProjectorResult, WriteOp
+from events.identity import peer_shared
 
 log = logging.getLogger(__name__)
 

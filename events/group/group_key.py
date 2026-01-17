@@ -39,7 +39,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     }
 
     # Use sort_keys=True for canonical ordering
-    blob = json.dumps(event_data, sort_keys=True).encode()
+    blob = crypto.canonicalize_json(event_data)
 
     # Store event with recorded wrapper and projection
     # t_ms is used for recorded_at metadata, not in the blob itself
@@ -74,7 +74,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     }
 
     # Use sort_keys=True for canonical ordering
-    blob = json.dumps(event_data, sort_keys=True).encode()
+    blob = crypto.canonicalize_json(event_data)
     key_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group_key.create_with_material() created key_id={key_id}")

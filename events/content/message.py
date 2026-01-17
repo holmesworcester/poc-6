@@ -151,19 +151,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Query channel to get group_id and disappearing_time_ms
-    ttl_subquery = (
-        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
-        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
-        "AND cu.new_disappearing_time_ms IS NOT NULL "
-        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
-    )
-    channel_row = safedb.query_one(
-        f"""SELECT c.group_id,
-                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
-            FROM channels c
-            WHERE c.channel_id = ? AND c.recorded_by = ? LIMIT 1""",
-        (channel_id, peer_id)
-    )
+    channel_row = channel.get(channel_id, peer_id, db)
     if not channel_row:
         raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
 
@@ -242,6 +230,24 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     }
 
 
+def get(message_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get a single message by ID.
+
+    Args:
+        message_id: Message ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Message dict with all fields, or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT * FROM messages WHERE message_id = ? AND recorded_by = ?""",
+        (message_id, recorded_by)
+    )
+
+
 def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms: int, db: Any,
                  skip_projection: bool = False) -> list[str]:
     """Create multiple messages efficiently with cached lookups.
@@ -260,6 +266,9 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
     Returns:
         List of message IDs
     """
+    from events.identity import peer as peer_module
+    from events.group import group
+
     if not contents:
         return []
 
@@ -307,7 +316,7 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
         raise ValueError(f"No username found for user {user_id}.")
 
     # Cache crypto keys
-    private_key = peer.get_private_key(peer_id, peer_id, db)
+    private_key = peer_module.get_private_key(peer_id, peer_id, db)
     key_data = group.pick_key(group_id, peer_id, db)
 
     # Build all event blobs
@@ -319,6 +328,7 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
             'type': 'message',
             'channel_id': channel_id,
             'signed_by': peer_shared_id,
+            'signer_type': 'peer_shared',
             'author_id': user_id,
             'content': content,
             'created_at': t_ms,

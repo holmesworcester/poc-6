@@ -1,184 +1,152 @@
-# V2 Projector Side Effects Analysis
+# V2 Projector Model
 
-## Overview
+## Core Principle
 
-9 event types remain without v2 projectors. This doc analyzes their side effects and proposes solutions.
-
-## Current V2 Pattern
+Projectors are pure functions with well-defined outputs:
 
 ```python
-EVENT_SPEC = {
-    'signer': {...},      # Signature verification
-    'requires': {...},    # Required dependencies (block if missing)
-    'optional': {...},    # Optional dependencies
-}
-
 def project_pure(ctx) -> ProjectorResult:
-    # Pure function: ctx in, WriteOps out
-    return ProjectorResult(writes=(WriteOp(...),), valid_event=True)
+    return ProjectorResult(
+        writes=(...),           # Table writes (insert/update/delete)
+        emit_events=(...),      # New deterministic events to create
+        valid_event=True
+    )
 ```
 
-The v2 pattern assumes projectors are pure functions that return database writes. Side effects break this model.
+## Output Types
+
+### 1. WriteOp - Table Operations
+```python
+WriteOp(op='insert', table='messages', values={...})
+WriteOp(op='update', table='groups', values={...}, where={...})
+WriteOp(op='delete', table='connections', where={...})
+```
+
+### 2. EmitEvent - Deterministic Event Creation
+Some projectors must emit new events. These are **deterministic** - given the same input, they produce the same event.
+
+```python
+EmitEvent(
+    event_type='group_key',
+    event_data={...},  # Deterministic content
+)
+```
+
+The apply layer handles creation/storage of emitted events.
 
 ---
 
-## Events Needing Conversion
+## Event-Specific Plans
 
-### 1. `group_key_shared`
+### group_key_shared
+**Current**: Creates derived `group_key` event during projection.
+**V2**: Emit the deterministic `group_key` event.
+```python
+def project_pure(ctx) -> ProjectorResult:
+    # Decrypt and verify...
+    return ProjectorResult(
+        writes=(WriteOp(op='insert', table='group_keys_shared', values={...}),),
+        emit_events=(EmitEvent(event_type='group_key', event_data={...}),),
+    )
+```
 
-**Current side effects:**
-- Creates derived `group_key` event from shared key material
-- Notifies blocked queue (`queues.blocked.notify_event_valid`)
-- Retries pending name updates
+### connection (ack creation)
+**Current**: `_project_request` calls `_send_ack_for_request` to create ack event.
+**V2**: Emit the ack event.
+```python
+def project_pure(ctx) -> ProjectorResult:
+    if mode == 'req':
+        return ProjectorResult(
+            writes=(WriteOp(op='insert', table='pending_connection_requests', values={...}),),
+            emit_events=(EmitEvent(event_type='connection', event_data={'mode': 'ack', ...}),),
+        )
+```
 
-**Proposed solution:**
-- **Key creation**: The receiver needs the key material. Instead of creating a new event during projection, the key material could be written directly to `group_keys` table as a WriteOp. The "event" is the group_key_shared itself - we don't need a separate group_key event on the receiver.
-- **Blocked queue notification**: This is a system-level concern. The v2 apply layer could automatically notify after any projection adds to valid_events.
-- **Pending name updates**: Could be a separate job that runs after projection, or triggered by the blocked queue notification.
+### message_deletion
+**Current**: Cascade deletes from valid_events via recursive `_cascade_delete_from_valid_events()`.
+**V2**: Apply layer handles cascade based on `event_dependencies` table.
+```python
+def project_pure(ctx) -> ProjectorResult:
+    return ProjectorResult(
+        writes=(
+            WriteOp(op='insert', table='message_deletions', values={...}),
+            WriteOp(op='insert', table='deleted_events', values={...}),
+            WriteOp(op='delete', table='messages', where={'message_id': ...}),
+            # Apply layer handles cascade from valid_events
+        ),
+    )
+```
 
-**Complexity**: High - requires rethinking key distribution model
+### user_removed / peer_removed
+**Current**: Conditionally rotates keys if this peer created the event.
+**V2**: Just write the removal. Key rotation is a separate admin action.
+```python
+def project_pure(ctx) -> ProjectorResult:
+    return ProjectorResult(
+        writes=(
+            WriteOp(op='insert', table='removed_users', values={...}),
+            WriteOp(op='insert', table='removed_peers', values={...}),  # for each peer
+            WriteOp(op='delete', table='connections', where={'peer_shared_id': ...}),
+        ),
+    )
+```
 
----
+**Key rotation is sender's responsibility** - see below.
 
-### 2. `user_removed`
-
-**Current side effects:**
-- Inserts into `removed_users` table ✓ (WriteOp)
-- Cascades: marks all user's peers as removed in `removed_peers` ✓ (WriteOp)
-- Deletes connections for removed peers (via `connection.remove_connections_for_peer`)
-- Rotates group keys (conditional: only if this peer created the event)
-
-**Proposed solution:**
-- **Connection deletion**: Express as WriteOp with `op='delete'`
-- **Key rotation**: This is the tricky one. Options:
-  1. **Sender responsibility**: The remover creates the rotated keys BEFORE creating user_removed. The user_removed event includes references to the new key_ids.
-  2. **Deferred job**: Key rotation runs as a background job after removal syncs. Risk: messages sent before rotation use old key.
-  3. **Explicit side effect**: Allow project_pure to return `side_effects=[CreateEvent('group_key', {...})]`
-
-**Recommendation**: Option 1 (sender responsibility) is cleanest - rotate keys first, then remove user.
-
----
-
-### 3. `peer_removed`
-
-**Current side effects:**
-- Similar to user_removed but for single peer
-- Marks peer as removed
-- Deletes connections
-- May trigger key rotation if last peer for user
-
-**Proposed solution:** Same as user_removed
-
----
-
-### 4. `message_deletion`
-
-**Current side effects:**
-- Inserts into `message_deletions` table ✓ (WriteOp)
-- Marks key for purging (inserts into `keys_to_purge`) ✓ (WriteOp)
-- Deletes message from `messages` table ✓ (WriteOp with `op='delete'`)
-- Inserts into `deleted_events` table ✓ (WriteOp)
-- Cascade deletes from `valid_events` (recursive)
-- Deletes from `shareable_events` ✓ (WriteOp)
-- Deletes blob from `store` ✓ (WriteOp)
-
-**Proposed solution:**
-- Most are already expressible as WriteOps
-- **Cascade delete from valid_events**: Could be a SQL trigger or handled by v2 apply layer based on `event_dependencies` table
-- This is actually a good v2 candidate!
+### sync
+**Status**: May need impure helper for sync state management. Investigate further.
 
 ---
 
-### 5. `message_rekey`
+## Key Selection Model
 
-**Current side effects:**
-- Re-encrypts message with new key
-- Updates message blob in store
-- Updates `key_id` in messages table
+**Principle**: Sender chooses the right key. Rotator just adds new keys to the list.
 
-**Proposed solution:**
-- The "re-encryption" happens at create() time, not project() time
-- project() just updates the key_id reference
-- This should be convertible to v2 with WriteOps
+### Current (wrong)
+- Remover rotates keys and tries to distribute new keys
+- Old keys get removed/invalidated
+- Complex coordination
 
----
+### V2 (correct)
+- Admin creates new group_key when removing a user (rotation)
+- All group_keys remain available (historical access)
+- **Sender picks latest key by timestamp** when encrypting
+- TODO: Change selection from timestamp-based to explicit ordering/chain
 
-### 6. `connection`
-
-**Current side effects:**
-- Inserts into `connections` table ✓ (WriteOp)
-- Complex address resolution logic
-- Ephemeral (not persisted long-term)
-
-**Proposed solution:**
-- Address resolution should happen at create() time
-- project() is just the table insert
-- Should be straightforward v2 conversion
+### Why this works
+1. Removed user can't decrypt messages encrypted with post-removal keys
+2. Remaining users always pick latest key (post-removal)
+3. No need to coordinate key distribution - keys sync naturally
+4. Historical messages remain decryptable with historical keys
 
 ---
 
-### 7. `connection_prekey`
+## Apply Layer Responsibilities
 
-**Current side effects:**
-- Stores prekey for connection establishment
-- Ephemeral
+The v2 apply layer handles:
 
-**Proposed solution:** Straightforward v2 conversion
-
----
-
-### 8. `sync`
-
-**Current side effects:**
-- Updates sync state
-- Ephemeral
-
-**Proposed solution:** Straightforward v2 conversion (or skip - sync events may not need projection)
+1. **Execute WriteOps** - INSERT/UPDATE/DELETE
+2. **Create emitted events** - Store and project deterministic events
+3. **Cascade deletes** - When event deleted from valid_events, cascade via event_dependencies
+4. **Notify blocked queue** - After valid_events insert, check blocked_events_ephemeral
 
 ---
 
-### 9. `message_attachment`
+## Implementation Order
 
-**Current side effects:**
-- Links attachment metadata to message
-- May involve file handling
-
-**Needs investigation:** Check current implementation
-
----
-
-## Recommendations
-
-### Easy wins (convert now):
-1. `connection` - just table insert
-2. `connection_prekey` - just table insert
-3. `message_deletion` - all WriteOps, cascade can be handled separately
-4. `message_rekey` - encryption at create(), projection is just update
-
-### Needs design work:
-5. `user_removed` / `peer_removed` - key rotation responsibility
-6. `group_key_shared` - key material handling
-
-### Skip for now:
-7. `sync` - may not need v2 projection
-8. `message_attachment` - needs investigation
+1. Add `emit_events` to `ProjectorResult` type
+2. Update apply layer to handle emitted events
+3. Update apply layer to handle cascade deletes
+4. Convert events:
+   - `group_key_shared` (emit group_key)
+   - `connection` (emit ack)
+   - `message_deletion` (cascade handled by apply)
+   - `user_removed` / `peer_removed` (just writes, no rotation)
+   - `message_rekey` (simple writes)
 
 ---
 
-## Questions for Review
+## Open Questions
 
-1. **Key rotation timing**: Should key rotation happen before or after removal event? Before is cleaner but requires the remover to create multiple events atomically.
-
-2. **Cascade deletes**: Should cascade deletion from valid_events be:
-   - A SQL trigger on valid_events?
-   - Handled by v2 apply layer?
-   - Explicit in project_pure return value?
-
-3. **Blocked queue notification**: Should this be:
-   - Automatic in v2 apply layer after any valid_events insert?
-   - Explicit side effect from projector?
-
-4. **group_key_shared derivation**: Should receivers:
-   - Create their own group_key event (current)?
-   - Just write key material directly to group_keys table?
-   - The former maintains event-sourcing purity, the latter is simpler.
+1. **Sync events**: Pure or impure? Need to investigate sync state management.
+2. **Key selection ordering**: Currently timestamp-based. TODO: design explicit ordering.

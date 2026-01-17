@@ -14,9 +14,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost',
-        // Unix socket proxy for local dev
-        // target: { socketPath: '/tmp/quiet-api.sock' },
+        target: 'http://localhost:8080',
         changeOrigin: true,
       },
     },

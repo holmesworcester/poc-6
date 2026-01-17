@@ -1,10 +1,13 @@
 """Apply layer for projection v2."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from core.db import SUBJECTIVE_TABLES, create_safe_db, create_unsafe_db
-from .types import ProjectorResult
+from .types import ProjectorResult, EmitEvent
+
+log = logging.getLogger(__name__)
 
 _SCOPE_FIELD_BY_TABLE = {
     "shareable_events": "can_share_peer_id",
@@ -77,3 +80,92 @@ def apply_writes(result: ProjectorResult, recorded_by: str, recorded_at: int, db
             target_db.execute(sql, params)
         else:
             raise ValueError(f"Unknown write op: {write.op}")
+
+    # Handle emitted events
+    if result.emit_events:
+        _apply_emit_events(result.emit_events, recorded_by, recorded_at, db)
+
+
+def _apply_emit_events(
+    emit_events: tuple[EmitEvent, ...],
+    recorded_by: str,
+    recorded_at: int,
+    db: Any
+) -> None:
+    """Create and project emitted events.
+
+    Emitted events are deterministic - the projector computed the event_data,
+    we just need to store and project them.
+    """
+    from core import store
+    from core import crypto
+    from events.identity import peer
+
+    for emit in emit_events:
+        peer_id = emit.peer_id or recorded_by
+
+        # Get the event module for this type to check if it needs signing
+        from events import registry
+        event_spec = registry.get_event_spec(emit.event_type)
+
+        event_data = dict(emit.event_data)
+        event_data['type'] = emit.event_type
+
+        # Sign if needed (most events need signing)
+        if event_spec and event_spec.get('signer'):
+            private_key = peer.get_private_key(peer_id, peer_id, db)
+            event_data = crypto.sign_event(event_data, private_key)
+
+        # Store the event
+        blob = crypto.canonicalize_json(event_data)
+        event_id = store.event(blob, peer_id, recorded_at, db)
+
+        log.debug(f"apply: emitted {emit.event_type} event {event_id[:20]}...")
+
+
+def cascade_delete_from_valid_events(event_id: str, recorded_by: str, db: Any) -> int:
+    """Cascade delete an event and all dependents from valid_events.
+
+    When an event is deleted/invalidated, all events that depend on it
+    must also be removed from valid_events for convergence.
+
+    Args:
+        event_id: The event being deleted
+        recorded_by: Peer scope
+        db: Database connection
+
+    Returns:
+        Total number of events deleted (including dependents)
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    deleted_count = 0
+    visited = set()
+
+    def _cascade(eid: str) -> int:
+        if eid in visited:
+            return 0
+        visited.add(eid)
+        count = 0
+
+        # Find all children (events that depend on this one)
+        children = safedb.query(
+            """SELECT DISTINCT child_event_id
+               FROM event_dependencies
+               WHERE parent_event_id = ? AND recorded_by = ?""",
+            (eid, recorded_by)
+        )
+
+        # Recursively delete children first
+        for child in children:
+            count += _cascade(child['child_event_id'])
+
+        # Delete this event from valid_events
+        safedb.execute(
+            "DELETE FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+            (eid, recorded_by)
+        )
+        return count + 1
+
+    deleted_count = _cascade(event_id)
+    log.debug(f"cascade_delete: removed {deleted_count} events from valid_events for {event_id[:20]}...")
+    return deleted_count

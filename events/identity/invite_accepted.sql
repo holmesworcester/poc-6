@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS invite_accepteds (
     inviter_transit_prekey_id TEXT,     -- Inviter's transit prekey ID
     inviter_transit_prekey_public_key BLOB,  -- Inviter's transit prekey
     invite_private_key BLOB,            -- Invite signing key (for sync_connect auth)
+    invite_pubkey TEXT,                 -- Derived from invite_private_key (for connection ACK verification)
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
     PRIMARY KEY (invite_id, recorded_by)
