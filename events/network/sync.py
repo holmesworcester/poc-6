@@ -7,7 +7,6 @@ Bloom filter sync is used as a fallback for window-based partitioning.
 # Registry metadata
 EVENT_TYPE = 'sync'
 SHAREABLE = True  # Sync events exchange between peers
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any, Iterator
@@ -29,8 +28,6 @@ BLOOM_SIZE_BITS = 512  # 512 bits = 64 bytes
 BLOOM_SIZE_BYTES = 64
 K_HASHES = 5  # Number of hash functions
 
-# Event types that are sync protocol infrastructure (not stored in event log)
-EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file', 'connection', 'negentropy'}
 
 # Window parameters
 DEFAULT_W = 12  # Default window parameter: 2^12 = 4096 windows
@@ -396,85 +393,24 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     return recorded_by_peers
 
 
-def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict, recorded_by: str, t_ms: int, db: Any) -> None:
-    """Project ephemeral event for a single peer.
-
-    Handles type-specific projection and marks event as valid.
-    """
-
-    # Type-specific projection dispatch
-    if event_type == 'sync':
-        project(event_id, recorded_by, t_ms, db, sync_data=event_data)
-    elif event_type == 'sync_file':
-        from events.network import sync_file
-        sync_file.project(event_id, recorded_by, t_ms, db, sync_file_data=event_data)
-    elif event_type == 'connection':
-        from events.network import connection
-        connection.project(event_id, recorded_by, t_ms, db, connection_data=event_data)
-    elif event_type == 'negentropy':
-        from events.network import negentropy
-        # The envelope contains:
-        # - connection_id: sender's connection_id (for our reply_connection_id)
-        # - reply_connection_id: OUR connection_id to use for responses
-        our_connection_id = event_data.get('reply_connection_id')
-        if our_connection_id:
-            negentropy.handle_incoming(db, recorded_by, our_connection_id, event_data, t_ms)
-        else:
-            log.warning(f"negentropy: no reply_connection_id in envelope")
-
-    # Mark ephemeral event as valid (for sync protocol tracking)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (event_id, recorded_by)
-    )
-
-
-def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_peers: list[str], t_ms: int, db: Any) -> bool:
-    """Check if event is ephemeral and handle it without storing.
-
-    Ephemeral events are protocol infrastructure that bypass normal storage
-    and are projected directly for all peers who can access them.
-
-    Args:
-        unwrapped_blob: Decrypted event blob
-        event_data: Parsed event data
-        recorded_by_peers: List of peers who can decrypt this event
-        t_ms: Current timestamp
-        db: Database connection
-
-    Returns:
-        True if event was ephemeral and handled, False to proceed with normal storage
-    """
-    logger = log  # Alias to avoid scoping issues with loop variable
-
-    event_type = event_data.get('type')
-    if event_type not in EPHEMERAL_EVENT_TYPES:
-        return False
-
-    # Ephemeral event: project directly without storing
-    logger.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
-    event_id = crypto.b64encode(crypto.hash(unwrapped_blob))
-
-    # Peers now sync normally via established connections (sync_connect)
-    # No need for bootstrap_complete tracking
-
-    # Project event for each peer who can access it
-    for recorded_by in recorded_by_peers:
-        _project_ephemeral_for_peer(event_id, event_type, event_data, recorded_by, t_ms, db)
-
-    return True
-
-
-def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
+def unwrap_and_store(blob: bytes, t_ms: int, db: Any,
+                     source_ip: str = None, source_port: int = None) -> list[str]:
     """Unwrap transit blob, store event, create recorded events for all peers with access.
 
     Edge case: If multiple local peers have the same key (e.g., two peers in the same network
     both accepted the same invite), this creates a separate recorded event for each peer.
 
+    Args:
+        blob: Transit-wrapped blob
+        t_ms: Timestamp
+        db: Database connection
+        source_ip: Source IP address (for address learning)
+        source_port: Source port (for address learning)
+
     Returns:
         List of recorded_ids (one per peer who can decrypt), or empty list if unwrap fails
     """
+    from events.network import connection as conn_module
 
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
@@ -494,18 +430,35 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
         log.debug(f"unwrap_and_store: unwrap failed for {len(recorded_by_peers)} peers")
         return []
 
-    # Check if this is an ephemeral protocol event (sync events, etc.)
-    try:
-        event_data = crypto.parse_json(unwrapped_blob)
-        if handle_ephemeral_event(unwrapped_blob, event_data, recorded_by_peers, t_ms, db):
-            return []  # Ephemeral event was handled, no recorded events created
-    except Exception as e:
-        # Not JSON or parse failed, continue with normal storage
-        pass
-
     # Store the unwrapped event blob (once)
+    # All events go through normal storage and projection (no ephemeral bypass)
     event_id = store.blob(unwrapped_blob, t_ms, True, db)
     log.debug(f"unwrap_and_store: stored event {event_id[:20]}..., creating recorded for {len(recorded_by_peers)} peers")
+
+    # Learn address from packet if we have source info
+    if source_ip and source_port:
+        # Extract connection_id hint from blob (first 16 bytes are typically the key hint)
+        hint = blob[:16] if len(blob) >= 16 else None
+        if hint:
+            hint_b64 = crypto.b64encode(hint)
+            # Try to find connection by hint and learn address
+            for peer_id in recorded_by_peers:
+                try:
+                    safedb = create_safe_db(db, recorded_by=peer_id)
+                    # Look for connection whose our_key starts with this hint
+                    conn_row = safedb.query_one("""
+                        SELECT connection_id FROM connections
+                        WHERE recorded_by = ? AND SUBSTR(connection_id, 1, 22) = ?
+                        LIMIT 1
+                    """, (peer_id, hint_b64[:22]))  # Base64 of 16 bytes is 22 chars
+                    if conn_row:
+                        conn_module.learn_address(
+                            conn_row['connection_id'], source_ip, source_port,
+                            'packet', t_ms, peer_id, db
+                        )
+                        log.debug(f"unwrap_and_store: learned address {source_ip}:{source_port} for connection {conn_row['connection_id'][:20]}...")
+                except Exception as e:
+                    log.debug(f"unwrap_and_store: address learning failed: {e}")
 
     # Create recorded event for EACH peer who can decrypt
     recorded_ids = []
@@ -516,11 +469,14 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     return recorded_ids
 
 
-def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any) -> None:
-    """Try to observe source peers from transit blobs (NAT integration).
+def _process_address_observations(transit_packets: list[dict], t_ms: int, db: Any) -> None:
+    """Try to observe source peers from transit packets (NAT integration).
 
     This is an optional integration point - if the network layer is initialized,
     we can use it to create address events. Otherwise, this is a no-op.
+
+    Now that packets include source_ip and source_port, we can do address learning
+    directly. This function handles any additional NAT simulation observations.
     """
     try:
         from simulator import network
@@ -531,10 +487,9 @@ def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any
             # Network engine not initialized, skip observations
             return
 
-        # For now, we don't have origin_ip/port in the blob metadata,
-        # so we can't truly observe endpoints yet.
-        # This is a placeholder for future integration.
-        log.debug(f"_process_address_observations: network layer available, {len(transit_blobs)} blobs")
+        # Count packets with source addresses for logging
+        packets_with_addr = sum(1 for p in transit_packets if p.get('source_ip'))
+        log.debug(f"_process_address_observations: network layer available, {len(transit_packets)} packets ({packets_with_addr} with addresses)")
 
     except ImportError:
         # Network layer not available
@@ -547,13 +502,16 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
     from events.network import negentropy
 
-    transit_blobs = queues.incoming.drain(batch_size, t_ms, db)
-    log.info(f"sync.receive: processing {len(transit_blobs)} blobs")
+    transit_packets = queues.incoming.drain(batch_size, t_ms, db)
+    log.info(f"sync.receive: processing {len(transit_packets)} blobs")
 
     # unwrap_and_store returns list of recorded_ids (one per peer who can decrypt)
     new_recorded_id_lists = []
-    for blob in transit_blobs:
-        result = unwrap_and_store(blob, t_ms, db)
+    for packet in transit_packets:
+        blob = packet['blob']
+        source_ip = packet.get('source_ip')
+        source_port = packet.get('source_port')
+        result = unwrap_and_store(blob, t_ms, db, source_ip=source_ip, source_port=source_port)
         new_recorded_id_lists.append(result)
 
     # Flatten and project all recorded events
@@ -592,7 +550,7 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
 
     # Try to integrate with network layer for address observations (optional)
     try:
-        _process_address_observations(transit_blobs, t_ms, db)
+        _process_address_observations(transit_packets, t_ms, db)
     except Exception as e:
         log.debug(f"sync.receive: address observation integration not fully ready: {e}")
 

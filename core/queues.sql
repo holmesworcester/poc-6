@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS incoming_blobs (
     blob BLOB NOT NULL,
     sent_at INTEGER NOT NULL,
     deliver_at INTEGER NOT NULL DEFAULT 0,  -- When packet will be delivered (sent_at + latency)
-    dropped BOOLEAN DEFAULT FALSE            -- Whether packet was dropped due to packet loss
+    dropped BOOLEAN DEFAULT FALSE,           -- Whether packet was dropped due to packet loss
+    source_ip TEXT,                          -- Learned from UDP source (for address learning)
+    source_port INTEGER                      -- Learned from UDP source (for address learning)
 );
 
 -- Index for efficient drain() queries: SELECT WHERE deliver_at <= ? AND NOT dropped

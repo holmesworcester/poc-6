@@ -43,7 +43,7 @@ def test_incoming_with_minimal_latency(db):
     # Should be deliverable at t=1001 (after 1ms latency)
     received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"test_packet"
+    assert received[0]['blob'] == b"test_packet"
 
 
 def test_incoming_with_latency(db):
@@ -63,7 +63,7 @@ def test_incoming_with_latency(db):
     # Should be deliverable at t=1100 (after delivery window)
     received = queues.incoming.drain(10, current_time_ms=1100, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"test_packet"
+    assert received[0]['blob'] == b"test_packet"
 
 
 def test_incoming_with_exact_latency_boundary(db):
@@ -83,7 +83,7 @@ def test_incoming_with_exact_latency_boundary(db):
     # At t=1050, exactly deliverable
     received = queues.incoming.drain(10, current_time_ms=1050, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"test_packet"
+    assert received[0]['blob'] == b"test_packet"
 
 
 def test_packet_loss_rate(db):
@@ -180,17 +180,17 @@ def test_multiple_batches_with_different_delivery_times(db):
     # At t=1100, only packet_1 should be ready
     received = queues.incoming.drain(10, current_time_ms=1100, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"packet_1"
+    assert received[0]['blob'] == b"packet_1"
 
     # At t=1200, packet_2 should be ready
     received = queues.incoming.drain(10, current_time_ms=1200, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"packet_2"
+    assert received[0]['blob'] == b"packet_2"
 
     # At t=1300, packet_3 should be ready
     received = queues.incoming.drain(10, current_time_ms=1300, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"packet_3"
+    assert received[0]['blob'] == b"packet_3"
 
 
 def test_drain_respects_batch_size(db):
@@ -273,7 +273,7 @@ def test_network_config_global_state(db):
     # But should be ready at t=2100
     received = queues.incoming.drain(10, current_time_ms=2100, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"packet_2"
+    assert received[0]['blob'] == b"packet_2"
 
 
 # ===== New Network Features Tests =====
@@ -342,7 +342,7 @@ def test_network_partition_blocks_source(db):
     db.commit()
     received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"from_bob"
+    assert received[0]['blob'] == b"from_bob"
 
 
 def test_network_partition_blocks_destination(db):
@@ -363,7 +363,7 @@ def test_network_partition_blocks_destination(db):
     db.commit()
     received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"to_dave"
+    assert received[0]['blob'] == b"to_dave"
 
 
 def test_network_partition_can_be_restored(db):
@@ -389,7 +389,7 @@ def test_network_partition_can_be_restored(db):
     db.commit()
     received = queues.incoming.drain(10, current_time_ms=1001, unsafedb=unsafedb)
     assert len(received) == 1
-    assert received[0] == b"restored"
+    assert received[0]['blob'] == b"restored"
 
 
 def test_burst_loss_drops_consecutive_packets(db):

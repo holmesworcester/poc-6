@@ -109,23 +109,22 @@ class RealClient:
         self.network_id = None
         self.channel_id = None
 
-        # Peer addresses for routing
-        self.peer_addresses = {}
-
-    def add_peer(self, peer_shared_id: str, host: str, port: int):
-        """Register a peer's address for UDP routing."""
-        self.peer_addresses[peer_shared_id] = (host, port)
-
     def receive_udp_packets(self, t_ms: int) -> int:
-        """Move incoming UDP packets into SQLite queue."""
+        """Move incoming UDP packets into SQLite queue with source address info.
+
+        Source addresses are passed through to enable address learning in the
+        Connection layer.
+        """
         packets = self.network.drain()
         if not packets:
             return 0
 
         unsafedb = create_unsafe_db(self.db)
         for data, addr in packets:
-            queues.incoming.add_immediate(data, t_ms, unsafedb)
-            log.debug(f"{self.name}: RECEIVED {len(data)}B UDP from {addr}")
+            source_ip, source_port = addr
+            queues.incoming.add_immediate(data, t_ms, unsafedb,
+                                          source_ip=source_ip, source_port=source_port)
+            log.debug(f"{self.name}: RECEIVED {len(data)}B UDP from {source_ip}:{source_port}")
 
         return len(packets)
 

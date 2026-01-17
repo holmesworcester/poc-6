@@ -1,19 +1,17 @@
-"""Connection event type (LOCAL-ONLY) for establishing peer connections.
+"""Connection management module for establishing and managing peer connections.
 
-Unified event type replacing sync_connect, sync_connect_ack, and transit_key.
-connection_id is the universal identifier for routing, display, and dependencies.
-
-Event modes:
-- mode=req: Connection request with fresh symmetric key
-- mode=ack: Connection acknowledgement referencing the request
+This module provides helper functions and the Connection dataclass for managing
+bidirectional peer connections. The actual event types are in:
+- connection_request.py: EVENT_TYPE='connection_request'
+- connection_ack.py: EVENT_TYPE='connection_ack'
 
 Flow:
-1. Alice creates connection(mode=req) with fresh symmetric key
-2. Alice wraps request with Bob's connection_prekey (asymmetric)
-3. Bob receives, unwraps, projects → stores Alice's key
-4. Bob creates connection(mode=ack) referencing Alice's request
+1. Alice creates connection_request with fresh symmetric key
+2. Alice wraps request with Bob's transit prekey (asymmetric)
+3. Bob receives, unwraps, projects → stores in pending_connection_requests
+4. Bob creates connection_ack referencing Alice's request
 5. Bob wraps ack with Alice's symmetric key
-6. Alice receives, unwraps, projects → stores Bob's key
+6. Alice receives, unwraps, projects → updates connection with their_key
 7. Connection ACTIVE (both have symmetric keys)
 
 Connection states:
@@ -24,17 +22,9 @@ Connection states:
 from dataclasses import dataclass
 from typing import Any
 
-# Registry metadata
-EVENT_TYPE = 'connection'
-SHAREABLE = False  # Local-only - contains symmetric key material
-EPHEMERAL = True   # Drop if deps missing - sender will retry
-PROJECTION_TABLE = 'connections'
-
 import logging
-import json
 from core import crypto
 from core import store
-from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -43,91 +33,8 @@ log = logging.getLogger(__name__)
 CONNECTION_TTL_MS = 300_000
 
 
-def create_request(
-    to_peer_shared_id: str | None,
-    from_peer_id: str,
-    from_peer_shared_id: str | None,
-    invite_id: str | None,
-    t_ms: int,
-    db: Any
-) -> tuple[str, bytes]:
-    """Create a connection request with fresh symmetric key.
-
-    Args:
-        to_peer_shared_id: Remote peer's public identity (NULL for bootstrap)
-        from_peer_id: Local peer ID creating the request
-        from_peer_shared_id: Local peer's public identity (NULL in bootstrap mode before cascade)
-        invite_id: Invite ID for bootstrap connections
-        t_ms: Timestamp
-        db: Database connection
-
-    Returns:
-        (connection_id, symmetric_key): The event ID and key bytes
-    """
-    if not to_peer_shared_id and not invite_id:
-        raise ValueError("At least one of to_peer_shared_id or invite_id must be provided")
-
-    # In bootstrap mode (no peer_shared_id yet), use invite_id as signed_by
-    signed_by = from_peer_shared_id if from_peer_shared_id else invite_id
-
-    log.debug(f"connection.create_request: from={signed_by[:20] if signed_by else 'unknown'}... to={to_peer_shared_id[:20] if to_peer_shared_id else invite_id[:20]}...")
-
-    # Generate fresh symmetric key
-    symmetric_key = crypto.generate_secret()
-
-    # Build connection request event
-    event_data = {
-        'type': 'connection',
-        'mode': 'req',
-        'key': crypto.b64encode(symmetric_key),
-        'to_peer_shared_id': to_peer_shared_id,
-        'invite_id': invite_id,
-        'signed_by': signed_by,
-        'created_at': t_ms,
-        'ttl_ms': CONNECTION_TTL_MS
-    }
-
-    # Sign with peer's private key
-    private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # If invite_id present, also sign with invite private key for bootstrap auth
-    # Check both group_prekeys (inviter) and invite_accepteds (joiner) for the key
-    if invite_id:
-        safedb = create_safe_db(db, recorded_by=from_peer_id)
-        invite_private_key = None
-
-        # First try group_prekeys (inviter's case - we created the invite)
-        invite_key_row = safedb.query_one(
-            "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
-            (from_peer_id, from_peer_id)
-        )
-        if invite_key_row and invite_key_row['private_key']:
-            invite_private_key = invite_key_row['private_key']
-
-        # Then try invite_accepteds (joiner's case - we accepted an invite)
-        if not invite_private_key:
-            ia_row = safedb.query_one(
-                "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
-                (invite_id, from_peer_id)
-            )
-            if ia_row and ia_row['invite_private_key']:
-                invite_private_key = ia_row['invite_private_key']
-
-        if invite_private_key:
-            invite_sig_data = json.dumps(signed_event, sort_keys=True).encode()
-            invite_signature = crypto.sign(invite_sig_data, invite_private_key)
-            signed_event['invite_signature'] = crypto.b64encode(invite_signature)
-            log.debug(f"connection.create_request: added invite_signature for invite {invite_id[:20]}...")
-
-    # Store the event
-    blob = crypto.canonicalize_json(signed_event)
-    unsafedb = create_unsafe_db(db)
-    connection_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
-
-    log.info(f"connection.create_request: created {connection_id[:20]}... for {to_peer_shared_id[:20] if to_peer_shared_id else invite_id[:20]}...")
-
-    return connection_id, symmetric_key
+# Import event creation from separate modules
+from events.network import connection_request, connection_ack
 
 
 def create_ack(
@@ -161,6 +68,7 @@ def create_ack(
         'for_connection_id': for_connection_id,
         'key': crypto.b64encode(symmetric_key),
         'signed_by': from_peer_shared_id,
+        'signer_type': 'peer_shared',  # v2: acks are always peer_shared signed
         'created_at': t_ms,
         'ttl_ms': CONNECTION_TTL_MS
     }
@@ -219,6 +127,167 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         return None
 
 
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for connection events.
+
+    For mode=req: Stores in pending_connection_requests. Ack is sent by tick job.
+    For mode=ack: Updates connections table with their_key and their_connection_id.
+
+    Auth is handled by the resolver via EVENT_SPEC signer config:
+    - signer_type='peer_shared': main signature verified against peer_shared's public key
+    - signer_type='invite': main signature verified against invite's public key (bootstrap)
+
+    Writes to: pending_connection_requests (req), connections (ack)
+    """
+    event_data = ctx.event_data
+    event_id = ctx.event_id
+    recorded_by = ctx.recorded_by
+    recorded_at = ctx.recorded_at
+
+    mode = event_data.get('mode')
+
+    if mode == 'req':
+        return _project_request_pure(ctx)
+    elif mode == 'ack':
+        return _project_ack_pure(ctx)
+    else:
+        log.warning(f"connection.project_pure: unknown mode '{mode}' for {event_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+
+def _project_request_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for connection requests (mode=req).
+
+    Stores in pending_connection_requests. Ack is sent by tick job (send_to_all).
+
+    Auth is handled by the resolver via ctx.signer (based on signer_type field):
+    - signer_type='peer_shared': resolver verifies main signature against peer_shared's public key
+    - signer_type='invite': resolver verifies main signature against invite's public key
+    """
+    event_data = ctx.event_data
+    event_id = ctx.event_id
+    recorded_by = ctx.recorded_by
+    recorded_at = ctx.recorded_at
+    db = ctx.db
+
+    # Auth: resolver verified signature, check ctx.signer is present
+    if not ctx.signer:
+        log.warning(f"connection._project_request_pure: no signer for {event_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    peer_shared_id = event_data.get('signed_by')
+    key_b64 = event_data.get('key')
+
+    unsafedb = create_unsafe_db(db)
+
+    # ENFORCEMENT: Reject connections from removed peers
+    if peer_shared_id:
+        removed_check = unsafedb.query_one(
+            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ? LIMIT 1",
+            (peer_shared_id,)
+        )
+        if removed_check:
+            log.info(f"connection._project_request_pure: rejecting from removed peer {peer_shared_id[:20]}...")
+            return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Extract key
+    if not key_b64:
+        log.warning(f"connection._project_request_pure: missing key in request {event_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    symmetric_key = crypto.b64decode(key_b64)
+
+    log.info(f"connection._project_request_pure: storing request {event_id[:20]}... from {peer_shared_id[:20] if peer_shared_id else 'unknown'}...")
+
+    # Store in pending_connection_requests - ack will be sent by tick job
+    writes = (
+        WriteOp(
+            op='insert',
+            table='pending_connection_requests',
+            values={
+                'request_id': event_id,
+                'remote_peer_shared_id': peer_shared_id,
+                'their_key': symmetric_key,
+                'received_at': recorded_at,
+                'recorded_by': recorded_by,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _project_ack_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for connection acks (mode=ack).
+
+    Updates the existing connection entry with their_key and their_connection_id.
+
+    Auth is handled by the resolver via ctx.signer (based on signer_type field):
+    - signer_type='peer_shared': resolver verifies main signature against peer_shared's public key
+    - signer_type='invite': resolver verifies main signature against invite's public key (bootstrap)
+
+    Additional validation: must reference a connection request we created.
+    """
+    event_data = ctx.event_data
+    event_id = ctx.event_id
+    recorded_by = ctx.recorded_by
+    recorded_at = ctx.recorded_at
+    db = ctx.db
+
+    # Auth: resolver verified signature, check ctx.signer is present
+    if not ctx.signer:
+        log.warning(f"connection._project_ack_pure: no signer for ack {event_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    for_connection_id = event_data.get('for_connection_id')
+    peer_shared_id = event_data.get('signed_by')
+    key_b64 = event_data.get('key')
+
+    if not for_connection_id:
+        log.warning(f"connection._project_ack_pure: ack {event_id[:20]}... missing for_connection_id")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if not key_b64:
+        log.warning(f"connection._project_ack_pure: ack {event_id[:20]}... missing key")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Validation: Must reference a connection we created
+    existing = safedb.query_one("""
+        SELECT connection_id FROM connections
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (for_connection_id, recorded_by))
+
+    if not existing:
+        log.warning(f"connection._project_ack_pure: no matching request for ack {event_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    their_key = crypto.b64decode(key_b64)
+
+    log.info(f"connection._project_ack_pure: updating connection {for_connection_id[:20]}... with ack {event_id[:20]}...")
+
+    # Update existing connection with their info
+    writes = (
+        WriteOp(
+            op='update',
+            table='connections',
+            values={
+                'their_connection_id': event_id,
+                'their_key': their_key,
+                'peer_shared_id': peer_shared_id,  # COALESCE handled by apply layer if needed
+                'last_handshake_ms': recorded_at,
+            },
+            where={
+                'connection_id': for_connection_id,
+                'recorded_by': recorded_by,
+            },
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True)
+
+
 def _project_request(
     event_id: str,
     event_data: dict,
@@ -246,11 +315,14 @@ def _project_request(
             log.info(f"connection.project: rejecting request from removed peer {peer_shared_id[:20]}...")
             return None
 
-    # Authentication: Try invite signature first (for bootstrap), fall back to peer signature
+    # Authentication: Based on signer_type field
+    # - signer_type='invite': main signature made with invite key (bootstrap mode)
+    # - signer_type='peer_shared': main signature made with peer_shared key (normal mode)
     authenticated = False
-    invite_signature_b64 = event_data.get('invite_signature')
+    signer_type = event_data.get('signer_type')
 
-    if invite_id and invite_signature_b64:
+    if signer_type == 'invite' and invite_id:
+        # Bootstrap mode: verify main signature with invite pubkey
         invite_public_key = None
 
         # Get invite_pubkey from either:
@@ -268,21 +340,19 @@ def _project_request(
             log.info(f"connection.project: found invite_pubkey for {invite_id[:20]}...")
 
         if invite_public_key:
-            # Verify invite signature
-            connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
-            sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
-            invite_signature = crypto.b64decode(invite_signature_b64)
-            if crypto.verify(sig_data, invite_signature, invite_public_key):
+            # Verify main signature with invite key
+            if crypto.verify_event(event_data, invite_public_key):
                 log.info(f"connection.project: invite signature verified for {invite_id[:20]}...")
                 authenticated = True
 
-    if not authenticated:
+    elif signer_type == 'peer_shared' and peer_shared_id:
+        # Normal mode: verify main signature with peer_shared pubkey
         if crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
             log.debug(f"connection.project: peer signature verified")
             authenticated = True
 
     if not authenticated:
-        log.warning(f"connection.project: authentication failed for request {event_id[:20]}...")
+        log.warning(f"connection.project: authentication failed for request {event_id[:20]}... signer_type={signer_type}")
         return None
 
     # Extract key
@@ -785,6 +855,12 @@ class Connection:
     # Sync optimization
     last_synced_root_hash: bytes | None = None  # Skip sync if our root unchanged
 
+    # Network address (LEARNED from packets)
+    peer_ip: str | None = None              # Learned from UDP source
+    peer_port: int | None = None            # Learned from UDP source
+    address_source: str | None = None       # 'packet', 'invite', 'manual'
+    address_learned_ms: int | None = None   # When we learned it
+
     @classmethod
     def from_row(cls, row: dict) -> 'Connection':
         """Create Connection from database row."""
@@ -800,6 +876,10 @@ class Connection:
             last_handshake_ms=row['last_handshake_ms'],
             ttl_ms=row['ttl_ms'],
             last_synced_root_hash=row.get('last_synced_root_hash'),
+            peer_ip=row.get('peer_ip'),
+            peer_port=row.get('peer_port'),
+            address_source=row.get('address_source'),
+            address_learned_ms=row.get('address_learned_ms'),
         )
 
     @property
@@ -837,6 +917,16 @@ class Connection:
     def is_bootstrap(self) -> bool:
         """Check if this is a bootstrap connection (via invite)."""
         return self.invite_id is not None
+
+    def has_address(self) -> bool:
+        """Check if we have a learned address for this connection."""
+        return self.peer_ip is not None and self.peer_port is not None
+
+    def get_address(self) -> tuple | None:
+        """Get the learned address as (ip, port) tuple."""
+        if self.has_address():
+            return (self.peer_ip, self.peer_port)
+        return None
 
     def time_since_handshake(self, t_ms: int) -> int:
         """Milliseconds since last handshake (req/ack)."""
@@ -937,6 +1027,114 @@ def format_time_remaining(ms: int) -> str:
         return f"in {ms // 60000}m {(ms % 60000) // 1000}s"
     else:
         return f"in {ms // 3600000}h {(ms % 3600000) // 60000}m"
+
+
+# ============================================================================
+# Address learning and lookup
+# ============================================================================
+
+def learn_address(connection_id: str, peer_ip: str, peer_port: int,
+                  source: str, t_ms: int, recorded_by: str, db: Any) -> None:
+    """Update connection with learned address from incoming packet.
+
+    Called by the connection layer when processing incoming blobs
+    to record the sender's network address.
+
+    Args:
+        connection_id: The connection that received the packet
+        peer_ip: IP address learned from UDP source
+        peer_port: Port learned from UDP source
+        source: How we learned it ('packet', 'invite', 'manual')
+        t_ms: When we learned it
+        recorded_by: Local peer who owns this connection
+        db: Database connection
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute("""
+        UPDATE connections SET
+            peer_ip = ?, peer_port = ?,
+            address_source = ?, address_learned_ms = ?
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (peer_ip, peer_port, source, t_ms, connection_id, recorded_by))
+    log.debug(f"connection.learn_address: learned {peer_ip}:{peer_port} for connection {connection_id[:20]}...")
+
+
+def get_address(connection_id: str, recorded_by: str, db: Any) -> tuple | None:
+    """Get address for a connection, checking all sources.
+
+    Priority:
+    1. Learned address on connection (from recent packets)
+    2. Bootstrap address from invite_accepteds
+
+    Args:
+        connection_id: The connection to get address for
+        recorded_by: Local peer who owns this connection
+        db: Database connection
+
+    Returns:
+        (ip, port) tuple if address found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Priority 1: Learned address on connection
+    conn = safedb.query_one("""
+        SELECT peer_ip, peer_port, peer_shared_id, invite_id
+        FROM connections WHERE connection_id = ? AND recorded_by = ?
+    """, (connection_id, recorded_by))
+
+    if not conn:
+        return None
+
+    if conn['peer_ip']:
+        return (conn['peer_ip'], conn['peer_port'])
+
+    # Priority 2: Bootstrap address from invite_accepteds
+    if conn['peer_shared_id']:
+        invite = safedb.query_one("""
+            SELECT address, port FROM invite_accepteds
+            WHERE inviter_peer_shared_id = ? AND recorded_by = ?
+        """, (conn['peer_shared_id'], recorded_by))
+        if invite and invite['address']:
+            return (invite['address'], invite['port'])
+
+    return None
+
+
+def get_address_by_peer(peer_shared_id: str, recorded_by: str, db: Any) -> tuple | None:
+    """Get address for a remote peer, checking connections and invite_accepteds.
+
+    Used when we need to send to a peer but don't have a specific connection_id.
+
+    Args:
+        peer_shared_id: Remote peer's public identity
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        (ip, port) tuple if address found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Check connections with learned addresses
+    conn = safedb.query_one("""
+        SELECT peer_ip, peer_port FROM connections
+        WHERE peer_shared_id = ? AND recorded_by = ? AND peer_ip IS NOT NULL
+        ORDER BY address_learned_ms DESC LIMIT 1
+    """, (peer_shared_id, recorded_by))
+
+    if conn and conn['peer_ip']:
+        return (conn['peer_ip'], conn['peer_port'])
+
+    # Check invite_accepteds for bootstrap address
+    invite = safedb.query_one("""
+        SELECT address, port FROM invite_accepteds
+        WHERE inviter_peer_shared_id = ? AND recorded_by = ?
+    """, (peer_shared_id, recorded_by))
+
+    if invite and invite['address']:
+        return (invite['address'], invite['port'])
+
+    return None
 
 
 # ============================================================================

@@ -59,7 +59,8 @@ class incoming:
     """
 
     @staticmethod
-    def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB, from_peer: str = None, to_peer: str = None) -> bool:
+    def add(blob: bytes, t_ms: int, unsafedb: UnsafeDB, from_peer: str = None, to_peer: str = None,
+            source_ip: str = None, source_port: int = None) -> bool:
         """Add an incoming transit blob to the queue with network simulation.
 
         If a transport callback is set, the packet is first offered to the callback.
@@ -76,6 +77,8 @@ class incoming:
             unsafedb: Database connection for queue storage
             from_peer: Source peer ID (for partition/NAT checking)
             to_peer: Destination peer ID (for partition/NAT checking)
+            source_ip: Source IP address (for address learning)
+            source_port: Source port (for address learning)
 
         Returns:
             True if packet was enqueued/sent, False if dropped
@@ -116,14 +119,14 @@ class incoming:
 
         # Store in SQLite queue
         unsafedb.execute(
-            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at) VALUES (?, ?, ?)",
-            (blob, t_ms, deliver_at)
+            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at, source_ip, source_port) VALUES (?, ?, ?, ?, ?)",
+            (blob, t_ms, deliver_at, source_ip, source_port)
         )
         log.debug(f"queues.incoming.add() enqueued blob, deliver_at={deliver_at}")
         return True
 
     @staticmethod
-    def drain(batch_size: int, current_time_ms: int, unsafedb: UnsafeDB) -> list[bytes]:
+    def drain(batch_size: int, current_time_ms: int, unsafedb: UnsafeDB) -> list[dict]:
         """Drain incoming transit blobs that are ready for delivery.
 
         Reads from SQLite queue with time-based bankruptcy protection:
@@ -136,7 +139,7 @@ class incoming:
             unsafedb: Database connection for queue storage
 
         Returns:
-            List of packet payloads
+            List of dicts with 'blob', 'source_ip', 'source_port' keys
         """
         log.debug(f"queues.incoming.drain() draining up to {batch_size} blobs at t_ms={current_time_ms}")
 
@@ -161,15 +164,15 @@ class incoming:
                        ORDER BY deliver_at
                        LIMIT ?
                    )
-                   RETURNING blob""",
+                   RETURNING blob, source_ip, source_port""",
                 (current_time_ms, batch_size)
             )
-            result = [row['blob'] for row in rows]
+            result = [{'blob': row['blob'], 'source_ip': row['source_ip'], 'source_port': row['source_port']} for row in rows]
         except Exception as e:
             # Fallback for older SQLite: SELECT then DELETE
             log.debug(f"queues.incoming.drain() RETURNING not supported, using fallback: {e}")
             rows = unsafedb.query(
-                """SELECT id, blob FROM incoming_blobs
+                """SELECT id, blob, source_ip, source_port FROM incoming_blobs
                    WHERE deliver_at <= ? AND NOT dropped
                    ORDER BY deliver_at
                    LIMIT ?""",
@@ -187,13 +190,14 @@ class incoming:
                 f"DELETE FROM incoming_blobs WHERE id IN ({placeholders})",
                 tuple(ids)
             )
-            result = [row['blob'] for row in rows]
+            result = [{'blob': row['blob'], 'source_ip': row['source_ip'], 'source_port': row['source_port']} for row in rows]
 
         log.info(f"queues.incoming.drain() drained {len(result)} blobs")
         return result
 
     @staticmethod
-    def add_immediate(blob: bytes, t_ms: int, unsafedb: UnsafeDB) -> None:
+    def add_immediate(blob: bytes, t_ms: int, unsafedb: UnsafeDB,
+                      source_ip: str = None, source_port: int = None) -> None:
         """Add a packet directly to queue with immediate delivery (no simulation).
 
         Use this for real networking where packets arrive from external sources
@@ -203,12 +207,14 @@ class incoming:
             blob: The packet data
             t_ms: Current time in milliseconds (used as both sent_at and deliver_at)
             unsafedb: Database connection for queue storage
+            source_ip: Source IP address (for address learning)
+            source_port: Source port (for address learning)
         """
         unsafedb.execute(
-            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at) VALUES (?, ?, ?)",
-            (blob, t_ms, t_ms)  # deliver_at = sent_at for immediate delivery
+            "INSERT INTO incoming_blobs (blob, sent_at, deliver_at, source_ip, source_port) VALUES (?, ?, ?, ?, ?)",
+            (blob, t_ms, t_ms, source_ip, source_port)  # deliver_at = sent_at for immediate delivery
         )
-        log.debug(f"queues.incoming.add_immediate() queued {len(blob)}B for immediate delivery")
+        log.debug(f"queues.incoming.add_immediate() queued {len(blob)}B for immediate delivery from {source_ip}:{source_port}")
 
     @staticmethod
     def pending_count(current_time_ms: int, unsafedb: UnsafeDB) -> int:
