@@ -54,6 +54,6 @@ Test alignment
 
 Schema-level checks
 - `docs/tla/EventGraphSchema.tla` encodes the full event graph (with mode
-  variants) and signer/dependency relationships. Use it to validate that
-  any implementation changes preserve causal ordering across the entire
-  graph, not just bootstrap.
+  variants) and signer/dependency relationships, with per-peer validity
+  sets. Use it to validate that any implementation changes preserve causal
+  ordering across the entire graph, not just bootstrap.

@@ -12,8 +12,9 @@ EXTENDS Naturals
 \*
 \* Use ActiveEvents in the TLC config to bound the state space.
 \* FullEvents lists all modeled nodes; ActiveEvents chooses a subset.
+\* Use Peers in the TLC config to model per-peer perspectives.
 
-CONSTANT ActiveEvents
+CONSTANTS ActiveEvents, Peers
 
 VARIABLES recorded, valid, trustAnchor
 
@@ -118,6 +119,7 @@ CoreEvents == {
 }
 
 ASSUME ActiveEvents \subseteq FullEvents
+ASSUME Peers /= {}
 
 EVENTS == ActiveEvents
 
@@ -221,53 +223,60 @@ SignerDep(e) ==
 
 Deps(e) == (RawDeps(e) \cup SignerDep(e)) \cap EVENTS
 
-\* Network validity is gated by an invite_accepted trust anchor.
-Guard(e) == IF e = Net THEN trustAnchor ELSE TRUE
+\* Network validity is gated by an invite_accepted trust anchor (per peer).
+Guard(p, e) == IF e = Net THEN trustAnchor[p] ELSE TRUE
 
 Init ==
-    /\ recorded = {}
-    /\ valid = {}
-    /\ trustAnchor = FALSE
+    /\ recorded = [p \in Peers |-> {}]
+    /\ valid = [p \in Peers |-> {}]
+    /\ trustAnchor = [p \in Peers |-> FALSE]
 
-Record(e) ==
+Record(p, e) ==
+    /\ p \in Peers
     /\ e \in EVENTS
-    /\ e \notin recorded
-    /\ recorded' = recorded \cup {e}
+    /\ e \notin recorded[p]
+    /\ recorded' = [recorded EXCEPT ![p] = @ \cup {e}]
     /\ UNCHANGED <<valid, trustAnchor>>
 
-Project(e) ==
-    /\ e \in recorded
-    /\ e \notin valid
-    /\ Deps(e) \subseteq valid
-    /\ Guard(e)
-    /\ valid' = valid \cup {e}
-    /\ trustAnchor' = IF e = InviteAccepted THEN TRUE ELSE trustAnchor
+Project(p, e) ==
+    /\ p \in Peers
+    /\ e \in recorded[p]
+    /\ e \notin valid[p]
+    /\ Deps(e) \subseteq valid[p]
+    /\ Guard(p, e)
+    /\ valid' = [valid EXCEPT ![p] = @ \cup {e}]
+    /\ trustAnchor' =
+        IF e = InviteAccepted
+        THEN [trustAnchor EXCEPT ![p] = TRUE]
+        ELSE trustAnchor
     /\ UNCHANGED recorded
 
 Stutter ==
     UNCHANGED <<recorded, valid, trustAnchor>>
 
 Next ==
-    \/ \E e \in EVENTS: Record(e)
-    \/ \E e \in EVENTS: Project(e)
+    \/ \E p \in Peers, e \in EVENTS: Record(p, e)
+    \/ \E p \in Peers, e \in EVENTS: Project(p, e)
     \/ Stutter
 
 Spec ==
     Init /\ [][Next]_<<recorded, valid, trustAnchor>>
 
 TypeOK ==
-    /\ recorded \subseteq EVENTS
-    /\ valid \subseteq EVENTS
-    /\ valid \subseteq recorded
-    /\ trustAnchor \in {TRUE, FALSE}
+    /\ recorded \in [Peers -> SUBSET EVENTS]
+    /\ valid \in [Peers -> SUBSET EVENTS]
+    /\ \A p \in Peers: valid[p] \subseteq recorded[p]
+    /\ trustAnchor \in [Peers -> {TRUE, FALSE}]
 
 InvDeps ==
-    \A e \in valid: Deps(e) \subseteq valid
+    \A p \in Peers:
+        \A e \in valid[p]: Deps(e) \subseteq valid[p]
 
 InvSigner ==
-    \A e \in valid: (SignerDep(e) \cap EVENTS) \subseteq valid
+    \A p \in Peers:
+        \A e \in valid[p]: (SignerDep(e) \cap EVENTS) \subseteq valid[p]
 
 InvNetAnchor ==
-    Net \in valid => trustAnchor
+    \A p \in Peers: (Net \in valid[p]) => trustAnchor[p]
 
 ====
