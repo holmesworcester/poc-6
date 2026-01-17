@@ -43,3 +43,8 @@ CREATE TABLE IF NOT EXISTS incoming_blobs (
     deliver_at INTEGER NOT NULL DEFAULT 0,  -- When packet will be delivered (sent_at + latency)
     dropped BOOLEAN DEFAULT FALSE            -- Whether packet was dropped due to packet loss
 );
+
+-- Index for efficient drain() queries: SELECT WHERE deliver_at <= ? AND NOT dropped
+-- Partial index excludes dropped packets which are never queried
+CREATE INDEX IF NOT EXISTS idx_incoming_blobs_deliver_at
+    ON incoming_blobs(deliver_at) WHERE NOT dropped;

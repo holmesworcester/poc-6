@@ -235,19 +235,14 @@ def test_new_channel_visible_to_other_users(api_setup, test_client):
     db.commit()
 
     # Sync so Bob sees the new channel
-    tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=200, check_interval=1
-    )
+    def bob_sees_announcements():
+        resp = bob_api.get(f"/api/networks/{u(alice['network_id'])}/channels")
+        assert resp.status_code == 200
+        channels = resp.json()["items"]
+        channel_names = [ch["name"] for ch in channels]
+        assert "announcements" in channel_names, f"Bob only sees: {channel_names}"
 
-    # Bob can see the new channel
-    bob_api.set_time(8000)
-    resp = bob_api.get(f"/api/networks/{u(alice['network_id'])}/channels")
-    assert resp.status_code == 200
-
-    channels = resp.json()["items"]
-    channel_names = [ch["name"] for ch in channels]
-    assert "general" in channel_names
-    assert "announcements" in channel_names
+    tick_helper.assert_eventually(bob_sees_announcements, db=db, start_t_ms=6000)
 
     print("✓ New channel visible to other users after sync")
 

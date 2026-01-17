@@ -507,7 +507,37 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
                 )
                 log.warning(f"[INVITE_ACCEPTED_V2] stored network_id={network_id[:20]}... in trust_anchors (will validate on arrival)")
             else:
-                log.warning(f"[INVITE_ACCEPTED_V2] no network_id in invite_link_data, keys={list(invite_link_data.keys())}")
+                # No network_id - this is a peer invite (device linking)
+                # For device linking, force-validate the INVITE itself (trust anchor)
+                invite_id = invite_link_data.get('invite_id')
+                link_user_id = invite_link_data.get('user_id')
+                invite_private_key_b64 = invite_link_data.get('invite_private_key')
+
+                if invite_id and link_user_id and invite_private_key_b64:
+                    # Derive invite_pubkey from private key
+                    from nacl.signing import SigningKey
+                    invite_private_key = crypto.b64decode(invite_private_key_b64)
+                    signing_key = SigningKey(invite_private_key)
+                    invite_pubkey = bytes(signing_key.verify_key)
+
+                    # Insert into invites table so resolver can find it
+                    # Use empty strings for required fields we don't have (group_id, inviter_id)
+                    # The resolver only needs invite_pubkey and user_id for peer_shared verification
+                    safedb.execute("""
+                        INSERT OR IGNORE INTO invites
+                        (invite_id, invite_pubkey, group_id, inviter_id, user_id, mode, created_at, recorded_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (invite_id, crypto.b64encode(invite_pubkey), '', '', link_user_id, 'peer', recorded_at, recorded_by))
+
+                    # Force-validate the invite (trust anchor for device linking)
+                    safedb.execute(
+                        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+                        (invite_id, recorded_by)
+                    )
+
+                    log.warning(f"[INVITE_ACCEPTED_V2] peer invite: derived pubkey and force-validated invite_id={invite_id[:20]}... for user_id={link_user_id[:20]}...")
+                else:
+                    log.warning(f"[INVITE_ACCEPTED_V2] no network_id in invite_link_data, keys={list(invite_link_data.keys())}")
 
             # Store inviter's peer_shared blob from link data (for sync)
             if inviter_peer_shared_blob_b64 and inviter_peer_shared_id:

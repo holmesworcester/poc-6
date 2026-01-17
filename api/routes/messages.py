@@ -195,7 +195,7 @@ async def list_messages(
     channel_id = from_urlsafe_b64(channel_id)
 
     # Verify channel exists
-    ch = channel_module.get_by_id(channel_id, recorded_by=peer_id, db=db)
+    ch = channel_module.get(channel_id, recorded_by=peer_id, db=db)
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
 
@@ -288,7 +288,7 @@ async def send_message(
     channel_id = from_urlsafe_b64(channel_id)
 
     # Verify channel exists
-    ch = channel_module.get_by_id(channel_id, recorded_by=peer_id, db=db)
+    ch = channel_module.get(channel_id, recorded_by=peer_id, db=db)
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
 
@@ -338,7 +338,7 @@ async def send_message_with_attachments(
     channel_id = from_urlsafe_b64(channel_id)
 
     # Verify channel exists
-    ch = channel_module.get_by_id(channel_id, recorded_by=peer_id, db=db)
+    ch = channel_module.get(channel_id, recorded_by=peer_id, db=db)
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
 
