@@ -13,8 +13,95 @@ from core import store
 from events.group import group_prekey
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp, EmitEvent
 
 log = logging.getLogger(__name__)
+
+
+# v2 event specification - asymmetrically encrypted, signed by peer_shared
+EVENT_SPEC = {
+    'encrypted': True,  # Wrapped to recipient's prekey
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
+    'requires': {},  # No deps - key material is self-contained
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for group_key_shared events.
+
+    On success:
+    - Verifies computed key_id matches claimed key_id (security check)
+    - Inserts into group_keys_shared table
+    - Emits deterministic group_key event with the shared key material
+    """
+    event_data = ctx.event_data
+
+    # Validate required fields
+    key_id = event_data.get('key_id')
+    symmetric_key_b64 = event_data.get('symmetric_key')
+    signed_by = event_data.get('signed_by')
+    created_at = event_data.get('created_at')
+    recipient_prekey_id = event_data.get('recipient_prekey_id')
+
+    if not key_id or not symmetric_key_b64 or not signed_by or created_at is None:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Validate symmetric key can be decoded
+    try:
+        crypto.b64decode(symmetric_key_b64)
+    except Exception:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Create deterministic group_key event data
+    # This MUST match group_key.create_with_material() blob structure
+    group_key_event_data = {
+        'type': 'group_key',
+        'key': symmetric_key_b64,  # Same key material
+    }
+
+    # Verify the computed key_id matches the claimed key_id
+    # Security check: prevents sender from claiming wrong key_id
+    deterministic_blob = crypto.canonicalize_json(group_key_event_data)
+    computed_key_id = crypto.b64encode(crypto.hash(deterministic_blob))
+    if computed_key_id != key_id:
+        log.error(f"group_key_shared key_id mismatch: computed={computed_key_id[:20]}... claimed={key_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # The group_key event is deterministic - same content = same event_id
+    # The apply layer will store it and project it
+    emit_group_key = EmitEvent(
+        event_type='group_key',
+        event_data=group_key_event_data,
+        peer_id=None,  # Use recorded_by from context
+    )
+
+    # Insert into group_keys_shared tracking table
+    # Use computed_key_id (not claimed key_id) since that's the actual event hash
+    writes = (
+        WriteOp(
+            op='insert',
+            table='group_keys_shared',
+            values={
+                'key_shared_id': ctx.event_id,
+                'original_key_id': computed_key_id,  # The actual deterministic event_id
+                'recipient_prekey_id': recipient_prekey_id,  # From signed event data
+                'signed_by': signed_by,
+                'created_at': created_at,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+    )
+
+    return ProjectorResult(
+        writes=writes,
+        valid_event=True,
+        emit_events=(emit_group_key,),
+    )
 
 
 def create(key_id: str, peer_id: str, peer_shared_id: str,
@@ -50,13 +137,17 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     if not recipient_prekey:
         raise ValueError(f"No group prekey found for recipient peer: {recipient_peer_id}")
 
+    # Extract recipient_prekey_id for inclusion in signed event data
+    recipient_prekey_id = crypto.b64encode(recipient_prekey['id'])
+
     # Create the inner event (to be wrapped to recipient's prekey)
-    # Note: recipient identity is in the crypto hint (from wrap()), not in event data
     inner_event_data = {
         'type': 'group_key_shared',
         'key_id': key_id,  # Reference to the key being shared
         'symmetric_key': symmetric_key_b64,  # The actual key material
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',
+        'recipient_prekey_id': recipient_prekey_id,  # Cryptographically bound recipient
         'created_at': t_ms
     }
 
@@ -124,12 +215,13 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     log.info(f"key_shared.create_for_invite() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite")
 
     # Create inner event
-    # Note: recipient identity (invite_prekey_id) is in the crypto hint (from wrap()), not in event data
     inner_event_data = {
         'type': 'group_key_shared',
         'key_id': key_id,
         'symmetric_key': symmetric_key_b64,
         'signed_by': peer_shared_id,
+        'signer_type': 'peer_shared',
+        'recipient_prekey_id': invite_prekey_id,  # Cryptographically bound recipient
         'created_at': t_ms
     }
 
