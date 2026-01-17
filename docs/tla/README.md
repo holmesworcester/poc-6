@@ -13,6 +13,7 @@ Files
 - `docs/tla/event_graph_schema.cfg`: TLC config for the core schema slice.
 - `docs/tla/event_graph_schema_fast.cfg`: TLC config for the smallest core slice.
 - `docs/tla/event_graph_schema_expanded.cfg`: TLC config for an expanded slice.
+- `docs/tla/event_graph_schema_expanded_single_peer.cfg`: expanded slice with a single peer.
 - `docs/tla/states/`: TLC output directory (generated; not tracked).
 
 State summary (BootstrapGraph.tla)
@@ -54,6 +55,13 @@ For an expanded schema slice:
 ```bash
 java -cp /tmp/tla2tools.jar tlc2.TLC \
   -config docs/tla/event_graph_schema_expanded.cfg \
+  docs/tla/EventGraphSchema.tla
+```
+
+For an expanded slice with a single peer:
+```bash
+java -cp /tmp/tla2tools.jar tlc2.TLC \
+  -config docs/tla/event_graph_schema_expanded_single_peer.cfg \
   docs/tla/EventGraphSchema.tla
 ```
 
