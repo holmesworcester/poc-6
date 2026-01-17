@@ -86,6 +86,12 @@ FullEvents == {
     TransitPrekey, TransitPrekeyShared, ObservedAddress, SelfAddress, NetworkIntro, Sync, Connection
 }
 
+LocalRoots == {
+    InviteAccepted, Peer, GroupKey, GroupPrekey, TransitPrekey, Connection, FileSlice
+}
+
+NetGuardedEvents == (FullEvents \ LocalRoots)
+
 IdentityEvents == {
     Net, InviteAccepted,
     InviteUserBoot, InviteUserOngoing, InvitePeerFirst, InvitePeerOngoing,
@@ -278,5 +284,41 @@ InvSigner ==
 
 InvNetAnchor ==
     \A p \in Peers: (Net \in valid[p]) => trustAnchor[p]
+
+InvTrustAnchorSource ==
+    IF InviteAccepted \in EVENTS
+    THEN \A p \in Peers: trustAnchor[p] => (InviteAccepted \in valid[p])
+    ELSE TRUE
+
+InvAllValidRequireNetwork ==
+    IF Net \in EVENTS
+    THEN \A p \in Peers:
+        \A e \in valid[p]:
+            (e \notin NetGuardedEvents) \/ (e = Net) \/ (Net \in valid[p])
+    ELSE TRUE
+
+InvUserInviteChain ==
+    IF InviteUserBoot \in EVENTS \/ InviteUserOngoing \in EVENTS
+    THEN \A p \in Peers:
+        ((UserBoot \in valid[p]) => (InviteUserBoot \in valid[p]))
+        /\ ((UserOngoing \in valid[p]) => (InviteUserOngoing \in valid[p]))
+    ELSE TRUE
+
+InvPeerSharedInviteChain ==
+    IF InvitePeerFirst \in EVENTS \/ InvitePeerOngoing \in EVENTS
+    THEN \A p \in Peers:
+        ((PeerSharedFirst \in valid[p]) => (InvitePeerFirst \in valid[p]))
+        /\ ((PeerSharedOngoing \in valid[p]) => (InvitePeerOngoing \in valid[p]))
+    ELSE TRUE
+
+InvAdminChain ==
+    IF AdminOngoing \in EVENTS
+    THEN \A p \in Peers: (AdminOngoing \in valid[p]) => (AdminBoot \in valid[p])
+    ELSE TRUE
+
+InvGroupAllUsersNetwork ==
+    IF GroupAllUsers \in EVENTS
+    THEN \A p \in Peers: (GroupAllUsers \in valid[p]) => (Net \in valid[p])
+    ELSE TRUE
 
 ====
