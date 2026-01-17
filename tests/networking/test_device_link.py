@@ -138,7 +138,7 @@ def test_device_link_sync_messages(device_link_clients):
     # Wait for laptop to sync the channel before testing messages
     from events.content import channel
     def laptop_has_channel():
-        channels = channel.list_channels(alice_laptop.peer_id, alice_laptop.db)
+        channels = channel.list(alice_laptop.peer_id, alice_laptop.db)
         return any(c['channel_id'] == alice_phone.channel_id for c in channels)
 
     ticks = tick_until(device_link_clients, laptop_has_channel, max_ticks=100)
@@ -312,7 +312,7 @@ def test_device_link_shares_history(device_link_clients):
     # Wait for laptop to sync the channel first
     from events.content import channel
     def laptop_has_channel():
-        channels = channel.list_channels(alice_laptop.peer_id, alice_laptop.db)
+        channels = channel.list(alice_laptop.peer_id, alice_laptop.db)
         return any(c['channel_id'] == alice_phone.channel_id for c in channels)
 
     ticks = tick_until(device_link_clients, laptop_has_channel, max_ticks=150)

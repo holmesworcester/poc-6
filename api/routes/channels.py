@@ -45,7 +45,7 @@ async def list_channels(network_id: str):
     peer_id = verify_network_access(network_id)
     db = get_db()
 
-    channels = channel.list_channels(recorded_by=peer_id, db=db)
+    channels = channel.list(recorded_by=peer_id, db=db)
 
     return ChannelListResponse(
         items=[
@@ -73,7 +73,7 @@ async def get_channel(network_id: str, channel_id: str):
     # Convert from URL-safe base64
     channel_id = from_urlsafe_b64(channel_id)
 
-    ch = channel.get_by_id(channel_id, recorded_by=peer_id, db=db)
+    ch = channel.get(channel_id, recorded_by=peer_id, db=db)
     if not ch:
         raise HTTPException(status_code=404, detail="Channel not found")
 

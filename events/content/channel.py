@@ -1,4 +1,5 @@
 """Channel event type (shareable, encrypted)."""
+from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'channel'
@@ -476,7 +477,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     return event_id
 
 
-def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels for a specific peer."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
     name_subquery = (
@@ -505,7 +506,7 @@ def list_channels(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
-def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
+def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List all channels with their current group keys.
 
     Returns channel info plus the current key_id from the associated group,
@@ -547,7 +548,7 @@ def list_channels_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
-def get_by_id(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a single channel by ID.
 
     Args:
@@ -634,12 +635,6 @@ def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shar
 
     log.info(f"add_member_to_channel() added member_id={member_id}")
     return member_id
-
-
-# Aliases for compatibility with master branch
-get = get_by_id
-list = list_channels
-list_with_keys = list_channels_with_keys
 
 
 def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
