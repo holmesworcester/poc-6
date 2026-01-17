@@ -251,19 +251,30 @@ def _project_request(
     invite_signature_b64 = event_data.get('invite_signature')
 
     if invite_id and invite_signature_b64:
-        invite_blob = store.get(invite_id, unsafedb)
-        if invite_blob:
-            try:
-                invite_event = crypto.parse_json(invite_blob)
-                invite_public_key = crypto.b64decode(invite_event.get('invite_pubkey', ''))
-                connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
-                sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
-                invite_signature = crypto.b64decode(invite_signature_b64)
-                if crypto.verify(sig_data, invite_signature, invite_public_key):
-                    log.info(f"connection.project: invite signature verified for {invite_id[:20]}...")
-                    authenticated = True
-            except Exception as e:
-                log.debug(f"connection.project: invite signature check failed: {e}")
+        invite_public_key = None
+
+        # Get invite_pubkey from either:
+        # - invites table (inviter projected the invite they created)
+        # - invite_accepteds table (joiner projected invite_accepted from URL)
+        pubkey_row = safedb.query_one(
+            """SELECT invite_pubkey FROM invites WHERE invite_id = ? AND recorded_by = ?
+               UNION
+               SELECT invite_pubkey FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?
+               LIMIT 1""",
+            (invite_id, recorded_by, invite_id, recorded_by)
+        )
+        if pubkey_row and pubkey_row['invite_pubkey']:
+            invite_public_key = crypto.b64decode(pubkey_row['invite_pubkey'])
+            log.info(f"connection.project: found invite_pubkey for {invite_id[:20]}...")
+
+        if invite_public_key:
+            # Verify invite signature
+            connect_without_invite_sig = {k: v for k, v in event_data.items() if k != 'invite_signature'}
+            sig_data = json.dumps(connect_without_invite_sig, sort_keys=True).encode()
+            invite_signature = crypto.b64decode(invite_signature_b64)
+            if crypto.verify(sig_data, invite_signature, invite_public_key):
+                log.info(f"connection.project: invite signature verified for {invite_id[:20]}...")
+                authenticated = True
 
     if not authenticated:
         if crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
