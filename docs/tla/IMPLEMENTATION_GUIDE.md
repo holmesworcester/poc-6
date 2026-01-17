@@ -57,3 +57,10 @@ Schema-level checks
   variants) and signer/dependency relationships, with per-peer validity
   sets. Use it to validate that any implementation changes preserve causal
   ordering across the entire graph, not just bootstrap.
+
+Additional security constraints (schema-level)
+- `invite_accepted` only projects if a matching invite event is recorded.
+- `message_deletion` and `message_reaction_deletion` require their targets.
+- `group_key_shared` and `group_prekey_shared` require corresponding keys.
+- `user_removed` and `peer_removed` require an admin event (boot or ongoing).
+- `file_slice` is only trusted after `message_attachment` and `file_slice`.

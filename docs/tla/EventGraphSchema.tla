@@ -92,6 +92,9 @@ LocalRoots == {
 
 NetGuardedEvents == (FullEvents \ LocalRoots)
 
+InviteEvents == {InviteUserBoot, InviteUserOngoing, InvitePeerFirst, InvitePeerOngoing}
+AdminEvents == {AdminBoot, AdminOngoing}
+
 IdentityEvents == {
     Net, InviteAccepted,
     InviteUserBoot, InviteUserOngoing, InvitePeerFirst, InvitePeerOngoing,
@@ -152,9 +155,9 @@ RawDeps(e) ==
        [] e = GroupKey -> {}
        [] e = GroupAllUsers -> {GroupKey}
        [] e = GroupNormal -> {GroupKey}
-       [] e = GroupKeyShared -> {}
+       [] e = GroupKeyShared -> {GroupKey}
        [] e = GroupPrekey -> {}
-       [] e = GroupPrekeyShared -> {}
+       [] e = GroupPrekeyShared -> {GroupPrekey}
        [] e = GroupMember -> {GroupAllUsers, UserOngoing, AdminBoot}
 
        [] e = Channel -> {GroupAllUsers}
@@ -163,8 +166,8 @@ RawDeps(e) ==
        [] e = Message -> {Channel, UserOngoing}
        [] e = MessageUpdate -> {Message}
        [] e = MessageReaction -> {Message}
-       [] e = MessageReactionDeletion -> {}
-       [] e = MessageDeletion -> {}
+       [] e = MessageReactionDeletion -> {MessageReaction}
+       [] e = MessageDeletion -> {Message}
        [] e = MessageAttachment -> {Message}
        [] e = MessageRekey -> {Message, GroupKey}
        [] e = FileSlice -> {}
@@ -232,6 +235,11 @@ Deps(e) == (RawDeps(e) \cup SignerDep(e)) \cap EVENTS
 \* Network validity is gated by an invite_accepted trust anchor (per peer).
 Guard(p, e) == IF e = Net THEN trustAnchor[p] ELSE TRUE
 
+HasRecordedInvite(p) ==
+    IF (InviteEvents \cap EVENTS) = {}
+    THEN TRUE
+    ELSE \E e \in (InviteEvents \cap EVENTS): e \in recorded[p]
+
 Init ==
     /\ recorded = [p \in Peers |-> {}]
     /\ valid = [p \in Peers |-> {}]
@@ -251,6 +259,7 @@ Project(p, e) ==
     /\ e \notin valid[p]
     /\ Deps(e) \subseteq valid[p]
     /\ Guard(p, e)
+    /\ IF e = InviteAccepted THEN HasRecordedInvite(p) ELSE TRUE
     /\ valid' = [valid EXCEPT ![p] = @ \cup {e}]
     /\ trustAnchor' =
         IF e = InviteAccepted
@@ -301,6 +310,13 @@ InvTrustAnchorSource ==
     THEN \A p \in Peers: trustAnchor[p] => (InviteAccepted \in valid[p])
     ELSE TRUE
 
+InvInviteAcceptedRecorded ==
+    IF InviteAccepted \in EVENTS /\ (InviteEvents \cap EVENTS) /= {}
+    THEN \A p \in Peers:
+        (InviteAccepted \in valid[p]) =>
+            (\E e \in (InviteEvents \cap EVENTS): e \in recorded[p])
+    ELSE TRUE
+
 InvAllValidRequireNetwork ==
     IF Net \in EVENTS
     THEN \A p \in Peers:
@@ -325,6 +341,15 @@ InvPeerSharedInviteChain ==
 InvAdminChain ==
     IF AdminOngoing \in EVENTS
     THEN \A p \in Peers: (AdminOngoing \in valid[p]) => (AdminBoot \in valid[p])
+    ELSE TRUE
+
+InvRemovalAdmin ==
+    IF (UserRemoved \in EVENTS \/ PeerRemoved \in EVENTS) /\ (AdminEvents \cap EVENTS) /= {}
+    THEN \A p \in Peers:
+        ((UserRemoved \in valid[p]) =>
+            (\E a \in (AdminEvents \cap EVENTS): a \in valid[p]))
+        /\ ((PeerRemoved \in valid[p]) =>
+            (\E a \in (AdminEvents \cap EVENTS): a \in valid[p]))
     ELSE TRUE
 
 InvGroupAllUsersNetwork ==
