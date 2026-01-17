@@ -220,20 +220,17 @@ def test_two_player_message_visibility(api_setup, test_client):
     db.commit()
 
     # Sync so Bob can see the message
-    tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=200, check_interval=1
-    )
+    def bob_sees_message():
+        resp = bob_api.get(
+            f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
+        )
+        assert resp.status_code == 200
+        messages = resp.json()["items"]
+        assert len(messages) == 1, f"Expected 1 message, got {len(messages)}"
+        assert messages[0]["content"] == "Hello Bob!"
+        assert messages[0]["author_name"] == "Alice"
 
-    # Bob can see the message
-    bob_api.set_time(8000)
-    resp = bob_api.get(
-        f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
-    )
-    assert resp.status_code == 200
-    messages = resp.json()["items"]
-    assert len(messages) == 1
-    assert messages[0]["content"] == "Hello Bob!"
-    assert messages[0]["author_name"] == "Alice"
+    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=6000)
 
     print("✓ Two player message visibility works via API")
 
@@ -273,16 +270,13 @@ def test_deleted_message_syncs_to_other_user(api_setup, test_client):
     db.commit()
 
     # Sync so Bob sees it
-    tick_helper.sync_until_converged(
-        db=db, start_t_ms=6000, max_rounds=200, check_interval=1
-    )
+    def bob_sees_message():
+        resp = bob_api.get(
+            f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
+        )
+        assert len(resp.json()["items"]) == 1
 
-    # Bob can see the message
-    bob_api.set_time(7000)
-    resp = bob_api.get(
-        f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
-    )
-    assert len(resp.json()["items"]) == 1
+    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=6000)
 
     # Alice deletes the message
     alice_api.set_time(8000)
@@ -293,16 +287,13 @@ def test_deleted_message_syncs_to_other_user(api_setup, test_client):
     db.commit()
 
     # Sync deletion to Bob
-    tick_helper.sync_until_converged(
-        db=db, start_t_ms=9000, max_rounds=200, check_interval=1
-    )
+    def bob_sees_deletion():
+        resp = bob_api.get(
+            f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
+        )
+        messages = resp.json()["items"]
+        assert len(messages) == 0, f"Deleted message should not appear for Bob, got {len(messages)}"
 
-    # Bob no longer sees the message
-    bob_api.set_time(11000)
-    resp = bob_api.get(
-        f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
-    )
-    messages = resp.json()["items"]
-    assert len(messages) == 0, "Deleted message should not appear for Bob"
+    tick_helper.assert_eventually(bob_sees_deletion, db=db, start_t_ms=9000)
 
     print("✓ Message deletion syncs to other users via API")

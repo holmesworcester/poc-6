@@ -255,40 +255,44 @@ def test_three_player_api(api_setup, test_client):
 
     # Sync messages
     print("\n=== Sync messages ===")
-    final_t_ms, rounds_used, converged, status = tick_helper.sync_until_converged(
-        db=db, start_t_ms=7000, max_rounds=500, check_interval=1, verbose=False
-    )
-    print(f"Message sync completed in {rounds_used} rounds (converged={converged})")
+
+    def all_messages_synced():
+        # Alice should see both messages from her network
+        resp = alice_api.get(f"/api/networks/{u(alice_network_id)}/channels/{u(alice_channel_id)}/messages")
+        assert resp.status_code == 200, f"Alice list messages failed: {resp.text}"
+        alice_messages = resp.json()["items"]
+        alice_contents = [m["content"] for m in alice_messages]
+        assert "Hello from Alice via API!" in alice_contents, "Alice should see her own message"
+        assert "Hello from Bob via API!" in alice_contents, f"Alice should see Bob's message, got: {alice_contents}"
+
+        # Bob should see both messages
+        resp = bob_api.get(f"/api/networks/{u(alice_network_id)}/channels/{u(alice_channel_id)}/messages")
+        assert resp.status_code == 200, f"Bob list messages failed: {resp.text}"
+        bob_messages = resp.json()["items"]
+        bob_contents = [m["content"] for m in bob_messages]
+        assert "Hello from Alice via API!" in bob_contents, "Bob should see Alice's message"
+        assert "Hello from Bob via API!" in bob_contents, f"Bob should see his own message, got: {bob_contents}"
+
+    tick_helper.assert_eventually(all_messages_synced, db=db, start_t_ms=7000)
+    print("Message sync completed")
 
     # === Test API: List messages ===
     print("\n=== API Test: List messages ===")
 
-    # Alice should see both messages
-    alice_api.set_time(final_t_ms)
+    # Verify final state
     resp = alice_api.get(f"/api/networks/{u(alice_network_id)}/channels/{u(alice_channel_id)}/messages")
-    assert resp.status_code == 200, f"Alice list messages failed: {resp.text}"
     alice_messages = resp.json()["items"]
     alice_contents = [m["content"] for m in alice_messages]
     print(f"Alice sees {len(alice_messages)} messages: {alice_contents}")
-
-    assert "Hello from Alice via API!" in alice_contents, "Alice should see her own message"
-    assert "Hello from Bob via API!" in alice_contents, "Alice should see Bob's message"
     assert "Hello from Charlie via API!" not in alice_contents, "Alice should NOT see Charlie's message"
 
-    # Bob should see both messages
-    bob_api.set_time(final_t_ms)
     resp = bob_api.get(f"/api/networks/{u(alice_network_id)}/channels/{u(alice_channel_id)}/messages")
-    assert resp.status_code == 200, f"Bob list messages failed: {resp.text}"
     bob_messages = resp.json()["items"]
     bob_contents = [m["content"] for m in bob_messages]
     print(f"Bob sees {len(bob_messages)} messages: {bob_contents}")
-
-    assert "Hello from Alice via API!" in bob_contents, "Bob should see Alice's message"
-    assert "Hello from Bob via API!" in bob_contents, "Bob should see his own message"
     assert "Hello from Charlie via API!" not in bob_contents, "Bob should NOT see Charlie's message"
 
     # Charlie should only see his own message
-    charlie_api.set_time(final_t_ms)
     resp = charlie_api.get(f"/api/networks/{u(charlie_network_id)}/channels/{u(charlie_channel_id)}/messages")
     assert resp.status_code == 200, f"Charlie list messages failed: {resp.text}"
     charlie_messages = resp.json()["items"]
