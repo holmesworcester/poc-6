@@ -6,7 +6,7 @@ via actual UDP packets on localhost.
 """
 import time
 from events.identity import user
-from tests.networking_tests.conftest import (
+from tests.networking.conftest import (
     Client, UDPTransport, tick_all, assert_eventually_multi
 )
 

@@ -5,7 +5,7 @@ These tests verify the UDP transport layer works correctly
 before integrating with the full sync system.
 """
 import time
-from tests.networking_tests.conftest import (
+from tests.networking.conftest import (
     Client, UDPSocket, tick_all, assert_eventually_multi
 )
 

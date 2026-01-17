@@ -54,6 +54,10 @@ import shlex
 import readline
 import atexit
 import os
+import socket
+import threading
+import queue
+import time
 from typing import Optional, Dict, List, Any
 
 # Configure logging BEFORE importing any modules that use logging
@@ -106,7 +110,7 @@ from events.network import connection
 COMMANDS = [
     'new-network', 'switch', 'send', 'tick', 'sync', 'sync-realtime', 'sync-status', 'auto-tick',
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
-    'status', 'accounts', 'channels', 'users', 'messages', 'keys',
+    'status', 'accounts', 'channels', 'users', 'messages', 'keys', 'whoami',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
     'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit'
 ]
@@ -307,6 +311,66 @@ class AccountContext:
         return f"{self.user_name} ({self.device_name})"
 
 
+# ============================================================================
+# UDP NETWORKING
+# ============================================================================
+
+class UDPSocket:
+    """UDP socket for real network communication."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self._sock: Optional[socket.socket] = None
+        self._incoming: queue.Queue = queue.Queue()
+        self._running = False
+        self._recv_thread: Optional[threading.Thread] = None
+
+    def start(self):
+        """Start listening for UDP packets."""
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((self.host, self.port))
+        self._sock.settimeout(0.1)
+        self._running = True
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+
+    def stop(self):
+        """Stop the socket."""
+        self._running = False
+        if self._recv_thread:
+            self._recv_thread.join(timeout=1.0)
+        if self._sock:
+            self._sock.close()
+
+    def _recv_loop(self):
+        """Background thread: receive packets and queue them."""
+        while self._running:
+            try:
+                data, addr = self._sock.recvfrom(65535)
+                self._incoming.put((data, addr))
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    def send_to(self, addr: tuple, data: bytes):
+        """Send packet to an address."""
+        if self._sock:
+            self._sock.sendto(data, addr)
+
+    def drain(self) -> list:
+        """Drain all queued packets."""
+        packets = []
+        while True:
+            try:
+                packets.append(self._incoming.get_nowait())
+            except queue.Empty:
+                break
+        return packets
+
+
 class CLISession:
     """Manages the CLI session state."""
 
@@ -320,6 +384,9 @@ class CLISession:
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
         self.command_history: List[str] = []  # Commands executed in this session
+        # UDP networking
+        self.udp_socket: Optional[UDPSocket] = None
+        self.peer_addresses: Dict[str, tuple] = {}  # peer_shared_id -> (host, port)
 
     def initialize_database(self, use_file: bool = False, db_path: str = None):
         """Initialize database with schema.
@@ -382,6 +449,128 @@ class CLISession:
         """Add an account to the session."""
         self.accounts[account.full_name] = account
 
+    def load_existing_accounts(self):
+        """Load existing accounts from the database.
+
+        Called at startup to restore accounts from a persisted database.
+        Auto-selects the first account if any exist.
+        """
+        # Get all local peer IDs
+        peer_ids = peer.list_local(self.db)
+        if not peer_ids:
+            return
+
+        for peer_id in peer_ids:
+            try:
+                # Get peer_shared_id and user_id
+                self_info = peer_shared.get_self(peer_id, self.db)
+                if not self_info:
+                    continue
+
+                peer_shared_id = self_info['peer_shared_id']
+                user_id = self_info.get('user_id')
+
+                # Get device name
+                device_name = peer_shared.get_device_name(peer_shared_id, peer_id, self.db)
+
+                # Get username (or fallback to "user")
+                username = "user"
+                if user_id:
+                    display_name = user.get_display_name(user_id, peer_id, self.db)
+                    if display_name:
+                        username = display_name.lower()
+
+                # Get network_id
+                network_id = network.get_network_id(peer_id, self.db)
+
+                # Create account context
+                account = AccountContext(
+                    user_name=username,
+                    device_name=device_name.lower(),
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id
+                )
+                account.user_id = user_id
+                account.network_id = network_id
+
+                self.add_account(account)
+            except Exception as e:
+                # Skip accounts that fail to load (incomplete state, etc.)
+                logging.debug(f"Failed to load account for peer {peer_id}: {e}")
+                continue
+
+        # Auto-select first account if any loaded
+        if self.accounts and not self.selected_account:
+            first_account = list(self.accounts.values())[0]
+            self.selected_account = first_account.full_name
+
+            # Auto-select first channel if available
+            channels = channel.list(recorded_by=first_account.peer_id, db=self.db)
+            if channels:
+                self.selected_channel_id = channels[0]['channel_id']
+
+    def start_networking(self, host: str, port: int):
+        """Start UDP networking on the given address."""
+        from core import queues
+
+        self.udp_socket = UDPSocket(host, port)
+        self.udp_socket.start()
+
+        # Set up transport callback to route packets via UDP
+        queues.set_transport_callback(self._transport_callback)
+
+        print(f"✓ listening on {host}:{port}")
+
+    def stop_networking(self):
+        """Stop UDP networking."""
+        from core import queues
+
+        queues.set_transport_callback(None)
+        if self.udp_socket:
+            self.udp_socket.stop()
+            self.udp_socket = None
+
+    def add_peer_address(self, peer_shared_id: str, host: str, port: int):
+        """Register a peer's network address."""
+        self.peer_addresses[peer_shared_id] = (host, port)
+
+    def receive_udp_packets(self) -> int:
+        """Drain UDP packets and inject into SQLite queue."""
+        if not self.udp_socket:
+            return 0
+
+        from core import queues
+        from core.db import create_unsafe_db
+
+        packets = self.udp_socket.drain()
+        if not packets:
+            return 0
+
+        t_ms = int(time.time() * 1000)
+        unsafedb = create_unsafe_db(self.db)
+        for data, addr in packets:
+            queues.incoming.add_immediate(data, t_ms, unsafedb)
+
+        return len(packets)
+
+    def _transport_callback(self, blob: bytes, from_peer: str, to_peer: str, t_ms: int) -> bool:
+        """Transport callback that routes packets via UDP."""
+        if not self.udp_socket:
+            return False
+
+        # Check for unknown peer IDs
+        if to_peer == "unknown" or from_peer == "unknown":
+            return True  # Drop packet, don't fall through to simulator
+
+        # Look up destination address
+        dest_addr = self.peer_addresses.get(to_peer)
+        if dest_addr:
+            self.udp_socket.send_to(dest_addr, blob)
+            return True
+
+        # Unknown destination - drop (no simulator fallback for real networking)
+        return True
+
     def run_auto_tick(self):
         """Run auto-tick until synced or max ticks reached."""
         if self.auto_tick_count == 0:
@@ -394,7 +583,14 @@ class CLISession:
         ticks_run = 0
 
         for i in range(self.auto_tick_count):
-            self.current_time_ms += 100  # 100ms per tick
+            # Use wall-clock time if networking is enabled
+            if self.udp_socket:
+                self.current_time_ms = int(time.time() * 1000)
+                self.receive_udp_packets()
+                time.sleep(0.1)  # 100ms between ticks
+            else:
+                self.current_time_ms += 100  # 100ms per tick
+
             tick.tick_sync_only(t_ms=self.current_time_ms, db=self.db)
             ticks_run += 1
 
@@ -1178,6 +1374,7 @@ def cmd_create_invite(session: CLISession):
     session.last_invite_link = invite_link
 
     print(f"✓ created invite #{invite_num}")
+    print(f"  link: {invite_link}")
     print(f"  use: accept-invite --username <name> --devicename <device> --invite {invite_num}")
     session.event_log.display()
 
@@ -1429,6 +1626,20 @@ def cmd_list_accounts(session: CLISession):
     for i, account in enumerate(account_list, 1):
         selected = "*" if account.full_name == session.selected_account else " "
         print(f"  {i}. {selected} {account.full_name}")
+
+
+def cmd_whoami(session: CLISession):
+    """Show current account identity info (useful for networking)."""
+    account = session.get_selected_account()
+
+    print(f"account: {account.full_name}")
+    print(f"peer_id: {account.peer_id}")
+    print(f"peer_shared_id: {account.peer_shared_id}")
+    print(f"user_id: {account.user_id}")
+    print(f"network_id: {account.network_id}")
+
+    if session.udp_socket:
+        print(f"listening: {session.udp_socket.host}:{session.udp_socket.port}")
 
 
 def cmd_list_channels(session: CLISession):
@@ -2548,6 +2759,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "accounts":
             cmd_list_accounts(session)
 
+        elif cmd == "whoami":
+            cmd_whoami(session)
+
         elif cmd == "channels":
             cmd_list_channels(session)
 
@@ -2836,22 +3050,50 @@ def run_interactive(session: CLISession):
     print("use TAB for completion, UP/DOWN for history")
     print()
 
+    # Start background sync thread if networking is enabled
+    sync_thread = None
+    stop_sync = threading.Event()
+
+    if session.udp_socket:
+        def background_sync():
+            while not stop_sync.is_set():
+                try:
+                    t_ms = int(time.time() * 1000)
+                    session.current_time_ms = t_ms
+                    session.receive_udp_packets()
+                    tick.tick(t_ms=t_ms, db=session.db)
+                    session.db.commit()
+                except Exception:
+                    pass  # Don't crash the background thread
+                time.sleep(0.1)
+
+        sync_thread = threading.Thread(target=background_sync, daemon=True)
+        sync_thread.start()
+        print("(background sync active)")
+        print()
+
     display_state(session)
     print()
 
-    while True:
-        try:
-            line = input("> ").strip()
-            if not execute_command(session, line, show_prompt=True):
+    try:
+        while True:
+            try:
+                line = input("> ").strip()
+                if not execute_command(session, line, show_prompt=True):
+                    break
+            except KeyboardInterrupt:
+                print()
+                print("goodbye!")
                 break
-        except KeyboardInterrupt:
-            print()
-            print("goodbye!")
-            break
-        except EOFError:
-            print()
-            print("goodbye!")
-            break
+            except EOFError:
+                print()
+                print("goodbye!")
+                break
+    finally:
+        # Stop background sync thread
+        if sync_thread:
+            stop_sync.set()
+            sync_thread.join(timeout=1.0)
 
 
 def run_non_interactive(session: CLISession):
@@ -2876,6 +3118,31 @@ def run_non_interactive(session: CLISession):
 # MAIN
 # ============================================================================
 
+def run_sync_loop(session: CLISession):
+    """Run sync-only mode: just tick in a loop, no REPL."""
+    print("running in sync-only mode (Ctrl+C to stop)")
+
+    try:
+        while True:
+            # Use wall-clock time
+            t_ms = int(time.time() * 1000)
+            session.current_time_ms = t_ms
+
+            # Receive any UDP packets
+            session.receive_udp_packets()
+
+            # Run tick
+            tick.tick(t_ms=t_ms, db=session.db)
+            session.db.commit()
+
+            # Sleep briefly
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\nstopping...")
+    finally:
+        session.stop_networking()
+
+
 def main():
     """Main entry point for CLI."""
     parser = argparse.ArgumentParser(description="POC-6 CLI")
@@ -2884,6 +3151,10 @@ def main():
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress all but critical logs")
     parser.add_argument("--disk", action="store_true", help="Use file-based SQLite for realistic I/O perf")
     parser.add_argument("--db-path", type=str, default=None, help="Path to database file (implies --disk)")
+    parser.add_argument("--exec", "-e", dest="exec_cmd", type=str, default=None, help="Execute single command and exit")
+    parser.add_argument("--listen", type=str, default=None, help="UDP listen address (host:port)")
+    parser.add_argument("--sync-only", action="store_true", help="Run sync loop only (no REPL)")
+    parser.add_argument("--peer", type=str, action="append", help="Peer address (peer_shared_id@host:port)")
     args = parser.parse_args()
 
     # Logging already configured at import time based on sys.argv
@@ -2891,11 +3162,45 @@ def main():
     session = CLISession()
     use_disk = args.disk or args.db_path is not None
     session.initialize_database(use_file=use_disk, db_path=args.db_path)
+    session.load_existing_accounts()
 
-    if args.interactive:
-        run_interactive(session)
-    else:
-        run_non_interactive(session)
+    # Start networking if --listen specified
+    if args.listen:
+        try:
+            host, port = args.listen.rsplit(':', 1)
+            port = int(port)
+            session.start_networking(host, port)
+        except ValueError:
+            print(f"error: invalid listen address '{args.listen}' (use host:port)")
+            sys.exit(1)
+
+    # Add peer addresses if specified
+    if args.peer:
+        for peer_spec in args.peer:
+            try:
+                peer_id, addr = peer_spec.split('@')
+                host, port = addr.rsplit(':', 1)
+                session.add_peer_address(peer_id, host, int(port))
+                print(f"✓ added peer {peer_id[:20]}... at {host}:{port}")
+            except ValueError:
+                print(f"warning: invalid peer spec '{peer_spec}' (use peer_shared_id@host:port)")
+
+    try:
+        if args.sync_only:
+            # Sync loop mode (background daemon)
+            if not args.listen:
+                print("error: --sync-only requires --listen")
+                sys.exit(1)
+            run_sync_loop(session)
+        elif args.exec_cmd:
+            # Execute single command and exit
+            execute_command(session, args.exec_cmd, show_prompt=False)
+        elif args.interactive:
+            run_interactive(session)
+        else:
+            run_non_interactive(session)
+    finally:
+        session.stop_networking()
 
 
 if __name__ == "__main__":
