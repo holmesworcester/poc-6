@@ -232,7 +232,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     key_id = group_row['key_id']
 
     # Get main channel
-    channel_row = channel.get_main(peer_id, db)
+    channel_row = safedb.query_one(
+        "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
+        (peer_id,)
+    )
     if not channel_row:
         raise ValueError(f"No main channel found for peer {peer_id}. Cannot create invite.")
 

@@ -85,11 +85,6 @@ def apply_writes(result: ProjectorResult, recorded_by: str, recorded_at: int, db
     if result.emit_events:
         _apply_emit_events(result.emit_events, recorded_by, recorded_at, db)
 
-    # Handle cascade deletes from valid_events
-    if result.cascade_deletes:
-        for event_id in result.cascade_deletes:
-            cascade_delete_from_valid_events(event_id, recorded_by, db)
-
 
 def _apply_emit_events(
     emit_events: tuple[EmitEvent, ...],

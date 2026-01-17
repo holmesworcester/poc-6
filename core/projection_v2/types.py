@@ -69,8 +69,6 @@ class ProjectorResult:
     writes: tuple[WriteOp, ...]
     valid_event: bool = True
     emit_events: tuple[EmitEvent, ...] = ()
-    # Event IDs to cascade delete from valid_events (and dependents)
-    cascade_deletes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -225,19 +225,12 @@ def _resolve_invite_pubkey(
     safedb: Any,
     unsafedb: Any,
 ) -> bytes | None:
-    # Bootstrap fix: Query BOTH invites AND invite_accepteds tables
-    # - Inviter has invite_pubkey in invites table (they created the invite)
-    # - Joiner has invite_pubkey in invite_accepteds table (derived from URL's private key)
     row = safedb.query_one(
-        """SELECT invite_pubkey FROM invites WHERE invite_id = ? AND recorded_by = ?
-           UNION
-           SELECT invite_pubkey FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?
-           LIMIT 1""",
-        (invite_id, recorded_by, invite_id, recorded_by),
+        "SELECT invite_pubkey FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
+        (invite_id, recorded_by),
     )
     if row and row.get("invite_pubkey"):
         return crypto.b64decode(row["invite_pubkey"])
-    # Fallback: try to get from blob (for events that haven't projected yet)
     blob = store.get(invite_id, unsafedb)
     if not blob:
         return None
