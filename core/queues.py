@@ -2,6 +2,7 @@
 from typing import Any, Callable, Optional
 import json
 import logging
+import threading
 from .db import UnsafeDB, SafeDB
 from . import network_config
 
@@ -13,10 +14,10 @@ MAX_QUEUE_AGE_MS = 3000  # 3 seconds
 
 
 # ===== Transport Callback =====
-# Optional callback for real network transport (e.g., UDP)
+# Thread-local storage for transport callback (allows parallel test execution)
 # Signature: (blob: bytes, from_peer: str, to_peer: str, t_ms: int) -> bool
 # Returns True if packet was handled (sent via real network), False to use simulator
-_transport_callback: Optional[Callable[[bytes, str, str, int], bool]] = None
+_thread_local = threading.local()
 
 
 def set_transport_callback(callback: Optional[Callable[[bytes, str, str, int], bool]]) -> None:
@@ -26,20 +27,22 @@ def set_transport_callback(callback: Optional[Callable[[bytes, str, str, int], b
     the packet is considered sent via real network and won't go through the simulator.
     If it returns False, the packet goes through the simulator as normal.
 
+    NOTE: This is thread-local, allowing parallel test execution where each test
+    thread can have its own transport callback.
+
     Args:
         callback: Function (blob, from_peer, to_peer, t_ms) -> bool, or None to clear
     """
-    global _transport_callback
-    _transport_callback = callback
+    _thread_local.transport_callback = callback
     if callback:
-        log.info("queues: transport callback set")
+        log.info("queues: transport callback set (thread-local)")
     else:
-        log.info("queues: transport callback cleared")
+        log.info("queues: transport callback cleared (thread-local)")
 
 
 def get_transport_callback() -> Optional[Callable[[bytes, str, str, int], bool]]:
-    """Get the current transport callback."""
-    return _transport_callback
+    """Get the current transport callback (thread-local)."""
+    return getattr(_thread_local, 'transport_callback', None)
 
 
 # ===== Incoming Queue =====
@@ -79,8 +82,8 @@ class incoming:
         """
         log.debug(f"queues.incoming.add() adding blob size={len(blob)}B, t_ms={t_ms}")
 
-        # Check if transport callback wants to handle this packet
-        callback = _transport_callback
+        # Check if transport callback wants to handle this packet (thread-local)
+        callback = get_transport_callback()
         if callback is not None:
             try:
                 handled = callback(blob, from_peer or "unknown", to_peer or "unknown", t_ms)
