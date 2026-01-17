@@ -44,3 +44,4 @@ tests/debug/output/
 
 # TLC output
 docs/tla/states/
+states/

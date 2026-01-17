@@ -8,6 +8,9 @@ Files
 - `docs/tla/BootstrapGraph.tla`: model of the identity chain and connection
   bootstrap/upgrade invariants.
 - `docs/tla/bootstrap_graph.cfg`: TLC config with invariants.
+- `docs/tla/EventGraphSchema.tla`: schema-level model of the full event graph
+  and validation relationships (bounded via ActiveEvents).
+- `docs/tla/event_graph_schema.cfg`: TLC config for the schema model.
 - `docs/tla/states/`: TLC output directory (generated; not tracked).
 
 State summary (BootstrapGraph.tla)
@@ -29,6 +32,13 @@ Running TLC
 java -cp /tmp/tla2tools.jar tlc2.TLC \
   -config docs/tla/bootstrap_graph.cfg \
   docs/tla/BootstrapGraph.tla
+```
+
+For the schema-level model (bounded):
+```bash
+java -cp /tmp/tla2tools.jar tlc2.TLC \
+  -config docs/tla/event_graph_schema.cfg \
+  docs/tla/EventGraphSchema.tla
 ```
 
 The model is small enough for full state exploration.

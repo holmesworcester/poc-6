@@ -51,3 +51,9 @@ Test alignment
   - invite validity without network (should block),
   - connection ack without request (should fail),
   - connection upgrade without both peer_shared (should fail).
+
+Schema-level checks
+- `docs/tla/EventGraphSchema.tla` encodes the full event graph (with mode
+  variants) and signer/dependency relationships. Use it to validate that
+  any implementation changes preserve causal ordering across the entire
+  graph, not just bootstrap.
