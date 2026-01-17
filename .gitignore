@@ -41,3 +41,6 @@ tests/debug/output/
 *.db-journal
 .pytest_cache/
 .test_dbs/
+
+# TLC output
+docs/tla/states/
