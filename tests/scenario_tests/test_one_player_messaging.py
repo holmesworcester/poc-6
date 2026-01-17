@@ -104,7 +104,7 @@ def test_alice_sends_to_herself(fresh_db):
     assert random_messages[0]['channel_id'] == random_channel_id
 
     # Verify channels are queryable
-    channels_list = channel.list_channels(alice['peer_id'], db)
+    channels_list = channel.list(alice['peer_id'], db)
     assert len(channels_list) == 2
     channel_names = {c['name'] for c in channels_list}
     assert 'general' in channel_names
@@ -113,7 +113,7 @@ def test_alice_sends_to_herself(fresh_db):
     # Verify groups are queryable (all_users group)
     from events.group import group
     from events.identity import network
-    groups_list = group.list_all_groups(alice['peer_id'], db)
+    groups_list = group.list(alice['peer_id'], db)
     assert len(groups_list) == 1  # all_users group only (admins_group deprecated)
 
     # Get all_users group using network projection

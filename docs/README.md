@@ -25,6 +25,7 @@ Active design docs and implementation plans in `planning/`:
 - **[bootstrap-simplification-plan.md](./planning/bootstrap-simplification-plan.md)** - Bootstrap process refactoring
 - **[tick-jobs-refactor-plan.md](./planning/tick-jobs-refactor-plan.md)** - Jobs system refactoring
 - **[event-registry-design.md](./planning/event-registry-design.md)** - Event type registration pattern
+- **[causal-chain-rules.md](./planning/causal-chain-rules.md)** - Rule-based causal chains and projector testing
 
 ### Features
 - **[disappearing-messages-spec.md](./planning/disappearing-messages-spec.md)** - Disappearing messages feature

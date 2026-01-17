@@ -148,10 +148,20 @@ def main():
         action="store_true",
         help="Enable auto-reload for development",
     )
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Disable authentication (for development)",
+    )
     args = parser.parse_args()
 
     # Set peer_id for lifespan to use
     _startup_peer_id = args.peer_id
+
+    # Disable auth if requested
+    if args.no_auth:
+        disable_auth()
+        print("Warning: Authentication disabled")
 
     import uvicorn
 

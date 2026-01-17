@@ -181,7 +181,7 @@ class CLICompleter:
             if cmd == 'channel' and not text.startswith('-'):
                 if self.session.selected_account:
                     account = self.session.accounts[self.session.selected_account]
-                    channels = channel.list_channels(recorded_by=account.peer_id, db=self.session.db)
+                    channels = channel.list(recorded_by=account.peer_id, db=self.session.db)
                     channel_nums = [str(i) for i in range(1, len(channels) + 1)]
                     matches.extend(n for n in channel_nums if n.startswith(text))
 
@@ -476,7 +476,7 @@ def get_channel_name(session: CLISession, channel_id: str) -> str:
     if not session.selected_account:
         return "#???"
     account = session.get_selected_account()
-    ch = channel.get_by_id(channel_id, account.peer_id, session.db)
+    ch = channel.get(channel_id, account.peer_id, session.db)
     return f"#{ch['name']}" if ch else "#???"
 
 
@@ -570,7 +570,7 @@ def display_sidebar(session: CLISession):
 
     # Channels section (selectable)
     print("  channels:")
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     if channels:
         for i, ch in enumerate(channels, 1):
             selected = "*" if ch['channel_id'] == session.selected_channel_id else " "
@@ -599,7 +599,7 @@ def display_main(session: CLISession):
         return
 
     # Get channel name
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     channel_name = None
     for ch in channels:
         if ch['channel_id'] == session.selected_channel_id:
@@ -741,7 +741,7 @@ def cmd_switch(session: CLISession, account_num: int):
     session.selected_account = account.full_name
 
     # Auto-select first channel if available
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     if channels:
         session.selected_channel_id = channels[0]['channel_id']
 
@@ -1080,7 +1080,7 @@ def cmd_select_channel(session: CLISession, channel_num: int):
     """Select a channel by number."""
     account = session.get_selected_account()
 
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     if not channels:
         print("✗ no channels available")
         return
@@ -1328,7 +1328,7 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
     session.selected_account = account.full_name
 
     # Auto-select first channel if available
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     if channels:
         session.selected_channel_id = channels[0]['channel_id']
 
@@ -1394,7 +1394,7 @@ def cmd_join(session: CLISession, username: str, devicename: str, invite_ref: st
     session.selected_account = account.full_name
 
     # Auto-select first channel if available
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     if channels:
         session.selected_channel_id = channels[0]['channel_id']
 
@@ -1438,7 +1438,7 @@ def cmd_list_channels(session: CLISession):
         return
 
     account = session.get_selected_account()
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
 
     if not channels:
         print("no channels")
@@ -1655,7 +1655,7 @@ def cmd_set_disappearing(session: CLISession, days: int | None = None, time_ms: 
         ttl_ms = time_ms
 
     # Get channel name for display
-    channels = channel.list_channels(recorded_by=account.peer_id, db=session.db)
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
     channel_name = next((ch['name'] for ch in channels if ch['channel_id'] == session.selected_channel_id), '???')
 
     try:
@@ -1756,7 +1756,7 @@ def cmd_keys(session: CLISession, summary: bool = False):
     prekeys = group_prekey.list(account.peer_id, session.current_time_ms, session.db)
 
     # Get channel -> key mappings (single query with JOIN)
-    channels_with_keys = channel.list_channels_with_keys(recorded_by=account.peer_id, db=session.db)
+    channels_with_keys = channel.list_with_keys(recorded_by=account.peer_id, db=session.db)
     channel_keys = [{'name': ch['name'], 'key_id': ch['key_id']} for ch in channels_with_keys]
 
     if summary:
