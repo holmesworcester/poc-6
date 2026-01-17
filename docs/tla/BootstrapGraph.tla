@@ -9,7 +9,7 @@ EXTENDS Naturals
 \* - docs/planning/network-root-linking-design.md
 \* - tests/v2_projectors/test_identity_chain.py
 
-VARIABLES recorded, valid, trustAnchor, connInvite, connPeer
+VARIABLES recorded, valid, trustAnchor, inviteAcceptedMode, connInvite, connPeer
 
 Net == "network"
 InviteUserBoot == "invite_user_bootstrap"
@@ -49,6 +49,7 @@ Init ==
     /\ recorded = {}
     /\ valid = {}
     /\ trustAnchor = FALSE
+    /\ inviteAcceptedMode = "none"
     /\ connInvite = FALSE
     /\ connPeer = FALSE
 
@@ -56,7 +57,7 @@ Record(e) ==
     /\ e \in EVENTS
     /\ e \notin recorded
     /\ recorded' = recorded \cup {e}
-    /\ UNCHANGED <<valid, trustAnchor, connInvite, connPeer>>
+    /\ UNCHANGED <<valid, trustAnchor, inviteAcceptedMode, connInvite, connPeer>>
 
 Project(e) ==
     /\ e \in recorded
@@ -65,7 +66,17 @@ Project(e) ==
     /\ Guard(e)
     /\ valid' = valid \cup {e}
     /\ trustAnchor' = IF e = InviteAcceptedBob THEN TRUE ELSE trustAnchor
+    /\ (e = InviteAcceptedBob => inviteAcceptedMode = "none" /\ inviteAcceptedMode' \in {"user", "peer"})
+    /\ (e /= InviteAcceptedBob => inviteAcceptedMode' = inviteAcceptedMode)
     /\ UNCHANGED <<recorded, connInvite, connPeer>>
+
+\* Device linking: invite_accepted without network_id forces peer invite validity.
+TrustPeerInvite ==
+    /\ InviteAcceptedBob \in valid
+    /\ inviteAcceptedMode = "peer"
+    /\ InvitePeerBob \notin valid
+    /\ valid' = valid \cup {InvitePeerBob}
+    /\ UNCHANGED <<recorded, trustAnchor, inviteAcceptedMode, connInvite, connPeer>>
 
 \* Bootstrap connection: invite-labeled connection before peer_shared is known.
 ConnectByInvite ==
@@ -73,7 +84,7 @@ ConnectByInvite ==
     /\ InviteAcceptedBob \in valid
     /\ InviteUserOngoing \in recorded
     /\ connInvite' = TRUE
-    /\ UNCHANGED <<recorded, valid, trustAnchor, connPeer>>
+    /\ UNCHANGED <<recorded, valid, trustAnchor, inviteAcceptedMode, connPeer>>
 
 \* Upgrade to peer_shared-labeled connection once both peers are known.
 UpgradeToPeer ==
@@ -82,31 +93,38 @@ UpgradeToPeer ==
     /\ PeerSharedAlice \in valid
     /\ PeerSharedBob \in valid
     /\ connPeer' = TRUE
-    /\ UNCHANGED <<recorded, valid, trustAnchor, connInvite>>
+    /\ UNCHANGED <<recorded, valid, trustAnchor, inviteAcceptedMode, connInvite>>
 
 Stutter ==
-    UNCHANGED <<recorded, valid, trustAnchor, connInvite, connPeer>>
+    UNCHANGED <<recorded, valid, trustAnchor, inviteAcceptedMode, connInvite, connPeer>>
 
 Next ==
     \/ \E e \in EVENTS: Record(e)
     \/ \E e \in EVENTS: Project(e)
+    \/ TrustPeerInvite
     \/ ConnectByInvite
     \/ UpgradeToPeer
     \/ Stutter
 
 Spec ==
-    Init /\ [][Next]_<<recorded, valid, trustAnchor, connInvite, connPeer>>
+    Init /\ [][Next]_<<recorded, valid, trustAnchor, inviteAcceptedMode, connInvite, connPeer>>
 
 TypeOK ==
     /\ recorded \subseteq EVENTS
     /\ valid \subseteq EVENTS
-    /\ valid \subseteq recorded
+    /\ valid \subseteq recorded \cup {InvitePeerBob}
+    /\ (InvitePeerBob \in valid /\ InvitePeerBob \notin recorded) =>
+       (InviteAcceptedBob \in valid /\ inviteAcceptedMode = "peer")
     /\ trustAnchor \in {TRUE, FALSE}
+    /\ inviteAcceptedMode \in {"none", "user", "peer"}
     /\ connInvite \in {TRUE, FALSE}
     /\ connPeer \in {TRUE, FALSE}
 
 InvDeps ==
-    \A e \in valid: Deps(e) \subseteq valid
+    \A e \in valid:
+        IF e = InvitePeerBob /\ inviteAcceptedMode = "peer" /\ InviteAcceptedBob \in valid
+        THEN TRUE
+        ELSE Deps(e) \subseteq valid
 
 InvConnInvite ==
     connInvite => (InviteUserOngoing \in recorded /\ InviteAcceptedBob \in valid)
