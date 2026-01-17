@@ -536,7 +536,7 @@ def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
 
 def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
          user_id: str | None, prekey_id: str | None, t_ms: int, db: Any,
-         device_name: str = "Device") -> dict[str, Any]:
+         device_name: str = "Device", network_id: str | None = None) -> dict[str, Any]:
     """Join/link a peer via peer invite (first peer or linking device).
 
     This is the canonical, reusable operation for peer joining/linking.
@@ -551,6 +551,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         t_ms: Base timestamp
         db: Database connection
         device_name: Device name (e.g., "Phone", "Desktop")
+        network_id: Network ID for trust anchoring (required for proper cascade)
 
     Returns:
         {
@@ -591,7 +592,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         'invite_prekey_id': prekey_id,
         'invite_private_key': crypto.b64encode(peer_invite_private_key),
         'user_id': user_id,  # User being linked to (for device linking)
-        # Peer invites don't have network_id - they link devices to existing users
+        'network_id': network_id,  # Required for trust anchoring (network is ALWAYS the trust anchor)
     }
     invite_accepted_id = invite_accepted.create(
         invite_link_data=peer_invite_link_data,
