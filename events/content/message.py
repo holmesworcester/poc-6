@@ -224,6 +224,113 @@ def get(message_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     )
 
 
+def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms: int, db: Any,
+                 skip_projection: bool = False) -> list[str]:
+    """Create multiple messages efficiently with cached lookups.
+
+    Optimized for bulk message creation (e.g., perf tests). Caches DB lookups
+    and crypto keys, then creates all messages in a batch.
+
+    Args:
+        peer_id: Local peer ID creating the messages
+        channel_id: Channel to post messages in
+        contents: List of message contents
+        start_t_ms: Starting timestamp (increments by 1 for each message)
+        db: Database connection
+        skip_projection: If True, skip projection (messages won't sync). Default False.
+
+    Returns:
+        List of message IDs
+    """
+    from events.identity import peer as peer_module
+    from events.group import group
+
+    if not contents:
+        return []
+
+    log.info(f"message.batch_create() creating {len(contents)} messages in channel_id={channel_id}")
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Cache lookups (done once for all messages)
+    channel_row = safedb.query_one(
+        "SELECT group_id, disappearing_time_ms FROM channels WHERE channel_id = ? AND recorded_by = ? LIMIT 1",
+        (channel_id, peer_id)
+    )
+    if not channel_row:
+        raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
+
+    group_id = channel_row['group_id']
+    disappearing_time_ms = channel_row.get('disappearing_time_ms', 0) or 0
+
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
+        (peer_id, peer_id)
+    )
+    if not peer_self_row or not peer_self_row['peer_shared_id']:
+        raise ValueError(f"Peer {peer_id} not found in peer_self table")
+    if not peer_self_row['user_id']:
+        raise ValueError(f"User identity not set for peer {peer_id}.")
+
+    peer_shared_id = peer_self_row['peer_shared_id']
+    user_id = peer_self_row['user_id']
+
+    # Check removed users
+    removal_row = safedb.query_one(
+        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, peer_id)
+    )
+    if removal_row:
+        raise ValueError(f"User {user_id} has been removed from the network.")
+
+    # Check username exists
+    username_row = safedb.query_one(
+        "SELECT event_id FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, peer_id)
+    )
+    if not username_row:
+        raise ValueError(f"No username found for user {user_id}.")
+
+    # Cache crypto keys
+    private_key = peer_module.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(group_id, peer_id, db)
+
+    # Build all event blobs
+    event_blobs = []
+    for i, content in enumerate(contents):
+        t_ms = start_t_ms + i
+
+        event_data = {
+            'type': 'message',
+            'channel_id': channel_id,
+            'signed_by': peer_shared_id,
+            'signer_type': 'peer_shared',
+            'author_id': user_id,
+            'content': content,
+            'created_at': t_ms,
+            'disappearing_time_ms': disappearing_time_ms
+        }
+
+        signed_event = crypto.sign_event(event_data, private_key)
+        canonical = crypto.canonicalize_json(signed_event)
+        blob = crypto.wrap(canonical, key_data, db)
+        event_blobs.append(blob)
+
+    if skip_projection:
+        # Batch store without projection (fastest, but messages won't sync)
+        event_ids = store.batch_store_events(event_blobs, peer_id, start_t_ms, db)
+    else:
+        # Store with projection (slower, but messages will sync correctly)
+        event_ids = []
+        for i, blob in enumerate(event_blobs):
+            t_ms = start_t_ms + i
+            event_id = store.event(blob, peer_id, t_ms, db)
+            event_ids.append(event_id)
+
+    log.info(f"message.batch_create() created {len(event_ids)} messages (skip_projection={skip_projection})")
+    return event_ids
+
+
 def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
     """List messages in a channel for a specific peer, including attachments, author names, and reactions.
 
