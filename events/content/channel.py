@@ -634,3 +634,49 @@ def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shar
 
     log.info(f"add_member_to_channel() added member_id={member_id}")
     return member_id
+
+
+# Aliases for compatibility with master branch
+get = get_by_id
+list = list_channels
+list_with_keys = list_channels_with_keys
+
+
+def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the main channel for a peer.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Channel dict with channel_id, name, group_id, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
+           FROM channels
+           WHERE recorded_by = ? AND is_main = 1""",
+        (recorded_by,)
+    )
+
+
+def get_next_update_count(channel_id: str, recorded_by: str, db: Any) -> int:
+    """Get the next global_count for a channel update.
+
+    Returns max existing global_count + 1, or 1 if no updates exist.
+
+    Args:
+        channel_id: Channel ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Next global_count value to use
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    max_count_row = safedb.query_one(
+        "SELECT MAX(global_count) as max_count FROM channel_updates WHERE channel_id = ? AND recorded_by = ?",
+        (channel_id, recorded_by)
+    )
+    return (max_count_row['max_count'] or 0) + 1 if max_count_row else 1
