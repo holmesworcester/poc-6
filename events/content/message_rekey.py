@@ -15,6 +15,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from events.group import group_key
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -41,7 +42,6 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
     """
     log.info(f"message_rekey.create() rekeying message_id={original_message_id[:20]}... with new key={new_key_id[:20]}...")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
     unsafedb = create_unsafe_db(db)
 
     # Get original message blob from store
@@ -62,10 +62,7 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
     log.info(f"message_rekey.create() decrypted original message, plaintext_size={len(plaintext)}B")
 
     # Get the new key from group_keys table
-    new_key_row = safedb.query_one(
-        "SELECT key FROM group_keys WHERE key_id = ? AND recorded_by = ? LIMIT 1",
-        (new_key_id, peer_id)
-    )
+    new_key_row = group_key.get_key(new_key_id, peer_id, db)
     if not new_key_row:
         raise ValueError(f"New key {new_key_id} not found for peer {peer_id}")
 

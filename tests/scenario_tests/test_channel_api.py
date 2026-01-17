@@ -2,8 +2,8 @@
 Scenario tests for channel API functions.
 
 Tests backend functions used by CLI:
-- channel.list_channels_with_keys() returns channels with key_id
-- channel.get_by_id() returns single channel by ID
+- channel.list_with_keys() returns channels with key_id
+- channel.get() returns single channel by ID
 """
 import pytest
 from events.identity import user, invite, peer as peer_module
@@ -13,7 +13,7 @@ from core import tick
 
 
 def test_list_channels_with_keys_returns_key_id(fresh_db):
-    """channel.list_channels_with_keys() includes key_id from group."""
+    """channel.list_with_keys() includes key_id from group."""
     db = fresh_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -30,7 +30,7 @@ def test_list_channels_with_keys_returns_key_id(fresh_db):
     db.commit()
 
     # List channels with keys
-    channels = channel.list_channels_with_keys(alice['peer_id'], db)
+    channels = channel.list_with_keys(alice['peer_id'], db)
 
     # Should have at least 2 channels (general + testing)
     assert len(channels) >= 2
@@ -56,7 +56,7 @@ def test_list_channels_with_keys_key_is_valid(fresh_db):
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
     db.commit()
 
-    channels = channel.list_channels_with_keys(alice['peer_id'], db)
+    channels = channel.list_with_keys(alice['peer_id'], db)
     general_ch = next((c for c in channels if c['name'] == 'general'), None)
     assert general_ch is not None
 
@@ -84,7 +84,7 @@ def test_list_channels_with_keys_includes_all_fields(fresh_db):
     )
     db.commit()
 
-    channels = channel.list_channels_with_keys(alice['peer_id'], db)
+    channels = channel.list_with_keys(alice['peer_id'], db)
     ephemeral_ch = next((c for c in channels if c['name'] == 'ephemeral'), None)
     assert ephemeral_ch is not None
 
@@ -102,7 +102,7 @@ def test_list_channels_with_keys_includes_all_fields(fresh_db):
 
 
 def test_get_by_id_returns_channel(fresh_db):
-    """channel.get_by_id() returns channel dict for valid ID."""
+    """channel.get() returns channel dict for valid ID."""
     db = fresh_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -119,7 +119,7 @@ def test_get_by_id_returns_channel(fresh_db):
     db.commit()
 
     # Get by ID
-    ch = channel.get_by_id(channel_id, alice['peer_id'], db)
+    ch = channel.get(channel_id, alice['peer_id'], db)
 
     assert ch is not None
     assert ch['channel_id'] == channel_id
@@ -131,20 +131,20 @@ def test_get_by_id_returns_channel(fresh_db):
 
 
 def test_get_by_id_returns_none_for_invalid_id(fresh_db):
-    """channel.get_by_id() returns None for non-existent channel."""
+    """channel.get() returns None for non-existent channel."""
     db = fresh_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
     db.commit()
 
     # Try to get non-existent channel
-    ch = channel.get_by_id('nonexistent-channel-id', alice['peer_id'], db)
+    ch = channel.get('nonexistent-channel-id', alice['peer_id'], db)
 
     assert ch is None
 
 
 def test_get_by_id_respects_recorded_by(fresh_db):
-    """channel.get_by_id() only returns channels visible to the peer."""
+    """channel.get() only returns channels visible to the peer."""
     db = fresh_db
 
     # Alice creates network and channel
@@ -163,17 +163,17 @@ def test_get_by_id_respects_recorded_by(fresh_db):
     db.commit()
 
     # Alice can see her channel
-    alice_view = channel.get_by_id(channel_id, alice['peer_id'], db)
+    alice_view = channel.get(channel_id, alice['peer_id'], db)
     assert alice_view is not None
     assert alice_view['name'] == 'alice-channel'
 
     # Bob cannot see Alice's channel (different network, no sync)
-    bob_view = channel.get_by_id(channel_id, bob['peer_id'], db)
+    bob_view = channel.get(channel_id, bob['peer_id'], db)
     assert bob_view is None
 
 
 def test_get_by_id_after_sync(fresh_db):
-    """channel.get_by_id() works after channel syncs to new user."""
+    """channel.get() works after channel syncs to new user."""
     db = fresh_db
 
     # Alice creates network
@@ -197,12 +197,12 @@ def test_get_by_id_after_sync(fresh_db):
     db.commit()
 
     # Verify Bob can list channels (prerequisite for get_by_id to work)
-    bob_channels = channel.list_channels(bob['peer_id'], db)
+    bob_channels = channel.list(bob['peer_id'], db)
     assert len(bob_channels) > 0, "Bob should have synced channels"
     bob_general = next((c for c in bob_channels if c['name'] == 'general'), None)
     assert bob_general is not None, "Bob should see general channel via list_channels"
 
     # Now test get_by_id with the channel_id from Bob's perspective
-    bob_view = channel.get_by_id(bob_general['channel_id'], bob['peer_id'], db)
+    bob_view = channel.get(bob_general['channel_id'], bob['peer_id'], db)
     assert bob_view is not None
     assert bob_view['name'] == 'general'

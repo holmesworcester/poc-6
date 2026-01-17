@@ -35,6 +35,8 @@ import json
 from core import crypto
 from core import store
 from events.identity import peer
+from events.identity import peer_shared
+from events.group import group_prekey
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -374,15 +376,12 @@ def _send_ack_for_request(
     safedb = create_safe_db(db, recorded_by=local_peer_id)
 
     # Get our peer_shared_id
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-        (local_peer_id, local_peer_id)
-    )
-    if not peer_self_row:
+    self_identity = peer_shared.get_self(local_peer_id, db)
+    if not self_identity:
         log.warning(f"connection._send_ack: no peer_shared_id for {local_peer_id[:20]}...")
         return
 
-    local_peer_shared_id = peer_self_row['peer_shared_id']
+    local_peer_shared_id = self_identity['peer_shared_id']
 
     # Check if we already have a connection to this peer (from our own request)
     # If so, update it instead of creating a new one

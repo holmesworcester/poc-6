@@ -11,7 +11,6 @@ import logging
 from core import crypto
 from core import store
 from events.group import group
-from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -73,16 +72,11 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
     """
     log.info(f"network_name_update.create() creating network name for network_id={network_id[:20]}..., name='{name}'")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
     # NOTE: network_id is passed as param - no need to check networks table
     # The event will have network_id as a dependency and will block until network is valid
 
     # Get main group (all_members) - use is_main flag since name varies
-    main_group = safedb.query_one(
-        "SELECT group_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
-        (peer_id,)
-    )
+    main_group = group.get_main(peer_id, db)
     if not main_group:
         # Main group not available yet (will come from sync)
         log.info(f"network_name_update.create() main group not found yet")
@@ -100,7 +94,7 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
     if not key_data:
         raise KeyNotAvailableError("No group key available for all_members group")
 
-    # Extract key_id from key_data - key_data has {'id': bytes, 'key': bytes}
+    # Extract key_id from key_data to include in event
     key_id_bytes = key_data.get('id')
     if not key_id_bytes:
         raise KeyNotAvailableError("Key ID not found in group key data")
@@ -109,25 +103,16 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
     # Build network_name_update event
     event_data = {
         'type': 'network_name_update',
-        'network_id': network_id,  # Identifies which network this name is for
-        'name': name,  # Will be encrypted
-        'key_id': key_id,  # Track which key was used
-        'global_count': 0,  # For LWW (last-writer-wins)
+        'network_id': network_id,
+        'name': name,
+        'key_id': key_id,
+        'global_count': 0,
         'signed_by': peer_shared_id,
         'signer_type': 'peer_shared',
         'created_at': t_ms
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Encrypt to group (using key_data for wrapping)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper
-    network_name_update_id = store.event(blob, peer_id, t_ms, db)
+    network_name_update_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"network_name_update.create() created network_name_update_id={network_name_update_id[:20]}...")
     return network_name_update_id

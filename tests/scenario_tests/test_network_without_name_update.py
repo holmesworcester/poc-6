@@ -67,7 +67,7 @@ def test_network_without_explicit_name():
 
     # Verify groups are queryable
     from events.group import group
-    groups_list = group.list_all_groups(alice['peer_id'], db)
+    groups_list = group.list(alice['peer_id'], db)
     assert len(groups_list) == 1  # all_users group
 
     print("✓ Network without explicit name works correctly")

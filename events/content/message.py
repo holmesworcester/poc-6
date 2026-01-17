@@ -1,4 +1,5 @@
 """Message event type."""
+from __future__ import annotations
 
 # Registry metadata
 EVENT_TYPE = 'message'
@@ -10,8 +11,8 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
-from events.group import group
-from events.identity import peer
+from events.identity import peer_shared, user
+from events.content import channel
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -148,22 +149,8 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     """
     log.info(f"message.create() creating message in channel_id={channel_id}, content='{content[:50]}...'")
 
-    safedb = create_safe_db(db, recorded_by=peer_id)
-
     # Query channel to get group_id and disappearing_time_ms
-    ttl_subquery = (
-        "SELECT cu.new_disappearing_time_ms FROM channel_updates cu "
-        "WHERE cu.channel_id = c.channel_id AND cu.recorded_by = c.recorded_by "
-        "AND cu.new_disappearing_time_ms IS NOT NULL "
-        "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
-    )
-    channel_row = safedb.query_one(
-        f"""SELECT c.group_id,
-                   COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
-            FROM channels c
-            WHERE c.channel_id = ? AND c.recorded_by = ? LIMIT 1""",
-        (channel_id, peer_id)
-    )
+    channel_row = channel.get(channel_id, peer_id, db)
     if not channel_row:
         raise ValueError(f"Channel {channel_id} not found for peer {peer_id}")
 
@@ -172,33 +159,22 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
 
     # Look up our identity from peer_self (set when we created/linked our account)
     # This is the canonical source for "what user am I?" - single lookup, no fallback chain
-    peer_self_row = safedb.query_one(
-        "SELECT peer_shared_id, user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if not peer_self_row or not peer_self_row['peer_shared_id']:
+    identity = peer_shared.get_self(peer_id, db)
+    if not identity or not identity['peer_shared_id']:
         raise ValueError(f"Peer {peer_id} not found in peer_self table")
-    if not peer_self_row['user_id']:
+    if not identity['user_id']:
         raise ValueError(f"User identity not set for peer {peer_id}. Must create or link account first.")
 
-    peer_shared_id = peer_self_row['peer_shared_id']
-    user_id = peer_self_row['user_id']
+    peer_shared_id = identity['peer_shared_id']
+    user_id = identity['user_id']
 
     # Check if user has been removed from the network
-    removal_row = safedb.query_one(
-        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, peer_id)
-    )
-    if removal_row:
+    if user.is_removed(user_id, peer_id, db):
         raise ValueError(f"User {user_id} has been removed from the network and cannot send messages.")
 
     # Check that user has a username set before allowing message creation
     # This ensures the author's name can be displayed with their message
-    username_row = safedb.query_one(
-        "SELECT event_id FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-        (user_id, peer_id)
-    )
-    if not username_row:
+    if not user.has_username(user_id, peer_id, db):
         raise ValueError(f"No username found for user {user_id}. Username must be set before sending messages.")
 
     # Build standardized event structure
@@ -215,19 +191,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         'disappearing_time_ms': disappearing_time_ms  # TTL setting at creation time (0 = permanent)
     }
 
-    # Sign the event with local peer's private key
-    private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Get key_data for encryption (group.pick_key uses peer_id for access control)
-    key_data = group.pick_key(group_id, peer_id, db)
-
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
-
-    # Store event with recorded wrapper and projection
-    event_id = store.event(blob, peer_id, t_ms, db)
+    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
 
     log.info(f"message.create() created message_id={event_id}")
 
@@ -240,6 +204,24 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
         'id': event_id,
         'latest': latest
     }
+
+
+def get(message_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get a single message by ID.
+
+    Args:
+        message_id: Message ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Message dict with all fields, or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT * FROM messages WHERE message_id = ? AND recorded_by = ?""",
+        (message_id, recorded_by)
+    )
 
 
 def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms: int, db: Any,
@@ -260,6 +242,9 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
     Returns:
         List of message IDs
     """
+    from events.identity import peer as peer_module
+    from events.group import group
+
     if not contents:
         return []
 
@@ -307,7 +292,7 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
         raise ValueError(f"No username found for user {user_id}.")
 
     # Cache crypto keys
-    private_key = peer.get_private_key(peer_id, peer_id, db)
+    private_key = peer_module.get_private_key(peer_id, peer_id, db)
     key_data = group.pick_key(group_id, peer_id, db)
 
     # Build all event blobs
@@ -319,6 +304,7 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
             'type': 'message',
             'channel_id': channel_id,
             'signed_by': peer_shared_id,
+            'signer_type': 'peer_shared',
             'author_id': user_id,
             'content': content,
             'created_at': t_ms,

@@ -194,6 +194,87 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
     return user_id, user_private_key
 
 
+def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
+    """Get display name for a user.
+
+    Prefers encrypted username from user_names, falls back to users.name.
+
+    Args:
+        user_id: User ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Display name string if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        """SELECT COALESCE(un.name, u.name) as name
+           FROM users u
+           LEFT JOIN user_names un ON u.user_id = un.user_id AND u.recorded_by = un.recorded_by
+           WHERE u.user_id = ? AND u.recorded_by = ? LIMIT 1""",
+        (user_id, recorded_by)
+    )
+    return row['name'] if row else None
+
+
+def get_username(user_id: str, recorded_by: str, db: Any) -> str | None:
+    """Get username for a user from the user_names table.
+
+    Args:
+        user_id: User ID to look up
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Username string if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+    return row['name'] if row else None
+
+
+def has_username(user_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if a user has a username set.
+
+    Args:
+        user_id: User ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if user has a username, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT 1 FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+    return row is not None
+
+
+def is_removed(user_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if a user has been removed from the network.
+
+    Args:
+        user_id: User ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if user is removed, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by)
+    )
+    return row is not None
+
+
 def project(user_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
     """Project user event into users table.
 
