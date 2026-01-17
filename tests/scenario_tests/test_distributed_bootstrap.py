@@ -89,7 +89,8 @@ def test_device_link_without_remote_invite_blob(fresh_db):
             prekey_id=accepted['invite_prekey_id'],
             t_ms=3002,
             db=db,
-            device_name='Laptop'
+            device_name='Laptop',
+            network_id=accepted['network_id']  # Required for trust anchoring
         )
 
     db.commit()
@@ -265,7 +266,8 @@ def test_invite_accepteds_stores_user_id_for_device_link(fresh_db):
         prekey_id=accepted['invite_prekey_id'],
         t_ms=3002,
         db=db,
-        device_name='Laptop'
+        device_name='Laptop',
+        network_id=accepted['network_id']  # Required for trust anchoring
     )
     db.commit()
 

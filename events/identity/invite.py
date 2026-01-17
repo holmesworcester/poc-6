@@ -825,6 +825,10 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
         'inviter_peer_shared_id': inviter_peer_shared_id,
     }
 
+    # Include network_id (required for trust anchoring in all invite types)
+    if 'network_id' in link_data:
+        result['network_id'] = link_data['network_id']
+
     # For mode='peer', include user_id from link data
     if 'user_id' in link_data:
         result['user_id'] = link_data['user_id']
