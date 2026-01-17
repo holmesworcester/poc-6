@@ -13,6 +13,8 @@ Files
 - `docs/tla/event_graph_schema.cfg`: TLC config for the core schema slice.
 - `docs/tla/event_graph_schema_fast.cfg`: TLC config for the smallest core slice.
 - `docs/tla/event_graph_schema_expanded.cfg`: TLC config for an expanded slice.
+- `docs/tla/event_graph_schema_mid.cfg`: TLC config for a mid-sized 2-peer slice
+  that includes attachments and file slices.
 - `docs/tla/event_graph_schema_expanded_single_peer.cfg`: expanded slice with a single peer.
 - `docs/tla/states/`: TLC output directory (generated; not tracked).
 
@@ -58,6 +60,13 @@ java -cp /tmp/tla2tools.jar tlc2.TLC \
   docs/tla/EventGraphSchema.tla
 ```
 
+For a mid-sized 2-peer slice (attachments + file slices):
+```bash
+java -cp /tmp/tla2tools.jar tlc2.TLC \
+  -config docs/tla/event_graph_schema_mid.cfg \
+  docs/tla/EventGraphSchema.tla
+```
+
 For an expanded slice with a single peer:
 ```bash
 java -cp /tmp/tla2tools.jar tlc2.TLC \
@@ -65,7 +74,7 @@ java -cp /tmp/tla2tools.jar tlc2.TLC \
   docs/tla/EventGraphSchema.tla
 ```
 
-Both configs default to two peers; reduce `Peers` to a single element in the
+Most configs default to two peers; reduce `Peers` to a single element in the
 config if you want a faster check.
 
 The model is small enough for full state exploration.

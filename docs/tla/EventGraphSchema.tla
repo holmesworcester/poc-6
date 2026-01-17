@@ -16,7 +16,7 @@ EXTENDS Naturals
 
 CONSTANTS ActiveEvents, Peers
 
-VARIABLES recorded, valid, trustAnchor
+VARIABLES recorded, valid, trustAnchor, trusted
 
 Net == "network"
 InviteAccepted == "invite_accepted"
@@ -236,13 +236,14 @@ Init ==
     /\ recorded = [p \in Peers |-> {}]
     /\ valid = [p \in Peers |-> {}]
     /\ trustAnchor = [p \in Peers |-> FALSE]
+    /\ trusted = [p \in Peers |-> {}]
 
 Record(p, e) ==
     /\ p \in Peers
     /\ e \in EVENTS
     /\ e \notin recorded[p]
     /\ recorded' = [recorded EXCEPT ![p] = @ \cup {e}]
-    /\ UNCHANGED <<valid, trustAnchor>>
+    /\ UNCHANGED <<valid, trustAnchor, trusted>>
 
 Project(p, e) ==
     /\ p \in Peers
@@ -255,24 +256,34 @@ Project(p, e) ==
         IF e = InviteAccepted
         THEN [trustAnchor EXCEPT ![p] = TRUE]
         ELSE trustAnchor
-    /\ UNCHANGED recorded
+    /\ UNCHANGED <<recorded, trusted>>
+
+VerifySlice(p) ==
+    /\ p \in Peers
+    /\ FileSlice \in valid[p]
+    /\ MessageAttachment \in valid[p]
+    /\ FileSlice \notin trusted[p]
+    /\ trusted' = [trusted EXCEPT ![p] = @ \cup {FileSlice}]
+    /\ UNCHANGED <<recorded, valid, trustAnchor>>
 
 Stutter ==
-    UNCHANGED <<recorded, valid, trustAnchor>>
+    UNCHANGED <<recorded, valid, trustAnchor, trusted>>
 
 Next ==
     \/ \E p \in Peers, e \in EVENTS: Record(p, e)
     \/ \E p \in Peers, e \in EVENTS: Project(p, e)
+    \/ \E p \in Peers: VerifySlice(p)
     \/ Stutter
 
 Spec ==
-    Init /\ [][Next]_<<recorded, valid, trustAnchor>>
+    Init /\ [][Next]_<<recorded, valid, trustAnchor, trusted>>
 
 TypeOK ==
     /\ recorded \in [Peers -> SUBSET EVENTS]
     /\ valid \in [Peers -> SUBSET EVENTS]
     /\ \A p \in Peers: valid[p] \subseteq recorded[p]
     /\ trustAnchor \in [Peers -> {TRUE, FALSE}]
+    /\ trusted \in [Peers -> SUBSET EVENTS]
 
 InvDeps ==
     \A p \in Peers:
@@ -319,6 +330,13 @@ InvAdminChain ==
 InvGroupAllUsersNetwork ==
     IF GroupAllUsers \in EVENTS
     THEN \A p \in Peers: (GroupAllUsers \in valid[p]) => (Net \in valid[p])
+    ELSE TRUE
+
+InvSliceAnchored ==
+    IF FileSlice \in EVENTS /\ MessageAttachment \in EVENTS
+    THEN \A p \in Peers:
+        (FileSlice \in trusted[p]) =>
+            (FileSlice \in valid[p] /\ MessageAttachment \in valid[p])
     ELSE TRUE
 
 ====
