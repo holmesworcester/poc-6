@@ -637,25 +637,6 @@ def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shar
     return member_id
 
 
-def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
-    """Get the main channel for a peer.
-
-    Args:
-        recorded_by: Peer perspective for queries
-        db: Database connection
-
-    Returns:
-        Channel dict with channel_id, name, group_id, etc., or None if not found
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    return safedb.query_one(
-        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
-           FROM channels
-           WHERE recorded_by = ? AND is_main = 1""",
-        (recorded_by,)
-    )
-
-
 def get_next_update_count(channel_id: str, recorded_by: str, db: Any) -> int:
     """Get the next global_count for a channel update.
 
