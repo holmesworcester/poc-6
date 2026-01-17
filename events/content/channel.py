@@ -535,6 +535,25 @@ def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
     )
 
 
+def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get the main channel for a peer.
+
+    Args:
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        Channel dict with channel_id, name, group_id, etc., or None if not found
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT channel_id, name, group_id, signed_by, created_at, disappearing_time_ms
+           FROM channels
+           WHERE recorded_by = ? AND is_main = 1""",
+        (recorded_by,)
+    )
+
+
 def get(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get a single channel by ID.
 
