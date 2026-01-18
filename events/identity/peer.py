@@ -4,7 +4,6 @@ from typing import Any
 # Registry metadata
 EVENT_TYPE = 'peer'
 SHAREABLE = False  # Local-only - contains private key material
-EPHEMERAL = False
 PROJECTION_TABLE = None  # No projection table (stored in peers table)
 import json
 import logging

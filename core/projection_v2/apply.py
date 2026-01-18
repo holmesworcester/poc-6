@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from core.db import SUBJECTIVE_TABLES, create_safe_db, create_unsafe_db
-from .types import ProjectorResult, EmitEvent
+from .types import ProjectorResult, EmitEvent, Command
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +84,10 @@ def apply_writes(result: ProjectorResult, recorded_by: str, recorded_at: int, db
     # Handle emitted events
     if result.emit_events:
         _apply_emit_events(result.emit_events, recorded_by, recorded_at, db)
+
+    # Execute commands (side effects)
+    if result.commands:
+        _execute_commands(result.commands, recorded_by, recorded_at, db)
 
 
 def _apply_emit_events(
@@ -169,3 +173,46 @@ def cascade_delete_from_valid_events(event_id: str, recorded_by: str, db: Any) -
     deleted_count = _cascade(event_id)
     log.debug(f"cascade_delete: removed {deleted_count} events from valid_events for {event_id[:20]}...")
     return deleted_count
+
+
+# ============================================================================
+# Command execution
+# ============================================================================
+
+# Registry of command handlers
+# Each handler takes (args, recorded_by, recorded_at, db)
+_COMMAND_HANDLERS: dict[str, Any] = {}
+
+
+def register_command_handler(command_type: str, handler: Any) -> None:
+    """Register a handler for a command type.
+
+    Args:
+        command_type: The command type string (e.g., 'send_connection_ack')
+        handler: Function taking (args, recorded_by, recorded_at, db)
+    """
+    _COMMAND_HANDLERS[command_type] = handler
+    log.debug(f"Registered command handler: {command_type}")
+
+
+def _execute_commands(
+    commands: tuple[Command, ...],
+    recorded_by: str,
+    recorded_at: int,
+    db: Any
+) -> None:
+    """Execute commands (side effects) after projection.
+
+    Commands are non-deterministic operations that projectors need
+    but cannot execute themselves (since project_pure must be pure).
+    """
+    for cmd in commands:
+        handler = _COMMAND_HANDLERS.get(cmd.command_type)
+        if handler:
+            try:
+                handler(cmd.args, recorded_by, recorded_at, db)
+                log.debug(f"Executed command: {cmd.command_type}")
+            except Exception as e:
+                log.warning(f"Command {cmd.command_type} failed: {e}")
+        else:
+            log.warning(f"No handler for command: {cmd.command_type}")

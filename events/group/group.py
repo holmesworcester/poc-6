@@ -4,7 +4,6 @@ from __future__ import annotations
 # Registry metadata
 EVENT_TYPE = 'group'
 SHAREABLE = True  # Groups sync for access control
-EPHEMERAL = False
 PROJECTION_TABLE = ('groups', 'group_id')
 
 from typing import Any

@@ -4,7 +4,7 @@ import sqlite3
 from core.db import Database, create_safe_db
 from core import schema
 from events.identity import user, peer, invite
-from events.network import connection
+from events.network import connection_request
 from tests.utils import tick_helper
 
 
@@ -59,7 +59,7 @@ def test_remove_connections_for_peer(fresh_db):
     bob_peer_shared_id = bob['peer_shared_id']
 
     # Remove connections for Bob
-    deleted_count = connection.remove_connections_for_peer(bob_peer_shared_id, db)
+    deleted_count = connection_request.remove_connections_for_peer(bob_peer_shared_id, db)
     db.commit()
     print(f"Deleted {deleted_count} connections for Bob")
 
@@ -113,7 +113,7 @@ def test_remove_connections_for_user(fresh_db):
     bob_user_id = bob['user_id']
 
     # Remove connections for Bob's user
-    deleted_count = connection.remove_connections_for_user(bob_user_id, db)
+    deleted_count = connection_request.remove_connections_for_user(bob_user_id, db)
     db.commit()
     print(f"Deleted {deleted_count} connections for user")
 
@@ -142,11 +142,11 @@ def test_remove_connections_no_transit_keys(fresh_db):
     db.commit()
 
     # Try to remove connections for a non-existent peer
-    deleted_count = connection.remove_connections_for_peer("nonexistent_peer_id", db)
+    deleted_count = connection_request.remove_connections_for_peer("nonexistent_peer_id", db)
     assert deleted_count == 0, "Should return 0 when no connections found"
 
     # Try to remove connections for a non-existent user
-    deleted_count = connection.remove_connections_for_user("nonexistent_user_id", db)
+    deleted_count = connection_request.remove_connections_for_user("nonexistent_user_id", db)
     assert deleted_count == 0, "Should return 0 when no connections found"
 
 

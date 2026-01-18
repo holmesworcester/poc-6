@@ -15,7 +15,7 @@ This document describes a refactoring to abstract connections from the syncing a
 Connections exist **before we know which local peer they're for**. The transit key hint routes to the connection; only after unwrap do we discover the local peer (via `transit_keys.owner_peer_id`).
 
 ```
-blob arrives → hint (first 16 bytes) → matches connection.our_transit_key_id
+blob arrives → hint (first 32 bytes) → matches connection.our_transit_key_id
                                      → routes to connection's inbox
                                      → unwrap reveals local_peer_id
 ```

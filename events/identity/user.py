@@ -4,7 +4,6 @@ from typing import Any
 # Registry metadata
 EVENT_TYPE = 'user'
 SHAREABLE = True  # User events sync across the network
-EPHEMERAL = False
 PROJECTION_TABLE = ('users', 'user_id')
 import base64
 import logging
@@ -426,7 +425,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
 
     # Generate deterministic prekey ID from public key hash (for bootstrap user invite)
     # This is needed for invite_accepted.project() to restore invite secrets
-    bootstrap_invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey)[:16])
+    # Use full 32-byte hash for consistency with all key hints
+    bootstrap_invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey))
 
     invite_link_data = {
         'invite_blob': base64.urlsafe_b64encode(invite_blob).decode().rstrip('='),

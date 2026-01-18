@@ -141,11 +141,13 @@ class RealClient:
 def setup_transport_callback(clients: dict):
     """Set up transport callback to route packets via UDP.
 
-    IMPORTANT: For real networking, the callback returns True for ALL packets,
-    either routing them via UDP (if destination known) or dropping them (if not).
-    This prevents packets from falling through to the simulator.
+    IMPORTANT: For real networking, the callback uses the Connection layer to
+    look up peer addresses from invite_accepteds (embedded in invite links).
+    This is the "real" approach - no cheating by looking up client objects directly.
     """
-    route_stats = {'routed': 0, 'unknown_dropped': 0, 'not_found_dropped': 0}
+    from events.network import connection_request as conn_module
+
+    route_stats = {'routed': 0, 'unknown_dropped': 0, 'not_found_dropped': 0, 'no_address': 0}
 
     def route_packet(blob: bytes, from_peer: str, to_peer: str, t_ms: int) -> bool:
         # Check for unknown/missing peer IDs
@@ -153,19 +155,30 @@ def setup_transport_callback(clients: dict):
             route_stats['unknown_dropped'] += 1
             return True  # Return True to prevent simulator fallback
 
-        # Find destination client
+        # Find source client to get their database and socket
+        src_client = None
         for client in clients.values():
-            if client.peer_shared_id == to_peer:
-                # Find source client to send from
-                for src_client in clients.values():
-                    if src_client.peer_id == from_peer or src_client.peer_shared_id == from_peer:
-                        dest_addr = (client.network.host, client.network.port)
-                        src_client.network.send_to(dest_addr, blob)
-                        route_stats['routed'] += 1
-                        return True
+            if client.peer_id == from_peer or client.peer_shared_id == from_peer:
+                src_client = client
+                break
 
-        # Not routed - peer not found (drop the packet)
-        route_stats['not_found_dropped'] += 1
+        if not src_client:
+            route_stats['not_found_dropped'] += 1
+            return True
+
+        # Use Connection layer to look up destination address
+        # This uses invite_accepteds (from invite link) or learned addresses
+        dest_addr = conn_module.get_address_by_peer(to_peer, src_client.peer_id, src_client.db)
+
+        if dest_addr:
+            src_client.network.send_to(dest_addr, blob)
+            route_stats['routed'] += 1
+            log.debug(f"Transport: routed {len(blob)}B from {from_peer[:8]}... to {to_peer[:8]}... at {dest_addr}")
+            return True
+
+        # No address found - drop the packet
+        route_stats['no_address'] += 1
+        log.debug(f"Transport: no address for {to_peer[:8]}... from {from_peer[:8]}... - dropped")
         return True  # Return True to prevent simulator fallback
 
     queues.set_transport_callback(route_packet)
@@ -269,12 +282,14 @@ def create_network_and_join(clients: dict, network_name: str = "TestNet"):
     alice.channel_id = result['channel_id']
     alice.db.commit()
 
-    # Alice creates an invite
+    # Alice creates an invite with her network address embedded
     t_ms = now_ms()
     invite_id, invite_code, invite_data = invite.create(
         peer_id=alice.peer_id,
         t_ms=t_ms,
-        db=alice.db
+        db=alice.db,
+        address=alice.network.host,
+        port=alice.network.port
     )
     alice.db.commit()
 
@@ -307,7 +322,7 @@ def create_network_and_join(clients: dict, network_name: str = "TestNet"):
     return alice.channel_id
 
 
-def tick_until(clients: dict, check_fn, max_ticks: int = 100, tick_interval: float = 0.05):
+def tick_until(clients: dict, check_fn, max_ticks: int = 100, tick_interval: float = 0.05, debug: bool = False):
     """Tick all clients until condition is met or timeout.
 
     Args:
@@ -315,6 +330,7 @@ def tick_until(clients: dict, check_fn, max_ticks: int = 100, tick_interval: flo
         check_fn: Function that returns True when done
         max_ticks: Maximum number of tick rounds
         tick_interval: Seconds between ticks
+        debug: If True, print route stats periodically
 
     Returns:
         Number of ticks taken, or None if timed out

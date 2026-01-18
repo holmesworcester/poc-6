@@ -10,7 +10,6 @@ Batch rekeying operations move all content to new "clean" keys before old keys a
 # Registry metadata
 EVENT_TYPE = 'message_deletion'
 SHAREABLE = True  # Deletions sync to remove messages from all peers
-EPHEMERAL = False
 PROJECTION_TABLE = ('message_deletions', 'deletion_id')
 
 from typing import Any

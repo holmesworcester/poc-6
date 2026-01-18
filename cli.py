@@ -95,7 +95,7 @@ from core import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 import os
 from core import network_config
-from events.network import connection
+from events.network import connection_request
 
 
 # ============================================================================
@@ -387,7 +387,7 @@ class CLISession:
         if self.auto_tick_count == 0:
             return
 
-        from events.network import sync as sync_module
+        from events.network import negentropy
 
         print(f"⟳ syncing...")
         start_t = self.current_time_ms
@@ -400,7 +400,7 @@ class CLISession:
 
             # Check if synced (every 10 ticks to avoid overhead)
             if (i + 1) % 10 == 0:
-                status = sync_module.get_global_sync_status(self.db, self.current_time_ms)
+                status = negentropy.get_global_sync_status(self.db, self.current_time_ms)
                 if status['all_synced'] and status['queue_empty']:
                     break
 
@@ -940,14 +940,14 @@ def cmd_set_auto_tick(session: CLISession, count: int):
 
 def cmd_sync_status(session: CLISession):
     """Show sync status for all active connections."""
-    from events.network import sync as sync_module
+    from events.network import negentropy
 
     account = session.get_selected_account()
     if not account:
         print("✗ no account selected")
         return
 
-    status = sync_module.get_global_sync_status(session.db, session.current_time_ms)
+    status = negentropy.get_global_sync_status(session.db, session.current_time_ms)
 
     total = status['total_connections']
     synced = status['synced_connections']
@@ -1940,7 +1940,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
     """Display connections for the selected account."""
     account = session.get_selected_account()
 
-    data = connection.list_all_for_display(account.peer_id, session.current_time_ms, session.db)
+    data = connection_request.list_all_for_display(account.peer_id, session.current_time_ms, session.db)
 
     active = data['active']
     pending = data['pending']
@@ -1958,7 +1958,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
     if active:
         print(f"ACTIVE ({len(active)})")
         for conn in active:
-            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            time_ago = connection_request.format_time_ago(conn.time_since_handshake(session.current_time_ms))
             if verbose:
                 print(f"  #{idx} ACTIVE: {conn.short_label}")
                 print(f"       connection_id:       {conn.connection_id[:20]}...")
@@ -1969,7 +1969,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
                     print(f"       invite_id:           {conn.invite_id[:20]}...")
                 print(f"       last_handshake:      {time_ago}")
                 print(f"       last_traffic:        ?  (not yet implemented)")
-                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print(f"       expires:             {connection_request.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
                 print()
             else:
                 label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
@@ -1981,7 +1981,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
     if pending:
         print(f"PENDING ({len(pending)})")
         for conn in pending:
-            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            time_ago = connection_request.format_time_ago(conn.time_since_handshake(session.current_time_ms))
             if verbose:
                 print(f"  #{idx} PENDING: {conn.short_label}")
                 print(f"       connection_id:       {conn.connection_id[:20]}...")
@@ -2002,7 +2002,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
     if bootstrap:
         print(f"BOOTSTRAP ({len(bootstrap)})")
         for conn in bootstrap:
-            time_ago = connection.format_time_ago(conn.time_since_handshake(session.current_time_ms))
+            time_ago = connection_request.format_time_ago(conn.time_since_handshake(session.current_time_ms))
             # For bootstrap, show [inviter] or [invitee] based on context
             # If peer_shared_id is unknown, show the role
             if conn.peer_shared_id:
@@ -2019,7 +2019,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
                     print(f"       invite_id:           {conn.invite_id[:20]}...")
                 print(f"       last_handshake:      {time_ago}")
                 print(f"       last_traffic:        ?  (not yet implemented)")
-                print(f"       expires:             {connection.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
+                print(f"       expires:             {connection_request.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
                 print()
             else:
                 print(f"  {idx}. {role_label:24}    conn: {conn.short_connection_id}    handshake {time_ago}")

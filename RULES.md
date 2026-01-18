@@ -404,3 +404,25 @@ See `tests/RULES.md` for test-specific guidelines. Key points:
 - Use `tick()` to drive sync operations
 - Test via API queries, not direct table inspection
 - Assert convergence in multi-peer scenarios
+
+### Scenario Tests: Always Use `assert_eventually`
+
+**Wrong:**
+```python
+run_ticks(db=db, start_t_ms=5000, num_rounds=200)
+assert message_synced_to_bob(db)  # May fail if sync takes longer
+```
+
+**Right:**
+```python
+from tests.utils.tick_helper import assert_eventually
+
+assert_eventually(
+    lambda: message_synced_to_bob(db),
+    db=db,
+    start_t_ms=5000,
+    msg="Message should sync to Bob"
+)
+```
+
+`assert_eventually` runs ticks and retries until the condition passes or times out. This avoids flaky tests that depend on exact tick counts for sync convergence. Use it for all assertions that depend on sync/projection completing.

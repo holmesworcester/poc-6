@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'peer_removed'
 SHAREABLE = True  # Peer removal syncs to stop syncing with removed peer
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any
@@ -11,8 +10,39 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
+from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+# V2 Projector specification
+# Note: peer_removed uses 'removed_by' as the signer field (not standard 'signed_by')
+EVENT_SPEC = {
+    'encrypted': False,
+    'signer': {
+        'id_field': 'removed_by',  # Custom signer field
+        'type_field': 'signer_type',  # Always 'peer_shared'
+    },
+    'requires': {
+        # The signer's peer_shared must exist for signature verification
+        'signer_peer_shared': {
+            'source': 'table',
+            'table': 'peers_shared',
+            'key': 'peer_shared_id',
+            'key_from': 'removed_by',
+            'fields': ['peer_shared_id', 'public_key'],
+        },
+    },
+    'optional': {
+        # The removed peer's info (for user lookup during key rotation)
+        'removed_peer': {
+            'source': 'table',
+            'table': 'peers_shared',
+            'key': 'peer_shared_id',
+            'key_from': 'removed_peer_shared_id',
+            'fields': ['peer_shared_id', 'user_id'],
+        },
+    },
+}
 
 
 def validate(removed_peer_shared_id: str, removed_by_peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -62,6 +92,7 @@ def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_
         'type': 'peer_removed',
         'removed_peer_shared_id': removed_peer_shared_id,
         'removed_by': removed_by_peer_shared_id,
+        'signer_type': 'peer_shared',  # For v2 resolver
         'created_at': t_ms
     }
 
@@ -78,85 +109,84 @@ def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_
     return event_id
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project peer_removed event to state.
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for peer_removed - returns writes without side effects.
 
-    Mark peer as removed so their sync requests are ignored.
-    Historical events from this peer remain valid.
-
-    If this was the last peer of a user, rotate group keys.
-
-    Args:
-        event_id: Event ID
-        recorded_by: Peer perspective for key rotation (if this is the last peer)
-        recorded_at: When the event was recorded
-        db: Database connection
-
-    Returns:
-        event_id if successful, None otherwise
+    Core projection: insert into removed_peers table.
+    Side effects (connection removal, key rotation) are handled in project() wrapper.
     """
-    # Fetch and parse event data from store
-    blob = store.get(event_id, db)
-    if not blob:
-        log.warning(f"peer_removed.project() blob not found for {event_id[:20]}...")
-        return None
-
-    event_data = crypto.parse_json(blob)
-
-    # Verify signature before trusting event data
-    # peer_removed uses 'removed_by' as the signer field (not 'signed_by')
-    signer_peer_shared_id = event_data.get('removed_by')
-    if not signer_peer_shared_id:
-        log.warning(f"peer_removed.project() missing removed_by field for {event_id[:20]}...")
-        return None
-
-    from events.identity import peer_shared
-    try:
-        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
-        if not crypto.verify_event(event_data, public_key):
-            log.warning(f"peer_removed.project() signature verification failed for {event_id[:20]}...")
-            return None
-    except ValueError:
-        log.warning(f"peer_removed.project() signer peer_shared not found for {event_id[:20]}...")
-        return None
-
-    unsafe_db = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
+    event_data = ctx.event_data
 
     removed_peer_shared_id = event_data.get('removed_peer_shared_id')
     removed_at = event_data.get('created_at')
-    signed_by = event_data.get('removed_by')  # The remover's peer_shared_id is the signer
+    signed_by = event_data.get('removed_by')
 
     if not removed_peer_shared_id:
+        log.warning(f"peer_removed.project_pure() missing removed_peer_shared_id")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if not signed_by:
+        log.warning(f"peer_removed.project_pure() missing removed_by field")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Core write: insert into removed_peers table
+    # Note: removed_peers is device-wide (no recorded_by column)
+    writes = [
+        WriteOp(
+            op='insert',
+            table='removed_peers',
+            values={
+                'peer_shared_id': removed_peer_shared_id,
+                'removed_at': removed_at,
+                'signed_by': signed_by,
+            },
+        ),
+    ]
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
+
+
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project peer_removed event to state (legacy wrapper).
+
+    NOTE: When EVENT_SPEC and project_pure are defined, recorded.py uses the v2 path
+    directly and this function is NOT called. Side effects (connection removal, key
+    rotation) are handled in recorded.py's post-projection hook for peer_removed.
+
+    This legacy wrapper exists for backwards compatibility if called directly.
+    """
+    from core.projection_v2.resolver import resolve
+    from core.projection_v2.apply import apply_result
+
+    resolve_result = resolve(EVENT_SPEC, event_id, recorded_by, recorded_at, db)
+
+    if resolve_result.status == 'block':
+        log.debug(f"peer_removed.project() blocked on deps: {resolve_result.missing}")
+        return None
+    if resolve_result.status == 'reject':
+        log.warning(f"peer_removed.project() rejected: {resolve_result.error}")
         return None
 
-    # Insert into removed_peers table (device-wide, no recorded_by)
-    unsafe_db.execute(
-        """INSERT OR IGNORE INTO removed_peers (peer_shared_id, removed_at, signed_by)
-           VALUES (?, ?, ?)""",
-        (removed_peer_shared_id, removed_at, signed_by)
-    )
+    result = project_pure(resolve_result.ctx)
+    if not result.valid_event:
+        return None
 
-    # DELETE ALL CONNECTIONS with this peer (enforcement mechanism)
-    # No connections = no sync possible
-    # Uses connection module API which handles per-peer connection removal
-    from events.network import connection
-    deleted_count = connection.remove_connections_for_peer(removed_peer_shared_id, db)
-    log.info(f"peer_removed.project() deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
+    apply_result(result, recorded_by, db)
 
-    # Rotate group keys when ANY peer is removed
-    # This ensures removed peers cannot decrypt future messages, even if they have cached keys
-    # The new key is shared with remaining members via group_key_shared events
-    # Map removed peer to its user_id from peers_shared (user→peer relationship stored there)
-    peer_row = safedb.query_one(
-        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-        (removed_peer_shared_id, recorded_by)
-    )
+    # Side effects are handled in recorded.py for v2 path
+    # If called directly (legacy), we need to handle them here
+    removed_peer_shared_id = resolve_result.ctx.event_data.get('removed_peer_shared_id')
+    if removed_peer_shared_id:
+        from events.network import connection_request
+        connection_request.remove_connections_for_peer(removed_peer_shared_id, db)
 
-    if peer_row and peer_row['user_id']:
-        removed_user_id = peer_row['user_id']
-        log.info(f"peer_removed.project() removed_peer {removed_peer_shared_id[:20]}... belongs to user {removed_user_id[:20]}..., rotating group keys")
-        _rotate_keys_for_removed_peer_user(removed_user_id, recorded_by, removed_at, db)
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        peer_row = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+            (removed_peer_shared_id, recorded_by)
+        )
+        if peer_row and peer_row.get('user_id'):
+            _rotate_keys_for_removed_peer_user(peer_row['user_id'], recorded_by, recorded_at, db)
 
     return event_id
 

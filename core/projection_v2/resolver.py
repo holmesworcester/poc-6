@@ -225,12 +225,21 @@ def _resolve_invite_pubkey(
     safedb: Any,
     unsafedb: Any,
 ) -> bytes | None:
+    # Check invites table (for inviter)
     row = safedb.query_one(
         "SELECT invite_pubkey FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
         (invite_id, recorded_by),
     )
     if row and row.get("invite_pubkey"):
         return crypto.b64decode(row["invite_pubkey"])
+    # Check invite_accepteds table (for joiner)
+    row = safedb.query_one(
+        "SELECT invite_pubkey FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
+        (invite_id, recorded_by),
+    )
+    if row and row.get("invite_pubkey"):
+        return crypto.b64decode(row["invite_pubkey"])
+    # Fallback: check blob store
     blob = store.get(invite_id, unsafedb)
     if not blob:
         return None
@@ -300,8 +309,9 @@ def _resolve_signer(
                 )
                 signer_is_admin = admin_row is not None
     elif signer_type == "invite":
-        if not _is_event_valid(signer_id, recorded_by, safedb):
-            return "block", None, [signer_id], None
+        # For invite signer, don't require the invite event in valid_events.
+        # Joiners have invite_accepted (not invite), so we just try to resolve the pubkey
+        # from invites table, invite_accepteds table, or blob store.
         public_key = _resolve_invite_pubkey(signer_id, recorded_by, safedb, unsafedb)
         if not public_key:
             return "reject", None, [], "invite signer not available"

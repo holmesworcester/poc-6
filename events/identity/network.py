@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'network'
 SHAREABLE = True  # Network root of trust syncs to all peers
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any

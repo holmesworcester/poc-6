@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'message'
 SHAREABLE = True  # Messages sync to channel members
-EPHEMERAL = False
 PROJECTION_TABLE = ('messages', 'message_id')
 
 from typing import Any

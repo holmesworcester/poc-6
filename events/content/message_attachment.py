@@ -8,7 +8,6 @@ instead of a separate 'file' event.
 # Registry metadata
 EVENT_TYPE = 'message_attachment'
 SHAREABLE = True  # Attachments sync with messages
-EPHEMERAL = False
 PROJECTION_TABLE = None  # No created_at lookup needed
 
 from typing import Any

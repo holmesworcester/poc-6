@@ -19,7 +19,7 @@ from . import store
 
 # ===== Constants =====
 
-HINT_SIZE = 16  # bytes (128 bits)
+HINT_SIZE = 32  # bytes (256 bits) - full BLAKE2b hash for key hints
 SECRET_SIZE = 32  # bytes (256 bits) for symmetric keys
 NONCE_SIZE = 24  # bytes (192 bits) for XChaCha20-Poly1305
 
@@ -37,7 +37,7 @@ def generate_keypair() -> Tuple[bytes, bytes]:
 
 
 def hash(data: bytes, size: int = HINT_SIZE) -> bytes:
-    """BLAKE2b hash. Default 16 bytes (128 bits) for IDs and hints."""
+    """BLAKE2b hash. Default 32 bytes (256 bits) for IDs and hints."""
     return nacl.hash.blake2b(data, digest_size=size, encoder=nacl.encoding.RawEncoder)
 
 
@@ -230,7 +230,7 @@ def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
 
 # ===== Key Lookup Functions =====
 
-ID_SIZE = 16  # bytes (128 bits)
+ID_SIZE = 32  # bytes (256 bits) - full hash for key IDs in encrypted blobs
 
 
 def extract_id(blob: bytes) -> bytes:
@@ -304,10 +304,10 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     )
     for conn_row in conn_rows:
         conn_id = conn_row['connection_id']
-        # Decode connection_id, take first 16 bytes, compare with id_bytes
+        # Decode connection_id, compare full 32 bytes with id_bytes
         try:
             conn_id_bytes = b64decode(conn_id)
-            if conn_id_bytes[:16] == id_bytes:
+            if conn_id_bytes == id_bytes:
                 log.debug(f"get_transit_key_by_id() found connection key for connection_id={conn_id[:20]}...")
                 return {
                     'id': id_bytes,
@@ -409,7 +409,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
         conn_id = conn_row['connection_id']
         try:
             conn_id_bytes = b64decode(conn_id)
-            if conn_id_bytes[:16] == id_bytes:
+            if conn_id_bytes == id_bytes:
                 log.debug(f"get_key_by_id() found connection key for connection_id={conn_id[:20]}...")
                 return {
                     'id': id_bytes,

@@ -89,7 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_group_keys_shared_by_prekey
 Extract prekey_id from blob hint and store it:
 
 ```python
-# Extract recipient_prekey_id from blob (first 16 bytes is the hint/prekey_id)
+# Extract recipient_prekey_id from blob (first 32 bytes is the hint/prekey_id)
 recipient_prekey_id = crypto.b64encode(blob[:crypto.ID_SIZE])
 
 safedb.execute(

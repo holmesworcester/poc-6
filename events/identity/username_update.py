@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'username_update'
 SHAREABLE = True  # Username updates sync across network
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any

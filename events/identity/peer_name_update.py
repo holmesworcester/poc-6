@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'peer_name_update'
 SHAREABLE = True  # Peer name updates sync across network
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any

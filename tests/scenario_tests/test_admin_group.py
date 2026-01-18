@@ -121,6 +121,17 @@ def test_admin_group_workflow(fresh_db):
 
     t_ms = assert_eventually(charlie_sees_admins, db=db, start_t_ms=t_ms + 1000)
 
+    # Wait for Alice to see Charlie as a member
+    from events.group import group_member
+    all_users_group = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+
+    def alice_sees_charlie():
+        members = group_member.list_members(all_users_group, alice['peer_id'], db)
+        member_names = [m['name'] for m in members]
+        assert 'Charlie' in member_names, f"Alice should see Charlie as member, got: {member_names}"
+
+    t_ms = assert_eventually(alice_sees_charlie, db=db, start_t_ms=t_ms)
+
     # Test: Rogue non-admin invite (Charlie tries to invite Dave before being admin)
     try:
         invite.create(peer_id=charlie['peer_id'], t_ms=t_ms, db=db)
@@ -155,7 +166,7 @@ def test_admin_group_workflow(fresh_db):
 
     rogue_invite_private_key, rogue_invite_public_key = crypto.generate_keypair()
     rogue_invite_pubkey_b64 = crypto.b64encode(rogue_invite_public_key)
-    rogue_invite_prekey_id = crypto.b64encode(crypto.hash(rogue_invite_public_key)[:16])
+    rogue_invite_prekey_id = crypto.b64encode(crypto.hash(rogue_invite_public_key))
 
     charlie_prekey_row = unsafedb.query_one(
         "SELECT transit_prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? LIMIT 1",

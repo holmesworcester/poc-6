@@ -45,8 +45,36 @@ from enum import Enum
 
 from core.db import create_safe_db
 from core import crypto
+from core import store
+from events.network import sync_window
 
 log = logging.getLogger(__name__)
+
+# Registry metadata
+EVENT_TYPE = 'negentropy'
+SHAREABLE = False  # Point-to-point sync protocol, don't broadcast to others
+PROJECTION_TABLE = None  # No persistent projection table
+
+
+def project(ref_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+    """Project negentropy event by handling the sync message.
+
+    Standard projector signature - fetches event data and delegates to handle_incoming.
+    """
+    blob = store.get(ref_id, db)
+    if not blob:
+        log.warning(f"negentropy.project: blob not found for {ref_id[:20]}...")
+        return None
+
+    event_data = crypto.parse_json(blob)
+    connection_id = event_data.get('reply_connection_id')
+
+    if not connection_id:
+        log.warning(f"negentropy.project: missing reply_connection_id in {ref_id[:20]}...")
+        return None
+
+    handle_incoming(db, recorded_by, connection_id, event_data, recorded_at)
+    return ref_id
 
 # Hierarchy levels - reduced to 4 levels for efficiency
 # root (0) -> prefix_2 -> prefix_4 -> prefix_6
@@ -326,6 +354,91 @@ def add_event_to_sync(
     For bulk operations, use add_events_to_sync_batch() instead.
     """
     add_events_to_sync_batch(db, recorded_by, [(event_id, created_at)])
+
+
+# ============================================================================
+# Shareable Event Tracking
+# ============================================================================
+
+
+def add_shareable_events_batch(
+    events: list[tuple[str, int, int]],  # List of (event_id, created_at, recorded_at)
+    can_share_peer_id: str,
+    db,
+    skip_negentropy: bool = False,
+    defer_buckets: bool = False
+) -> None:
+    """Add multiple shareable events efficiently.
+
+    Batches inserts for both shareable_events and negentropy tables.
+    Much faster than calling add_shareable_event() in a loop for bulk operations.
+
+    Args:
+        events: List of (event_id, created_at, recorded_at) tuples
+        can_share_peer_id: The peer who recorded/has these events
+        db: Database connection
+        skip_negentropy: If True, skip negentropy entirely
+        defer_buckets: If True, skip bucket computation (caller must call
+                       rebuild_buckets_for_peer after all events added)
+    """
+    if not events:
+        return
+
+    safedb = create_safe_db(db, recorded_by=can_share_peer_id)
+
+    # Batch insert into shareable_events
+    for event_id, created_at, recorded_at in events:
+        event_id_bytes = crypto.b64decode(event_id)
+        window_id = sync_window.SyncWindow.storage_window_from_event_id(event_id_bytes)
+
+        safedb.execute(
+            """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+        )
+
+    # Batch add to negentropy (unless skipped)
+    if not skip_negentropy:
+        negentropy_events = [(event_id, recorded_at) for event_id, created_at, recorded_at in events]
+        add_events_to_sync_batch(db, can_share_peer_id, negentropy_events, defer_buckets=defer_buckets)
+
+    log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (defer={defer_buckets})")
+
+
+def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, recorded_at: int, db,
+                        skip_negentropy: bool = False) -> None:
+    """Add shareable event to both sync tracking tables.
+
+    ARCHITECTURE NOTE: Dual Sync Tables
+    ====================================
+    We maintain two tables for sync tracking:
+
+    1. shareable_events - Tracks window_id for hash-based windowing
+       - created_at is always NULL for determinism (encrypted events can't provide it)
+
+    2. negentropy_events - Used by negentropy time-based sync protocol
+       - Tracks bucket_start_ms for time-hierarchy hashing
+       - Uses recorded_at for bucketing (available for all events)
+
+    Both tables track the same set of events. This function is the SINGLE place
+    that adds to both, ensuring they stay synchronized. All paths that create
+    shareable events (recorded.project, file_slice.batch_create_slices) call
+    this function.
+
+    Incoming synced events also flow through recorded.project(), so they
+    automatically get added to both tables on the receiving side.
+
+    For bulk operations, use add_shareable_events_batch() instead.
+
+    Args:
+        event_id: The event being marked as shareable
+        can_share_peer_id: The peer who recorded/has this event and can share it
+        created_at: When event was created (often NULL for encrypted events)
+        recorded_at: When this peer recorded the event (always available)
+        db: Database connection
+        skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
+    """
+    add_shareable_events_batch([(event_id, created_at, recorded_at)], can_share_peer_id, db, skip_negentropy)
 
 
 def get_bucket_hash(
@@ -726,7 +839,7 @@ def _send_event_blobs(
     Returns:
         Number of blobs sent
     """
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
     sent = 0
@@ -840,7 +953,7 @@ def sync_connection(
     Returns:
         Number of messages sent
     """
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     msgs = init_sync_for_connection(db, recorded_by, conn.connection_id, t_ms)
     sent = 0
@@ -878,7 +991,7 @@ def handle_incoming(
     Returns:
         Number of response messages sent
     """
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     # Unwrap the inner message
     msg = envelope.get('data', envelope)
@@ -918,7 +1031,7 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
         Stats dict with counts
     """
     from core.db import create_unsafe_db
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     unsafedb = create_unsafe_db(db)
     local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -941,8 +1054,9 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
             if not conn.can_send():
                 continue
 
-            # Skip bootstrap connections without peer identity
-            if not conn.peer_shared_id:
+            # Skip connections without any identity
+            # But allow bootstrap connections (have invite_id even if peer_shared_id is NULL)
+            if not conn.peer_shared_id and not conn.invite_id:
                 continue
 
             total_connections += 1
@@ -1060,6 +1174,70 @@ def get_all_connection_sync_status(db, recorded_by: str, t_ms: int) -> dict:
         'total_connections': total,
         'synced_connections': synced_count,
         'connections': connections,
+    }
+
+
+def get_global_sync_status(db, t_ms: int) -> dict:
+    """Get sync status across all local peers and their active connections.
+
+    Uses negentropy's per-connection sync state for accurate progress detection.
+
+    Args:
+        db: Database connection
+        t_ms: Current timestamp (for connection expiry check)
+
+    Returns:
+        {
+            'all_synced': bool,           # All connections across all peers synced
+            'queue_empty': bool,          # incoming_blobs is empty
+            'total_connections': int,     # Count of active connections
+            'synced_connections': int,    # Count that are fully synced
+            'by_peer': [                  # Per local peer breakdown
+                {
+                    'peer_id': str,
+                    'all_synced': bool,
+                    'total_connections': int,
+                    'synced_connections': int,
+                    'connections': [...]
+                }
+            ]
+        }
+    """
+    from core.db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+
+    # Get queue size
+    queue = unsafedb.query_one("SELECT COUNT(*) as cnt FROM incoming_blobs")
+    queue_empty = (queue['cnt'] if queue else 0) == 0
+
+    # Get all local peers
+    local_peers = [row['peer_id'] for row in unsafedb.query("SELECT peer_id FROM local_peers")]
+
+    by_peer = []
+    total_connections = 0
+    total_synced = 0
+
+    for peer_id in local_peers:
+        status = get_all_connection_sync_status(db, peer_id, t_ms)
+        by_peer.append({
+            'peer_id': peer_id,
+            'all_synced': status['all_synced'],
+            'total_connections': status['total_connections'],
+            'synced_connections': status['synced_connections'],
+            'connections': status['connections'],
+        })
+        total_connections += status['total_connections']
+        total_synced += status['synced_connections']
+
+    # All synced if every peer is synced (vacuously true if no connections)
+    all_synced = all(p['all_synced'] for p in by_peer) if by_peer else True
+
+    return {
+        'all_synced': all_synced,
+        'queue_empty': queue_empty,
+        'total_connections': total_connections,
+        'synced_connections': total_synced,
+        'by_peer': by_peer,
     }
 
 

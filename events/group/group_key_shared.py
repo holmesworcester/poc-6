@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'group_key_shared'
 SHAREABLE = True  # Sealed keys sync to enable group decryption
-EPHEMERAL = False
 PROJECTION_TABLE = ('group_keys_shared', 'group_key_shared_id')
 
 from typing import Any

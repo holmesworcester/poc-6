@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from api.core.database import get_db, get_peer_id, get_t_ms
 from events.identity import network
-from events.network import connection as conn_module
+from events.network import connection_request as conn_module
 from core.db import create_safe_db
 
 router = APIRouter()

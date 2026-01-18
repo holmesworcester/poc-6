@@ -4,7 +4,6 @@ from __future__ import annotations
 # Registry metadata
 EVENT_TYPE = 'channel'
 SHAREABLE = True  # Channels sync to all members
-EPHEMERAL = False
 PROJECTION_TABLE = ('channels', 'channel_id')
 
 from typing import Any

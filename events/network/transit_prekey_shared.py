@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'transit_prekey_shared'
 SHAREABLE = True  # Public transit prekeys sync for routing
-EPHEMERAL = False
 PROJECTION_TABLE = ('transit_prekeys_shared', 'transit_prekey_shared_id')
 
 from typing import Any

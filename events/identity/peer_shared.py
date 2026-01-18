@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'peer_shared'
 SHAREABLE = True  # Public identity syncs across network
-EPHEMERAL = False
 PROJECTION_TABLE = ('peers_shared', 'peer_shared_id')
 
 from typing import Any
@@ -281,6 +280,20 @@ def project(peer_shared_id: str, recorded_by: str, recorded_at: int, db: Any) ->
         log.info(f"peer_shared.project() inserted into peers_shared with user_id: peer_shared_id={peer_shared_id[:20]}..., user_id={user_id[:20]}...")
     else:
         log.info(f"peer_shared.project() inserted into peers_shared (self-signed bootstrap): peer_shared_id={peer_shared_id[:20]}...")
+
+    # Connection label upgrade: When peer_shared syncs, update connections that have
+    # invite_id but not peer_shared_id. This allows get_connection_by_peer() to find
+    # bootstrap connections after the peer's identity is established.
+    # Per spec: "When peer_shared projects, update connections with matching invite_id"
+    owner_peer_id = event_data['peer_id']
+    if invite_id and owner_peer_id != recorded_by:
+        # This is a remote peer's peer_shared - upgrade their connection label
+        safedb.execute("""
+            UPDATE connections
+            SET peer_shared_id = ?
+            WHERE invite_id = ? AND peer_shared_id IS NULL AND recorded_by = ?
+        """, (peer_shared_id, invite_id, recorded_by))
+        log.info(f"peer_shared.project() label upgrade: peer_shared_id={peer_shared_id[:20]}... for invite_id={invite_id[:20]}...")
 
     # Insert into peer_self table (subjective mapping) if this is our own peer
     # ONLY update peer_self for invite-signed peer_shared (has user_id)

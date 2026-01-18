@@ -103,7 +103,7 @@ def test_three_player_messaging(fresh_db):
 
     # Test connection listing API (CLI display)
     print("\n=== Testing Connection Listing API ===")
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     # Test Alice's connections
     alice_conns = conn_module.list_all_for_display(alice['peer_id'], final_t_ms, db)

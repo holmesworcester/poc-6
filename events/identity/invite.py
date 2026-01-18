@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'invite'
 SHAREABLE = True  # Invites sync to enable network membership
-EPHEMERAL = False
 PROJECTION_TABLE = ('invites', 'invite_id')
 
 from typing import Any
@@ -95,6 +94,10 @@ def project_pure(ctx: Any) -> ProjectorResult:
             # Admin grant doesn't authorize this signer
             return ProjectorResult(writes=tuple(), valid_event=False)
 
+    # Network address for bootstrap connections (ongoing invites only)
+    address = event_data.get('address')
+    port = event_data.get('port')
+
     writes = (
         WriteOp(
             op='insert',
@@ -108,6 +111,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'user_id': user_id,  # For mode='peer'
                 'created_at': created_at,
                 'recorded_by': ctx.recorded_by,
+                'address': address,  # May be None for bootstrap invites
+                'port': port,  # May be None for bootstrap invites
             },
         ),
     )
@@ -149,7 +154,8 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     return admin_row is not None
 
 
-def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
+def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None,
+           address: str | None = None, port: int | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -166,6 +172,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         db: Database connection
         mode: 'user' for network join invites, 'peer' for device linking invites
         user_id: Required for mode='peer', target user to link to. Must be None for mode='user'.
+        address: Inviter's IP address (for connection bootstrapping)
+        port: Inviter's port (for connection bootstrapping)
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -310,14 +318,14 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_transit_prekey_shared_id = inviter_prekey_shared_row['transit_prekey_shared_id']
     inviter_transit_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
 
-    # TODO: Address info should come from an address table or network discovery
-    # Currently hardcoded for local testing; production needs proper address resolution
-    inviter_ip = '127.0.0.1'
-    inviter_port = 6100
+    # Address info: use passed parameters or fall back to defaults
+    # For production, this should come from self_address discovery
+    inviter_ip = address if address is not None else '127.0.0.1'
+    inviter_port = port if port is not None else 6100
 
     # Create minimal invite event (signed by Alice, proves authorization)
-    # SLIM INVITE: Only essential fields for sync. Transit prekey + address info moved to link.
-    # This keeps invite event under 488-byte UDP limit.
+    # SLIM INVITE: Only essential fields for sync. Transit prekey info moved to link.
+    # Address/port included for bootstrap connections.
     invite_event_data = {
         'type': 'invite',
         'mode': mode,
@@ -327,7 +335,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'inviter_user_id': inviter_user_id,  # For admin validation during projection
         'signed_by': peer_shared_id,  # Also serves as inviter_peer_shared_id (redundancy removed)
         'signer_type': 'peer_shared',  # v2: ongoing invites are signed by peer_shared
-        'created_at': t_ms
+        'created_at': t_ms,
+        'address': inviter_ip,  # Network address for bootstrap
+        'port': inviter_port,  # Network port for bootstrap
     }
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
@@ -414,9 +424,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             )
             log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
 
-    # Get inviter's peer_shared blob to include in invite link
-    # This allows Bob to immediately have Alice in his peers_shared table upon joining
-    # Build invite link - metadata + keys for connection, NO blobs (those sync after connection)
+    # Build invite link - metadata + keys for connection
     import base64
 
     invite_link_data = {
@@ -591,11 +599,13 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
     mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility
     user_id = event_data.get('user_id')  # None for mode='user', set for mode='link' and mode='peer'
     group_id = event_data.get('group_id')  # None for mode='peer' (peer invites don't have group context)
+    address = event_data.get('address')  # Network address for bootstrap
+    port = event_data.get('port')  # Network port for bootstrap
 
     safedb.execute(
         """INSERT OR IGNORE INTO invites
-           (invite_id, invite_pubkey, group_id, inviter_id, mode, user_id, created_at, recorded_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (invite_id, invite_pubkey, group_id, inviter_id, mode, user_id, created_at, recorded_by, address, port)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             invite_id,
             event_data['invite_pubkey'],
@@ -604,7 +614,9 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             mode,
             user_id,
             event_data['created_at'],
-            recorded_by
+            recorded_by,
+            address,
+            port
         )
     )
 

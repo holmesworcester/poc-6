@@ -377,7 +377,7 @@ class TestInvitationRejection:
 
         # Create rogue prekey
         rogue_private_key, rogue_public_key = crypto.generate_keypair()
-        rogue_prekey_id = crypto.b64encode(crypto.hash(rogue_public_key)[:16])
+        rogue_prekey_id = crypto.b64encode(crypto.hash(rogue_public_key))
 
         # Craft rogue invite (bypassing authorization checks)
         rogue_invite_data = {
@@ -714,23 +714,22 @@ class TestAdminGrantChain:
         )
         db.commit()
 
-        # Sync
-        run_ticks(db=db, start_t_ms=26000, num_rounds=200)
+        # Verify Charlie is admin from all perspectives using assert_eventually
+        def check_charlie_admin():
+            charlie_admin_alice = admin.is_user_admin(
+                charlie['user_id'], alice['network_id'], alice['peer_id'], db
+            )
+            charlie_admin_bob = admin.is_user_admin(
+                charlie['user_id'], alice['network_id'], bob['peer_id'], db
+            )
+            charlie_admin_charlie = admin.is_user_admin(
+                charlie['user_id'], alice['network_id'], charlie['peer_id'], db
+            )
+            assert charlie_admin_alice is True, "Alice should see Charlie as admin"
+            assert charlie_admin_bob is True, "Bob should see Charlie as admin"
+            assert charlie_admin_charlie is True, "Charlie should see himself as admin"
 
-        # Verify Charlie is admin from all perspectives
-        charlie_admin_alice = admin.is_user_admin(
-            charlie['user_id'], alice['network_id'], alice['peer_id'], db
-        )
-        charlie_admin_bob = admin.is_user_admin(
-            charlie['user_id'], alice['network_id'], bob['peer_id'], db
-        )
-        charlie_admin_charlie = admin.is_user_admin(
-            charlie['user_id'], alice['network_id'], charlie['peer_id'], db
-        )
-
-        assert charlie_admin_alice is True, "Alice should see Charlie as admin"
-        assert charlie_admin_bob is True, "Bob should see Charlie as admin"
-        assert charlie_admin_charlie is True, "Charlie should see himself as admin"
+        assert_eventually(check_charlie_admin, db=db, start_t_ms=26000)
 
 
 # =============================================================================
@@ -1941,31 +1940,34 @@ class TestStateMachine:
             admin_grant=alice_grant
         )
         db.commit()
-        run_ticks(db=db, start_t_ms=10000, num_rounds=200)
 
-        # State: Bob=ADMIN
-        bob_admin = admin.is_user_admin(bob['user_id'], alice['network_id'], bob['peer_id'], db)
-        assert bob_admin is True, "Bob should be admin after sync"
+        # State: Bob=ADMIN - use assert_eventually
+        def check_bob_admin():
+            bob_admin = admin.is_user_admin(bob['user_id'], alice['network_id'], bob['peer_id'], db)
+            assert bob_admin is True, "Bob should be admin after sync"
+            bob_grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
+            assert bob_grant is not None, "Bob should have admin_grant after sync"
+            return bob_grant
 
-        # Verify Bob's grant is available
-        bob_grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
-        assert bob_grant is not None, "Bob should have admin_grant after sync"
+        t_ms = assert_eventually(check_bob_admin, db=db, start_t_ms=10000)
 
         # Transition: Bob can now create invites
-        invite_id2, invite_link2, _ = invite.create(peer_id=bob['peer_id'], t_ms=15000, db=db)
+        invite_id2, invite_link2, _ = invite.create(peer_id=bob['peer_id'], t_ms=t_ms, db=db)
         assert invite_id2 is not None
 
         # Charlie joins via Bob's invite
-        charlie_peer_id = peer.create(t_ms=16000, db=db)
-        charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link2, name='Charlie', t_ms=16000, db=db)
+        charlie_peer_id = peer.create(t_ms=t_ms + 1000, db=db)
+        charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link2, name='Charlie', t_ms=t_ms + 1000, db=db)
         db.commit()
-        run_ticks(db=db, start_t_ms=17000, num_rounds=200)
 
         # State: Network=MULTI_USER, Bob=ADMIN, Charlie=ACTIVE
-        all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
-        members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
-        names = sorted([m['name'] for m in members])
-        assert names == ['Alice', 'Bob', 'Charlie']
+        def check_charlie_joined():
+            all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+            members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+            names = sorted([m['name'] for m in members])
+            assert names == ['Alice', 'Bob', 'Charlie'], f"Expected all 3 users, got {names}"
+
+        t_ms = assert_eventually(check_charlie_joined, db=db, start_t_ms=t_ms + 2000)
 
         # Bob can grant admin to Charlie (use fresh bob_grant)
         bob_grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -1975,17 +1977,19 @@ class TestStateMachine:
             network_id=alice['network_id'],
             signed_by=bob['peer_shared_id'],
             signer_private_key=bob_private_key,
-            t_ms=20000,
+            t_ms=t_ms,
             peer_id=bob['peer_id'],
             db=db,
             admin_grant=bob_grant
         )
         db.commit()
-        run_ticks(db=db, start_t_ms=21000, num_rounds=200)
 
         # State: Network=MULTI_ADMIN (Alice, Bob, Charlie are all admins)
-        charlie_admin = admin.is_user_admin(charlie['user_id'], alice['network_id'], alice['peer_id'], db)
-        assert charlie_admin is True
+        def check_charlie_admin():
+            charlie_admin = admin.is_user_admin(charlie['user_id'], alice['network_id'], alice['peer_id'], db)
+            assert charlie_admin is True, "Charlie should be admin"
+
+        assert_eventually(check_charlie_admin, db=db, start_t_ms=t_ms + 1000)
 
     def test_state_transitions_with_multiple_removals(self, fresh_db):
         """Test state machine with multiple sequential removals."""

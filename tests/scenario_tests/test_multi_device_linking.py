@@ -132,7 +132,7 @@ def test_alice_links_phone_to_laptop(fresh_db):
 
     # Verify connections between devices
     print("\n=== Verifying connections between devices ===")
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     # Phone's connections
     phone_conns = conn_module.list_all_for_display(alice_phone['peer_id'], current_t_ms, db)
@@ -422,7 +422,7 @@ def test_three_devices_all_linked(fresh_db):
 
     # Verify connections between all three devices
     print("\n=== Verifying connections between all three devices ===")
-    from events.network import connection as conn_module
+    from events.network import connection_request as conn_module
 
     # Get current time from sync
     final_t_ms = 6000 + 500 * 100  # Approximate end time

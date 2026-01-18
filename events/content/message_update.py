@@ -85,7 +85,6 @@ def project_pure(ctx: Any) -> ProjectorResult:
 # Event type registration
 EVENT_TYPE = 'message_update'
 SHAREABLE = True
-EPHEMERAL = False
 PROJECTION_TABLE = ('message_updates', 'update_id')
 
 

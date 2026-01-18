@@ -788,7 +788,7 @@ The `recorded_by` identifies the local peer who owns this connection.
 
 ## Connection Identity and Bootstrap
 
-Connections are keyed by `connection_id` — the event hash of our connection request. This ID appears as the hint in the first 16 bytes of incoming blobs, enabling routing before decryption.
+Connections are keyed by `connection_id` — the event hash of our connection request. This ID appears as the hint in the first 32 bytes of incoming blobs, enabling routing before decryption.
 
 ### Identity Labels
 
@@ -923,7 +923,7 @@ On devices with multiple local peers (linked accounts), incoming messages must b
 
 ### Stage 1: Route to Connection (by hint)
 
-The first 16 bytes of every transit-wrapped blob is a hint matching `connection_id`. This routes the blob to the correct connection's inbox without decryption.
+The first 32 bytes of every transit-wrapped blob is a hint matching `connection_id`. This routes the blob to the correct connection's inbox without decryption.
 
 ### Stage 2: Route to Local Peer (by connection ownership)
 

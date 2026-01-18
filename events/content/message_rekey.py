@@ -8,7 +8,6 @@ before the old key is discarded, ensuring forward secrecy.
 # Registry metadata
 EVENT_TYPE = 'message_rekey'
 SHAREABLE = True  # Rekey events sync for forward secrecy
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any

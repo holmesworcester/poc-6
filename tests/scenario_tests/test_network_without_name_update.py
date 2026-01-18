@@ -33,12 +33,12 @@ def test_network_without_explicit_name():
     )
 
     # Verify all core components were created
-    assert len(alice['peer_id']) == 24
-    assert len(alice['peer_shared_id']) == 24
-    assert len(alice['network_id']) == 24
-    assert len(alice['user_id']) == 24
-    assert len(alice['group_id']) == 24
-    assert len(alice['channel_id']) == 24
+    assert len(alice['peer_id']) == 44
+    assert len(alice['peer_shared_id']) == 44
+    assert len(alice['network_id']) == 44
+    assert len(alice['user_id']) == 44
+    assert len(alice['group_id']) == 44
+    assert len(alice['channel_id']) == 44
 
     # Verify network is queryable
     from events.identity import network
@@ -104,8 +104,8 @@ def test_network_with_explicit_name():
     )
 
     # Verify all core components were created
-    assert len(alice['peer_id']) == 24
-    assert len(alice['network_id']) == 24
+    assert len(alice['peer_id']) == 44
+    assert len(alice['network_id']) == 44
 
     # Verify network is queryable
     from events.identity import network

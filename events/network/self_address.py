@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'self_address'
 SHAREABLE = True  # Addresses sync to enable peer discovery
-EPHEMERAL = False
 PROJECTION_TABLE = ('addresses', 'address_id')
 
 from typing import Any

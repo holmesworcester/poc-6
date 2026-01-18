@@ -16,7 +16,7 @@ import tick
 import jobs
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
-from events.network import sync as sync_module, negentropy
+from events.network import negentropy
 
 def run_timed_test():
     """Run a two-user image sync with detailed timing."""

@@ -8,7 +8,6 @@ This is a first-class event type, NOT a group. Admin status is granted by:
 # Registry metadata
 EVENT_TYPE = 'admin'
 SHAREABLE = True  # Admin grants sync across network
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any

@@ -28,7 +28,6 @@ from events.network.transit_prekey import (
 # Registry metadata (same as transit_prekey)
 EVENT_TYPE = 'connection_prekey'  # Alias - actual events still use 'transit_prekey'
 SHAREABLE = False
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 

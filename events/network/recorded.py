@@ -2,17 +2,14 @@
 
 ARCHITECTURE NOTE: Event Type Registry
 ======================================
-This module no longer uses hardcoded LOCAL_ONLY_TYPES, EPHEMERAL_TYPES, or TABLE_MAP.
-Instead, each event module declares its own metadata via module-level constants:
+Each event module declares its own metadata via module-level constants:
 
     EVENT_TYPE = 'message'
     SHAREABLE = True
-    EPHEMERAL = False
     PROJECTION_TABLE = ('messages', 'message_id')
 
 The registry (events/registry.py) auto-discovers these declarations and provides:
     - is_shareable(event_type) - whether event syncs to other peers
-    - is_ephemeral(event_type) - whether to drop if deps missing
     - get_projection_table(event_type) - table for created_at lookup
     - get_project_fn(event_type) - the project() function to call
 
@@ -126,6 +123,9 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
 
         # Self-references (event references itself or its container)
         'network_id',       # Often self-referential for network events
+
+        # Routing metadata (not event references)
+        'reply_connection_id',  # Negentropy reply routing, not an event dependency
     }
     # Note: key_id is now a proper semantic dependency since group_key events are deterministic
     # (same key_material = same key_id on all peers via content-addressed hashing)
@@ -133,7 +133,9 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
     # Event types with NO dependencies (root events or self-signed)
     NO_DEPS_TYPES = {
         'network',          # Root of trust, self-signed
-        'connection',       # Ephemeral, auth handled in projection
+        'connection',       # Ephemeral, auth handled in projection (legacy)
+        'connection_request',  # Auth via transit key unwrap, not signature
+        'connection_ack',      # Auth via symmetric key unwrap, not signature
         'peer',             # Local peer event, no external deps
         'group_key',        # Local key event
         'invite_accepted',  # Local-only, never synced, signed_by is local peer
@@ -357,9 +359,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         # Always use created_at=None for simplicity and determinism
         # Sync protocol doesn't need created_at - it uses recorded_at for ordering
         # UI lazy loading will use separate projected_events table with created_at
-        from events.network import sync
+        from events.network import negentropy
         log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None (skip_neg={skip_negentropy})")
-        sync.add_shareable_event(
+        negentropy.add_shareable_event(
             ref_id,
             recorded_by,
             created_at=None,  # Always None for determinism (encrypted events don't have created_at)
@@ -401,12 +403,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
         if resolve_result.status == 'block':
             missing_deps = list(resolve_result.missing)
-            if registry.is_ephemeral(event_type):
-                log.warning(
-                    f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... "
-                    f"with missing deps: {[d[:20] for d in missing_deps]}"
-                )
-                return [None, recorded_id]
 
             requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
             log.warning(
@@ -488,6 +484,45 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
             retry_pending_name_updates(recorded_by, db)
 
+        if event_type == 'peer_removed':
+            # v2 projector writes to removed_peers table, but we also need side effects:
+            # 1. Delete all connections with the removed peer
+            # 2. Rotate group keys if this was a user's peer
+            from events.network import connection_request
+            from events.identity import peer_removed as peer_removed_module
+
+            removed_peer_shared_id = event_data.get('removed_peer_shared_id')
+            if removed_peer_shared_id:
+                # Delete connections
+                deleted_count = connection_request.remove_connections_for_peer(removed_peer_shared_id, db)
+                log.info(f"[PEER_REMOVED_V2] deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
+
+                # Rotate group keys - lookup user_id for the removed peer
+                peer_row = safedb.query_one(
+                    "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+                    (removed_peer_shared_id, recorded_by)
+                )
+                if peer_row and peer_row.get('user_id'):
+                    removed_user_id = peer_row['user_id']
+                    log.info(f"[PEER_REMOVED_V2] rotating keys for user {removed_user_id[:20]}...")
+                    peer_removed_module._rotate_keys_for_removed_peer_user(removed_user_id, recorded_by, recorded_at, db)
+
+        if event_type == 'user_removed':
+            # v2 projector writes to removed_users table, but we also need side effects:
+            # 1. Cascade: Mark all peers of the removed user as removed
+            # 2. Delete connections for each peer
+            # 3. Rotate group keys (only if this peer created the event)
+            from events.identity import user_removed as user_removed_module
+
+            removed_user_id = event_data.get('removed_user_id')
+            removed_at = event_data.get('created_at')
+            removed_by = event_data.get('removed_by')
+
+            if removed_user_id:
+                user_removed_module._handle_user_removed_side_effects(
+                    removed_user_id, removed_at, removed_by, recorded_by, db
+                )
+
         if event_type == 'invite_accepted':
             # v2 projector writes to invite_accepteds table, but we also need to:
             # 1. Store network_id in trust_anchors (NOT valid_events - network validates when it arrives)
@@ -536,14 +571,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
         missing_deps = check_deps(event_data, recorded_by, db)
         if missing_deps:
-            # Ephemeral events (transit-layer) are recurring/retryable
-            # If deps are missing, drop them - sender will retry
-            # Use registry to check if event type is ephemeral
-            if registry.is_ephemeral(event_type):
-                log.warning(f"[EPHEMERAL_DROP] Dropping ephemeral {event_type} event {ref_id[:20]}... with missing deps: {[d[:20] for d in missing_deps]}")
-                return [None, recorded_id]
-
-            # Historical events - block until dependencies resolved
+            # Block until dependencies resolved
             requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
             log.warning(f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: {[d[:20] for d in missing_deps]}")
 
@@ -581,7 +609,9 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         # - file_slice, message_attachment: take event_data parameter (performance)
         # ==========================================================================
 
-        # Special case: projectors that take event_data (avoid re-parsing for performance)
+        # TODO: file_slice and message_attachment have non-standard project() signatures
+        # that take event_data parameter. They should be refactored to use the standard
+        # signature and fetch event_data themselves, then these special cases can be removed.
         if event_type == 'file_slice':
             from events.content import file_slice
             file_slice.project(ref_id, event_data, recorded_by, recorded_at, db)

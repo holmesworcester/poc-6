@@ -12,7 +12,6 @@ Usage:
 # Registry metadata
 EVENT_TYPE = 'observed_address'
 SHAREABLE = True  # Address observations sync for peer discovery
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 from typing import Any, Optional

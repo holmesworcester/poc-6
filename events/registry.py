@@ -3,13 +3,11 @@
 Each event module should declare:
 - EVENT_TYPE: str - the event type name (e.g., 'user', 'message')
 - SHAREABLE: bool - whether this event should be synced to other peers
-- EPHEMERAL: bool (optional) - whether to drop if deps missing (default False)
 - PROJECTION_TABLE: tuple[str, str] | None (optional) - (table_name, id_column) for created_at lookup
 
 Example event module:
     EVENT_TYPE = 'user'
     SHAREABLE = True
-    EPHEMERAL = False
     PROJECTION_TABLE = ('users', 'user_id')
 
     def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -75,7 +73,6 @@ def _discover_events() -> None:
                 'module': module,
                 'module_name': module_name,
                 'shareable': getattr(module, 'SHAREABLE', False),  # Safe default
-                'ephemeral': getattr(module, 'EPHEMERAL', False),
                 'projection_table': getattr(module, 'PROJECTION_TABLE', None),
                 'event_spec': getattr(module, 'EVENT_SPEC', None),
                 'project_pure': getattr(module, 'project_pure', None),
@@ -145,21 +142,6 @@ def is_shareable(event_type: str) -> bool:
     return _registry[event_type]['shareable']
 
 
-def is_ephemeral(event_type: str) -> bool:
-    """Check if an event type is ephemeral (drop if deps missing).
-
-    Ephemeral events are transit-layer events that can be retried.
-
-    Args:
-        event_type: The event type
-
-    Returns:
-        True if ephemeral, False otherwise
-    """
-    _discover_events()
-    return _registry.get(event_type, {}).get('ephemeral', False)
-
-
 def get_projection_table(event_type: str) -> tuple[str, str] | None:
     """Get projection table info for an event type.
 
@@ -194,12 +176,6 @@ def get_local_only_types() -> set[str]:
     return {t for t, meta in _registry.items() if not meta['shareable']}
 
 
-def get_ephemeral_types() -> set[str]:
-    """Get set of ephemeral event types."""
-    _discover_events()
-    return {t for t, meta in _registry.items() if meta['ephemeral']}
-
-
 # Convenience: print registry summary
 def print_registry() -> None:
     """Print a summary of registered event types."""
@@ -210,7 +186,6 @@ def print_registry() -> None:
 
     shareable = [t for t, m in _registry.items() if m['shareable']]
     local_only = [t for t, m in _registry.items() if not m['shareable']]
-    ephemeral = [t for t, m in _registry.items() if m['ephemeral']]
 
     print(f"\nShareable ({len(shareable)}):")
     for t in sorted(shareable):
@@ -218,8 +193,4 @@ def print_registry() -> None:
 
     print(f"\nLocal-only ({len(local_only)}):")
     for t in sorted(local_only):
-        print(f"  - {t}")
-
-    print(f"\nEphemeral ({len(ephemeral)}):")
-    for t in sorted(ephemeral):
         print(f"  - {t}")

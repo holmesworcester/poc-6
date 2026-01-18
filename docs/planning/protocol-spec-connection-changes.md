@@ -59,7 +59,7 @@ connections (
 ```markdown
 ## Connection Identity and Bootstrap
 
-Connections are keyed by `our_transit_key_id` — the transit key we gave the remote peer. This key appears as the hint in the first 16 bytes of incoming blobs, enabling routing before decryption.
+Connections are keyed by `our_transit_key_id` — the transit key we gave the remote peer. This key appears as the hint in the first 32 bytes of incoming blobs, enabling routing before decryption.
 
 ### Identity Labels
 
@@ -118,7 +118,7 @@ connection_inbox (
 
 When a blob arrives from the network:
 
-1. Extract hint from first 16 bytes of blob
+1. Extract hint from first 32 bytes of blob
 2. Look up connection by `our_transit_key_id = hint`
 3. If found: insert into `connection_inbox` for that connection
 4. If not found: blob is either a new handshake or stale; route to fallback queue
@@ -166,7 +166,7 @@ On devices with multiple local peers (linked accounts), incoming messages must b
 
 ### Stage 1: Route to Connection (by hint)
 
-The first 16 bytes of every transit-wrapped blob is a hint matching `our_transit_key_id`. This routes the blob to the correct connection's inbox without decryption.
+The first 32 bytes of every transit-wrapped blob is a hint matching `our_transit_key_id`. This routes the blob to the correct connection's inbox without decryption.
 
 ### Stage 2: Route to Local Peer (by key ownership)
 

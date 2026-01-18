@@ -14,7 +14,6 @@ Usage:
 # Registry metadata
 EVENT_TYPE = 'network_intro'
 SHAREABLE = True  # Intros sync for NAT traversal
-EPHEMERAL = False
 PROJECTION_TABLE = None
 
 # Intros are time-sensitive; drop if too old on receipt.

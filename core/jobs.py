@@ -98,8 +98,8 @@ class SyncReceiveJob(Job):
         super().__init__('sync_receive', every_ms=100)
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import sync
-        sync.receive(batch_size=2000, t_ms=t_ms, db=db)
+        from core import receive
+        receive.receive(batch_size=2000, t_ms=t_ms, db=db)
         return {}
 
 
@@ -198,8 +198,8 @@ class ConnectionSendJob(Job):
         super().__init__('connection_send', every_ms=1_000)  # 1 second
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import connection
-        connection.send_to_all(t_ms=t_ms, db=db)
+        from events.network import connection_request
+        connection_request.send_to_all(t_ms=t_ms, db=db)
         return {}
 
 
@@ -210,8 +210,8 @@ class ConnectionPurgeJob(Job):
         super().__init__('connection_purge', every_ms=60_000)  # 1 minute
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import connection
-        connection.purge_expired(t_ms=t_ms, db=db)
+        from events.network import connection_request
+        connection_request.purge_expired(t_ms=t_ms, db=db)
         return {}
 
 
@@ -241,7 +241,7 @@ class IntroProcessJob(Job):
         super().__init__('intro_process', every_ms=500)  # Check twice per second
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import intro, connection
+        from events.network import intro, connection_request
         from .db import create_safe_db
         import logging
 
@@ -291,7 +291,7 @@ class IntroProcessJob(Job):
 
                 try:
                     # Send connection request - this creates the NAT mapping
-                    connection._send_request(
+                    connection_request._send_request(
                         to_peer_shared_id=other_peer_id,
                         from_peer_id=peer_id,
                         from_peer_shared_id=our_peer_shared_id,

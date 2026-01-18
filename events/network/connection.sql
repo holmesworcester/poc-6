@@ -97,9 +97,14 @@ ON connection_inbox(received_at);
 CREATE TABLE IF NOT EXISTS pending_connection_requests (
     request_id TEXT NOT NULL,               -- The incoming request's event ID
     remote_peer_shared_id TEXT,             -- Who sent the request (may be NULL for bootstrap)
+    remote_invite_id TEXT,                  -- Invite used by sender (set in bootstrap mode)
     their_key BLOB NOT NULL,                -- Their symmetric key from the request
     received_at INTEGER NOT NULL,           -- When we received the request
     recorded_by TEXT NOT NULL,              -- Local peer who received this request
+
+    -- Source address (learned from packet that delivered this request)
+    source_ip TEXT,                         -- IP address packet came from
+    source_port INTEGER,                    -- Port packet came from
 
     PRIMARY KEY (request_id, recorded_by)
 );

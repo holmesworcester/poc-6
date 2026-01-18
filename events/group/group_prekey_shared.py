@@ -3,7 +3,6 @@
 # Registry metadata
 EVENT_TYPE = 'group_prekey_shared'
 SHAREABLE = True  # Public prekeys sync for key sealing
-EPHEMERAL = False
 PROJECTION_TABLE = ('group_prekeys_shared', 'group_prekey_shared_id')
 
 from typing import Any

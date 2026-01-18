@@ -12,7 +12,6 @@ log = logging.getLogger(__name__)
 # Event type declarations for auto-discovery
 EVENT_TYPE = 'message_reaction_deletion'
 SHAREABLE = True  # Sync deletions to other peers
-EPHEMERAL = False
 PROJECTION_TABLE = ('message_reaction_deletions', 'deletion_id')
 
 # v2 event specification - signed by peer_shared, encrypted

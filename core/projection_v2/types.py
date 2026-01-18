@@ -65,10 +65,27 @@ class EmitEvent:
 
 
 @dataclass(frozen=True)
+class Command:
+    """Side effect command to be executed after projection.
+
+    Commands are non-deterministic side effects that projectors need to trigger
+    but cannot execute themselves (since project_pure must be pure).
+
+    The apply layer executes these after writes are committed.
+    Command handlers are registered by command_type.
+
+    Example: send_ack command for connection_request projection
+    """
+    command_type: str
+    args: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ProjectorResult:
     writes: tuple[WriteOp, ...]
     valid_event: bool = True
     emit_events: tuple[EmitEvent, ...] = ()
+    commands: tuple[Command, ...] = ()
 
 
 @dataclass(frozen=True)

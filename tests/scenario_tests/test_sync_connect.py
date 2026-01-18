@@ -15,7 +15,7 @@ from core import schema
 from events.identity import user, invite, peer
 from tests.utils import tick_helper
 from core import tick
-from events.network import connection as conn_module
+from events.network import connection_request as conn_module
 
 
 def test_connection_establishment(fresh_db):
@@ -276,15 +276,21 @@ def test_two_way_handshake(fresh_db):
     print("\n=== Step 3: Waiting for bidirectional handshake ===")
 
     def both_can_send():
-        # Alice should be able to wrap to Bob
-        alice_to_bob_conn = conn_module.get_connection_by_peer(alice_peer_id, bob_peer_shared_id, 5000, db)
-        assert alice_to_bob_conn and alice_to_bob_conn.can_send(), \
-            "Alice should have Bob's key for sending"
+        # Get all connections for both peers
+        # Note: During bootstrap, connections use invite_id not peer_shared_id,
+        # so we check get_connections() instead of get_connection_by_peer()
+        alice_conns = conn_module.get_connections(alice_peer_id, 5000, db)
+        bob_conns = conn_module.get_connections(bob_peer_id, 5000, db)
 
-        # Bob should be able to wrap to Alice
-        bob_to_alice_conn = conn_module.get_connection_by_peer(bob_peer_id, alice_peer_shared_id, 5000, db)
-        assert bob_to_alice_conn and bob_to_alice_conn.can_send(), \
-            "Bob should have Alice's key for sending"
+        # Alice should have at least one connection she can send on
+        alice_can_send = any(c.can_send() for c in alice_conns)
+        assert alice_can_send, \
+            f"Alice should have a connection with their_key (has {len(alice_conns)} conns)"
+
+        # Bob should have at least one connection he can send on
+        bob_can_send = any(c.can_send() for c in bob_conns)
+        assert bob_can_send, \
+            f"Bob should have a connection with their_key (has {len(bob_conns)} conns)"
 
     tick_helper.assert_eventually(both_can_send, db=db, start_t_ms=4000)
 

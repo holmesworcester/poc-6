@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS invites (
     user_id TEXT,                 -- For mode='peer': target user to link to
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
+    -- Network address for bootstrap connections
+    address TEXT,                 -- IP address or hostname of inviter
+    port INTEGER,                 -- Port of inviter
     PRIMARY KEY (invite_id, recorded_by)
 );
 
