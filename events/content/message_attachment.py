@@ -10,6 +10,22 @@ EVENT_TYPE = 'message_attachment'
 SHAREABLE = True  # Attachments sync with messages
 PROJECTION_TABLE = None  # No created_at lookup needed
 
+# v2 event specification
+EVENT_SPEC = {
+    'encrypted': True,  # Group-wrapped via store.publish
+    'signer': None,  # Signature verified manually via crypto.verify_signed_by_peer_shared
+    'requires': {
+        'message': {
+            'source': 'table',
+            'table': 'messages',
+            'key': 'message_id',
+            'fields': ['message_id', 'signed_by'],
+        },
+    },
+    'optional': {},
+    'cascade_on_delete': ['message'],  # Delete attachment when message is deleted
+}
+
 from typing import Any
 import base64
 import io
@@ -17,12 +33,131 @@ import logging
 from PIL import Image
 from core import crypto
 from core import store
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
+from core.projection_v2.apply import register_command_handler
 from events.identity import peer_shared, peer
 from events.group import group
 from events.content import file_slice, message
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for message_attachment events.
+
+    Validates that attachment creator matches message creator,
+    then inserts into message_attachments and event_dependencies.
+    """
+    event_data = ctx.event_data
+
+    message_id = event_data.get('message_id')
+    file_id = event_data.get('file_id')
+    filename = event_data.get('filename')
+    mime_type = event_data.get('mime_type')
+    signed_by = event_data.get('signed_by')
+
+    # File descriptor fields
+    blob_bytes = event_data.get('blob_bytes')
+    nonce_prefix_b64 = event_data.get('nonce_prefix')
+    enc_key_b64 = event_data.get('enc_key')
+    root_hash_b64 = event_data.get('root_hash')
+    total_slices = event_data.get('total_slices')
+
+    # Validate required fields
+    if not all([message_id, file_id, signed_by, blob_bytes is not None,
+                nonce_prefix_b64, enc_key_b64, root_hash_b64, total_slices is not None]):
+        log.warning(f"message_attachment.project_pure() missing required fields")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Validate message exists and attachment creator matches message creator
+    message_row = ctx.deps.get('message')
+    if not message_row:
+        log.warning(f"message_attachment.project_pure() message not found")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    if message_row.get('signed_by') != signed_by:
+        log.warning(f"message_attachment.project_pure() signer mismatch: "
+                   f"attachment={signed_by[:20] if signed_by else 'None'}... "
+                   f"message={message_row.get('signed_by', 'None')[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode file descriptor fields
+    nonce_prefix = crypto.b64decode(nonce_prefix_b64)
+    enc_key = crypto.b64decode(enc_key_b64)
+    root_hash = crypto.b64decode(root_hash_b64)
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='message_attachments',
+            values={
+                'message_id': message_id,
+                'file_id': file_id,
+                'filename': filename,
+                'mime_type': mime_type,
+                'blob_bytes': blob_bytes,
+                'nonce_prefix': nonce_prefix,
+                'enc_key': enc_key,
+                'root_hash': root_hash,
+                'total_slices': total_slices,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+        WriteOp(
+            op='insert',
+            table='event_dependencies',
+            values={
+                'child_event_id': ctx.event_id,
+                'parent_event_id': message_id,
+                'recorded_by': ctx.recorded_by,
+                'dependency_type': 'message',
+            },
+        ),
+    )
+
+    # Command to trigger file sync if needed
+    commands = (
+        Command(
+            command_type='maybe_request_file_sync',
+            args={
+                'file_id': file_id,
+                'total_slices': total_slices,
+            }
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True, commands=commands)
+
+
+def _handle_maybe_request_file_sync(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Handle file sync request command.
+
+    Checks if we have all slices; if not, requests sync from peers.
+    """
+    file_id = args['file_id']
+    total_slices = args['total_slices']
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    our_slices = safedb.query_one(
+        "SELECT COUNT(*) as cnt FROM file_slices WHERE file_id = ? AND recorded_by = ?",
+        (file_id, recorded_by)
+    )
+    have_slices = our_slices['cnt'] if our_slices else 0
+
+    if have_slices < total_slices:
+        log.info(f"message_attachment: auto-requesting file sync: have {have_slices}/{total_slices} slices")
+        try:
+            from events.network import sync_file
+            sync_file.request_file_sync(file_id, recorded_by, priority=5, ttl_ms=0, t_ms=recorded_at, db=db)
+        except Exception as e:
+            log.warning(f"message_attachment: failed to request sync: {e}")
+
+
+# Register the command handler at module load time
+register_command_handler('maybe_request_file_sync', _handle_maybe_request_file_sync)
+
 
 SLICE_SIZE = 450  # bytes - matches ideal protocol design
 

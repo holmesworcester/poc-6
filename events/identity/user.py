@@ -576,20 +576,20 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     log.info(f"new_network() created channel: {channel_id[:20]}...")
 
     # 11. Create transit_prekey + transit_prekey_shared (for sync)
-    from events.network import transit_prekey, transit_prekey_shared
-    prekey_id, prekey_private = transit_prekey.create(
+    from events.network import connection_prekey, connection_prekey_shared
+    prekey_id, prekey_private = connection_prekey.create(
         peer_id=peer_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
-    transit_prekey_shared_id = transit_prekey_shared.create(
+    connection_prekey_shared_id = connection_prekey_shared.create(
         prekey_id=prekey_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
-    log.info(f"new_network() created transit prekey: {prekey_id[:20]}..., shared={transit_prekey_shared_id[:20]}...")
+    log.info(f"new_network() created transit prekey: {prekey_id[:20]}..., shared={connection_prekey_shared_id[:20]}...")
 
     # Add user to all_users group
     # Pass admin_grant directly so the event has explicit dependency for convergence
@@ -612,7 +612,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
         'prekey_id': prekey_id,
-        'transit_prekey_shared_id': transit_prekey_shared_id,
+        'connection_prekey_shared_id': connection_prekey_shared_id,
         'network_id': network_id,
         'all_users_group_id': all_users_group_id,
         'channel_id': channel_id,
@@ -845,8 +845,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         network_id=invite_data.get('network_id')  # Trust anchor for cascade
     )
     peer_shared_id = peer_shared_join_result['peer_shared_id']
-    prekey_id = peer_shared_join_result['transit_prekey_id']
-    transit_prekey_shared_id = peer_shared_join_result['transit_prekey_shared_id']
+    prekey_id = peer_shared_join_result['connection_prekey_id']
+    connection_prekey_shared_id = peer_shared_join_result['connection_prekey_shared_id']
     log.info(f"join() delegated to peer_shared.join(): peer_shared_id={peer_shared_id[:20]}...")
 
     # Try to create username_update event (encrypted with group key)
@@ -883,7 +883,7 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         'peer_shared_id': peer_shared_id,
         'user_id': user_id,
         'prekey_id': prekey_id,
-        'transit_prekey_shared_id': transit_prekey_shared_id,
+        'connection_prekey_shared_id': connection_prekey_shared_id,
         'network_id': invite_data.get('network_id'),  # From invite
         'channel_id': channel_id,
         'key_id': key_id,

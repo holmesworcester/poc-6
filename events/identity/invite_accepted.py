@@ -54,7 +54,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     port = invite_link_data.get('port')
     network_id = invite_link_data.get('network_id')
     link_user_id = invite_link_data.get('user_id')
-    inviter_transit_prekey_id = invite_link_data.get('inviter_transit_prekey_id')
+    inviter_connection_prekey_id = invite_link_data.get('inviter_connection_prekey_id')
 
     # Decode invite_private_key if present
     invite_private_key_b64 = invite_link_data.get('invite_private_key')
@@ -68,9 +68,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
         invite_pubkey_b64 = crypto.b64encode(bytes(signing_key.verify_key))
 
     # Decode inviter transit prekey if present
-    inviter_transit_prekey_public_key = None
-    if invite_link_data.get('inviter_transit_prekey_public_key'):
-        inviter_transit_prekey_public_key = crypto.b64decode(invite_link_data['inviter_transit_prekey_public_key'])
+    inviter_connection_prekey_public_key = None
+    if invite_link_data.get('inviter_connection_prekey_public_key'):
+        inviter_connection_prekey_public_key = crypto.b64decode(invite_link_data['inviter_connection_prekey_public_key'])
 
     writes = (
         WriteOp(
@@ -83,8 +83,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'port': port,
                 'network_id': network_id,
                 'user_id': link_user_id,
-                'inviter_transit_prekey_id': inviter_transit_prekey_id,
-                'inviter_transit_prekey_public_key': inviter_transit_prekey_public_key,
+                'inviter_connection_prekey_id': inviter_connection_prekey_id,
+                'inviter_connection_prekey_public_key': inviter_connection_prekey_public_key,
                 'invite_private_key': invite_private_key,
                 'invite_pubkey': invite_pubkey_b64,
                 'created_at': event_data.get('created_at'),
@@ -231,10 +231,10 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         invite_pubkey_b64 = crypto.b64encode(bytes(signing_key.verify_key))
 
     # Extract inviter's transit prekey for initial connection
-    inviter_transit_prekey_id = invite_link_data.get('inviter_transit_prekey_id')
-    inviter_transit_prekey_public_key = None
-    if invite_link_data.get('inviter_transit_prekey_public_key'):
-        inviter_transit_prekey_public_key = crypto.b64decode(invite_link_data['inviter_transit_prekey_public_key'])
+    inviter_connection_prekey_id = invite_link_data.get('inviter_connection_prekey_id')
+    inviter_connection_prekey_public_key = None
+    if invite_link_data.get('inviter_connection_prekey_public_key'):
+        inviter_connection_prekey_public_key = crypto.b64decode(invite_link_data['inviter_connection_prekey_public_key'])
 
     # Extract user_id for device linking (peer invites carry the user_id being linked to)
     link_user_id = invite_link_data.get('user_id')
@@ -242,7 +242,7 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
     safedb.execute("""
         INSERT OR IGNORE INTO invite_accepteds
         (invite_id, inviter_peer_shared_id, address, port, network_id, user_id,
-         inviter_transit_prekey_id, inviter_transit_prekey_public_key,
+         inviter_connection_prekey_id, inviter_connection_prekey_public_key,
          invite_private_key, invite_pubkey, created_at, recorded_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
@@ -252,8 +252,8 @@ def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any
         port,
         network_id,
         link_user_id,
-        inviter_transit_prekey_id,
-        inviter_transit_prekey_public_key,
+        inviter_connection_prekey_id,
+        inviter_connection_prekey_public_key,
         invite_private_key,
         invite_pubkey_b64,
         event_data['created_at'],

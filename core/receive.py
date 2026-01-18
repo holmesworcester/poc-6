@@ -56,17 +56,17 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
     # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
-    # Hint is full 32 bytes, so we can do exact match on transit_prekey_id
+    # Hint is full 32 bytes, so we can do exact match on connection_prekey_id
     try:
         cursor = db._conn.execute(
-            "SELECT DISTINCT owner_peer_id FROM transit_prekeys WHERE transit_prekey_id = ?",
+            "SELECT DISTINCT owner_peer_id FROM connection_prekeys WHERE connection_prekey_id = ?",
             (hint_b64,)
         )
         recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
             log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_prekey")
     except Exception as e:
-        log.warning(f"route_blob_to_peers: Failed to query transit_prekeys: {e}")
+        log.warning(f"route_blob_to_peers: Failed to query connection_prekeys: {e}")
         recorded_by_peers = []
 
     return recorded_by_peers

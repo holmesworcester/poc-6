@@ -293,30 +293,30 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     invite_prekey_id = local_prekey_id
 
     # Get inviter's prekey for Bob to send sync requests
-    # Query prekey from transit_prekeys table
+    # Query prekey from connection_prekeys table
     inviter_prekey_row = unsafedb.query_one(
-        "SELECT transit_prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT connection_prekey_id, public_key FROM connection_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_row:
         raise ValueError(f"No prekey found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_prekey_id = inviter_prekey_row['transit_prekey_id']
+    inviter_prekey_id = inviter_prekey_row['connection_prekey_id']
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
-    # Get prekey_shared_id from transit_prekeys_shared table
+    # Get prekey_shared_id from connection_prekeys_shared table
     # Query by recorded_by only since peer_id may be old peer_shared_id after linking
     inviter_prekey_shared_row = safedb.query_one(
-        "SELECT transit_prekey_shared_id, created_at FROM transit_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT connection_prekey_shared_id, created_at FROM connection_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_shared_row:
         raise ValueError(f"No prekey_shared found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_transit_prekey_shared_id = inviter_prekey_shared_row['transit_prekey_shared_id']
-    inviter_transit_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
+    inviter_connection_prekey_shared_id = inviter_prekey_shared_row['connection_prekey_shared_id']
+    inviter_connection_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
 
     # Address info: use passed parameters or fall back to defaults
     # For production, this should come from self_address discovery
@@ -438,9 +438,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'ip': inviter_ip,
         'port': inviter_port,
         # Transit prekey for encrypting initial sync_connect to Alice
-        'inviter_transit_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
-        'inviter_transit_prekey_shared_id': inviter_transit_prekey_shared_id,
-        'inviter_transit_prekey_id': inviter_prekey_id,
+        'inviter_connection_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
+        'inviter_connection_prekey_shared_id': inviter_connection_prekey_shared_id,
+        'inviter_connection_prekey_id': inviter_prekey_id,
     }
 
     # For mode='peer', include user_id so acceptor knows which user to link to

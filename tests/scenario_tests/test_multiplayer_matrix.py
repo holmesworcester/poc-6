@@ -64,7 +64,7 @@ from events.identity import user, invite, peer, peer_shared, admin
 from events.identity import user_removed, peer_removed, network as network_module
 from events.group import group_member, group_key, group_key_shared, group
 from events.content import message
-from events.network import transit_prekey
+from events.network import connection_prekey
 from tests.utils.tick_helper import run_ticks, assert_eventually
 from core import crypto
 from core import store

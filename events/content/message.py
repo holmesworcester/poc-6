@@ -443,7 +443,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     created_at = event_data.get('created_at')
 
     # Derive group_id from channel_id (not stored in event to save space)
-    # Channel must exist (checked by recorded.check_deps via channel_id dependency)
+    # Channel must exist (v2 resolver checks channel_id dependency via EVENT_SPEC)
     channel_row = safedb.query_one(
         "SELECT group_id FROM channels WHERE channel_id = ? AND recorded_by = ?",
         (channel_id, recorded_by)
@@ -453,8 +453,8 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         return None
     group_id = channel_row['group_id']
 
-    # Note: Author dependency (author_id -> user_id) is checked by recorded.check_deps()
-    # before projection begins, so we don't need to check here.
+    # Note: Author dependency (author_id -> user_id) is checked by v2 resolver
+    # via EVENT_SPEC before projection begins, so we don't need to check here.
 
     # Calculate TTL from event's disappearing_time_ms (captured at creation time)
     # This is deterministic - same event always produces same TTL

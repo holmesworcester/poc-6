@@ -46,6 +46,8 @@ from enum import Enum
 from core.db import create_safe_db
 from core import crypto
 from core import store
+from core.projection_v2.types import ProjectorResult, Command
+from core.projection_v2.apply import register_command_handler
 from events.network import sync_window
 
 log = logging.getLogger(__name__)
@@ -54,6 +56,57 @@ log = logging.getLogger(__name__)
 EVENT_TYPE = 'negentropy'
 SHAREABLE = False  # Point-to-point sync protocol, don't broadcast to others
 PROJECTION_TABLE = None  # No persistent projection table
+
+# v2 event specification - minimal, as this is a sync protocol message
+EVENT_SPEC = {
+    'encrypted': False,  # Plain JSON sync protocol message
+    'signer': None,  # No signature verification
+    'requires': {},  # No dependencies
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for negentropy sync messages.
+
+    Negentropy messages are ephemeral sync protocol messages. They don't write
+    to any projection table - instead, they trigger the sync state machine via
+    a command.
+    """
+    event_data = ctx.event_data
+    connection_id = event_data.get('reply_connection_id')
+
+    if not connection_id:
+        log.warning(f"negentropy.project_pure: missing reply_connection_id in {ctx.event_id[:20]}...")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Return a command to handle the sync message (side effect)
+    commands = (
+        Command(
+            command_type='handle_negentropy_sync',
+            args={
+                'connection_id': connection_id,
+                'event_data': event_data,
+            }
+        ),
+    )
+
+    return ProjectorResult(writes=tuple(), valid_event=True, commands=commands)
+
+
+def _handle_negentropy_sync(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Handle negentropy sync command.
+
+    Dispatches the sync message to handle_incoming().
+    """
+    connection_id = args['connection_id']
+    event_data = args['event_data']
+    handle_incoming(db, recorded_by, connection_id, event_data, recorded_at)
+
+
+# Register the command handler at module load time
+register_command_handler('handle_negentropy_sync', _handle_negentropy_sync)
 
 
 def project(ref_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:

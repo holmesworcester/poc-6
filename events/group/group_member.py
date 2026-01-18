@@ -277,7 +277,7 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         log.warning(f"group_member.project() signature verification FAILED for member_id={member_id}")
         return None  # Reject unsigned or invalid signature
 
-    # Note: group_id and user_id dependencies are checked by recorded.check_deps()
+    # Note: group_id and user_id dependencies are checked by v2 resolver via EVENT_SPEC
     # before dispatch. If we get here, they're guaranteed to be in valid_events,
     # which means their projection succeeded and table rows exist.
 

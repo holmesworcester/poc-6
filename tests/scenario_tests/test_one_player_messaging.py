@@ -29,7 +29,7 @@ def test_alice_sends_to_herself(fresh_db):
     assert len(alice['peer_id']) == 44
     assert len(alice['peer_shared_id']) == 44
     assert len(alice['prekey_id']) == 44
-    assert len(alice['transit_prekey_shared_id']) == 44
+    assert len(alice['connection_prekey_shared_id']) == 44
     assert len(alice['key_id']) == 44
     assert len(alice['group_id']) == 44
     assert len(alice['channel_id']) == 44

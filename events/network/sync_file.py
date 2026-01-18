@@ -413,20 +413,13 @@ def send_request(file_id: str, to_peer: str, from_peer_id: str, t_ms: int, db: A
     canonical = crypto.canonicalize_json(signed_event)
 
     # Get target peer's transit prekey for wrapping
-    from events.network import transit_prekey
+    from events.network import connection_prekey
     from core import queues
 
-    target_prekey = transit_prekey.get_prekey_for_peer(to_peer, from_peer_id, t_ms, db)
-    if not target_prekey:
+    target_prekey_dict = connection_prekey.get_connection_prekey_for_peer(to_peer, from_peer_id, db)
+    if not target_prekey_dict:
         log.warning(f"sync_file.send_request() no transit prekey for target {to_peer[:20]}...")
         return
-
-    # Wrap with target's transit prekey
-    target_prekey_dict = {
-        'id': target_prekey['prekey_id'],
-        'key': target_prekey['public_key'],
-        'type': 'transit'
-    }
     wrapped = crypto.wrap(canonical, target_prekey_dict, db)
 
     # Queue for delivery
@@ -509,9 +502,9 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, sync_fil
     log.info(f"sync_file.project() sending {len(slices_to_send)} slices to requester")
 
     # Get requester's transit prekey for wrapping response slices
-    from events.network import transit_prekey
+    from events.network import connection_prekey
     try:
-        requester_prekey_dict = transit_prekey.get_transit_prekey_for_peer(requester_peer_id, recorded_by, db)
+        requester_prekey_dict = connection_prekey.get_connection_prekey_for_peer(requester_peer_id, recorded_by, db)
         if not requester_prekey_dict:
             log.warning(f"sync_file.project() no prekey for requester {requester_peer_id[:20]}...")
             return

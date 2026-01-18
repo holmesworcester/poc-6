@@ -243,11 +243,11 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     Checks:
     - connections WHERE our_key and connection_id hint matches
-    - transit_prekeys WHERE owner_peer_id == recorded_by
+    - connection_prekeys WHERE owner_peer_id == recorded_by
     - local_peers.private_key WHERE peer_id == recorded_by
 
     Does NOT check:
-    - transit_prekeys_shared (public keys for encryption, not decryption)
+    - connection_prekeys_shared (public keys for encryption, not decryption)
     - group_keys, group_prekeys (wrong namespace)
 
     Args:
@@ -267,9 +267,9 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     log.debug(f"get_transit_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
-    # Check transit_prekeys (asymmetric) - DIRECT lookup, no _shared table
+    # Check connection_prekeys (asymmetric) - DIRECT lookup, no _shared table
     transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM transit_prekeys WHERE transit_prekey_id = ? AND owner_peer_id = ?",
+        "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ?",
         (key_id, recorded_by)
     )
     if transit_prekey_row and transit_prekey_row['private_key']:
@@ -330,7 +330,7 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
 
     Does NOT check:
     - group_prekeys_shared (public keys for encryption, not decryption)
-    - transit_keys, transit_prekeys (wrong namespace)
+    - transit_keys, connection_prekeys (wrong namespace)
 
     Args:
         id_bytes: Key ID bytes (16 bytes) - hint ID from blob
@@ -435,15 +435,15 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     log.debug(f"get_key_by_id() key_id={key_id} not found in keys tables")
 
-    # Then try asymmetric keys from transit_prekeys (device-wide, with ownership filter)
+    # Then try asymmetric keys from connection_prekeys (device-wide, with ownership filter)
     # The hint (key_id) is always a prekey_shared_id (event ID)
     # Two cases:
     # 1. Detached prekey (from invite_accepted): prekey_id = prekey_shared_id directly
-    # 2. Regular prekey: need to find transit_prekey_id from transit_prekeys_shared, then look up in transit_prekeys
+    # 2. Regular prekey: need to find connection_prekey_id from connection_prekeys_shared, then look up in connection_prekeys
 
-    log.debug(f"get_key_by_id() checking transit_prekeys for prekey_id={key_id} (detached), owner={recorded_by[:20]}...")
+    log.debug(f"get_key_by_id() checking connection_prekeys for prekey_id={key_id} (detached), owner={recorded_by[:20]}...")
     transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM transit_prekeys WHERE transit_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
+        "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
         (key_id, recorded_by)
     )
     if transit_prekey_row and transit_prekey_row['private_key']:
@@ -454,25 +454,25 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
             'type': 'asymmetric'
         }
 
-    # Try finding via transit_prekeys_shared (for regular prekeys)
-    log.debug(f"get_key_by_id() checking transit_prekeys_shared for prekey_shared_id={key_id}")
-    transit_prekey_shared_row = safedb.query_one(
-        "SELECT transit_prekey_shared_id FROM transit_prekeys_shared WHERE transit_prekey_shared_id = ? AND recorded_by = ? LIMIT 1",
+    # Try finding via connection_prekeys_shared (for regular prekeys)
+    log.debug(f"get_key_by_id() checking connection_prekeys_shared for prekey_shared_id={key_id}")
+    connection_prekey_shared_row = safedb.query_one(
+        "SELECT connection_prekey_shared_id FROM connection_prekeys_shared WHERE connection_prekey_shared_id = ? AND recorded_by = ? LIMIT 1",
         (key_id, recorded_by)
     )
-    if transit_prekey_shared_row:
-        # Need to get transit_prekey_id from event data
-        transit_prekey_shared_blob = store.get(key_id, db)
-        if transit_prekey_shared_blob:
-            transit_prekey_shared_data = parse_json(transit_prekey_shared_blob)
-            transit_prekey_id = transit_prekey_shared_data.get('transit_prekey_id')
-            if transit_prekey_id:
+    if connection_prekey_shared_row:
+        # Need to get connection_prekey_id from event data
+        connection_prekey_shared_blob = store.get(key_id, db)
+        if connection_prekey_shared_blob:
+            connection_prekey_shared_data = parse_json(connection_prekey_shared_blob)
+            connection_prekey_id = connection_prekey_shared_data.get('connection_prekey_id')
+            if connection_prekey_id:
                 transit_prekey_row = unsafedb.query_one(
-                    "SELECT private_key FROM transit_prekeys WHERE transit_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
-                    (transit_prekey_id, recorded_by)
+                    "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
+                    (connection_prekey_id, recorded_by)
                 )
                 if transit_prekey_row and transit_prekey_row['private_key']:
-                    log.debug(f"get_key_by_id() found transit prekey via transit_prekeys_shared link")
+                    log.debug(f"get_key_by_id() found transit prekey via connection_prekeys_shared link")
                     return {
                         'id': id_bytes,
                         'private_key': transit_prekey_row['private_key'],
@@ -601,7 +601,7 @@ def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
 def unwrap_transit(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
     """Unwrap transit-layer blob (network transport). Never blocks on missing keys.
 
-    Only checks transit key namespace: transit_keys, transit_prekeys.
+    Only checks transit key namespace: transit_keys, connection_prekeys.
     Does NOT check: group_keys, group_prekeys.
 
     Args:
@@ -624,7 +624,7 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes 
     """Unwrap event-layer blob (application data). Always blocks on missing keys.
 
     Only checks event key namespace: group_keys, group_prekeys.
-    Does NOT check: transit_keys, transit_prekeys.
+    Does NOT check: transit_keys, connection_prekeys.
 
     Args:
         wrapped_blob: Encrypted blob to unwrap

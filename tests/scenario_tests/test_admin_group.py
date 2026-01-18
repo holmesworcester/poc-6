@@ -169,7 +169,7 @@ def test_admin_group_workflow(fresh_db):
     rogue_invite_prekey_id = crypto.b64encode(crypto.hash(rogue_invite_public_key))
 
     charlie_prekey_row = unsafedb.query_one(
-        "SELECT transit_prekey_id, public_key FROM transit_prekeys WHERE owner_peer_id = ? LIMIT 1",
+        "SELECT connection_prekey_id, public_key FROM connection_prekeys WHERE owner_peer_id = ? LIMIT 1",
         (charlie['peer_id'],)
     )
 
@@ -183,9 +183,9 @@ def test_admin_group_workflow(fresh_db):
         'key_id': charlie_group_key_row['key_id'],
         'inviter_peer_shared_id': charlie['peer_shared_id'],
         'inviter_user_id': charlie['user_id'],  # Charlie is NOT an admin!
-        'inviter_transit_prekey_public_key': crypto.b64encode(charlie_prekey_row['public_key']),
-        'inviter_transit_prekey_shared_id': charlie['peer_shared_id'],
-        'inviter_transit_prekey_id': charlie_prekey_row['transit_prekey_id'],
+        'inviter_connection_prekey_public_key': crypto.b64encode(charlie_prekey_row['public_key']),
+        'inviter_connection_prekey_shared_id': charlie['peer_shared_id'],
+        'inviter_connection_prekey_id': charlie_prekey_row['connection_prekey_id'],
         'signed_by': charlie['peer_shared_id'],
         'created_at': t_ms + 2000
     }

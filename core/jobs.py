@@ -138,13 +138,13 @@ class TransitPrekeyReplenishmentJob(Job):
             return False
 
         # Additional check: only run if prekeys actually low
-        from events.network.transit_prekey import MIN_TRANSIT_PREKEYS
+        from events.network.connection_prekey import MIN_TRANSIT_PREKEYS
         unsafedb = create_unsafe_db(db)
 
         peers = unsafedb.query("SELECT peer_id FROM local_peers")
         for peer in peers:
             count = unsafedb.query_one(
-                "SELECT COUNT(*) as c FROM transit_prekeys WHERE owner_peer_id = ? AND ttl_ms > ?",
+                "SELECT COUNT(*) as c FROM connection_prekeys WHERE owner_peer_id = ? AND ttl_ms > ?",
                 (peer['peer_id'], t_ms)
             )
             if count and count['c'] < MIN_TRANSIT_PREKEYS:
@@ -153,8 +153,8 @@ class TransitPrekeyReplenishmentJob(Job):
         return False  # All peers have enough prekeys
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import transit_prekey
-        return transit_prekey.replenish_for_all_peers(t_ms, db)
+        from events.network import connection_prekey
+        return connection_prekey.replenish_for_all_peers(t_ms, db)
 
 
 class GroupPrekeyReplenishmentJob(Job):

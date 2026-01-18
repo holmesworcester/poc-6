@@ -73,7 +73,7 @@ def test_device_link_debug(device_link_debug_clients):
 
     print(f"Link invite_id: {link_invite_id[:30]}...")
     print(f"Link invite has inviter_peer_shared_id: {link_data.get('inviter_peer_shared_id', 'MISSING')[:30]}...")
-    print(f"Link invite has transit_prekey: {'YES' if link_data.get('inviter_transit_prekey_public_key') else 'NO'}")
+    print(f"Link invite has transit_prekey: {'YES' if link_data.get('inviter_connection_prekey_public_key') else 'NO'}")
 
     print("\n=== PHASE 3: Laptop creates peer and accepts invite ===")
     t_ms = now_ms()

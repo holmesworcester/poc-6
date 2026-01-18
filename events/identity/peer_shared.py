@@ -572,8 +572,8 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
             'peer_shared_id': str,
             'user_id': str,
             'prekey_id': str | None,
-            'transit_prekey_id': str,
-            'transit_prekey_shared_id': str,
+            'connection_prekey_id': str,
+            'connection_prekey_shared_id': str,
         }
     """
     log.info(f"peer_shared.join() peer_id={peer_id}, peer_invite_id={peer_invite_id[:20]}..., user_id={user_id[:20] if user_id else 'None'}..., device_name={device_name}")
@@ -627,21 +627,21 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
 
     # 3. Auto-create transit_prekey + transit_prekey_shared for sync
-    from events.network import transit_prekey, transit_prekey_shared
-    transit_prekey_id, transit_prekey_private = transit_prekey.create(
+    from events.network import connection_prekey, connection_prekey_shared
+    connection_prekey_id, transit_prekey_private = connection_prekey.create(
         peer_id=peer_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
 
-    transit_prekey_shared_id = transit_prekey_shared.create(
-        prekey_id=transit_prekey_id,
+    connection_prekey_shared_id = connection_prekey_shared.create(
+        prekey_id=connection_prekey_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
-    log.info(f"peer_shared.join() created transit prekey_shared: {transit_prekey_shared_id[:20]}...")
+    log.info(f"peer_shared.join() created transit prekey_shared: {connection_prekey_shared_id[:20]}...")
 
     # 4. Project peer_shared immediately (establishes peer↔user link, updates peer_self)
     from events.network import recorded
@@ -689,7 +689,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         'peer_shared_id': peer_shared_id,
         'user_id': user_id,
         'prekey_id': prekey_id,
-        'transit_prekey_id': transit_prekey_id,
-        'transit_prekey_shared_id': transit_prekey_shared_id,
+        'connection_prekey_id': connection_prekey_id,
+        'connection_prekey_shared_id': connection_prekey_shared_id,
         'invite_accepted_id': invite_accepted_id,
     }

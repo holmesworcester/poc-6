@@ -102,10 +102,10 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
             'has_key_id': True,  # Special handling for forward secrecy
         },
         {
-            'table': 'transit_prekeys',
-            'id_col': 'transit_prekey_id',
+            'table': 'connection_prekeys',
+            'id_col': 'connection_prekey_id',
             'db': 'unsafe',  # Device-wide, not subjective
-            'name': 'transit prekeys',
+            'name': 'connection prekeys',
         },
         {
             'table': 'group_prekeys',
@@ -114,10 +114,10 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
             'name': 'group prekeys',
         },
         {
-            'table': 'transit_prekeys_shared',
-            'id_col': 'transit_prekey_shared_id',
+            'table': 'connection_prekeys_shared',
+            'id_col': 'connection_prekey_shared_id',
             'db': 'safe',
-            'name': 'transit_prekeys_shared',
+            'name': 'connection_prekeys_shared',
         },
         {
             'table': 'group_prekeys_shared',

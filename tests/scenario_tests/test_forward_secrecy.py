@@ -12,7 +12,7 @@ from core.db import create_safe_db, create_unsafe_db
 from core import crypto
 from events.identity import user, invite, peer
 from events.content import message, message_deletion
-from events.network import transit_prekey
+from events.network import connection_prekey
 from events.group import group_prekey
 from tests.utils import tick_helper, assertions
 from tests.utils.tick_helper import assert_eventually
@@ -248,29 +248,29 @@ def test_prekey_ttl_and_purge_expired(fresh_db_with_alice):
     db, alice = fresh_db_with_alice
 
     print("\n=== Alice generates 5 transit prekeys ===")
-    transit_prekey_ids = transit_prekey.generate_batch(alice['peer_id'], count=5, t_ms=2000, db=db)
+    connection_prekey_ids = connection_prekey.generate_batch(alice['peer_id'], count=5, t_ms=2000, db=db)
     db.commit()
-    assert len(transit_prekey_ids) == 5, f"Expected 5 prekeys, got {len(transit_prekey_ids)}"
+    assert len(connection_prekey_ids) == 5, f"Expected 5 prekeys, got {len(connection_prekey_ids)}"
 
     # Check that prekeys have TTL set
     unsafedb = create_unsafe_db(db)
-    for prekey_id in transit_prekey_ids:
+    for prekey_id in connection_prekey_ids:
         prekey = unsafedb.query_one(
-            "SELECT created_at, ttl_ms FROM transit_prekeys WHERE transit_prekey_id = ?",
+            "SELECT created_at, ttl_ms FROM connection_prekeys WHERE connection_prekey_id = ?",
             (prekey_id,)
         )
         assert prekey is not None, f"Prekey {prekey_id[:20]}... not found"
         assert prekey['ttl_ms'] > prekey['created_at'], f"TTL not set correctly"
         print(f"✓ Prekey {prekey_id[:20]}... has ttl_ms={prekey['ttl_ms']}")
 
-    print(f"\n=== Generated {len(transit_prekey_ids)} prekeys with TTL ===")
+    print(f"\n=== Generated {len(connection_prekey_ids)} prekeys with TTL ===")
 
     # Create purge_expired event with cutoff that includes the prekeys
     # Prekeys were created at t_ms=2000, 2001, 2002, 2003, 2004
     # TTL = t_ms + TRANSIT_PREKEY_TTL_MS (30 days in ms = 2592000000)
     # So TTLs are ~2592002000+
     # We'll use cutoff_ms = 2592002001 to delete the first prekey
-    prekey_ttl = transit_prekey.TRANSIT_PREKEY_TTL_MS
+    prekey_ttl = connection_prekey.TRANSIT_PREKEY_TTL_MS
     cutoff_ms = 2000 + prekey_ttl - 1  # Delete all prekeys created before this
 
     print(f"\n=== Alice triggers purge_expired with cutoff_ms={cutoff_ms} ===")
@@ -280,7 +280,7 @@ def test_prekey_ttl_and_purge_expired(fresh_db_with_alice):
 
     # Verify prekeys still exist before projection
     prekey_count_before = unsafedb.query_one(
-        "SELECT COUNT(*) as count FROM transit_prekeys"
+        "SELECT COUNT(*) as count FROM connection_prekeys"
     )
     print(f"Prekeys before purge projection: {prekey_count_before['count']}")
 
@@ -296,7 +296,7 @@ def test_generate_batch_prekeys(fresh_db_with_alice):
     db, alice = fresh_db_with_alice
 
     print("\n=== Alice generates 10 transit prekeys ===")
-    transit_ids = transit_prekey.generate_batch(alice['peer_id'], count=10, t_ms=2000, db=db)
+    transit_ids = connection_prekey.generate_batch(alice['peer_id'], count=10, t_ms=2000, db=db)
     db.commit()
     assert len(transit_ids) == 10
 
@@ -309,9 +309,9 @@ def test_generate_batch_prekeys(fresh_db_with_alice):
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
 
-    # transit_prekeys is device-wide (unsafedb), so query with unsafedb
+    # connection_prekeys is device-wide (unsafedb), so query with unsafedb
     transit_with_ttl = unsafedb.query(
-        "SELECT COUNT(*) as count FROM transit_prekeys WHERE ttl_ms > 0"
+        "SELECT COUNT(*) as count FROM connection_prekeys WHERE ttl_ms > 0"
     )
     assert transit_with_ttl[0]['count'] >= 10, "Transit prekeys should have TTL"
 
@@ -330,7 +330,7 @@ def test_multi_peer_purge_convergence(fresh_db_with_alice):
     db, alice = fresh_db_with_alice
 
     print("\n=== Alice generates 5 transit prekeys ===")
-    alice_transit_ids = transit_prekey.generate_batch(alice['peer_id'], count=5, t_ms=2000, db=db)
+    alice_transit_ids = connection_prekey.generate_batch(alice['peer_id'], count=5, t_ms=2000, db=db)
     db.commit()
     print(f"Alice generated {len(alice_transit_ids)} transit prekeys")
 
@@ -346,7 +346,7 @@ def test_multi_peer_purge_convergence(fresh_db_with_alice):
     db.commit()
 
     print("\n=== Bob generates his own prekeys ===")
-    bob_transit_ids = transit_prekey.generate_batch(bob['peer_id'], count=5, t_ms=2500, db=db)
+    bob_transit_ids = connection_prekey.generate_batch(bob['peer_id'], count=5, t_ms=2500, db=db)
     db.commit()
     bob_group_ids = group_prekey.generate_batch(bob['peer_id'], count=5, t_ms=3500, db=db)
     db.commit()
@@ -357,11 +357,11 @@ def test_multi_peer_purge_convergence(fresh_db_with_alice):
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
 
     alice_transit_before = unsafedb.query_one(
-        "SELECT COUNT(*) as count FROM transit_prekeys WHERE owner_peer_id = ?",
+        "SELECT COUNT(*) as count FROM connection_prekeys WHERE owner_peer_id = ?",
         (alice['peer_id'],)
     )['count']
     bob_transit_before = unsafedb.query_one(
-        "SELECT COUNT(*) as count FROM transit_prekeys WHERE owner_peer_id = ?",
+        "SELECT COUNT(*) as count FROM connection_prekeys WHERE owner_peer_id = ?",
         (bob['peer_id'],)
     )['count']
 
@@ -380,7 +380,7 @@ def test_multi_peer_purge_convergence(fresh_db_with_alice):
 
     # Calculate cutoff: purge all prekeys with TTL <= this value
     # We'll purge those created at t_ms < 2100 (before first prekeys + some buffer)
-    prekey_ttl = transit_prekey.TRANSIT_PREKEY_TTL_MS
+    prekey_ttl = connection_prekey.TRANSIT_PREKEY_TTL_MS
     cutoff_ms = 2000 + prekey_ttl - 1  # Will delete all prekeys created before t=2000
 
     print(f"\n=== Alice triggers purge_expired with cutoff_ms={cutoff_ms} ===")
@@ -781,7 +781,7 @@ def test_rekey_no_duplicates(fresh_db_with_alice):
 
     # Now if we rekey again with the same message, we should only keep the one with better TTL
     print("\n=== Generate more prekeys (creates more key options) ===")
-    new_prekey_ids = transit_prekey.generate_batch(alice['peer_id'], count=5, t_ms=5000, db=db)
+    new_prekey_ids = connection_prekey.generate_batch(alice['peer_id'], count=5, t_ms=5000, db=db)
     db.commit()
     print(f"Generated {len(new_prekey_ids)} new prekeys")
 

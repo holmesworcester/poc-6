@@ -3,7 +3,7 @@ import sqlite3
 from core.db import Database
 from core import schema
 from events.identity import user, peer_shared
-from events.network import recorded
+from core.projection_v2 import resolver as v2_resolver
 from core import store
 
 
@@ -32,10 +32,17 @@ def test_peer_shared_has_invite_deps():
     print(f"Alice's peer_id: {alice['peer_id']}")
     print(f"Bob's peer_id: {bob['peer_id']}")
 
-    # Check deps from Bob's perspective
-    missing_deps = recorded.check_deps(alice_ps_data, bob['peer_id'], db)
+    # Check deps from Bob's perspective using v2 resolver
+    resolve_result = v2_resolver.resolve_event(
+        ref_id=alice['peer_shared_id'],
+        event_type='peer_shared',
+        event_data=alice_ps_data,
+        recorded_by=bob['peer_id'],
+        recorded_at=3000,
+        db=db,
+    )
 
-    print(f"Missing deps for Bob receiving Alice's peer_shared: {missing_deps}")
+    print(f"Resolve result for Bob receiving Alice's peer_shared: status={resolve_result.status}, missing={resolve_result.missing}")
 
     # peer_shared SHOULD have invite_id and signed_by deps (trust anchor model)
     # This is expected - Bob needs to receive the invite first to validate the peer_shared
@@ -45,14 +52,15 @@ def test_peer_shared_has_invite_deps():
     assert invite_id is not None, "peer_shared should have invite_id (trust anchor)"
     assert signed_by == invite_id, "peer_shared should be signed by its invite"
 
-    # If Bob doesn't have the invite yet, there should be missing deps
+    # If Bob doesn't have the invite yet, the resolver should block
     # (This is the expected behavior - deps are resolved via sync)
-    if missing_deps:
-        print(f"✓ peer_shared correctly has invite deps: {missing_deps}")
-        # Verify the missing dep is the invite_id
-        assert invite_id in missing_deps, f"Missing dep should be the invite_id"
+    if resolve_result.status == 'block':
+        missing_deps = list(resolve_result.missing)
+        print(f"✓ peer_shared correctly blocked on deps: {missing_deps}")
+        # Verify the missing dep includes the invite_id
+        assert invite_id in missing_deps, f"Missing dep should include the invite_id"
     else:
-        # If no missing deps, it means the invite was already synced/available
+        # If resolved ok, it means the invite was already synced/available
         print("✓ peer_shared deps already satisfied (invite available)")
 
     print("✓ Test passed: peer_shared events have invite deps (trust anchor model)")

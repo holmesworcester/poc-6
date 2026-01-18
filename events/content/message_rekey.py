@@ -10,14 +10,135 @@ EVENT_TYPE = 'message_rekey'
 SHAREABLE = True  # Rekey events sync for forward secrecy
 PROJECTION_TABLE = None
 
+# v2 event specification
+EVENT_SPEC = {
+    'encrypted': False,  # Plain JSON, not group-wrapped
+    'signer': None,  # signed_by is peer_id, no cryptographic verification
+    'requires': {},  # Validates key exists in project()
+    'optional': {},
+    'cascade_on_delete': [],
+}
+
 from typing import Any
 import logging
 from core import crypto
 from core import store
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
+from core.projection_v2.apply import register_command_handler
 from events.group import group_key
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
+
+def project_pure(ctx: Any) -> ProjectorResult:
+    """Pure projector for message_rekey events.
+
+    Validates the rekey can be decrypted, then returns writes for
+    message_rekeys table and a command to replace the store blob.
+    """
+    event_data = ctx.event_data
+
+    original_message_id = event_data.get('original_message_id')
+    new_key_id = event_data.get('new_key_id')
+    new_ciphertext_and_nonce_b64 = event_data.get('new_ciphertext')
+    created_at = event_data.get('created_at')
+
+    if not all([original_message_id, new_key_id, new_ciphertext_and_nonce_b64, created_at is not None]):
+        log.warning(f"message_rekey.project_pure() missing required fields")
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Decode ciphertext and nonce
+    new_ciphertext_and_nonce = crypto.b64decode(new_ciphertext_and_nonce_b64)
+    nonce = new_ciphertext_and_nonce[-crypto.NONCE_SIZE:]
+    new_ciphertext = new_ciphertext_and_nonce[:-crypto.NONCE_SIZE]
+
+    writes = (
+        WriteOp(
+            op='insert',
+            table='message_rekeys',
+            values={
+                'rekey_id': ctx.event_id,
+                'original_message_id': original_message_id,
+                'new_key_id': new_key_id,
+                'new_ciphertext': new_ciphertext,
+                'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
+                'recorded_at': ctx.recorded_at,
+            },
+        ),
+        WriteOp(
+            op='update',
+            table='messages',
+            values={'key_id': new_key_id},
+            where={
+                'message_id': original_message_id,
+                'recorded_by': ctx.recorded_by,
+            },
+        ),
+    )
+
+    # Command to replace the blob in store and validate decryption
+    commands = (
+        Command(
+            command_type='replace_message_blob',
+            args={
+                'original_message_id': original_message_id,
+                'new_key_id': new_key_id,
+                'new_ciphertext': new_ciphertext,
+                'nonce': nonce,
+            }
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True, commands=commands)
+
+
+def _handle_replace_message_blob(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Handle blob replacement command.
+
+    Validates the rekey can be decrypted with the new key,
+    then replaces the original message blob in the store.
+    """
+    original_message_id = args['original_message_id']
+    new_key_id = args['new_key_id']
+    new_ciphertext = args['new_ciphertext']
+    nonce = args['nonce']
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
+
+    # Get new key to validate
+    new_key_row = safedb.query_one(
+        "SELECT key FROM group_keys WHERE key_id = ? AND recorded_by = ? LIMIT 1",
+        (new_key_id, recorded_by)
+    )
+    if not new_key_row:
+        log.warning(f"message_rekey: new key {new_key_id[:20]}... not found, skipping blob replacement")
+        return
+
+    # Validate decryption works
+    try:
+        new_key = new_key_row['key']
+        rekeyed_plaintext = crypto.decrypt(new_ciphertext, new_key, nonce)
+        log.info(f"message_rekey: verified rekeyed plaintext, size={len(rekeyed_plaintext)}B")
+    except Exception as e:
+        log.warning(f"message_rekey: failed to decrypt rekeyed message: {e}")
+        return
+
+    # Replace original message blob in store with new ciphertext
+    new_key_id_bytes = crypto.b64decode(new_key_id)
+    new_blob = new_key_id_bytes + nonce + new_ciphertext
+
+    unsafedb.execute(
+        "UPDATE store SET blob = ? WHERE id = ?",
+        (new_blob, original_message_id)
+    )
+    log.info(f"message_rekey: replaced message blob in store for {original_message_id[:20]}...")
+
+
+# Register the command handler at module load time
+register_command_handler('replace_message_blob', _handle_replace_message_blob)
 
 
 def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, db: Any) -> str:

@@ -28,7 +28,7 @@ SUBJECTIVE_TABLES = {
     'group_keys_shared',           # Group keys shared (subjective)
     'group_prekeys',               # Subjective group prekeys
     'group_prekeys_shared',        # Group prekeys shared (subjective)
-    'transit_prekeys_shared',      # Transit prekeys shared (subjective)
+    'connection_prekeys_shared',      # Transit prekeys shared (subjective)
     'users',
     'user_names',                  # Encrypted username updates (peer-scoped)
     'peer_names',                  # Encrypted peer/device name updates (peer-scoped)
@@ -71,7 +71,7 @@ SUBJECTIVE_TABLES = {
 # Tables that are device-wide (not scoped by recorded_by)
 DEVICE_TABLES = {
     'local_peers',
-    'transit_prekeys',             # Asymmetric keys for initial contact
+    'connection_prekeys',             # Asymmetric keys for initial contact
     'store',
     'incoming_blobs',
     'sync_state_ephemeral',
