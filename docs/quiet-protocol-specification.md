@@ -412,16 +412,53 @@ When `invite_accepted.project()` runs, it:
 
 When joining a network or linking a device, the invite blob exists on the inviter's device, not locally. Events signed by this invite will **block** until the invite blob arrives via sync.
 
+**Trust Anchor**: The `network` event is the **only** trust anchor. It is force-validated when accepting any invite (both user invites and peer invites). All other events derive their validity through the dependency chain, never through force-validation.
+
+#### Causal Chains by Flow
+
+**Network Creation (first user)**:
+```
+network (self-signed) ← FORCE VALID (trust anchor)
+  └─► admin_grant (signed by network)
+        └─► [content: groups, channels, messages]
+  └─► invite(mode=user) (signed by network, for bootstrap)
+        └─► user (signed by invite)
+              └─► invite(mode=peer) (signed by user_id, first peer)
+                    └─► peer_shared (signed by peer invite)
+```
+
+**Network Join (new user via invite link)**:
+```
+[REMOTE] network ← FORCE VALID on accept (trust anchor stored in trust_anchors)
+  └─► [REMOTE] admin_grant for inviter
+        └─► [REMOTE] inviter's peer_shared
+              └─► [REMOTE] invite(mode=user) (signed by inviter's peer_shared)
+                    └─► [LOCAL] user (signed by invite) ← BLOCKS until invite arrives
+                          └─► [LOCAL] invite(mode=peer) (signed by user_id)
+                                └─► [LOCAL] peer_shared (signed by peer invite) ← BLOCKS until peer invite projects
+```
+
+**Device Linking (new peer for existing user)**:
+```
+[REMOTE] network ← FORCE VALID on accept (trust anchor stored in trust_anchors)
+  └─► [REMOTE] admin_grant
+        └─► [REMOTE] existing peer_shared
+              └─► [REMOTE] invite(mode=peer) (signed by existing peer_shared)
+                    └─► [LOCAL] peer_shared (signed by peer invite) ← BLOCKS until invite arrives
+```
+
+**Key principle**: The `invite_accepted` event for ANY invite type (user or peer) must include `network_id` so the network can be recorded as trust anchor. Invites themselves are **never** force-validated; they are validated through their signers which trace back to the network.
+
 **Bootstrap flow:**
 
-1. `invite_accepted.create()` — Stores invite_private_key and inviter's connection info locally
+1. `invite_accepted.create()` — Stores invite_private_key, inviter's connection info, AND network_id in trust_anchors
 2. `user.create()` / `peer_shared.create()` — Events are stored but **block** (invite not yet valid)
 3. Bootstrap connection initiated using `invite_accepteds` (has inviter's address and transit prekey)
-4. Sync with inviter — invite blob arrives
-5. Invite projects (network_id already valid from step 1)
-6. **Cascade unblock** — user → peer_invite → peer_shared → transit_prekey_shared
+4. Sync with inviter — network blob, invite blob, and dependency chain arrive
+5. Network projects (trust anchor already marked from step 1)
+6. **Cascade unblock** — admin_grant → inviter's peer_shared → invite → user/peer_shared → transit_prekey_shared
 
-This relies on the standard validity cascade rather than special-casing bootstrap. Events block until their dependencies are satisfied, then unblock naturally when the invite blob syncs.
+This relies on the standard validity cascade rather than special-casing bootstrap. Events block until their dependencies are satisfied, then unblock naturally when the dependency chain syncs.
 
 **Projection fallback**: When projecting events signed by an invite, projectors can derive `invite_pubkey` from `invite_private_key` in `invite_accepteds` if the invite is in the local store but not yet in the `invites` projection table. This handles the window between receiving the blob and projecting it.
 

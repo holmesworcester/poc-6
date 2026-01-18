@@ -70,8 +70,19 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Store as signed plaintext (no encryption)
     blob = crypto.canonicalize_json(signed_event)
 
-    # Store event and return network_id (which is the event_id)
-    network_id = store.event(blob, peer_id, t_ms, db)
+    # Compute network_id (hash of blob) before storing
+    network_id = crypto.b64encode(crypto.hash(blob))
+
+    # Add trust_anchors entry BEFORE store.event() so projection passes trust check
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
+        (network_id, peer_id, t_ms)
+    )
+
+    # Store event (triggers projection)
+    stored_id = store.event(blob, peer_id, t_ms, db)
+    assert stored_id == network_id, f"network_id mismatch: {stored_id} != {network_id}"
 
     log.info(f"network.create() created self-signed network_id={network_id}")
     return network_id, network_private_key
@@ -124,6 +135,31 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # TRUST ANCHOR ENFORCEMENT: Only accept networks we've agreed to join
+    # Check if: (1) in trust_anchors, (2) already projected, (3) already valid, or
+    # (4) no invite_accepted for this network (creator case during re-projection)
+    trust_anchor = safedb.query_one(
+        "SELECT 1 FROM trust_anchors WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    existing = safedb.query_one(
+        "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    already_valid = safedb.query_one(
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    # Creator detection: if there's no invite_accepted for this network, peer is the creator
+    has_invite_accepted = safedb.query_one(
+        "SELECT 1 FROM invite_accepteds WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    is_creator = not has_invite_accepted
+    if not trust_anchor and not existing and not already_valid and not is_creator:
+        log.warning(f"network.project() REJECTED - network_id={network_id[:20]}... not in trust_anchors")
+        return None
 
     # Get blob from store
     blob = store.get(network_id, unsafedb)

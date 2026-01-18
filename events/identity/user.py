@@ -482,7 +482,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         prekey_id=bootstrap_invite_prekey_id,  # Bootstrap user invite's prekey ID
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
-        device_name=device_name
+        device_name=device_name,
+        network_id=network_id  # Trust anchor for cascade
     )
     peer_shared_id = peer_shared_join_result['peer_shared_id']
     log.info(f"new_network() delegated to peer_shared.join(): {peer_shared_id[:20]}...")
@@ -840,7 +841,8 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         prekey_id=invite_prekey_id,  # From user invite (for dependency tracking)
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
-        device_name=device_name
+        device_name=device_name,
+        network_id=invite_data.get('network_id')  # Trust anchor for cascade
     )
     peer_shared_id = peer_shared_join_result['peer_shared_id']
     prekey_id = peer_shared_join_result['transit_prekey_id']
