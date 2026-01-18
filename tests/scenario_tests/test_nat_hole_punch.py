@@ -1,16 +1,15 @@
 """
 Test NAT hole punching scenario.
 
-Alice is public. Bob and Charlie are behind NAT.
-Alice observes Bob's public endpoint when Bob sends to her.
-Alice announces Bob's endpoint to the group (address event).
-Alice creates an intro event telling Bob and Charlie about each other.
-Bob and Charlie hole punch by exchanging packets through the NAT.
+DEPRECATED: These tests use the old network_config simulator which has been
+replaced by the new address-based transport (core/transport.py).
 
-Goal: Verify that address events capture observations and intro events
-      facilitate hole punching between peers behind NAT.
+The new transport uses real UDP networking and does not simulate NAT.
+NAT traversal features have been removed in favor of simpler address-based routing.
 """
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Deprecated: NAT simulator replaced by direct UDP transport")
 import sqlite3
 from core.db import Database, create_safe_db
 from core import schema

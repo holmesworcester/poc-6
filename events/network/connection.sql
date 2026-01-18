@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS connections (
     -- Sync optimization
     last_synced_root_hash BLOB,             -- Root hash at last successful sync (skip if unchanged)
 
+    -- Address discovery (from packet_metadata during projection)
+    from_addr_ip TEXT,                      -- Last known IP address
+    from_addr_port INTEGER,                 -- Last known UDP port
+
     PRIMARY KEY (connection_id, recorded_by),
     CHECK (peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
 );

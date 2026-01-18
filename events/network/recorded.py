@@ -383,6 +383,33 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     event_type = event_data.get('type')
     projected_id = None
 
+    # TRUST ANCHOR ENFORCEMENT for network events
+    # Accept if: (1) in trust_anchors, (2) already projected, (3) already valid, or
+    # (4) no invite_accepted for this network (creator case during re-projection)
+    if event_type == 'network':
+        trust_anchor = safedb.query_one(
+            "SELECT 1 FROM trust_anchors WHERE network_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        existing = safedb.query_one(
+            "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        already_valid = safedb.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        # Creator detection: if there's no invite_accepted for this network, peer is the creator
+        # (Joiners always have an invite_accepted with network_id)
+        has_invite_accepted = safedb.query_one(
+            "SELECT 1 FROM invite_accepteds WHERE network_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        is_creator = not has_invite_accepted  # No invite_accepted = creator
+        if not trust_anchor and not existing and not already_valid and not is_creator:
+            log.warning(f"[TRUST_ANCHOR] Rejecting network {ref_id[:20]}... - not trusted by {recorded_by[:20]}...")
+            return [None, recorded_id]
+
     project_pure_fn = registry.get_project_pure_fn(event_type) if event_type else None
     event_spec = registry.get_event_spec(event_type) if event_type else None
 

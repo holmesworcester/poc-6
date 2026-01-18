@@ -685,19 +685,33 @@ class TestAdminGrantChain:
         )
         db.commit()
 
-        # Sync so Bob receives his admin grant
-        run_ticks(db=db, start_t_ms=11000, num_rounds=200)
+        # Wait for Bob to receive his admin grant
+        def bob_has_admin_grant():
+            grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
+            assert grant is not None, "Bob should have admin_grant"
 
-        # Verify Bob has admin grant before continuing
+        assert_eventually(bob_has_admin_grant, db=db, start_t_ms=11000,
+                          msg="Bob should receive admin_grant")
+
+        # Get the actual grant ID (assert_eventually returns timestamp, not the value)
         bob_grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
-        assert bob_grant is not None, "Bob should have admin_grant after sync"
 
         # Now invite Charlie
         invite_id, invite_link, _ = invite.create(peer_id=bob['peer_id'], t_ms=15000, db=db)
         charlie_peer_id = peer.create(t_ms=16000, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link, name='Charlie', t_ms=16000, db=db)
         db.commit()
-        run_ticks(db=db, start_t_ms=17000, num_rounds=200)
+
+        # Wait for Alice to see Charlie's user (sync must complete)
+        def alice_sees_charlie():
+            charlie_user = db.query_one(
+                "SELECT 1 FROM users WHERE user_id = ? AND recorded_by = ?",
+                (charlie['user_id'], alice['peer_id'])
+            )
+            assert charlie_user is not None, "Alice should see Charlie's user"
+
+        t_ms = assert_eventually(alice_sees_charlie, db=db, start_t_ms=17000,
+                                  msg="Alice should see Charlie after sync")
 
         # Bob grants admin to Charlie
         bob_private_key = peer.get_private_key(bob['peer_id'], bob['peer_id'], db)
@@ -707,30 +721,30 @@ class TestAdminGrantChain:
             network_id=alice['network_id'],
             signed_by=bob['peer_shared_id'],
             signer_private_key=bob_private_key,
-            t_ms=25000,
+            t_ms=t_ms + 1000,
             peer_id=bob['peer_id'],
             db=db,
             admin_grant=bob_grant
         )
         db.commit()
 
-        # Sync
-        run_ticks(db=db, start_t_ms=26000, num_rounds=200)
+        # Wait for all perspectives to see Charlie as admin
+        def all_see_charlie_as_admin():
+            charlie_admin_alice = admin.is_user_admin(
+                charlie['user_id'], alice['network_id'], alice['peer_id'], db
+            )
+            charlie_admin_bob = admin.is_user_admin(
+                charlie['user_id'], alice['network_id'], bob['peer_id'], db
+            )
+            charlie_admin_charlie = admin.is_user_admin(
+                charlie['user_id'], alice['network_id'], charlie['peer_id'], db
+            )
+            assert charlie_admin_alice is True, "Alice should see Charlie as admin"
+            assert charlie_admin_bob is True, "Bob should see Charlie as admin"
+            assert charlie_admin_charlie is True, "Charlie should see himself as admin"
 
-        # Verify Charlie is admin from all perspectives
-        charlie_admin_alice = admin.is_user_admin(
-            charlie['user_id'], alice['network_id'], alice['peer_id'], db
-        )
-        charlie_admin_bob = admin.is_user_admin(
-            charlie['user_id'], alice['network_id'], bob['peer_id'], db
-        )
-        charlie_admin_charlie = admin.is_user_admin(
-            charlie['user_id'], alice['network_id'], charlie['peer_id'], db
-        )
-
-        assert charlie_admin_alice is True, "Alice should see Charlie as admin"
-        assert charlie_admin_bob is True, "Bob should see Charlie as admin"
-        assert charlie_admin_charlie is True, "Charlie should see himself as admin"
+        assert_eventually(all_see_charlie_as_admin, db=db, start_t_ms=t_ms + 2000,
+                          msg="All should see Charlie as admin")
 
 
 # =============================================================================
@@ -1917,7 +1931,7 @@ class TestStateMachine:
         bob_peer_id = peer.create(t_ms=3000, db=db)
         bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=3000, db=db)
         db.commit()
-        run_ticks(db=db, start_t_ms=4000, num_rounds=200)
+        t_ms = run_ticks(db=db, start_t_ms=4000, num_rounds=200)
 
         # State: Bob=NON_ADMIN
         bob_admin = admin.is_user_admin(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -1925,23 +1939,24 @@ class TestStateMachine:
 
         # Bob cannot create invites
         with pytest.raises(ValueError):
-            invite.create(peer_id=bob['peer_id'], t_ms=8000, db=db)
+            invite.create(peer_id=bob['peer_id'], t_ms=t_ms, db=db)
 
         # Transition: Alice promotes Bob
         alice_grant = admin.my_grant(alice['user_id'], alice['network_id'], alice['peer_id'], db)
         alice_private_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
+        t_ms += 100
         admin.create(
             user_id=bob['user_id'],
             network_id=alice['network_id'],
             signed_by=alice['peer_shared_id'],
             signer_private_key=alice_private_key,
-            t_ms=9000,
+            t_ms=t_ms,
             peer_id=alice['peer_id'],
             db=db,
             admin_grant=alice_grant
         )
         db.commit()
-        run_ticks(db=db, start_t_ms=10000, num_rounds=200)
+        t_ms = run_ticks(db=db, start_t_ms=t_ms + 100, num_rounds=200)
 
         # State: Bob=ADMIN
         bob_admin = admin.is_user_admin(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -1952,20 +1967,74 @@ class TestStateMachine:
         assert bob_grant is not None, "Bob should have admin_grant after sync"
 
         # Transition: Bob can now create invites
-        invite_id2, invite_link2, _ = invite.create(peer_id=bob['peer_id'], t_ms=15000, db=db)
+        t_ms += 100
+        invite_id2, invite_link2, _ = invite.create(peer_id=bob['peer_id'], t_ms=t_ms, db=db)
         assert invite_id2 is not None
 
         # Charlie joins via Bob's invite
-        charlie_peer_id = peer.create(t_ms=16000, db=db)
-        charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link2, name='Charlie', t_ms=16000, db=db)
+        t_ms += 100
+        charlie_peer_id = peer.create(t_ms=t_ms, db=db)
+        charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link2, name='Charlie', t_ms=t_ms, db=db)
         db.commit()
-        run_ticks(db=db, start_t_ms=17000, num_rounds=200)
 
-        # State: Network=MULTI_USER, Bob=ADMIN, Charlie=ACTIVE
-        all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
-        members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
-        names = sorted([m['name'] for m in members])
-        assert names == ['Alice', 'Bob', 'Charlie']
+        # DEBUG: Check Charlie's state before syncing
+        charlie_conns = db.query("SELECT * FROM connections WHERE recorded_by = ?", (charlie_peer_id,))
+        print(f"\n=== CHARLIE STATE BEFORE SYNC ===")
+        print(f"Charlie connections: {len(charlie_conns)}")
+        for c in charlie_conns:
+            print(f"  - to {c['peer_shared_id'][:20]}... state={c.get('state')}")
+
+        charlie_ps = db.query_one(
+            "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (charlie['peer_shared_id'], charlie_peer_id)
+        )
+        print(f"Charlie peer_shared projected: {charlie_ps is not None}")
+
+        charlie_peer_self = db.query_one(
+            "SELECT * FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (charlie_peer_id, charlie_peer_id)
+        )
+        print(f"Charlie peer_self: {charlie_peer_self is not None}")
+
+        charlie_ia = db.query_one(
+            "SELECT * FROM invite_accepteds WHERE recorded_by = ?",
+            (charlie_peer_id,)
+        )
+        print(f"Charlie invite_accepteds: {charlie_ia is not None}")
+        if charlie_ia:
+            print(f"  invite_id={charlie_ia['invite_id'][:20]}...")
+            print(f"  inviter_peer_shared_id={charlie_ia.get('inviter_peer_shared_id', 'MISSING')[:20] if charlie_ia.get('inviter_peer_shared_id') else 'NULL'}...")
+
+        charlie_blocked = db.query(
+            "SELECT * FROM blocked_events_ephemeral WHERE recorded_by = ?",
+            (charlie_peer_id,)
+        )
+        print(f"Charlie blocked events: {len(charlie_blocked)}")
+
+        charlie_local = db.query_one(
+            "SELECT * FROM local_peers WHERE peer_id = ?",
+            (charlie_peer_id,)
+        )
+        print(f"Charlie in local_peers: {charlie_local is not None}")
+
+        # Also check Bob's invite to see what peer_shared_id it has
+        bob_ps = db.query_one(
+            "SELECT * FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (bob['peer_shared_id'], bob['peer_id'])
+        )
+        print(f"Bob's peer_shared_id: {bob['peer_shared_id'][:20]}...")
+        print(f"Inviter (from ia): {charlie_ia.get('inviter_peer_shared_id', 'NULL')[:20] if charlie_ia and charlie_ia.get('inviter_peer_shared_id') else 'NULL'}...")
+        print(f"Same? {charlie_ia and charlie_ia.get('inviter_peer_shared_id') == bob['peer_shared_id']}")
+
+        # Wait for Alice to see Charlie as a member
+        def alice_sees_charlie_as_member():
+            all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+            members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+            names = sorted([m['name'] for m in members])
+            assert names == ['Alice', 'Bob', 'Charlie'], f"Expected all 3, got {names}"
+
+        t_ms = assert_eventually(alice_sees_charlie_as_member, db=db, start_t_ms=t_ms + 100,
+                                  msg="Alice should see Charlie as member")
 
         # Bob can grant admin to Charlie (use fresh bob_grant)
         bob_grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
@@ -1975,17 +2044,20 @@ class TestStateMachine:
             network_id=alice['network_id'],
             signed_by=bob['peer_shared_id'],
             signer_private_key=bob_private_key,
-            t_ms=20000,
+            t_ms=t_ms + 100,
             peer_id=bob['peer_id'],
             db=db,
             admin_grant=bob_grant
         )
         db.commit()
-        run_ticks(db=db, start_t_ms=21000, num_rounds=200)
 
-        # State: Network=MULTI_ADMIN (Alice, Bob, Charlie are all admins)
-        charlie_admin = admin.is_user_admin(charlie['user_id'], alice['network_id'], alice['peer_id'], db)
-        assert charlie_admin is True
+        # Wait for Alice to see Charlie as admin
+        def alice_sees_charlie_as_admin():
+            charlie_admin = admin.is_user_admin(charlie['user_id'], alice['network_id'], alice['peer_id'], db)
+            assert charlie_admin is True, "Alice should see Charlie as admin"
+
+        assert_eventually(alice_sees_charlie_as_admin, db=db, start_t_ms=t_ms + 200,
+                          msg="Alice should see Charlie as admin")
 
     def test_state_transitions_with_multiple_removals(self, fresh_db):
         """Test state machine with multiple sequential removals."""

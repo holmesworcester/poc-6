@@ -516,6 +516,89 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any) -> list[str]:
     return recorded_ids
 
 
+def store_packet_from_addr(event_id: str, recorded_by: str, from_addr: tuple[str, int] | None, db: Any) -> None:
+    """Store packet source address in staging table for projection.
+
+    This metadata is used by connection.project() to populate from_addr columns.
+
+    Args:
+        event_id: The event being received
+        recorded_by: Peer receiving the event
+        from_addr: Source address as (ip, port) tuple, or None
+        db: Database connection
+    """
+    if not from_addr:
+        return
+
+    ip, port = from_addr
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute("""
+        INSERT OR REPLACE INTO packet_metadata (event_id, recorded_by, from_addr_ip, from_addr_port)
+        VALUES (?, ?, ?, ?)
+    """, (event_id, recorded_by, ip, port))
+
+
+def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db: Any) -> list[str]:
+    """Unwrap transit blob, store event, create recorded events for all peers who can decrypt.
+
+    This is the unified receive function that:
+    1. Routes by transit key - finds peers who can decrypt
+    2. Unwraps blob (tries each peer until success)
+    3. Checks for ephemeral events (sync, negentropy) and handles them specially
+    4. Stores event blob (once) for non-ephemeral events
+    5. Creates recorded events for each peer
+    6. Stores from_addr metadata for projection
+
+    Args:
+        blob: Transit-wrapped blob
+        from_addr: Source address as (ip, port) tuple
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        List of recorded_ids (one per peer who can decrypt), or empty list if unwrap fails
+    """
+    # Route to peers who can decrypt (device-wide lookup)
+    recorded_by_peers = route_blob_to_peers(blob, db)
+
+    if not recorded_by_peers:
+        log.debug(f"store_incoming: no peers can decrypt blob (unknown key)")
+        return []
+
+    # Try to unwrap with each peer who has access
+    unwrapped_blob = None
+    for peer_id in recorded_by_peers:
+        unwrapped_blob, missing_keys = crypto.unwrap_transit(blob, peer_id, db)
+        if unwrapped_blob is not None:
+            break
+
+    if unwrapped_blob is None:
+        log.debug(f"store_incoming: unwrap failed for {len(recorded_by_peers)} peers")
+        return []
+
+    # Check for ephemeral events (sync, negentropy) that need special handling
+    try:
+        event_data = crypto.parse_json(unwrapped_blob)
+        if handle_ephemeral_event(unwrapped_blob, event_data, recorded_by_peers, t_ms, db):
+            return []  # Ephemeral event was handled, no recorded events created
+    except Exception:
+        # Not JSON or parse failed, continue with normal storage
+        pass
+
+    # Store the unwrapped event blob (once)
+    event_id = store.blob(unwrapped_blob, t_ms, True, db)
+    log.debug(f"store_incoming: stored event {event_id[:20]}..., creating recorded for {len(recorded_by_peers)} peers")
+
+    # Create recorded event for EACH peer who can decrypt + store from_addr in staging
+    recorded_ids = []
+    for peer_id in recorded_by_peers:
+        recorded_id = recorded.create(event_id, peer_id, t_ms, db, True)
+        store_packet_from_addr(event_id, peer_id, from_addr, db)
+        recorded_ids.append(recorded_id)
+
+    return recorded_ids
+
+
 def _process_address_observations(transit_blobs: list[bytes], t_ms: int, db: Any) -> None:
     """Try to observe source peers from transit blobs (NAT integration).
 

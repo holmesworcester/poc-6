@@ -106,7 +106,7 @@ from events.network import connection
 COMMANDS = [
     'new-network', 'switch', 'send', 'tick', 'sync', 'sync-realtime', 'sync-status', 'auto-tick',
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
-    'status', 'accounts', 'channels', 'users', 'messages', 'keys',
+    'status', 'accounts', 'channels', 'users', 'messages', 'keys', 'whoami', 'connections',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
     'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit'
 ]
@@ -1431,6 +1431,26 @@ def cmd_list_accounts(session: CLISession):
         print(f"  {i}. {selected} {account.full_name}")
 
 
+def cmd_whoami(session: CLISession):
+    """Show current account identity info (needed for --peer flag)."""
+    if not session.selected_account:
+        print("error: no account selected")
+        return
+
+    account = session.get_selected_account()
+    print(f"peer_id: {account.peer_id}")
+
+    # Get peer_shared_id
+    ps = peer_shared.get_for_peer(account.peer_id, account.peer_id, session.db)
+    if ps:
+        print(f"peer_shared_id: {ps['peer_shared_id']}")
+
+    if account.user_id:
+        print(f"user_id: {account.user_id}")
+    if account.network_id:
+        print(f"network_id: {account.network_id}")
+
+
 def cmd_list_channels(session: CLISession):
     """List all channels for the selected account."""
     if not session.selected_account:
@@ -2545,6 +2565,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
         elif cmd == "status":
             display_state(session)
 
+        elif cmd == "whoami":
+            cmd_whoami(session)
+
         elif cmd == "accounts":
             cmd_list_accounts(session)
 
@@ -2743,6 +2766,7 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    switch <n>")
             print("    accounts")
             print("    users")
+            print("    whoami                         Show current peer/user identity info")
             print()
             print("  Channels:")
             print("    channel <n>")
@@ -2872,18 +2896,48 @@ def run_non_interactive(session: CLISession):
             break
 
 
+def run_sync_daemon(session: CLISession):
+    """Run sync daemon mode - continuously tick without REPL.
+
+    Used for network daemons that just sync in the background.
+    Press Ctrl+C to stop.
+    """
+    import time
+    from core import tick as tick_module
+
+    print("Sync daemon mode - press Ctrl+C to stop")
+
+    try:
+        while True:
+            t_ms = int(time.time() * 1000)
+            tick_module.tick(t_ms=t_ms, db=session.db)
+            session.db.commit()
+            time.sleep(0.1)  # 100ms tick interval
+    except KeyboardInterrupt:
+        print("\nStopping sync daemon...")
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
 
 def main():
     """Main entry point for CLI."""
+    from core import transport
+
     parser = argparse.ArgumentParser(description="POC-6 CLI")
     parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug logging")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress all but critical logs")
     parser.add_argument("--disk", action="store_true", help="Use file-based SQLite for realistic I/O perf")
     parser.add_argument("--db-path", type=str, default=None, help="Path to database file (implies --disk)")
+
+    # Networking options
+    parser.add_argument("--listen", type=str, help="UDP listen address (host:port)")
+    parser.add_argument("--peer", type=str, action="append", help="Peer address (peer_shared_id@host:port)")
+    parser.add_argument("--exec", "-e", dest="exec_cmd", type=str, help="Execute single command and exit")
+    parser.add_argument("--sync-only", action="store_true", help="Run sync daemon mode without REPL")
+
     args = parser.parse_args()
 
     # Logging already configured at import time based on sys.argv
@@ -2892,10 +2946,34 @@ def main():
     use_disk = args.disk or args.db_path is not None
     session.initialize_database(use_file=use_disk, db_path=args.db_path)
 
-    if args.interactive:
-        run_interactive(session)
-    else:
-        run_non_interactive(session)
+    # Start networking if --listen specified
+    if args.listen:
+        host, port = args.listen.rsplit(':', 1)
+        transport.start_udp(host, int(port))
+        print(f"Listening on {host}:{port}")
+
+    # Register peer addresses
+    if args.peer:
+        for peer_spec in args.peer:
+            peer_id, addr = peer_spec.split('@')
+            host, port = addr.rsplit(':', 1)
+            transport.add_peer_address(peer_id, host, int(port))
+            print(f"Added peer {peer_id[:20]}... at {host}:{port}")
+
+    try:
+        if args.exec_cmd:
+            # Execute single command and exit
+            execute_command(session, args.exec_cmd, show_prompt=False)
+        elif args.sync_only:
+            # Run sync daemon mode
+            run_sync_daemon(session)
+        elif args.interactive:
+            run_interactive(session)
+        else:
+            run_non_interactive(session)
+    finally:
+        # Cleanup
+        transport.stop_udp()
 
 
 if __name__ == "__main__":
