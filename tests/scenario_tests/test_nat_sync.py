@@ -1,13 +1,14 @@
 """
 Scenario tests for NAT simulation during sync.
 
-Tests verify that:
-1. Peers behind NAT cannot receive packets without hole punch
-2. Manual hole punch (both peers send) enables communication
-3. NAT mappings expire and block packets again
-4. Direct peers (not behind NAT) work normally
+DEPRECATED: These tests use the old network_config simulator which has been
+replaced by the new address-based transport (core/transport.py).
+
+The new transport uses real UDP networking and does not simulate NAT.
 """
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Deprecated: NAT simulator replaced by direct UDP transport")
 from core import network_config
 from events.identity import user, invite, peer
 from tests.utils import tick_helper

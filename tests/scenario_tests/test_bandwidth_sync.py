@@ -1,12 +1,15 @@
 """
 Scenario tests for bandwidth limiting during sync.
 
-Tests verify that:
-1. Sync completes under bandwidth constraints (may take more rounds)
-2. Bandwidth stats are tracked correctly during sync
-3. Unlimited bandwidth (default) doesn't throttle
+DEPRECATED: These tests use the old network_config simulator which has been
+replaced by the new address-based transport (core/transport.py).
+
+The new transport uses real UDP networking and does not simulate bandwidth.
+These tests should be removed or rewritten if bandwidth simulation is needed.
 """
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Deprecated: network_config simulator replaced by UDP transport")
 from core.db import Database
 from core import schema
 from core import network_config

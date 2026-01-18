@@ -6,6 +6,11 @@ Tests protocol behavior under realistic network conditions:
 - Network partitions and healing
 - Jittery connections
 - Burst packet loss
+
+DEPRECATED: These tests use the old network_config simulator which has been
+replaced by the new address-based transport (core/transport.py).
+
+The new transport uses real UDP networking and does not simulate network conditions.
 """
 import sqlite3
 import random
@@ -14,6 +19,9 @@ from core.db import Database
 from core import schema
 from core.db import create_unsafe_db
 from core import queues
+
+pytestmark = pytest.mark.skip(reason="Deprecated: network_config simulator replaced by UDP transport")
+
 from core import network_config
 
 
