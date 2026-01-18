@@ -91,16 +91,46 @@ class Job(ABC):
 
 
 
-class SyncReceiveJob(Job):
-    """Receive and process incoming sync responses."""
+class ReceiveJob(Job):
+    """Receive and process incoming transit blobs using address-based transport.
+
+    This job:
+    1. Transfers packets (loopback for testing, UDP for production)
+    2. Drains batch from transport.drain_incoming()
+    3. Stores all events via sync.store_incoming()
+    4. Projects all recorded events
+    """
 
     def __init__(self):
-        super().__init__('sync_receive', every_ms=100)
+        super().__init__('receive', every_ms=100)
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import sync
-        sync.receive(batch_size=2000, t_ms=t_ms, db=db)
-        return {}
+        from core import transport
+        from events.network import sync, recorded
+
+        # 1. Transfer packets (loopback for testing, UDP for production)
+        if transport.is_udp_active():
+            transport.udp_transfer()
+        else:
+            transport.loopback_transfer()
+
+        # 2. Grab batch from incoming (pure - no DB)
+        batch = transport.drain_incoming(100)
+        if not batch:
+            return {'received': 0}
+
+        # 3. Store all (touches DB)
+        all_recorded_ids = []
+        for blob, from_addr in batch:
+            recorded_ids = sync.store_incoming(blob, from_addr, t_ms, db)
+            all_recorded_ids.extend(recorded_ids)
+
+        # 4. Project all (touches DB)
+        if all_recorded_ids:
+            recorded.project_ids(all_recorded_ids, db)
+
+        db.commit()
+        return {'received': len(batch)}
 
 
 class MessageRekeyAndPurgeJob(Job):
@@ -324,7 +354,7 @@ class NegentropySyncJob(Job):
 # Registry of job instances
 JOBS = [
     ConnectionSendJob(),
-    SyncReceiveJob(),
+    ReceiveJob(),
     NegentropySyncJob(),
     ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),
