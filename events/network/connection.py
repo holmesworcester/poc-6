@@ -343,7 +343,9 @@ def _project_request(
         """, (from_addr_ip, from_addr_port, peer_shared_id, recorded_by))
 
     # Send ack back (this creates our connection row with connection_id = ack_id)
-    _send_ack_for_request(event_id, peer_shared_id, symmetric_key, recorded_by, recorded_at, db)
+    # Pass from_addr for reply routing (especially important in bootstrap when peer_shared_id is invite_id)
+    reply_addr = (from_addr_ip, from_addr_port) if from_addr_ip else None
+    _send_ack_for_request(event_id, peer_shared_id, symmetric_key, recorded_by, recorded_at, db, reply_addr=reply_addr)
 
     return event_id
 
@@ -420,9 +422,14 @@ def _send_ack_for_request(
     their_key: bytes,
     local_peer_id: str,
     t_ms: int,
-    db: Any
+    db: Any,
+    reply_addr: tuple[str, int] | None = None
 ) -> None:
-    """Send connection ack in response to a request."""
+    """Send connection ack in response to a request.
+
+    Args:
+        reply_addr: Direct reply address from packet metadata (preferred for routing)
+    """
     from core.db import create_safe_db
 
     safedb = create_safe_db(db, recorded_by=local_peer_id)
@@ -476,8 +483,10 @@ def _send_ack_for_request(
         wrapped = crypto.wrap(ack_blob, to_key, db)
 
         from core import transport
-        # Try to look up destination address
-        to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
+        # Use reply_addr first (from packet metadata), then fall back to lookups
+        to_addr = reply_addr
+        if not to_addr:
+            to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
         if not to_addr:
             to_addr = transport.get_peer_address(remote_peer_shared_id)
 
@@ -501,16 +510,21 @@ def _send_ack_for_request(
 
     # Store our outgoing connection (we're the one who received the request)
     # Our connection_id is the ack_id, their_connection_id is the request_id
+    # Include from_addr so we can send sync messages later
+    from_addr_ip = reply_addr[0] if reply_addr else None
+    from_addr_port = reply_addr[1] if reply_addr else None
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
             connection_id, recorded_by, peer_shared_id, invite_id,
             our_key, their_connection_id, their_key,
-            created_at, last_handshake_ms, ttl_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, last_handshake_ms, ttl_ms,
+            from_addr_ip, from_addr_port
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         ack_id, local_peer_id, remote_peer_shared_id, None,
         ack_key, request_id, their_key,
-        t_ms, t_ms, CONNECTION_TTL_MS
+        t_ms, t_ms, CONNECTION_TTL_MS,
+        from_addr_ip, from_addr_port
     ))
 
     # Wrap ack with their symmetric key and send via transport
@@ -526,8 +540,10 @@ def _send_ack_for_request(
     wrapped = crypto.wrap(ack_blob, to_key, db)
 
     from core import transport
-    # Try to look up destination address
-    to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
+    # Use reply_addr first (from packet metadata), then fall back to lookups
+    to_addr = reply_addr
+    if not to_addr:
+        to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
     if not to_addr:
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
@@ -1215,7 +1231,7 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     conn = safedb.query_one("""
-        SELECT their_connection_id, their_key, peer_shared_id
+        SELECT their_connection_id, their_key, peer_shared_id, from_addr_ip, from_addr_port
         FROM connections
         WHERE connection_id = ? AND recorded_by = ?
     """, (connection_id, recorded_by))
@@ -1242,8 +1258,12 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     wrapped = crypto.wrap(blob, to_key, db)
 
     from core import transport
-    # Try to look up destination address
-    to_addr = get_address_for_peer(to_peer_shared_id, recorded_by, db)
+    # Use stored from_addr first (most reliable), then fall back to lookups
+    to_addr = None
+    if conn['from_addr_ip']:
+        to_addr = (conn['from_addr_ip'], conn['from_addr_port'])
+    if not to_addr:
+        to_addr = get_address_for_peer(to_peer_shared_id, recorded_by, db)
     if not to_addr:
         to_addr = transport.get_peer_address(to_peer_shared_id)
 

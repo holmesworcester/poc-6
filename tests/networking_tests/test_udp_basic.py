@@ -1,118 +1,200 @@
 """
-Basic UDP networking tests.
-
-These tests verify the UDP transport layer works correctly
-before integrating with the full sync system.
+Basic UDP tests to verify the fundamentals work.
 """
+import pytest
 import time
-from tests.networking_tests.conftest import (
-    Client, UDPSocket, tick_all, assert_eventually_multi
-)
+import socket
+from multiprocessing import Process, Queue
 
 
-def test_udp_packet_roundtrip(create_client):
-    """Two UDP sockets can send packets to each other."""
-    # Create two clients
-    alice = create_client("alice")
-    bob = create_client("bob")
-
-    # They know each other's addresses
-    alice.network.add_peer("bob", ("127.0.0.1", bob.network.port))
-    bob.network.add_peer("alice", ("127.0.0.1", alice.network.port))
-
-    # Alice sends to Bob
-    alice.network.send("bob", b"hello from alice")
-
-    # Give packet time to arrive
-    time.sleep(0.05)
-
-    # Bob should have received it
-    packets = bob.network.drain()
-    assert len(packets) == 1
-    data, addr = packets[0]
-    assert data == b"hello from alice"
-    assert addr[1] == alice.network.port  # From Alice's port
-
-    # Bob sends back to Alice
-    bob.network.send("alice", b"hello from bob")
-    time.sleep(0.05)
-
-    # Alice should have received it
-    packets = alice.network.drain()
-    assert len(packets) == 1
-    data, addr = packets[0]
-    assert data == b"hello from bob"
-    assert addr[1] == bob.network.port
+def udp_sender(port: int, message: bytes, result_queue: Queue):
+    """Send a UDP packet."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(message, ('127.0.0.1', port))
+    sock.close()
+    result_queue.put({'sent': True})
 
 
-def test_multiple_packets(create_client):
-    """Multiple packets queue up correctly."""
-    alice = create_client("alice")
-    bob = create_client("bob")
-
-    bob.network.add_peer("alice", ("127.0.0.1", alice.network.port))
-
-    # Bob sends multiple packets
-    for i in range(10):
-        bob.network.send("alice", f"packet {i}".encode())
-
-    time.sleep(0.1)
-
-    # Alice receives all of them
-    packets = alice.network.drain()
-    assert len(packets) == 10
-
-    # Verify order (UDP doesn't guarantee order, but localhost usually preserves it)
-    contents = [p[0].decode() for p in packets]
-    assert contents == [f"packet {i}" for i in range(10)]
+def udp_receiver(port: int, result_queue: Queue):
+    """Receive a UDP packet."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('127.0.0.1', port))
+    sock.settimeout(2.0)
+    try:
+        data, addr = sock.recvfrom(65535)
+        result_queue.put({'received': data, 'from': addr})
+    except socket.timeout:
+        result_queue.put({'timeout': True})
+    finally:
+        sock.close()
 
 
-def test_separate_databases(create_client):
-    """Each client has its own isolated database."""
-    from events.identity import user
+class TestBasicUDP:
+    """Test raw UDP works between processes."""
 
-    alice = create_client("alice")
-    bob = create_client("bob")
+    def test_udp_send_receive(self):
+        """Basic UDP packet delivery between processes."""
+        port = 19100
+        message = b"hello from sender"
 
-    # Alice creates a network in her database
-    alice_result = user.new_network(name='Alice', t_ms=1000, db=alice.db)
-    alice.peer_id = alice_result['peer_id']
-    alice.network_id = alice_result['network_id']
-    alice.db.commit()
+        recv_queue = Queue()
+        send_queue = Queue()
 
-    # Bob creates a DIFFERENT network in his database
-    bob_result = user.new_network(name='Bob', t_ms=1000, db=bob.db)
-    bob.peer_id = bob_result['peer_id']
-    bob.network_id = bob_result['network_id']
-    bob.db.commit()
+        # Start receiver first
+        receiver = Process(target=udp_receiver, args=(port, recv_queue))
+        receiver.start()
+        time.sleep(0.1)  # Let it bind
 
-    # They should have different network IDs (different databases, different keys)
-    assert alice.network_id != bob.network_id
+        # Send
+        sender = Process(target=udp_sender, args=(port, message, send_queue))
+        sender.start()
 
-    # Alice's DB should NOT see Bob's network
-    alice_networks = alice.db.query("SELECT network_id FROM networks")
-    assert len(alice_networks) == 1
-    assert alice_networks[0]['network_id'] == alice.network_id
+        # Wait for results
+        sender.join(timeout=2)
+        receiver.join(timeout=2)
 
-    # Bob's DB should NOT see Alice's network
-    bob_networks = bob.db.query("SELECT network_id FROM networks")
-    assert len(bob_networks) == 1
-    assert bob_networks[0]['network_id'] == bob.network_id
+        send_result = send_queue.get(timeout=1)
+        recv_result = recv_queue.get(timeout=1)
+
+        assert send_result.get('sent') == True
+        assert recv_result.get('received') == message
+        print(f"UDP delivery works: {message} -> {recv_result}")
 
 
-def test_client_tick_runs(create_client):
-    """Client tick() runs without error."""
-    alice = create_client("alice")
+class TestTransportUDP:
+    """Test transport layer UDP functions."""
 
-    # Create a network first
-    from events.identity import user
-    result = user.new_network(name='Alice', t_ms=1000, db=alice.db)
-    alice.peer_id = result['peer_id']
-    alice.db.commit()
+    def test_transport_udp_roundtrip(self):
+        """Transport UDP send/receive between two processes."""
+        from multiprocessing import Process, Queue
 
-    # Tick should work
-    alice.tick(t_ms=2000)
-    alice.tick(t_ms=2100)
-    alice.tick(t_ms=2200)
+        def worker(name: str, port: int, cmd_queue: Queue, result_queue: Queue):
+            """Worker with transport UDP."""
+            from core import transport
 
-    # No assertion needed - just verify it doesn't crash
+            transport.start_udp('127.0.0.1', port)
+            result_queue.put({'started': True, 'port': port})
+
+            while True:
+                cmd = cmd_queue.get(timeout=5)
+                if cmd['action'] == 'send':
+                    transport.send(cmd['data'], ('127.0.0.1', port), cmd['to_addr'])
+                    transport.udp_transfer()
+                    result_queue.put({'sent': True})
+                elif cmd['action'] == 'receive':
+                    transport.udp_transfer()
+                    batch = transport.drain_incoming(10)
+                    result_queue.put({'received': batch})
+                elif cmd['action'] == 'stop':
+                    transport.stop_udp()
+                    result_queue.put({'stopped': True})
+                    break
+
+        # Create workers
+        alice_cmd, alice_result = Queue(), Queue()
+        bob_cmd, bob_result = Queue(), Queue()
+
+        alice = Process(target=worker, args=('alice', 19101, alice_cmd, alice_result))
+        bob = Process(target=worker, args=('bob', 19102, bob_cmd, bob_result))
+
+        alice.start()
+        bob.start()
+
+        # Wait for both to start
+        alice_result.get(timeout=2)
+        bob_result.get(timeout=2)
+        time.sleep(0.1)
+
+        try:
+            # Alice sends to Bob
+            alice_cmd.put({'action': 'send', 'data': b'hello bob', 'to_addr': ('127.0.0.1', 19102)})
+            alice_result.get(timeout=2)
+
+            time.sleep(0.1)
+
+            # Bob receives
+            bob_cmd.put({'action': 'receive'})
+            recv = bob_result.get(timeout=2)
+
+            assert len(recv['received']) == 1, f"Bob should have 1 packet, got {recv}"
+            assert recv['received'][0][0] == b'hello bob'
+            print(f"Transport UDP works: {recv}")
+
+        finally:
+            alice_cmd.put({'action': 'stop'})
+            bob_cmd.put({'action': 'stop'})
+            alice.join(timeout=2)
+            bob.join(timeout=2)
+
+
+class TestConnectionBasic:
+    """Test connection establishment basics."""
+
+    def test_connection_works(self):
+        """Verify connection establishment over real UDP."""
+        from tests.networking_tests.multiprocess_client import RemoteClient, tick_all
+        import tempfile
+        import os
+
+        tmp = tempfile.mkdtemp()
+
+        alice = RemoteClient(
+            name="alice",
+            db_path=os.path.join(tmp, "alice.db"),
+            udp_port=19103
+        )
+        bob = RemoteClient(
+            name="bob",
+            db_path=os.path.join(tmp, "bob.db"),
+            udp_port=19104
+        )
+
+        alice.start()
+        bob.start()
+
+        try:
+            t_ms = 1000
+
+            # Alice creates network
+            alice.new_network(name='Alice', t_ms=t_ms)
+            t_ms += 100
+
+            # Alice creates invite
+            invite_link = alice.create_invite(t_ms=t_ms)
+            t_ms += 100
+
+            # Bob learns Alice's address out-of-band
+            bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
+
+            # Bob creates peer and joins
+            bob.create_peer(t_ms=t_ms)
+            t_ms += 100
+
+            bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
+            t_ms += 100
+
+            # Alice learns Bob's address
+            alice.add_peer_address(bob.peer_shared_id, '127.0.0.1', bob.udp_port)
+
+            # Run ticks
+            tick_all(alice, bob, t_ms=t_ms, rounds=20)
+            t_ms += 2000
+
+            # Check connections
+            alice_conns = alice.get_connections(t_ms=t_ms)
+            bob_conns = bob.get_connections(t_ms=t_ms)
+
+            print(f"Alice connections: {alice_conns}")
+            print(f"Bob connections: {bob_conns}")
+
+            # Both should have active connections
+            alice_active = [c for c in alice_conns if c['can_send']]
+            bob_active = [c for c in bob_conns if c['can_send']]
+
+            assert len(alice_active) >= 1, f"Alice should have active connection"
+            assert len(bob_active) >= 1, f"Bob should have active connection"
+
+        finally:
+            alice.stop()
+            bob.stop()
