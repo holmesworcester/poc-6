@@ -307,7 +307,7 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Extract recipient_prekey_id from blob (first 16 bytes is the hint/prekey_id)
-    recipient_prekey_id = crypto.b64encode(blob[:crypto.ID_SIZE])
+    recipient_prekey_id = crypto.b64encode(blob[:crypto.KEY_ID_SIZE])
 
     # Insert into group_keys_shared table to track this event
     # Store original_key_id for auditing (what sender claimed), but we use computed_key_id

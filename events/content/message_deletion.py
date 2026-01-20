@@ -257,7 +257,7 @@ def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> st
     if message_blob:
         try:
             # Extract key_id from blob (first 16 bytes)
-            key_id_bytes = message_blob[:crypto.ID_SIZE]
+            key_id_bytes = message_blob[:crypto.KEY_ID_SIZE]
             key_id_b64 = crypto.b64encode(key_id_bytes)
 
             # Mark this key for purging (for forward secrecy)

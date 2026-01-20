@@ -87,7 +87,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     else:
         ttl_ms = 0
 
-    key_id_bytes = event_blob[:crypto.ID_SIZE]
+    key_id_bytes = event_blob[:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
 
     writes = (
@@ -468,7 +468,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     # Extract key_id from blob for efficient purge lookups
     # Key ID is the first 16 bytes of the blob (the hint)
-    key_id_bytes = event_blob[:crypto.ID_SIZE]
+    key_id_bytes = event_blob[:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
 
     # Check if deletion exists (may have arrived before message)
