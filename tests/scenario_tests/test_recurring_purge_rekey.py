@@ -58,7 +58,7 @@ def test_tick_runs_message_rekey_and_purge(fresh_db):
     )
     assert message_1_blob is not None
 
-    key_id_bytes = message_1_blob['blob'][:crypto.ID_SIZE]
+    key_id_bytes = message_1_blob['blob'][:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
     print(f"Message 1 encrypted with key: {key_id_b64[:20]}...")
 
@@ -124,7 +124,7 @@ def test_tick_runs_message_rekey_and_purge(fresh_db):
         (message_id_1,)
     )
     assert message_1_blob_after is not None
-    new_key_id_bytes = message_1_blob_after['blob'][:crypto.ID_SIZE]
+    new_key_id_bytes = message_1_blob_after['blob'][:crypto.KEY_ID_SIZE]
     new_key_id_b64 = crypto.b64encode(new_key_id_bytes)
     assert new_key_id_b64 != key_id_b64, "Message 1 should be encrypted with a new key"
     print(f"✓ Message 1 rekeyed with new key: {new_key_id_b64[:20]}...")
@@ -235,7 +235,7 @@ def test_end_to_end_forward_secrecy_with_tick(fresh_db):
 
     # Get the encryption key
     message_blob = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (message_id,))
-    key_id_bytes = message_blob['blob'][:crypto.ID_SIZE]
+    key_id_bytes = message_blob['blob'][:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
     print(f"Message encrypted with key: {key_id_b64[:20]}...")
 

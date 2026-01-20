@@ -42,7 +42,7 @@ def test_delete_message_marks_key_for_purging(fresh_db_with_alice):
     )
     assert message_blob is not None
 
-    key_id_bytes = message_blob['blob'][:crypto.ID_SIZE]
+    key_id_bytes = message_blob['blob'][:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
 
     # Delete the message
@@ -95,7 +95,7 @@ def test_delete_and_rekey_message(fresh_db_with_alice):
         "SELECT blob FROM store WHERE id = ?",
         (msg2_id,)
     )
-    msg2_key_id_bytes = msg2_blob['blob'][:crypto.ID_SIZE]
+    msg2_key_id_bytes = msg2_blob['blob'][:crypto.KEY_ID_SIZE]
     msg2_key_id_b64 = crypto.b64encode(msg2_key_id_bytes)
     print(f"Message 2 encrypted with key: {msg2_key_id_b64[:20]}...")
 
