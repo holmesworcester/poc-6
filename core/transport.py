@@ -7,10 +7,14 @@ Architecture:
 
 For testing, loopback_transfer() moves all _outgoing -> _incoming directly.
 For production, udp_transfer() sends/receives via real UDP sockets.
+For simulation, simulator_transfer() processes packets through NetworkSimulator.
 """
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 import logging
+
+if TYPE_CHECKING:
+    from core.simulator import NetworkSimulator
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +26,10 @@ _lock = Lock()
 # UDP networking state
 _udp_socket: Optional['UDPSocket'] = None
 _peer_addresses: dict[str, tuple[str, int]] = {}  # peer_shared_id -> (host, port)
+
+# Simulator state
+_simulator: Optional['NetworkSimulator'] = None
+_simulator_time_ms: int = 0  # Current simulation time
 
 
 def deliver(blob: bytes, from_addr: tuple[str, int]) -> None:
@@ -84,8 +92,12 @@ def drain_outgoing(limit: int = 100) -> list[tuple[bytes, tuple[str, int], tuple
 def loopback_transfer() -> int:
     """Move all outgoing -> incoming (for testing). Returns count transferred.
 
-    This is the simplest "network" - everything gets delivered immediately.
+    If a simulator is set, packets are processed through the simulator
+    (with latency, packet loss, etc.). Otherwise, immediate delivery.
     """
+    if _simulator is not None:
+        return simulator_transfer(_simulator_time_ms)
+
     with _lock:
         count = len(_outgoing)
         for blob, from_addr, to_addr in _outgoing:
@@ -95,10 +107,89 @@ def loopback_transfer() -> int:
 
 
 def reset():
-    """Clear all queues."""
+    """Clear all queues and simulator state."""
+    global _simulator, _simulator_time_ms
     with _lock:
         _incoming.clear()
         _outgoing.clear()
+    if _simulator:
+        _simulator.reset()
+    _simulator = None
+    _simulator_time_ms = 0
+
+
+# ============================================================================
+# Simulator Functions
+# ============================================================================
+
+def set_simulator(sim: Optional['NetworkSimulator']) -> None:
+    """Set the network simulator for testing network conditions.
+
+    When set, loopback_transfer() will use the simulator instead of
+    immediate delivery.
+
+    Args:
+        sim: NetworkSimulator instance, or None to disable
+    """
+    global _simulator
+    _simulator = sim
+    if sim:
+        log.info("transport: simulator enabled")
+    else:
+        log.info("transport: simulator disabled")
+
+
+def get_simulator() -> Optional['NetworkSimulator']:
+    """Get the current simulator instance."""
+    return _simulator
+
+
+def is_simulator_active() -> bool:
+    """Check if simulator is enabled."""
+    return _simulator is not None
+
+
+def set_simulator_time(t_ms: int) -> None:
+    """Set the current simulation time.
+
+    This should be called before loopback_transfer() to ensure
+    the simulator knows the current time for latency calculations.
+    """
+    global _simulator_time_ms
+    _simulator_time_ms = t_ms
+
+
+def simulator_transfer(t_ms: int) -> int:
+    """Process packets through the simulator.
+
+    1. Moves outgoing packets into the simulator (with potential drops)
+    2. Drains packets whose delivery time has passed into incoming
+
+    Args:
+        t_ms: Current simulation time in milliseconds
+
+    Returns:
+        Number of packets delivered to incoming queue
+    """
+    global _simulator_time_ms
+    _simulator_time_ms = t_ms
+
+    if not _simulator:
+        return loopback_transfer()
+
+    # Move outgoing -> simulator
+    with _lock:
+        for blob, from_addr, to_addr in _outgoing:
+            _simulator.add(blob, from_addr, to_addr, t_ms)
+        _outgoing.clear()
+
+    # Drain ready packets from simulator -> incoming
+    ready = _simulator.drain(t_ms)
+    with _lock:
+        for blob, from_addr in ready:
+            _incoming.append((blob, from_addr))
+
+    return len(ready)
 
 
 def pending_count() -> tuple[int, int]:
