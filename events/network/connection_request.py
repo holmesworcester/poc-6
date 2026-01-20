@@ -724,10 +724,12 @@ def send_to_all(t_ms: int, db: Any) -> None:
                 inviter_id = invite_row['inviter_peer_shared_id']
                 log.info(f"connection_request.send_to_all: BOOTSTRAP MODE for {peer_id[:20]}... -> inviter {inviter_id[:20]}...")
 
-                # Check if we already have a connection to inviter
+                # Check if we already have an ESTABLISHED connection to inviter
+                # (must have their_key - incomplete connections don't count)
                 existing = safedb.query_one("""
                     SELECT 1 FROM connections
                     WHERE peer_shared_id = ? AND recorded_by = ?
+                      AND their_key IS NOT NULL
                       AND last_handshake_ms + ttl_ms > ?
                 """, (inviter_id, peer_id, t_ms))
 
