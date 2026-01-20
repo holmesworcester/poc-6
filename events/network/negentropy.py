@@ -1077,8 +1077,8 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     established connections, sending negentropy root hashes to initiate
     or continue sync.
 
-    Optimization: Skip connections where our root hash hasn't changed since
-    last successful sync. This avoids sending redundant messages when idle.
+    Sync is initiated for ALL established connections, even if our root hash
+    hasn't changed - the remote peer may have new events we need to pull.
 
     Returns:
         Stats dict with counts
@@ -1091,7 +1091,6 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
 
     total_connections = 0
     total_messages = 0
-    skipped_unchanged = 0
 
     for peer_row in local_peers:
         peer_id = peer_row['peer_id']
@@ -1114,16 +1113,15 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
 
             total_connections += 1
 
-            # Optimization: Skip if our root hasn't changed since last sync
-            if conn.last_synced_root_hash and conn.last_synced_root_hash == our_root_hash:
-                skipped_unchanged += 1
-                continue
+            # Note: We removed the "skip if our root unchanged" optimization here.
+            # Even if OUR hash is unchanged, the remote peer may have new events
+            # that we need to pull. Sync must be initiated regularly for all connections.
 
             sent = sync_connection(db, peer_id, conn, t_ms)
             total_messages += sent
 
-    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} sent, {skipped_unchanged} skipped (unchanged)")
-    return {'connections': total_connections, 'messages_sent': total_messages, 'skipped_unchanged': skipped_unchanged}
+    log.info(f"negentropy.sync_all_connections: {total_connections} connections, {total_messages} sent")
+    return {'connections': total_connections, 'messages_sent': total_messages}
 
 
 def get_sync_status(

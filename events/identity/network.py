@@ -69,8 +69,14 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Store as signed plaintext (no encryption)
     blob = crypto.canonicalize_json(signed_event)
 
-    # Store event and return network_id (which is the event_id)
-    network_id = store.event(blob, peer_id, t_ms, db)
+    # Compute network_id (hash of blob) before storing
+    network_id = crypto.b64encode(crypto.hash(blob))
+
+    # Store event - projection will be blocked until trust anchor exists
+    # Trust anchor is inserted by invite_accepted.project() (uniform model)
+    # Creator self-invites via peer_shared.join() → invite_accepted → trust anchor → network projects
+    stored_id = store.event(blob, peer_id, t_ms, db)
+    assert stored_id == network_id, f"network_id mismatch: {stored_id} != {network_id}"
 
     log.info(f"network.create() created self-signed network_id={network_id}")
     return network_id, network_private_key
@@ -123,6 +129,27 @@ def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str
 
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # TRUST ANCHOR ENFORCEMENT: Only accept networks we've agreed to join
+    # Trust anchors are inserted by invite_accepted.project() for ALL cases:
+    # - Creator: self-invites via peer_shared.join() → invite_accepted → trust anchor
+    # - Joiner: accepts invite → invite_accepted → trust anchor
+    # This is a uniform model - no special case for "creator detection".
+    trust_anchor = safedb.query_one(
+        "SELECT 1 FROM trust_anchors WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    existing = safedb.query_one(
+        "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    already_valid = safedb.query_one(
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    if not trust_anchor and not existing and not already_valid:
+        log.warning(f"network.project() REJECTED - network_id={network_id[:20]}... not in trust_anchors")
+        return None
 
     # Get blob from store
     blob = store.get(network_id, unsafedb)

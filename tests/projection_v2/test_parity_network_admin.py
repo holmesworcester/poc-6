@@ -33,6 +33,15 @@ def _mark_valid(db: Database, recorded_by: str, event_id: str) -> None:
     )
 
 
+def _add_trust_anchor(db: Database, recorded_by: str, network_id: str, t_ms: int) -> None:
+    """Add trust anchor for network (required before network can project)."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
+        "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
+        (network_id, recorded_by, t_ms),
+    )
+
+
 def _build_network_event(t_ms: int) -> tuple[str, dict, bytes, bytes, bytes]:
     network_private_key, network_public_key = crypto.generate_keypair()
     event_data = {
@@ -75,11 +84,15 @@ def _build_admin_event(
 def _project_network_legacy(db: Database, recorded_by: str, recorded_at: int, blob: bytes, event_id: str) -> None:
     stored_id = _store_blob(db, blob, recorded_at)
     assert stored_id == event_id
+    # Trust anchor required before network can project (uniform model)
+    _add_trust_anchor(db, recorded_by, event_id, recorded_at)
     network_module.project(event_id, recorded_by, recorded_at, db)
     _mark_valid(db, recorded_by, event_id)
 
 
 def _project_network_v2(db: Database, recorded_by: str, recorded_at: int, event_id: str, event_data: dict) -> None:
+    # Trust anchor required before network can project (uniform model)
+    _add_trust_anchor(db, recorded_by, event_id, recorded_at)
     result = v2_resolver.resolve_event(
         ref_id=event_id,
         event_type='network',

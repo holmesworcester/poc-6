@@ -12,8 +12,8 @@ Key differences from scenario tests:
 
 Transport Architecture:
 - Each Client has a UDPSocket for real network I/O
-- Outgoing packets are intercepted via a transport callback and sent via UDP
-- Incoming UDP packets are fed to sync.unwrap_and_store()
+- Uses core.transport module for packet routing
+- Incoming UDP packets are fed to transport.deliver()
 - Peer addresses are mapped via peer_shared_id -> (host, port)
 """
 import pytest
@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 class UDPSocket:
     """Simple UDP socket wrapper for testing.
 
-    This is a minimal implementation for tests - the real one will be in core/net.py
+    This is a minimal implementation for tests - the real one is in core/udp.py
     """
     port: int
     host: str = '127.0.0.1'
@@ -112,8 +112,8 @@ class Client:
     Named 'Client' not 'TestClient' to avoid pytest collection.
 
     Transport Integration:
-    - Incoming UDP packets are fed to sync.unwrap_and_store()
-    - Outgoing packets are routed via UDP using the peer_addresses mapping
+    - Incoming UDP packets are fed to transport.deliver()
+    - Outgoing packets are routed via transport.send()
     - peer_addresses maps peer_shared_id -> (host, port)
     """
     name: str
@@ -138,15 +138,14 @@ class Client:
         self.network.add_peer(peer_shared_id, (host, port))
 
     def receive_udp_packets(self, t_ms: int) -> int:
-        """Move incoming UDP packets into this client's SQLite queue.
+        """Move incoming UDP packets into the transport incoming queue.
 
-        Drains the UDP socket's thread-safe buffer and INSERTs each packet
-        directly into this client's incoming_blobs table. The packets will
-        be processed by the sync_receive job during tick().
+        Drains the UDP socket's thread-safe buffer and calls transport.deliver()
+        for each packet. The packets will be processed by ReceiveJob during tick().
 
         Thread safety:
         - UDP recv thread puts packets into _incoming queue (thread-safe)
-        - This method runs on main thread, INSERTs into SQLite
+        - This method runs on main thread
         - No SQLite access from background thread
 
         Args:
@@ -155,18 +154,15 @@ class Client:
         Returns:
             Number of packets queued
         """
-        from core import queues
-        from core.db import create_unsafe_db
+        from core import transport
 
         packets = self.network.drain()
         if not packets:
             return 0
 
-        # INSERT into this client's SQLite queue (main thread - safe)
-        unsafedb = create_unsafe_db(self.db)
         for data, addr in packets:
-            queues.incoming.add_immediate(data, t_ms, unsafedb)
-            log.debug(f"Client {self.name}: queued UDP packet from {addr}")
+            transport.deliver(data, addr)
+            log.debug(f"Client {self.name}: delivered UDP packet from {addr}")
 
         return len(packets)
 
@@ -198,10 +194,10 @@ class Client:
         """
         from core import tick as tick_module
 
-        # Step 1: Process incoming UDP packets through sync
+        # Step 1: Process incoming UDP packets through transport
         self.receive_udp_packets(t_ms)
 
-        # Step 2: Run normal tick jobs (sync_receive, sync_send, etc.)
+        # Step 2: Run normal tick jobs (ReceiveJob will drain transport.incoming)
         tick_module.tick(t_ms=t_ms, db=self.db)
         self.db.commit()
 
@@ -259,9 +255,14 @@ def udp_port_allocator():
 @pytest.fixture
 def create_client(fresh_client_db, udp_port_allocator):
     """Factory to create test clients."""
+    from core import transport
+
     clients = []
 
     def _create(name: str) -> Client:
+        # Reset transport state for each test
+        transport.reset()
+
         db = fresh_client_db()
         port = udp_port_allocator()
         network = UDPSocket(port=port)
@@ -276,6 +277,9 @@ def create_client(fresh_client_db, udp_port_allocator):
     for client in clients:
         client.network.stop()
 
+    # Reset transport
+    transport.reset()
+
 
 def tick_all(*clients: Client, t_ms: int):
     """Tick all clients at the same timestamp."""
@@ -287,7 +291,7 @@ class UDPTransport:
     """Transport layer that routes packets via UDP between clients.
 
     This enables real network communication between test clients by:
-    1. Intercepting outgoing packets via the transport callback
+    1. Intercepting outgoing packets from transport._outgoing
     2. Looking up destination addresses by peer_shared_id
     3. Sending via UDP to the appropriate client
 
@@ -295,14 +299,16 @@ class UDPTransport:
         transport = UDPTransport()
         transport.register_client(alice)
         transport.register_client(bob)
-        transport.enable()  # Sets the global transport callback
+        transport.enable()  # Start routing
         ...
-        transport.disable()  # Clears the callback
+        transport.disable()  # Stop routing
     """
 
     def __init__(self):
         self.clients: dict[str, Client] = {}  # peer_shared_id -> Client
         self._enabled = False
+        self._routing_thread: Optional[threading.Thread] = None
+        self._running = False
 
     def register_client(self, client: Client):
         """Register a client for UDP routing.
@@ -325,54 +331,35 @@ class UDPTransport:
                 other_client.add_peer_address(client.peer_shared_id, client.network.host, client.network.port)
 
     def enable(self):
-        """Enable UDP routing by setting the transport callback."""
-        from core import queues
-        queues.set_transport_callback(self._transport_callback)
+        """Enable UDP routing."""
         self._enabled = True
         log.info("UDPTransport: enabled")
 
     def disable(self):
-        """Disable UDP routing by clearing the transport callback."""
-        from core import queues
-        queues.set_transport_callback(None)
+        """Disable UDP routing."""
         self._enabled = False
         log.info("UDPTransport: disabled")
 
-    def _transport_callback(self, blob: bytes, from_peer: str, to_peer: str, t_ms: int) -> bool:
-        """Transport callback that routes packets via UDP.
+    def route_outgoing(self):
+        """Route any pending outgoing packets via UDP.
 
-        Args:
-            blob: Packet data
-            from_peer: Source peer ID
-            to_peer: Destination peer_shared_id
-            t_ms: Timestamp
-
-        Returns:
-            True if packet was sent via UDP, False to use simulator
+        Should be called periodically or before checking received packets.
         """
-        # Find the destination client
-        dest_client = self.clients.get(to_peer)
-        if dest_client is None:
-            # Unknown destination - let simulator handle it
-            log.debug(f"UDPTransport: unknown dest {to_peer[:20] if to_peer else 'None'}..., using simulator")
-            return False
+        from core import transport
 
-        # Find the source client to send from
-        source_client = None
-        for client in self.clients.values():
-            if client.peer_id == from_peer or client.peer_shared_id == from_peer:
-                source_client = client
-                break
+        outgoing = transport.drain_outgoing(100)
+        for blob, from_addr, to_addr in outgoing:
+            # Find the source client
+            source_client = None
+            for client in self.clients.values():
+                if (client.network.host, client.network.port) == from_addr:
+                    source_client = client
+                    break
 
-        if source_client is None:
-            log.debug(f"UDPTransport: unknown source {from_peer[:20] if from_peer else 'None'}..., using simulator")
-            return False
-
-        # Send via UDP
-        dest_addr = (dest_client.network.host, dest_client.network.port)
-        source_client.network.send_to_addr(dest_addr, blob)
-        log.debug(f"UDPTransport: sent {len(blob)}B from {source_client.name} to {dest_client.name}")
-        return True
+            if source_client:
+                # Send via UDP
+                source_client.network.send_to_addr(to_addr, blob)
+                log.debug(f"UDPTransport: routed {len(blob)}B to {to_addr}")
 
 
 @pytest.fixture

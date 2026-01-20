@@ -214,9 +214,24 @@ def send_ack_for_request(
 
     wrapped = crypto.wrap(ack_blob, to_key, db)
 
-    from core import queues
-    # Pass peer IDs for NAT enforcement
-    queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=local_peer_id, to_peer=remote_peer_shared_id)
+    from core import transport
+    from events.network.connection_request import get_address_for_peer
+
+    # Try to look up destination address
+    to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db) if remote_peer_shared_id else None
+    if not to_addr and remote_peer_shared_id:
+        to_addr = transport.get_peer_address(remote_peer_shared_id)
+
+    if to_addr:
+        # Real networking - send via transport with addresses
+        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+        transport.send(wrapped, from_addr, to_addr)
+        log.info(f"connection_ack.send_ack_for_request: sent via transport to {to_addr}")
+    else:
+        # Loopback mode - deliver directly to incoming queue
+        from_addr = ('127.0.0.1', 0)
+        transport.deliver(wrapped, from_addr)
+        log.debug(f"connection_ack.send_ack_for_request: sent via loopback")
 
     # Remove from pending requests since we successfully acked
     safedb.execute(

@@ -58,7 +58,20 @@ def v2_network_state(v2_db):
     }
     signed_event = crypto.sign_event(event_data, network_private_key)
     blob = crypto.canonicalize_json(signed_event)
-    network_id = store.event(blob, peer_id, 1000, db)
+
+    # Compute network_id before storing (needed for trust anchor)
+    network_id = crypto.b64encode(crypto.hash(blob))
+
+    # Trust anchor required before network can project (uniform model)
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    safedb.execute(
+        "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
+        (network_id, peer_id, 1000)
+    )
+
+    # Now store and project
+    stored_id = store.event(blob, peer_id, 1000, db)
+    assert stored_id == network_id
 
     db.commit()
 

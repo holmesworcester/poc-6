@@ -214,6 +214,28 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     event_type = event_data.get('type')
     projected_id = None
 
+    # TRUST ANCHOR ENFORCEMENT for network events
+    # Trust anchors are inserted by invite_accepted.project() for ALL cases:
+    # - Creator: self-invites via peer_shared.join() → invite_accepted → trust anchor
+    # - Joiner: accepts invite → invite_accepted → trust anchor
+    # This is a uniform model - no special case for "creator detection".
+    if event_type == 'network':
+        trust_anchor = safedb.query_one(
+            "SELECT 1 FROM trust_anchors WHERE network_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        existing = safedb.query_one(
+            "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        already_valid = safedb.query_one(
+            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        if not trust_anchor and not existing and not already_valid:
+            log.warning(f"[TRUST_ANCHOR] Rejecting network {ref_id[:20]}... - not trusted by {recorded_by[:20]}...")
+            return [None, recorded_id]
+
     project_pure_fn = registry.get_project_pure_fn(event_type) if event_type else None
     event_spec = registry.get_event_spec(event_type) if event_type else None
 
@@ -370,7 +392,38 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
                     "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
                     (network_id, recorded_by, recorded_at)
                 )
-                log.warning(f"[INVITE_ACCEPTED_V2] stored network_id={network_id[:20]}... in trust_anchors (will validate on arrival)")
+                log.warning(f"[INVITE_ACCEPTED_V2] stored network_id={network_id[:20]}... in trust_anchors")
+
+                # Uniform trust anchor model: Now that trust anchor exists, project network if blob is in store
+                # This handles both creator (network.create() stored blob) and joiner (sync delivered blob)
+                from events.identity import network as network_module
+                network_blob = store.get(network_id, unsafedb)
+                if network_blob:
+                    # Check if already projected
+                    already_projected = safedb.query_one(
+                        "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
+                        (network_id, recorded_by)
+                    )
+                    if not already_projected:
+                        result = network_module.project(network_id, recorded_by, recorded_at, db)
+                        if result:
+                            log.warning(f"[INVITE_ACCEPTED_V2] projected network event {network_id[:20]}...")
+                            # Mark network as valid
+                            safedb.execute(
+                                "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+                                (network_id, recorded_by)
+                            )
+                            # CRITICAL: Notify blocked queue to unblock events waiting on network
+                            # This triggers the cascade: network -> invite -> user -> peer_shared
+                            unblocked_by_network = queues.blocked.notify_event_valid(network_id, recorded_by, safedb)
+                            if unblocked_by_network:
+                                log.warning(f"[INVITE_ACCEPTED_V2] unblocked {len(unblocked_by_network)} events after network became valid")
+                                # Re-project unblocked events recursively
+                                project_ids(unblocked_by_network, db)
+                        else:
+                            log.warning(f"[INVITE_ACCEPTED_V2] network projection failed for {network_id[:20]}...")
+                    else:
+                        log.warning(f"[INVITE_ACCEPTED_V2] network already projected {network_id[:20]}...")
             else:
                 # No network_id in invite_link_data - this should not happen anymore
                 # All invite types (user and peer) should include network_id for proper trust anchoring

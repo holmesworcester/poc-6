@@ -43,6 +43,29 @@ EVENT_SPEC = {
 }
 
 
+def get_address_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> tuple[str, int] | None:
+    """Look up last known address for a peer from connections table.
+
+    Args:
+        peer_shared_id: Peer's shared ID to look up
+        recorded_by: Local peer's ID (for scoped lookup)
+        db: Database connection
+
+    Returns:
+        (ip, port) tuple or None if no address known
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one("""
+        SELECT from_addr_ip, from_addr_port FROM connections
+        WHERE peer_shared_id = ? AND recorded_by = ?
+          AND from_addr_ip IS NOT NULL
+        ORDER BY last_handshake_ms DESC LIMIT 1
+    """, (peer_shared_id, recorded_by))
+    if row and row['from_addr_ip']:
+        return (row['from_addr_ip'], row['from_addr_port'])
+    return None
+
+
 def create(
     to_peer_shared_id: str | None,
     from_peer_id: str,
@@ -289,7 +312,26 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
 
     symmetric_key = crypto.b64decode(key_b64)
 
-    log.info(f"connection_request.project: storing {event_id[:20]}... from {remote_peer_shared_id[:20] if remote_peer_shared_id else remote_invite_id[:20] if remote_invite_id else 'unknown'}...")
+    # Look up from_addr from packet_metadata staging table
+    from_addr_row = safedb.query_one("""
+        SELECT from_addr_ip, from_addr_port FROM packet_metadata
+        WHERE event_id = ? AND recorded_by = ?
+    """, (event_id, recorded_by))
+    from_addr_ip = from_addr_row['from_addr_ip'] if from_addr_row else None
+    from_addr_port = from_addr_row['from_addr_port'] if from_addr_row else None
+
+    if from_addr_ip:
+        log.info(f"connection_request.project: received {event_id[:20]}... from {remote_peer_shared_id[:20] if remote_peer_shared_id else remote_invite_id[:20] if remote_invite_id else 'unknown'}... at {from_addr_ip}:{from_addr_port}")
+    else:
+        log.info(f"connection_request.project: received {event_id[:20]}... from {remote_peer_shared_id[:20] if remote_peer_shared_id else remote_invite_id[:20] if remote_invite_id else 'unknown'}...")
+
+    # Update address for existing connection if we have one for this peer
+    if remote_peer_shared_id and from_addr_ip:
+        safedb.execute("""
+            UPDATE connections
+            SET from_addr_ip = ?, from_addr_port = ?
+            WHERE peer_shared_id = ? AND recorded_by = ?
+        """, (from_addr_ip, from_addr_port, remote_peer_shared_id, recorded_by))
 
     # Store in pending_connection_requests
     safedb.execute("""
@@ -307,12 +349,207 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     return event_id
 
 
+def _project_ack(
+    event_id: str,
+    event_data: dict,
+    recorded_by: str,
+    recorded_at: int,
+    safedb: Any,
+    unsafedb: Any,
+    db: Any
+) -> str | None:
+    """Project a connection acknowledgement (mode=ack)."""
+    for_connection_id = event_data.get('for_connection_id')
+    peer_shared_id = event_data.get('signed_by')
+    key_b64 = event_data.get('key')
+
+    if not for_connection_id:
+        log.warning(f"connection.project: ack {event_id[:20]}... missing for_connection_id")
+        return None
+
+    if not key_b64:
+        log.warning(f"connection.project: ack {event_id[:20]}... missing key")
+        return None
+
+    their_key = crypto.b64decode(key_b64)
+
+    # Find the original request we sent
+    existing = safedb.query_one("""
+        SELECT connection_id FROM connections
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (for_connection_id, recorded_by))
+
+    if not existing:
+        log.warning(f"connection.project: no matching request for ack {event_id[:20]}... (for_connection_id={for_connection_id[:20]}...)")
+        return None
+
+    # Look up from_addr from packet_metadata staging table
+    from_addr_row = safedb.query_one("""
+        SELECT from_addr_ip, from_addr_port FROM packet_metadata
+        WHERE event_id = ? AND recorded_by = ?
+    """, (event_id, recorded_by))
+    from_addr_ip = from_addr_row['from_addr_ip'] if from_addr_row else None
+    from_addr_port = from_addr_row['from_addr_port'] if from_addr_row else None
+
+    # Update connection with their info + address
+    safedb.execute("""
+        UPDATE connections
+        SET their_connection_id = ?,
+            their_key = ?,
+            peer_shared_id = COALESCE(peer_shared_id, ?),
+            last_handshake_ms = ?,
+            from_addr_ip = COALESCE(?, from_addr_ip),
+            from_addr_port = COALESCE(?, from_addr_port)
+        WHERE connection_id = ? AND recorded_by = ?
+    """, (
+        event_id, their_key, peer_shared_id,
+        recorded_at, from_addr_ip, from_addr_port,
+        for_connection_id, recorded_by
+    ))
+
+    if from_addr_ip:
+        log.info(f"connection.project: activated connection {for_connection_id[:20]}... with ack {event_id[:20]}... at {from_addr_ip}:{from_addr_port}")
+    else:
+        log.info(f"connection.project: activated connection {for_connection_id[:20]}... with ack {event_id[:20]}...")
+
+    return event_id
+
+
+def _send_ack_for_request(
+    request_id: str,
+    remote_peer_shared_id: str | None,
+    their_key: bytes,
+    local_peer_id: str,
+    t_ms: int,
+    db: Any
+) -> None:
+    """Send connection ack in response to a request."""
+    from core.db import create_safe_db
+
+    safedb = create_safe_db(db, recorded_by=local_peer_id)
+
+    # Get our peer_shared_id
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (local_peer_id, local_peer_id)
+    )
+    if not peer_self_row:
+        log.warning(f"connection._send_ack: no peer_shared_id for {local_peer_id[:20]}...")
+        return
+
+    local_peer_shared_id = peer_self_row['peer_shared_id']
+
+    # Check if we already have a connection to this peer (from our own request)
+    # If so, update it instead of creating a new one
+    existing = safedb.query_one("""
+        SELECT connection_id, our_key FROM connections
+        WHERE peer_shared_id = ? AND recorded_by = ?
+        ORDER BY created_at DESC LIMIT 1
+    """, (remote_peer_shared_id, local_peer_id))
+
+    if existing:
+        # Update existing connection with their key
+        safedb.execute("""
+            UPDATE connections
+            SET their_key = ?,
+                their_connection_id = ?,
+                last_handshake_ms = ?
+            WHERE connection_id = ? AND recorded_by = ?
+        """, (their_key, request_id, t_ms, existing['connection_id'], local_peer_id))
+
+        # Create and send ack using our existing key
+        ack_id, _ = create_ack(
+            for_connection_id=request_id,
+            from_peer_id=local_peer_id,
+            from_peer_shared_id=local_peer_shared_id,
+            t_ms=t_ms,
+            db=db
+        )
+
+        # Wrap ack with their symmetric key and send via transport
+        unsafedb = create_unsafe_db(db)
+        ack_blob = store.get(ack_id, unsafedb)
+        to_key = {
+            'id': crypto.b64decode(request_id)[:16],
+            'key': their_key,
+            'type': 'symmetric'
+        }
+        wrapped = crypto.wrap(ack_blob, to_key, db)
+
+        from core import transport
+        # Try to look up destination address
+        to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
+        if not to_addr:
+            to_addr = transport.get_peer_address(remote_peer_shared_id)
+
+        if to_addr:
+            from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+            transport.send(wrapped, from_addr, to_addr)
+        else:
+            transport.deliver(wrapped, ('127.0.0.1', 0))
+
+        log.info(f"connection._send_ack: updated existing connection and sent ack {ack_id[:20]}... for request {request_id[:20]}...")
+        return
+
+    # No existing connection - create new one
+    ack_id, ack_key = create_ack(
+        for_connection_id=request_id,
+        from_peer_id=local_peer_id,
+        from_peer_shared_id=local_peer_shared_id,
+        t_ms=t_ms,
+        db=db
+    )
+
+    # Store our outgoing connection (we're the one who received the request)
+    # Our connection_id is the ack_id, their_connection_id is the request_id
+    safedb.execute("""
+        INSERT OR REPLACE INTO connections (
+            connection_id, recorded_by, peer_shared_id, invite_id,
+            our_key, their_connection_id, their_key,
+            created_at, last_handshake_ms, ttl_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        ack_id, local_peer_id, remote_peer_shared_id, None,
+        ack_key, request_id, their_key,
+        t_ms, t_ms, CONNECTION_TTL_MS
+    ))
+
+    # Wrap ack with their symmetric key and send via transport
+    unsafedb = create_unsafe_db(db)
+    ack_blob = store.get(ack_id, unsafedb)
+
+    to_key = {
+        'id': crypto.b64decode(request_id)[:16],  # Use request_id as hint
+        'key': their_key,
+        'type': 'symmetric'
+    }
+
+    wrapped = crypto.wrap(ack_blob, to_key, db)
+
+    from core import transport
+    # Try to look up destination address
+    to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
+    if not to_addr:
+        to_addr = transport.get_peer_address(remote_peer_shared_id)
+
+    if to_addr:
+        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+        transport.send(wrapped, from_addr, to_addr)
+    else:
+        transport.deliver(wrapped, ('127.0.0.1', 0))
+
+    log.info(f"connection._send_ack: sent ack {ack_id[:20]}... for request {request_id[:20]}...")
+
+
 # ============================================================================
 # Connection management functions (moved from utility connection.py)
 # ============================================================================
 
 from dataclasses import dataclass
 
+# ============================================================================
+# Connection dataclass and display helpers
+# ============================================================================
 
 @dataclass
 class Connection:
@@ -650,16 +887,28 @@ def _send_request(
         log.warning(f"connection_request._send_request: no prekey for {to_peer_shared_id[:20]}...")
         return
 
-    # Wrap and queue
+    # Wrap and send via transport
     unsafedb = create_unsafe_db(db)
     request_blob = store.get(connection_id, unsafedb)
     wrapped = crypto.wrap(request_blob, to_key, db)
 
-    from core import queues
-    # Pass peer IDs for NAT enforcement
-    queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=from_peer_id, to_peer=to_peer_shared_id)
+    from core import transport
 
-    log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}...")
+    # Try to look up destination address
+    to_addr = get_address_for_peer(to_peer_shared_id, from_peer_id, db)
+    if not to_addr:
+        to_addr = transport.get_peer_address(to_peer_shared_id)
+
+    if to_addr:
+        # Real networking - send via transport with addresses
+        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+        transport.send(wrapped, from_addr, to_addr)
+        log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
+    else:
+        # Loopback mode - deliver directly to incoming queue
+        from_addr = ('127.0.0.1', 0)
+        transport.deliver(wrapped, from_addr)
+        log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... (loopback)")
 
 
 def purge_expired(t_ms: int, db: Any) -> int:
@@ -882,13 +1131,13 @@ def get_address_by_peer(peer_shared_id: str, recorded_by: str, db: Any) -> tuple
 
     # Priority 1: Check connections with learned addresses
     conn = safedb.query_one("""
-        SELECT peer_ip, peer_port FROM connections
-        WHERE peer_shared_id = ? AND recorded_by = ? AND peer_ip IS NOT NULL
-        ORDER BY address_learned_ms DESC LIMIT 1
+        SELECT from_addr_ip, from_addr_port FROM connections
+        WHERE peer_shared_id = ? AND recorded_by = ? AND from_addr_ip IS NOT NULL
+        ORDER BY last_handshake_ms DESC LIMIT 1
     """, (peer_shared_id, recorded_by))
 
-    if conn and conn['peer_ip']:
-        return (conn['peer_ip'], conn['peer_port'])
+    if conn and conn['from_addr_ip']:
+        return (conn['from_addr_ip'], conn['from_addr_port'])
 
     # Priority 2: Check pending_connection_requests (source address from incoming packets)
     pending = safedb.query_one("""
@@ -1160,10 +1409,17 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
 
     wrapped = crypto.wrap(blob, to_key, db)
 
-    unsafedb = create_unsafe_db(db)
-    from core import queues
-    # Pass peer IDs for NAT enforcement
-    queues.incoming.add(wrapped, t_ms, unsafedb, from_peer=recorded_by, to_peer=to_peer_shared_id)
+    from core import transport
+    # Try to look up destination address
+    to_addr = get_address_for_peer(to_peer_shared_id, recorded_by, db)
+    if not to_addr:
+        to_addr = transport.get_peer_address(to_peer_shared_id)
+
+    if to_addr:
+        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+        transport.send(wrapped, from_addr, to_addr)
+    else:
+        transport.deliver(wrapped, ('127.0.0.1', 0))
 
     log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}...")
     return True
