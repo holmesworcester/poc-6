@@ -843,7 +843,7 @@ def _log_checkpoint(
     safedb.execute("""
         UPDATE connections
         SET last_synced_root_hash = ?
-        WHERE connection_id = ? AND recorded_by = ?
+        WHERE key_id = ? AND recorded_by = ?
     """, (root_hash, connection_id, recorded_by))
 
 
@@ -1000,7 +1000,7 @@ def sync_connection(
     Args:
         db: Database connection
         recorded_by: Local peer ID
-        conn: Connection object (must have their_connection_id set)
+        conn: Connection object (must have their_key_id set)
         t_ms: Current timestamp
 
     Returns:
@@ -1008,19 +1008,19 @@ def sync_connection(
     """
     from events.network import connection_request as conn_module
 
-    msgs = init_sync_for_connection(db, recorded_by, conn.connection_id, t_ms)
+    msgs = init_sync_for_connection(db, recorded_by, conn.key_id, t_ms)
     sent = 0
     for msg in msgs:
         # Wrap in negentropy envelope for ephemeral detection
-        # Include reply_connection_id so receiver knows which connection_id to use
+        # Include reply_key_id so receiver knows which key_id to use
         envelope = {
             'type': 'negentropy',
-            'connection_id': conn.connection_id,
-            'reply_connection_id': conn.their_connection_id,  # Receiver's connection_id
+            'connection_id': conn.key_id,
+            'reply_connection_id': conn.their_key_id,  # Receiver's key_id
             'data': msg,
         }
         blob = crypto.canonicalize_json(envelope)
-        if conn_module.send(recorded_by, conn.connection_id, blob, t_ms, db):
+        if conn_module.send(recorded_by, conn.key_id, blob, t_ms, db):
             sent += 1
     return sent
 
@@ -1189,7 +1189,7 @@ def get_all_connection_sync_status(db, recorded_by: str, t_ms: int) -> dict:
 
     # Get active bidirectional connections (their_key is not NULL = bidirectional)
     rows = safedb.query("""
-        SELECT connection_id, peer_shared_id
+        SELECT key_id, peer_shared_id
         FROM connections
         WHERE recorded_by = ?
           AND last_handshake_ms + ttl_ms > ?
@@ -1201,7 +1201,7 @@ def get_all_connection_sync_status(db, recorded_by: str, t_ms: int) -> dict:
     synced_count = 0
 
     for row in rows:
-        conn_id = row['connection_id']
+        conn_id = row['key_id']
         status = get_sync_status(db, recorded_by, conn_id)
 
         conn_info = {

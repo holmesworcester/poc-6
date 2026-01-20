@@ -59,7 +59,7 @@ SUBJECTIVE_TABLES = {
     'message_reactions',           # Message reactions (peer-scoped)
     'message_reaction_deletions',  # Message reaction deletions (peer-scoped)
     'message_updates',             # Message updates/edits (peer-scoped)
-    'connections',                 # Peer connections (peer-scoped, keyed by connection_id + recorded_by)
+    'connections',                 # Peer connections (peer-scoped, keyed by key_id + recorded_by)
     'pending_connection_requests', # Pending acks for incoming connection requests (peer-scoped)
     'packet_metadata',             # Packet metadata staging for from_addr (peer-scoped)
     'negentropy_buckets',          # Negentropy sync: bucket hashes (peer-scoped)

@@ -127,13 +127,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
             op='update',
             table='connections',
             values={
-                'their_connection_id': event_id,
+                'their_key_id': event_id,
                 'their_key': their_key,
                 'peer_shared_id': peer_shared_id,
                 'last_handshake_ms': recorded_at,
             },
             where={
-                'connection_id': for_request_id,
+                'key_id': for_request_id,
                 'recorded_by': recorded_by,
             },
         ),
@@ -189,13 +189,13 @@ def send_ack_for_request(
     )
 
     # Store our outgoing connection (we're the one who received the request)
-    # Our connection_id is the ack_id, their_connection_id is the request_id
+    # Our key_id is the ack_id, their_key_id is the request_id
     # In bootstrap mode: peer_shared_id is NULL, invite_id is set
     # In normal mode: peer_shared_id is set, invite_id is NULL
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
-            connection_id, recorded_by, peer_shared_id, invite_id,
-            our_key, their_connection_id, their_key,
+            key_id, recorded_by, peer_shared_id, invite_id,
+            our_key, their_key_id, their_key,
             created_at, last_handshake_ms, ttl_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
@@ -209,7 +209,7 @@ def send_ack_for_request(
     ack_blob = store.get(ack_id, unsafedb)
 
     to_key = {
-        'id': crypto.b64decode(request_id),  # Use request_id as hint
+        'id': crypto.b64decode(request_id),  # Use request_id (their_key_id) as hint
         'key': their_key,
         'type': 'symmetric'
     }
@@ -271,10 +271,10 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"connection_ack.project: missing key in {event_id[:20]}...")
         return None
 
-    # Validation: Must reference a connection we created
+    # Validation: Must reference a connection we created (for_request_id is our key_id)
     existing = safedb.query_one("""
-        SELECT connection_id FROM connections
-        WHERE connection_id = ? AND recorded_by = ?
+        SELECT key_id FROM connections
+        WHERE key_id = ? AND recorded_by = ?
     """, (for_request_id, recorded_by))
 
     if not existing:
@@ -292,11 +292,11 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     # Update connection with their info
     safedb.execute("""
         UPDATE connections
-        SET their_connection_id = ?,
+        SET their_key_id = ?,
             their_key = ?,
             peer_shared_id = COALESCE(peer_shared_id, ?),
             last_handshake_ms = ?
-        WHERE connection_id = ? AND recorded_by = ?
+        WHERE key_id = ? AND recorded_by = ?
     """, (
         event_id, their_key, peer_shared_id,
         recorded_at, for_request_id, recorded_by

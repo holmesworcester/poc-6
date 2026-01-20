@@ -144,11 +144,11 @@ def test_device_link_debug(device_link_debug_clients):
         if i % 20 == 0:
             # Check connections
             phone_conns = phone_safedb.query(
-                "SELECT peer_shared_id, their_connection_id FROM connections WHERE recorded_by = ?",
+                "SELECT peer_shared_id, their_key_id FROM connections WHERE recorded_by = ?",
                 (alice_phone.peer_id,)
             )
             laptop_conns = laptop_safedb.query(
-                "SELECT peer_shared_id, their_connection_id FROM connections WHERE recorded_by = ?",
+                "SELECT peer_shared_id, their_key_id FROM connections WHERE recorded_by = ?",
                 (alice_laptop.peer_id,)
             )
             print(f"Tick {i}: Phone connections={len(phone_conns)}, Laptop connections={len(laptop_conns)}")

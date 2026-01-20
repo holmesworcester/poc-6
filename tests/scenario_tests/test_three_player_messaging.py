@@ -14,6 +14,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer
 from events.content import message
+from events.network import connection_request as conn_module
 from tests.utils.tick_helper import run_ticks, assert_eventually
 from core import tick
 
@@ -79,10 +80,11 @@ def test_three_player_messaging(fresh_db):
     for qw in sorted(by_qw.keys()):
         print(f"  QW {qw}: {len(by_qw[qw])} events")
 
-    # Check connections BEFORE sync
+    # Check connections BEFORE sync (use API)
     print("\n=== Connections BEFORE sync ===")
-    connections_before = db.query("SELECT connection_id FROM connections")
-    print(f"Device has {len(connections_before)} connections before sync")
+    alice_conns_before = conn_module.get_connections(alice['peer_id'], 3500, db)
+    bob_conns_before = conn_module.get_connections(bob['peer_id'], 3500, db)
+    print(f"Alice has {len(alice_conns_before)} connections, Bob has {len(bob_conns_before)} connections before sync")
 
     # Initial sync - run enough ticks for random window selection to cover all 16 windows
     # With w=4 (16 windows), we need ~100 rounds to have high probability of hitting all windows
@@ -90,20 +92,21 @@ def test_three_player_messaging(fresh_db):
     final_t_ms = run_ticks(db=db, start_t_ms=4000, num_rounds=100)
     print(f"Initial sync completed")
 
-    # Check connections AFTER sync
+    # Check connections AFTER sync (use API)
     print("\n=== Connections AFTER sync ===")
-    connections_after = db.query("SELECT connection_id, recorded_by, peer_shared_id FROM connections")
-    print(f"Device has {len(connections_after)} connections after sync")
-    for c in connections_after:
-        peer_label = c['peer_shared_id'] or 'unknown'
-        print(f"  Connection: {c['connection_id'][:20]}... for peer: {peer_label[:20] if peer_label != 'unknown' else peer_label}...")
+    alice_conns_after = conn_module.get_connections(alice['peer_id'], final_t_ms, db)
+    bob_conns_after = conn_module.get_connections(bob['peer_id'], final_t_ms, db)
+    print(f"Alice has {len(alice_conns_after)} connections, Bob has {len(bob_conns_after)} connections after sync")
+    for c in alice_conns_after + bob_conns_after:
+        peer_label = c.peer_shared_id or 'unknown'
+        print(f"  Connection: {c.key_id[:20]}... for peer: {peer_label[:20] if peer_label != 'unknown' else peer_label}...")
 
-    # Assert connections were established (at least 2 - Alice<->Bob bidirectional)
-    assert len(connections_after) >= 1, "At least one connection should be established after sync"
+    # Assert connections were established (at least 1 per peer)
+    assert len(alice_conns_after) >= 1, "Alice should have at least one connection after sync"
+    assert len(bob_conns_after) >= 1, "Bob should have at least one connection after sync"
 
     # Test connection listing API (CLI display)
     print("\n=== Testing Connection Listing API ===")
-    from events.network import connection_request as conn_module
 
     # Test Alice's connections
     alice_conns = conn_module.list_all_for_display(alice['peer_id'], final_t_ms, db)
@@ -126,9 +129,9 @@ def test_three_player_messaging(fresh_db):
 
     # Verify connection details are populated
     for conn in alice_conns['active']:
-        print(f"  Active: peer={conn.peer_shared_id[:20] if conn.peer_shared_id else 'None'}... conn_id={conn.connection_id[:16]}...")
+        print(f"  Active: peer={conn.peer_shared_id[:20] if conn.peer_shared_id else 'None'}... key_id={conn.key_id[:16]}...")
         assert conn.their_key is not None, "Active connection should have their_key"
-        assert conn.their_connection_id is not None, "Active connection should have their_connection_id"
+        assert conn.their_key_id is not None, "Active connection should have their_key_id"
 
     # Assert Alice has at least one active connection
     assert len(alice_conns['active']) >= 1, "Alice should have at least 1 active connection after sync"

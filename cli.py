@@ -1981,8 +1981,8 @@ def cmd_connections(session: CLISession, verbose: bool = False):
             time_ago = connection_request.format_time_ago(conn.time_since_handshake(session.current_time_ms))
             if verbose:
                 print(f"  #{idx} ACTIVE: {conn.short_label}")
-                print(f"       connection_id:       {conn.connection_id[:20]}...")
-                print(f"       their_connection_id: {conn.their_connection_id[:20] if conn.their_connection_id else 'NULL'}...")
+                print(f"       key_id:       {conn.key_id[:20]}...")
+                print(f"       their_key_id: {conn.their_key_id[:20] if conn.their_key_id else 'NULL'}...")
                 if conn.peer_shared_id:
                     print(f"       peer_shared_id:      {conn.peer_shared_id[:20]}...")
                 if conn.invite_id:
@@ -1993,7 +1993,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
                 print()
             else:
                 label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
-                print(f"  {idx}. {label}...    conn: {conn.short_connection_id}    handshake {time_ago}")
+                print(f"  {idx}. {label}...    conn: {conn.short_key_id}    handshake {time_ago}")
             idx += 1
         print()
 
@@ -2004,7 +2004,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
             time_ago = connection_request.format_time_ago(conn.time_since_handshake(session.current_time_ms))
             if verbose:
                 print(f"  #{idx} PENDING: {conn.short_label}")
-                print(f"       connection_id:       {conn.connection_id[:20]}...")
+                print(f"       key_id:       {conn.key_id[:20]}...")
                 if conn.peer_shared_id:
                     print(f"       to_peer_shared_id:   {conn.peer_shared_id[:20]}...")
                 if conn.invite_id:
@@ -2014,7 +2014,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
                 print()
             else:
                 label = conn.peer_shared_id[:8] if conn.peer_shared_id else conn.invite_id[:8] if conn.invite_id else "???"
-                print(f"  {idx}. → {label}...    conn: {conn.short_connection_id}    sent {time_ago}")
+                print(f"  {idx}. → {label}...    conn: {conn.short_key_id}    sent {time_ago}")
             idx += 1
         print()
 
@@ -2032,9 +2032,9 @@ def cmd_connections(session: CLISession, verbose: bool = False):
 
             if verbose:
                 print(f"  #{idx} BOOTSTRAP: {role_label}")
-                print(f"       connection_id:       {conn.connection_id[:20]}...")
-                if conn.their_connection_id:
-                    print(f"       their_connection_id: {conn.their_connection_id[:20]}...")
+                print(f"       key_id:       {conn.key_id[:20]}...")
+                if conn.their_key_id:
+                    print(f"       their_key_id: {conn.their_key_id[:20]}...")
                 if conn.invite_id:
                     print(f"       invite_id:           {conn.invite_id[:20]}...")
                 print(f"       last_handshake:      {time_ago}")
@@ -2042,7 +2042,7 @@ def cmd_connections(session: CLISession, verbose: bool = False):
                 print(f"       expires:             {connection_request.format_time_remaining(conn.time_until_expiry(session.current_time_ms))}")
                 print()
             else:
-                print(f"  {idx}. {role_label:24}    conn: {conn.short_connection_id}    handshake {time_ago}")
+                print(f"  {idx}. {role_label:24}    conn: {conn.short_key_id}    handshake {time_ago}")
             idx += 1
         print()
 

@@ -31,24 +31,17 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         List of peer_ids who can decrypt this blob (empty if no keys found)
     """
 
-    hint = blob[:crypto.KEY_ID_SIZE]
-    hint_b64 = crypto.b64encode(hint)
+    key_id = blob[:crypto.KEY_ID_SIZE]
+    key_id_b64 = crypto.b64encode(key_id)
 
     # Try connections first (symmetric keys from connection handshake)
-    # The hint is first KEY_ID_SIZE bytes of connection_id
+    # Direct indexed lookup by key_id column
     try:
         cursor = db._conn.execute(
-            "SELECT DISTINCT connection_id, recorded_by FROM connections"
+            "SELECT DISTINCT recorded_by FROM connections WHERE key_id = ?",
+            (key_id_b64,)
         )
-        recorded_by_peers = []
-        for row in cursor.fetchall():
-            conn_id = row[0]
-            try:
-                conn_id_bytes = crypto.b64decode(conn_id)
-                if conn_id_bytes[:crypto.KEY_ID_SIZE] == hint:
-                    recorded_by_peers.append(row[1])
-            except Exception:
-                continue
+        recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
             log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via connection")
             return recorded_by_peers
@@ -56,11 +49,11 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
     # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
-    # Hint is KEY_ID_SIZE bytes, matches connection_prekey_id
+    # key_id is KEY_ID_SIZE bytes, matches connection_prekey_id
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT owner_peer_id FROM connection_prekeys WHERE connection_prekey_id = ?",
-            (hint_b64,)
+            (key_id_b64,)
         )
         recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
@@ -231,7 +224,7 @@ def _update_connection_request_addresses(event_source_addresses: dict, t_ms: int
             safedb.execute("""
                 UPDATE connections
                 SET peer_ip = ?, peer_port = ?, address_source = 'packet', address_learned_ms = ?
-                WHERE connection_id = ? AND recorded_by = ? AND peer_ip IS NULL
+                WHERE key_id = ? AND recorded_by = ? AND peer_ip IS NULL
             """, (source_ip, source_port, t_ms, event_id, peer_id))
 
     log.debug(f"_update_connection_request_addresses: updated {len(event_source_addresses)} events")

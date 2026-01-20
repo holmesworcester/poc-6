@@ -240,7 +240,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     """Get transit decryption key. Only checks LOCAL key tables with our private keys.
 
     Checks:
-    - connections WHERE our_key and connection_id hint matches
+    - connections WHERE our_key and key_id matches
     - connection_prekeys WHERE owner_peer_id == recorded_by
     - local_peers.private_key WHERE peer_id == recorded_by
 
@@ -293,27 +293,20 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
             }
 
     # Check connections table (symmetric keys from connection handshake)
-    # The hint is first 16 bytes of connection_id hash, so we need to compare
+    # key_id IS the connection identifier - direct indexed lookup
     from .db import create_safe_db
     safedb = create_safe_db(db, recorded_by=recorded_by)
-    conn_rows = safedb.query(
-        "SELECT connection_id, our_key FROM connections WHERE recorded_by = ?",
-        (recorded_by,)
+    conn_row = safedb.query_one(
+        "SELECT our_key FROM connections WHERE key_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
     )
-    for conn_row in conn_rows:
-        conn_id = conn_row['connection_id']
-        # Decode connection_id, compare first KEY_ID_SIZE bytes with id_bytes
-        try:
-            conn_id_bytes = b64decode(conn_id)
-            if conn_id_bytes[:KEY_ID_SIZE] == id_bytes:
-                log.debug(f"get_transit_key_by_id() found connection key for connection_id={conn_id[:20]}...")
-                return {
-                    'id': id_bytes,
-                    'key': conn_row['our_key'],
-                    'type': 'symmetric'
-                }
-        except Exception:
-            continue
+    if conn_row:
+        log.debug(f"get_transit_key_by_id() found connection key for key_id={key_id[:20]}...")
+        return {
+            'id': id_bytes,
+            'key': conn_row['our_key'],
+            'type': 'symmetric'
+        }
 
     log.debug(f"get_transit_key_by_id() NO KEY FOUND for key_id={key_id}, recorded_by={recorded_by[:20]}...")
     return None
@@ -398,24 +391,19 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
     log.debug(f"get_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
     # First try connections table (symmetric keys from connection handshake)
+    # key_id IS the connection identifier - direct indexed lookup
     safedb = create_safe_db(db, recorded_by=recorded_by)
-    conn_rows = safedb.query(
-        "SELECT connection_id, our_key FROM connections WHERE recorded_by = ?",
-        (recorded_by,)
+    conn_row = safedb.query_one(
+        "SELECT our_key FROM connections WHERE key_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
     )
-    for conn_row in conn_rows:
-        conn_id = conn_row['connection_id']
-        try:
-            conn_id_bytes = b64decode(conn_id)
-            if conn_id_bytes[:KEY_ID_SIZE] == id_bytes:
-                log.debug(f"get_key_by_id() found connection key for connection_id={conn_id[:20]}...")
-                return {
-                    'id': id_bytes,
-                    'key': conn_row['our_key'],
-                    'type': 'symmetric'
-                }
-        except Exception:
-            continue
+    if conn_row:
+        log.debug(f"get_key_by_id() found connection key for key_id={key_id[:20]}...")
+        return {
+            'id': id_bytes,
+            'key': conn_row['our_key'],
+            'type': 'symmetric'
+        }
 
     # Then try group keys table (subjective)
     safedb = create_safe_db(db, recorded_by=recorded_by)

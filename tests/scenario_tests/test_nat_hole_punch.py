@@ -478,11 +478,11 @@ def test_full_nat_hole_punch_integration(fresh_db):
         bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
         charlie_safedb = create_safe_db(db, recorded_by=charlie['peer_id'])
         bob_connections = bob_safedb.query(
-            "SELECT connection_id FROM connections WHERE recorded_by = ?",
+            "SELECT key_id FROM connections WHERE recorded_by = ?",
             (bob['peer_id'],)
         )
         charlie_connections = charlie_safedb.query(
-            "SELECT connection_id FROM connections WHERE recorded_by = ?",
+            "SELECT key_id FROM connections WHERE recorded_by = ?",
             (charlie['peer_id'],)
         )
         print(f"Bob connections: {len(bob_connections)}")
