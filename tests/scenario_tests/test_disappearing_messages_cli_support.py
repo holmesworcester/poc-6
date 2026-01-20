@@ -142,7 +142,7 @@ def test_channel_update_turn_off_disappearing(fresh_db):
         db=db,
         new_disappearing_time_ms=0
     )
-    channel_update.project(update_id, alice['peer_id'], 3000, db)
+    # Projection happens automatically via store.event() in create()
     db.commit()
 
     # Verify it's off

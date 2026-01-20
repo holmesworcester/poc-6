@@ -180,49 +180,6 @@ def create_from_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     return prekey_id
 
 
-def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project group prekey event into group_prekeys table with recorded_by scoping.
-
-    Args:
-        prekey_id: The group_prekey event ID
-        recorded_by: Peer projecting this event (also the owner for local prekeys)
-        recorded_at: Timestamp to use for created_at (since blob has no timestamp)
-        db: Database connection
-
-    Returns:
-        prekey_id on success, None on failure
-    """
-    log.info(f"group_prekey.project() prekey_id={prekey_id}, seen_by={recorded_by}")
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    blob = store.get(prekey_id, db)
-    if not blob:
-        log.warning(f"group_prekey.project() blob not found for prekey_id={prekey_id}")
-        return None
-
-    # Parse JSON - deterministic blob has only type, public_key, private_key
-    event_data = crypto.parse_json(blob)
-
-    # Use recorded_at for timestamp (deterministic blobs have no timestamp)
-    # Use recorded_by as owner (local prekeys are always owned by the projecting peer)
-    owner_peer_id = recorded_by
-    created_at = recorded_at
-
-    # Calculate TTL: absolute time when this prekey expires
-    ttl_ms = created_at + GROUP_PREKEY_TTL_MS
-
-    # Insert into group_prekeys table with recorded_by (subjective)
-    safedb.execute(
-        "INSERT OR IGNORE INTO group_prekeys (prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
-         crypto.b64decode(event_data['private_key']), created_at, ttl_ms, recorded_by)
-    )
-
-    return prekey_id
-
-
 def get_group_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     """Get the group pre-key for a specific peer in format expected by crypto.wrap().
 

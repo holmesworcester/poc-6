@@ -111,48 +111,6 @@ def project_pure(ctx: Any) -> ProjectorResult:
     return ProjectorResult(writes=writes, valid_event=True)
 
 
-def project(key_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project group key event into group_keys table.
-
-    Args:
-        key_id: The group_key event ID
-        recorded_by: Peer projecting this event
-        recorded_at: Timestamp to use for created_at (since blob has no timestamp)
-        db: Database connection
-
-    Returns:
-        key_id on success, None on failure
-    """
-    log.debug(f"group_key.project() projecting key_id={key_id}, seen_by={recorded_by}")
-
-    # Get blob from store
-    blob = store.get(key_id, db)
-    if not blob:
-        log.warning(f"group_key.project() blob not found for key_id={key_id}")
-        return None
-
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-
-    # Insert into group_keys table (subjective)
-    # Note: created_at comes from recorded_at, NOT the blob (deterministic blobs have no timestamp)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    log.debug(f"group_key.project() inserting key_id={key_id} into group_keys table")
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_keys (key_id, key, created_at, recorded_by)
-           VALUES (?, ?, ?, ?)""",
-        (
-            key_id,
-            crypto.b64decode(event_data['key']),
-            recorded_at,  # Use recorded_at since blob has no timestamp
-            recorded_by
-        )
-    )
-
-    log.info(f"group_key.project() projected key_id={key_id} into group_keys table")
-    return key_id
-
-
 def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     """Get group key from database in format expected by crypto.wrap().
 

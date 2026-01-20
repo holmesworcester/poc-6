@@ -486,10 +486,9 @@ def test_message_rekey_mechanism():
     assert rekey_data['new_key_id'] == new_key_id
     print(f"Step 6: Rekey event stored correctly with deterministic nonce")
 
-    # Project (validate) the rekey event
-    result = message_rekey.project(rekey_id, alice_peer_id, 7000, db)
-    assert result == rekey_id, "Rekey projection should succeed"
-    print(f"Step 7: Rekey event projected successfully")
+    # Projection happens automatically via store.event() in create()
+    # Rekey event is already projected
+    print(f"Step 7: Rekey event projected automatically via store.event()")
     db.commit()
 
     # Verify original message blob was replaced
@@ -605,8 +604,7 @@ def test_rekeyed_message_with_deterministic_encryption():
     ciphertext_1 = rekey_data_1['new_ciphertext']
     print(f"Step 4: Rekey event 1 ciphertext: {ciphertext_1[:50]}...")
 
-    # Project the first rekey
-    message_rekey.project(rekey_id_1, alice_peer_id, 7000, db)
+    # Projection happens automatically via store.event() in create()
     db.commit()
 
     # Get the blob after first rekey

@@ -155,51 +155,6 @@ def project_pure(ctx: Any) -> ProjectorResult:
     return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project peer_removed event to state (legacy wrapper).
-
-    NOTE: When EVENT_SPEC and project_pure are defined, recorded.py uses the v2 path
-    directly and this function is NOT called. Side effects (connection removal, key
-    rotation) are handled in recorded.py's post-projection hook for peer_removed.
-
-    This legacy wrapper exists for backwards compatibility if called directly.
-    """
-    from core.projection_v2.resolver import resolve
-    from core.projection_v2.apply import apply_result
-
-    resolve_result = resolve(EVENT_SPEC, event_id, recorded_by, recorded_at, db)
-
-    if resolve_result.status == 'block':
-        log.debug(f"peer_removed.project() blocked on deps: {resolve_result.missing}")
-        return None
-    if resolve_result.status == 'reject':
-        log.warning(f"peer_removed.project() rejected: {resolve_result.error}")
-        return None
-
-    result = project_pure(resolve_result.ctx)
-    if not result.valid_event:
-        return None
-
-    apply_result(result, recorded_by, db)
-
-    # Side effects are handled in recorded.py for v2 path
-    # If called directly (legacy), we need to handle them here
-    removed_peer_shared_id = resolve_result.ctx.event_data.get('removed_peer_shared_id')
-    if removed_peer_shared_id:
-        from events.network import connection_request
-        connection_request.remove_connections_for_peer(removed_peer_shared_id, db)
-
-        safedb = create_safe_db(db, recorded_by=recorded_by)
-        peer_row = safedb.query_one(
-            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
-            (removed_peer_shared_id, recorded_by)
-        )
-        if peer_row and peer_row.get('user_id'):
-            _rotate_keys_for_removed_peer_user(peer_row['user_id'], recorded_by, recorded_at, db)
-
-    return event_id
-
-
 def _rotate_keys_for_removed_peer_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:
     """Rotate group keys if this was the last peer of a removed user.
 
