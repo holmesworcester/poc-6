@@ -149,7 +149,8 @@ def send_ack_for_request(
     their_key: bytes,
     local_peer_id: str,
     t_ms: int,
-    db: Any
+    db: Any,
+    reply_addr: tuple[str, int] | None = None
 ) -> None:
     """Send connection ack in response to a request.
 
@@ -161,6 +162,7 @@ def send_ack_for_request(
         local_peer_id: Our local peer ID
         t_ms: Timestamp
         db: Database connection
+        reply_addr: Direct reply address (ip, port) from the incoming packet
     """
     safedb = create_safe_db(db, recorded_by=local_peer_id)
 
@@ -217,8 +219,10 @@ def send_ack_for_request(
     from core import transport
     from events.network.connection_request import get_address_for_peer
 
-    # Try to look up destination address
-    to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db) if remote_peer_shared_id else None
+    # Use reply_addr if provided (from incoming packet), otherwise look up
+    to_addr = reply_addr
+    if not to_addr and remote_peer_shared_id:
+        to_addr = get_address_for_peer(remote_peer_shared_id, local_peer_id, db)
     if not to_addr and remote_peer_shared_id:
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
