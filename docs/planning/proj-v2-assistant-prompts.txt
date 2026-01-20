@@ -1,0 +1,49 @@
+Launch plan (suggested order):
+
+Wave 1 (start now):
+1) Core v2 pipeline (Codex)
+2) Core v2 pipeline (Claude)
+3) Tests harness
+4) Recorded integration (if you have a 4th assistant)
+
+Wave 2 (after tests harness is ready):
+5) Pilot conversions (Claude)
+6) Pilot conversions (Codex)
+
+Prompts:
+
+1) Core v2 pipeline (Codex)
+You are in /home/holmes/poc-6-proj-v2-core-codex on branch proj-v2-core-codex.
+Follow /home/holmes/poc-6-proj-v2-core-codex/docs/planning/proj-v2-core-codex-plan.md and the resolver contract in /home/holmes/functional-projectors-and-commands/docs/planning/proj-v2-split-plan.md.
+Implement core/projection_v2/{resolver,apply,engine}.py. Do not touch events/network/recorded.py.
+Signer_type is required (no default). Report back using AGENTS.md handoff format.
+
+2) Core v2 pipeline (Claude)
+You are in /home/holmes/poc-6-proj-v2-core-claude on branch proj-v2-core-claude.
+Follow /home/holmes/poc-6-proj-v2-core-claude/docs/planning/proj-v2-core-claude-plan.md and the resolver contract in /home/holmes/functional-projectors-and-commands/docs/planning/proj-v2-split-plan.md.
+Implement core/projection_v2/{resolver,apply,engine}.py. Do not touch events/network/recorded.py.
+Signer_type is required (no default). Report back using AGENTS.md handoff format.
+
+3) Tests harness
+You are in /home/holmes/poc-6-proj-v2-tests on branch proj-v2-tests.
+Follow /home/holmes/poc-6-proj-v2-tests/docs/planning/proj-v2-tests-plan.md.
+Create tests/projection_v2 helpers + minimal examples. Include reject for missing signer_type.
+Keep tests minimal and compatible with scenario tests. Report back using AGENTS.md handoff format.
+
+4) Recorded integration (optional in wave 1)
+You are in /home/holmes/poc-6-proj-v2-recorded on branch proj-v2-recorded.
+Follow /home/holmes/poc-6-proj-v2-recorded/docs/planning/proj-v2-recorded-plan.md and the resolver contract in /home/holmes/functional-projectors-and-commands/docs/planning/proj-v2-split-plan.md.
+Add dual-dispatch to events/network/recorded.py, branch to v2 before legacy deps. Missing signer_type should reject.
+Do not modify core/projection_v2 stubs. Report back using AGENTS.md handoff format.
+
+5) Pilot conversions (Claude) - after harness
+You are in /home/holmes/poc-6-proj-v2-admin on branch proj-v2-admin.
+Follow /home/holmes/poc-6-proj-v2-admin/docs/planning/proj-v2-admin-plan.md.
+TDD projector-level tests first using tests/projection_v2 helpers, then add EVENT_SPEC + project_pure for identity network/admin.
+Add signer_type to create() event_data. Report back using AGENTS.md handoff format.
+
+6) Pilot conversions (Codex) - after harness
+You are in /home/holmes/poc-6-proj-v2-pilots-codex on branch proj-v2-pilots-codex.
+Follow /home/holmes/poc-6-proj-v2-pilots-codex/docs/planning/proj-v2-pilots-codex-plan.md.
+TDD projector-level tests first, then add EVENT_SPEC + project_pure for identity network/admin.
+Add signer_type to create() event_data. Report back using AGENTS.md handoff format.

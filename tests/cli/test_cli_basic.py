@@ -60,18 +60,18 @@ status
     assert "✓" in result.stdout
 
 
-@pytest.mark.skip(reason="Multi-account sync uses old transport callback; needs multi-instance refactor")
 def test_two_user_messaging():
     """Alice invites Bob, both send messages and sync."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
 invite
 accept-invite --username bob --devicename phone --invite 1
+tick 20
 switch 1
 send hello from alice
 switch 2
 send hi from bob
-tick 10
+tick 50
 switch 1
 status
 """
@@ -172,17 +172,18 @@ status
         f"Message 'test message' not found in MAIN section. MAIN content: {repr(main_section)}"
 
 
-@pytest.mark.skip(reason="Multi-account sync uses old transport callback; needs multi-instance refactor")
 def test_auto_tick_behavior():
     """Test that auto-tick happens after send command."""
     commands = """
 new-network --name "Alice's Network" --username alice --devicename desktop
 invite
 accept-invite --username bob --devicename phone --invite 1
+tick 20
 switch 1
 send from alice
 switch 2
 send from bob
+tick 50
 switch 1
 status
 """
@@ -202,13 +203,13 @@ status
     assert "auto-syncing" in result.stdout or "⟳" in result.stdout
 
 
-@pytest.mark.skip(reason="Multi-account sync uses old transport callback; needs multi-instance refactor")
 def test_link_device_basic():
     """Test linking a second device to an existing user."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
 link
 accept-link --devicename laptop --invite 1
+tick 20
 accounts
 """
     result = run_cli(commands)
@@ -230,18 +231,18 @@ accounts
     assert "linked device to existing user: alice" in result.stdout
 
 
-@pytest.mark.skip(reason="Multi-account sync uses old transport callback; needs multi-instance refactor")
 def test_link_device_with_messaging():
     """Test that linked devices can send/receive messages."""
     commands = """
 new-network --name "Test Network" --username alice --devicename desktop
 link
 accept-link --devicename laptop --invite 1
+tick 20
 switch 1
 send Hello from desktop
 switch 2
 send Hello from laptop
-sync --ticks 50
+tick 50
 switch 1
 show
 """
