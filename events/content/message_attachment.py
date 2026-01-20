@@ -147,12 +147,7 @@ def _handle_maybe_request_file_sync(args: dict, recorded_by: str, recorded_at: i
     have_slices = our_slices['cnt'] if our_slices else 0
 
     if have_slices < total_slices:
-        log.info(f"message_attachment: auto-requesting file sync: have {have_slices}/{total_slices} slices")
-        try:
-            from events.network import sync_file
-            sync_file.request_file_sync(file_id, recorded_by, priority=5, ttl_ms=0, t_ms=recorded_at, db=db)
-        except Exception as e:
-            log.warning(f"message_attachment: failed to request sync: {e}")
+        log.info(f"message_attachment: need file sync: have {have_slices}/{total_slices} slices (handled by negentropy)")
 
 
 # Register the command handler at module load time
@@ -946,12 +941,40 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
     have_slices = our_slices['cnt'] if our_slices else 0
 
     if have_slices < total_slices:
-        log.info(f"message_attachment.project() auto-requesting file sync: have {have_slices}/{total_slices} slices")
-        try:
-            from events.network import sync_file
-            sync_file.request_file_sync(file_id, recorded_by, priority=5, ttl_ms=0, t_ms=recorded_at, db=db)
-        except Exception as e:
-            log.warning(f"message_attachment.project() failed to request sync: {e}")
+        log.info(f"message_attachment.project(): need file sync: have {have_slices}/{total_slices} slices (handled by negentropy)")
+
+
+def is_file_complete(file_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if all slices for a file have been received.
+
+    Args:
+        file_id: File ID to check
+        recorded_by: Peer ID who owns the file
+        db: Database connection
+
+    Returns:
+        True if all slices received, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get total slices from attachment metadata
+    attachment = safedb.query_one(
+        "SELECT total_slices FROM message_attachments WHERE file_id = ? LIMIT 1",
+        (file_id,)
+    )
+    if not attachment or not attachment['total_slices']:
+        return False
+
+    total_slices = attachment['total_slices']
+
+    # Count received slices
+    result = safedb.query_one(
+        "SELECT COUNT(*) as count FROM file_slices WHERE file_id = ?",
+        (file_id,)
+    )
+    received = result['count'] if result else 0
+
+    return received >= total_slices
 
 
 def consolidate_file_slices(file_id: str, recorded_by: str, db: Any) -> bool:
@@ -1171,13 +1194,7 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
         log.info(f"message_attachment.get_file_data() incomplete: have {len(slice_rows)}/{total_slices} slices, "
                  f"requesting sync from peers")
 
-        # Auto-trigger file sync with high priority (TTL = 0 means forever)
-        try:
-            from events.network import sync_file
-            sync_file.request_file_sync(file_id, recorded_by, priority=10, ttl_ms=0, t_ms=0, db=db)
-        except Exception as e:
-            log.warning(f"message_attachment.get_file_data() failed to request sync: {e}")
-
+        # File slices will be synced via negentropy
         return None
 
     # Decrypt slices

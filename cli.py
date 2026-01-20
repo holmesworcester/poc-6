@@ -91,7 +91,6 @@ from core import tick
 # Import event functions (this is our API)
 from events.identity import user, peer, invite, network, user_removed, peer_shared
 from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update, message_attachment
-from events.network import sync_file
 from core import purge_expired
 from events.group import group_member, group_key, group_prekey, group
 import os
@@ -1088,7 +1087,7 @@ def cmd_sync_realtime(session: CLISession, args: List[str]):
         print("Running at wall-clock time...\n")
 
         def until_done(t_ms, db):
-            return sync_file.is_file_complete(file_id, account.peer_id, db)
+            return message_attachment.is_file_complete(file_id, account.peer_id, db)
 
         final_t_ms, report = perf_tick.run_realtime(
             db=session.db,
@@ -1659,53 +1658,13 @@ def cmd_files(session: CLISession):
 
 
 def cmd_pause_file(session: CLISession, file_num: int):
-    """Pause a file download."""
-    account = session.get_selected_account()
-
-    if not hasattr(session, 'file_list') or not session.file_list:
-        print("✗ run 'files' first to see file list")
-        return
-
-    if not (1 <= file_num <= len(session.file_list)):
-        print(f"✗ file #{file_num} not found (must be 1-{len(session.file_list)})")
-        return
-
-    file_info = session.file_list[file_num - 1]
-    file_id = file_info['file_id']
-
-    sync_file.pause_file_sync(
-        file_id=file_id,
-        peer_id=account.peer_id,
-        db=session.db
-    )
-
-    session.db.commit()
-    print(f"✓ paused download: {file_info['filename']}")
+    """Pause a file download (feature removed)."""
+    print("✗ pause/resume removed: files now sync automatically via negentropy")
 
 
 def cmd_resume_file(session: CLISession, file_num: int):
-    """Resume a paused file download."""
-    account = session.get_selected_account()
-
-    if not hasattr(session, 'file_list') or not session.file_list:
-        print("✗ run 'files' first to see file list")
-        return
-
-    if not (1 <= file_num <= len(session.file_list)):
-        print(f"✗ file #{file_num} not found (must be 1-{len(session.file_list)})")
-        return
-
-    file_info = session.file_list[file_num - 1]
-    file_id = file_info['file_id']
-
-    sync_file.resume_file_sync(
-        file_id=file_id,
-        peer_id=account.peer_id,
-        db=session.db
-    )
-
-    session.db.commit()
-    print(f"✓ resumed download: {file_info['filename']}")
+    """Resume a paused file download (feature removed)."""
+    print("✗ pause/resume removed: files now sync automatically via negentropy")
 
 
 def cmd_time(session: CLISession):

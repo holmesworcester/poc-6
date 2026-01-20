@@ -167,7 +167,7 @@ def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Insert or ignore (now includes event_id for sync_file)
+    # Insert or ignore
     safedb.execute(
         """INSERT OR IGNORE INTO file_slices
            (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)

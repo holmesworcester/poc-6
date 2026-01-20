@@ -14,7 +14,6 @@ from typing import Optional, Iterator
 
 from api.core.database import get_db, get_peer_id, get_t_ms, verify_network_access, from_urlsafe_b64
 from events.content import message_attachment
-from events.network import sync_file
 from core import crypto
 
 router = APIRouter()
@@ -238,20 +237,7 @@ async def request_file_sync_endpoint(
     # Convert from URL-safe base64
     file_id = from_urlsafe_b64(file_id)
 
-    # Request file sync with priority
-    try:
-        sync_file.request_file_sync(
-            file_id=file_id,
-            peer_id=peer_id,
-            priority=request.priority,
-            ttl_ms=0,  # No expiration
-            t_ms=t_ms,
-            db=db,
-        )
-        db.commit()
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+    # Priority sync removed - files sync automatically via negentropy
     # Return current status
     progress = message_attachment.get_file_download_progress(file_id, peer_id, db)
     if not progress:

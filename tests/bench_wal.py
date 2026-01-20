@@ -131,7 +131,6 @@ def bench_message_sync(mode: str, num_messages: int = 500) -> dict:
 def bench_file_sync(mode: str, file_size_kb: int = 100) -> dict:
     """Benchmark file creation and sync."""
     from events.content import message_attachment
-    from events.network import sync_file
 
     reset_state()
 
@@ -177,16 +176,7 @@ def bench_file_sync(mode: str, file_size_kb: int = 100) -> dict:
     results["file_create_time"] = time.time() - start
     results["slice_count"] = file_result['slice_count']
 
-    # Bob requests file
-    sync_file.request_file_sync(
-        file_id=file_result['file_id'],
-        peer_id=bob['peer_id'],
-        priority=10,
-        ttl_ms=0,
-        t_ms=4000,
-        db=db
-    )
-    db.commit()
+    # File slices sync automatically via negentropy during tick()
 
     # Sync until complete
     start = time.time()
