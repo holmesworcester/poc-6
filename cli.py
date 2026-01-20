@@ -2944,6 +2944,10 @@ def main():
     """Main entry point for CLI."""
     from core import transport
 
+    # Enable loopback mode by default for multi-account sync within single process
+    # (overridden if --listen is specified for UDP mode)
+    transport.enable_loopback()
+
     parser = argparse.ArgumentParser(description="POC-6 CLI")
     parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug logging")
