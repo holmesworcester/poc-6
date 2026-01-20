@@ -26,14 +26,14 @@ def test_alice_sends_to_herself(fresh_db):
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
     # Verify all components were created
-    assert len(alice['peer_id']) == 44
-    assert len(alice['peer_shared_id']) == 44
-    assert len(alice['prekey_id']) == 44
-    assert len(alice['connection_prekey_shared_id']) == 44
-    assert len(alice['key_id']) == 44
-    assert len(alice['group_id']) == 44
-    assert len(alice['channel_id']) == 44
-    assert len(alice['user_id']) == 44
+    assert len(alice['peer_id']) == 24
+    assert len(alice['peer_shared_id']) == 24
+    assert len(alice['prekey_id']) == 24
+    assert len(alice['connection_prekey_shared_id']) == 24
+    assert len(alice['key_id']) == 24
+    assert len(alice['group_id']) == 24
+    assert len(alice['channel_id']) == 24
+    assert len(alice['user_id']) == 24
 
     # Send first message in default channel
     result1 = message.create(
@@ -46,7 +46,7 @@ def test_alice_sends_to_herself(fresh_db):
 
     # Verify message was created and appears in latest
     assert 'id' in result1
-    assert len(result1['id']) == 44
+    assert len(result1['id']) == 24
     assert 'latest' in result1
     assert len(result1['latest']) == 1
     assert result1['latest'][0]['content'] == 'Hello'

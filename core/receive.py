@@ -24,18 +24,18 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     (asymmetric) to find all local peers who have the decryption key for this blob.
 
     Args:
-        blob: Transit-wrapped blob with hint in first 32 bytes
+        blob: Transit-wrapped blob with hint in first KEY_ID_SIZE bytes
         db: Database connection
 
     Returns:
         List of peer_ids who can decrypt this blob (empty if no keys found)
     """
 
-    hint = blob[:32]
+    hint = blob[:crypto.KEY_ID_SIZE]
     hint_b64 = crypto.b64encode(hint)
 
     # Try connections first (symmetric keys from connection handshake)
-    # The hint is full 32 bytes of connection_id hash
+    # The hint is first KEY_ID_SIZE bytes of connection_id
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT connection_id, recorded_by FROM connections"
@@ -45,7 +45,7 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
             conn_id = row[0]
             try:
                 conn_id_bytes = crypto.b64decode(conn_id)
-                if conn_id_bytes == hint:
+                if conn_id_bytes[:crypto.KEY_ID_SIZE] == hint:
                     recorded_by_peers.append(row[1])
             except Exception:
                 continue
@@ -56,7 +56,7 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
     # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
-    # Hint is full 32 bytes, so we can do exact match on connection_prekey_id
+    # Hint is KEY_ID_SIZE bytes, matches connection_prekey_id
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT owner_peer_id FROM connection_prekeys WHERE connection_prekey_id = ?",

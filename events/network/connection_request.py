@@ -1419,9 +1419,9 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
         log.debug(f"connection_request.send: connection {connection_id[:20]}... not ready (no their_key)")
         return False
 
-    # Wrap with their key using their_connection_id as hint (full 32 bytes)
+    # Wrap with their key using their_connection_id as hint (first 16 bytes)
     to_key = {
-        'id': crypto.b64decode(their_connection_id),
+        'id': crypto.b64decode(their_connection_id)[:crypto.KEY_ID_SIZE],
         'key': their_key,
         'type': 'symmetric'
     }
