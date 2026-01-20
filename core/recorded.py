@@ -119,6 +119,27 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             log.warning(f"Failed to parse event: ref_id={ref_id[:20] if ref_id else 'N/A'}..., error={str(e)[:50]}")
             return [None, recorded_id]
 
+    # Check if event is pre-deleted (deletion arrived before the event itself)
+    # Must check BEFORE marking shareable - deleted events should never sync
+    if event_type:
+        event_spec_early = registry.get_event_spec(event_type)
+        if event_spec_early and event_spec_early.get('skip_if_deleted'):
+            deleted_check = safedb.query_one(
+                "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (ref_id, recorded_by)
+            )
+            if deleted_check:
+                # Event was deleted - clean up completely, never sync
+                log.debug(f"Event {event_type} {ref_id[:20]}... is deleted - purging")
+                # Remove from shareable_events (in case it was somehow added)
+                safedb.execute(
+                    "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+                    (ref_id, recorded_by)
+                )
+                # Delete the blob from store
+                unsafedb.execute("DELETE FROM store WHERE id = ?", (ref_id,))
+                return [None, recorded_id]
+
     # Mark shareable events for sync (centralized marking via registry)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
     # Track that this peer recorded this event and can share it (not who created it)
@@ -190,12 +211,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
                 f"{[d[:20] for d in missing_deps]}"
             )
 
-            if event_type == 'channel':
-                log.error(
-                    f"[CHANNEL_BLOCKED] channel_id={ref_id[:20]}... recorded_by={recorded_by[:20]}... "
-                    f"missing_deps={missing_deps}"
-                )
-
             queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
 
@@ -215,15 +230,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             f"[PROJECTION_DISPATCH] (v2) Projecting event type: {event_type}, "
             f"ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..."
         )
-
-        if event_type == 'message':
-            deleted_check = safedb.query_one(
-                "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
-                (ref_id, recorded_by)
-            )
-            if deleted_check:
-                log.info(f"Skipping projection of message {ref_id[:20]}... - message is marked as deleted")
-                return [None, recorded_id]
 
         try:
             projector_result = project_pure_fn(resolve_result.ctx)

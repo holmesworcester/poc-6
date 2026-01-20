@@ -24,6 +24,7 @@ DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 # v2 event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
     'encrypted': True,
+    'skip_if_deleted': True,  # Skip projection if in deleted_events (deletion arrived first)
     'signer': {
         'id_field': 'signed_by',
         'type_field': 'signer_type',
