@@ -80,7 +80,7 @@ def test_connection_establishment(fresh_db):
     """)
     assert conn_row is not None, "Should have at least one complete connection"
     assert conn_row['peer_shared_id'] or conn_row['invite_id'], "Connection should have identity label"
-    assert conn_row['their_connection_id'], "Connection should have their_connection_id"
+    assert conn_row['their_key_id'], "Connection should have their_key_id"
     assert conn_row['their_key'], "Connection should have their_key"
     print("✓ Connection has all required fields after handshake")
 
@@ -304,7 +304,7 @@ def test_two_way_handshake(fresh_db):
 
     for conn in alice_connections + bob_connections:
         print(f"  Connection for {conn.recorded_by[:10]}... to {conn.label[:20]}...")
-        print(f"    their_connection_id: {conn.their_connection_id[:20] if conn.their_connection_id else 'None'}...")
+        print(f"    their_key_id: {conn.their_key_id[:20] if conn.their_key_id else 'None'}...")
         print(f"    their_key: {'[present]' if conn.their_key else 'None'}")
 
     print("\n✅ Two-way handshake test passed!")

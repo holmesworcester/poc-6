@@ -1,7 +1,7 @@
 -- Connection tables for peer-to-peer communication
 --
 -- Simplified design: connection events contain symmetric keys directly.
--- connection_id is the universal identifier for routing, display, and dependencies.
+-- key_id identifies the key for routing and lookup.
 --
 -- Two tables:
 -- 1. connections (SUBJECTIVE) - established/pending connections
@@ -11,12 +11,12 @@
 -- connections table (SUBJECTIVE)
 -- ============================================================================
 -- Tracks connections with remote peers, scoped by recorded_by.
--- A connection is PENDING if their_connection_id is NULL (awaiting ack).
--- A connection is ACTIVE if their_connection_id is set (bidirectional).
+-- A connection is PENDING if their_key_id is NULL (awaiting ack).
+-- A connection is ACTIVE if their_key_id is set (bidirectional).
 
 CREATE TABLE IF NOT EXISTS connections (
-    connection_id TEXT NOT NULL,            -- Our connection event ID (mode=req)
-    recorded_by TEXT NOT NULL,              -- Local peer who owns this connection
+    key_id TEXT NOT NULL,                   -- Identifies our_key (our connection event ID)
+    recorded_by TEXT NOT NULL,              -- Local peer who owns this key
 
     -- Identity labels (at least one required)
     peer_shared_id TEXT,                    -- Remote peer's public identity (NULL for bootstrap)
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS connections (
 
     -- Keys
     our_key BLOB NOT NULL,                  -- Symmetric key we created (they send TO us with this)
-    their_connection_id TEXT,               -- Their ack's connection_id (NULL until they ack)
+    their_key_id TEXT,                      -- Identifies their_key (their connection event ID)
     their_key BLOB,                         -- Symmetric key they created (we send TO them with this)
 
     -- Lifecycle
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS connections (
     from_addr_ip TEXT,                      -- Last known IP address
     from_addr_port INTEGER,                 -- Last known UDP port
 
-    PRIMARY KEY (connection_id, recorded_by),
+    PRIMARY KEY (key_id, recorded_by),
     CHECK (peer_shared_id IS NOT NULL OR invite_id IS NOT NULL)
 );
 
@@ -61,24 +61,28 @@ WHERE invite_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_connections_ttl
 ON connections(last_handshake_ms, ttl_ms);
 
+-- Index for key_id lookup (transit key routing)
+CREATE INDEX IF NOT EXISTS idx_connections_key_id
+ON connections(key_id);
+
 
 -- ============================================================================
 -- connection_inbox table (DEVICE-WIDE - for routing)
 -- ============================================================================
--- Device-wide inbox for incoming blobs, routed by connection_id hint.
+-- Device-wide inbox for incoming blobs, routed by key_id hint.
 -- Blobs are stored here before we know which peer they're for.
 -- process_inbox() drains this and routes to peer-scoped receive().
 
 CREATE TABLE IF NOT EXISTS connection_inbox (
     id INTEGER PRIMARY KEY,
-    connection_id TEXT NOT NULL,            -- Hint from blob (first 16 bytes)
+    key_id TEXT NOT NULL,                   -- Key ID from blob (identifies recipient's key)
     blob BLOB NOT NULL,                     -- Raw connection-wrapped blob
     received_at INTEGER NOT NULL            -- When blob was received
 );
 
 -- Index for routing lookups
 CREATE INDEX IF NOT EXISTS idx_connection_inbox_key
-ON connection_inbox(connection_id);
+ON connection_inbox(key_id);
 
 -- Index for ordered processing
 CREATE INDEX IF NOT EXISTS idx_connection_inbox_received

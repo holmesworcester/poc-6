@@ -147,7 +147,7 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                     )
                     # Serialize connections
                     conn_data = [{
-                        'connection_id': c.connection_id,
+                        'key_id': c.key_id,
                         'peer_shared_id': c.peer_shared_id,
                         'can_send': c.can_send(),
                         'is_pending': c.is_pending(),
@@ -227,7 +227,7 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                     from core.db import create_safe_db
                     sdb = create_safe_db(db, recorded_by=state['peer_id'])
                     conns = sdb.query("""
-                        SELECT connection_id, peer_shared_id, from_addr_ip, from_addr_port
+                        SELECT key_id, peer_shared_id, from_addr_ip, from_addr_port
                         FROM connections WHERE recorded_by = ?
                     """, (state['peer_id'],))
                     result_queue.put({'ok': True, 'connections': [dict(c) for c in conns]})

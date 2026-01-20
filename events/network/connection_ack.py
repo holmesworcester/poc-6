@@ -127,13 +127,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
             op='update',
             table='connections',
             values={
-                'their_connection_id': event_id,
+                'their_key_id': event_id,
                 'their_key': their_key,
                 'peer_shared_id': peer_shared_id,
                 'last_handshake_ms': recorded_at,
             },
             where={
-                'connection_id': for_request_id,
+                'key_id': for_request_id,
                 'recorded_by': recorded_by,
             },
         ),
@@ -189,7 +189,7 @@ def send_ack_for_request(
     )
 
     # Store our outgoing connection (we're the one who received the request)
-    # Our connection_id is the ack_id, their_connection_id is the request_id
+    # Our key_id is the ack_id, their_key_id is the request_id
     # In bootstrap mode: peer_shared_id is NULL, invite_id is set
     # In normal mode: peer_shared_id is set, invite_id is NULL
     # Store reply_addr so we can send sync messages back to this peer
@@ -198,8 +198,8 @@ def send_ack_for_request(
 
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
-            connection_id, recorded_by, peer_shared_id, invite_id,
-            our_key, their_connection_id, their_key,
+            key_id, recorded_by, peer_shared_id, invite_id,
+            our_key, their_key_id, their_key,
             created_at, last_handshake_ms, ttl_ms,
             from_addr_ip, from_addr_port
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -215,7 +215,7 @@ def send_ack_for_request(
     ack_blob = store.get(ack_id, unsafedb)
 
     to_key = {
-        'id': crypto.b64decode(request_id)[:crypto.KEY_ID_SIZE],  # Use first 16 bytes as hint
+        'id': crypto.b64decode(request_id),  # Use request_id (their_key_id) as hint
         'key': their_key,
         'type': 'symmetric'
     }
@@ -243,5 +243,3 @@ def send_ack_for_request(
     )
 
     log.info(f"connection_ack.send_ack_for_request: sent ack {ack_id[:20]}... for request {request_id[:20]}...")
-
-
