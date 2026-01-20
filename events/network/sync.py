@@ -30,7 +30,8 @@ BLOOM_SIZE_BYTES = 64
 K_HASHES = 5  # Number of hash functions
 
 # Event types that are sync protocol infrastructure (not stored in event log)
-EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file', 'connection', 'negentropy'}
+# Note: 'connection' was removed - connection events are now stored with TTL for cleaner handling
+EPHEMERAL_EVENT_TYPES = {'sync', 'sync_file', 'negentropy'}
 
 # Window parameters
 DEFAULT_W = 12  # Default window parameter: 2^12 = 4096 windows
@@ -349,18 +350,17 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     (asymmetric) to find all local peers who have the decryption key for this blob.
 
     Args:
-        blob: Transit-wrapped blob with hint in first 16 bytes
+        blob: Transit-wrapped blob with hint in first 32 bytes (full key ID)
         db: Database connection
 
     Returns:
         List of peer_ids who can decrypt this blob (empty if no keys found)
     """
 
-    hint = blob[:16]
-    hint_b64 = crypto.b64encode(hint)
+    key_id = blob[:crypto.KEY_ID_SIZE]  # Extract key ID from blob
+    key_id_b64 = crypto.b64encode(key_id)
 
     # Try connections first (symmetric keys from connection handshake)
-    # The hint is first 16 bytes of connection_id hash
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT connection_id, recorded_by FROM connections"
@@ -370,7 +370,7 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
             conn_id = row[0]
             try:
                 conn_id_bytes = crypto.b64decode(conn_id)
-                if conn_id_bytes[:16] == hint:
+                if conn_id_bytes == key_id:
                     recorded_by_peers.append(row[1])
             except Exception:
                 continue
@@ -380,11 +380,11 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     except Exception as e:
         log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
-    # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
+    # Try transit prekeys (asymmetric) - look up OWNER by prekey ID
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT owner_peer_id FROM transit_prekeys WHERE transit_prekey_id = ?",
-            (hint_b64,)
+            (key_id_b64,)
         )
         recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
@@ -430,7 +430,8 @@ def _project_ephemeral_for_peer(event_id: str, event_type: str, event_data: dict
     )
 
 
-def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_peers: list[str], t_ms: int, db: Any) -> bool:
+def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_peers: list[str], t_ms: int, db: Any,
+                           from_addr: tuple[str, int] | None = None) -> bool:
     """Check if event is ephemeral and handle it without storing.
 
     Ephemeral events are protocol infrastructure that bypass normal storage
@@ -442,6 +443,7 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
         recorded_by_peers: List of peers who can decrypt this event
         t_ms: Current timestamp
         db: Database connection
+        from_addr: Source address as (ip, port) tuple, or None
 
     Returns:
         True if event was ephemeral and handled, False to proceed with normal storage
@@ -455,6 +457,11 @@ def handle_ephemeral_event(unwrapped_blob: bytes, event_data: dict, recorded_by_
     # Ephemeral event: project directly without storing
     logger.debug(f"handle_ephemeral_event: processing ephemeral {event_type} for {len(recorded_by_peers)} peers")
     event_id = crypto.b64encode(crypto.hash(unwrapped_blob))
+
+    # Store from_addr in packet_metadata for each peer (needed by connection.project for acks)
+    if from_addr:
+        for recorded_by in recorded_by_peers:
+            store_packet_from_addr(event_id, recorded_by, from_addr, db)
 
     # Peers now sync normally via established connections (sync_connect)
     # No need for bootstrap_complete tracking
@@ -579,7 +586,7 @@ def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db
     # Check for ephemeral events (sync, negentropy) that need special handling
     try:
         event_data = crypto.parse_json(unwrapped_blob)
-        if handle_ephemeral_event(unwrapped_blob, event_data, recorded_by_peers, t_ms, db):
+        if handle_ephemeral_event(unwrapped_blob, event_data, recorded_by_peers, t_ms, db, from_addr=from_addr):
             return []  # Ephemeral event was handled, no recorded events created
     except Exception:
         # Not JSON or parse failed, continue with normal storage
@@ -888,7 +895,7 @@ def send_request_to_connection(their_transit_key_id: str, their_transit_key: byt
     # Create transit key for response (inline - no separate transit_key table)
     # Generate a fresh symmetric key for the response
     response_transit_key_bytes = crypto.generate_secret()
-    response_transit_key_id = crypto.b64encode(crypto.sha256(response_transit_key_bytes)[:16])
+    response_transit_key_id = crypto.b64encode(crypto.hash(response_transit_key_bytes))
 
     # Build request - include public key so receiver can derive same bloom salt
     # even before peer_shared is validated (key-based connection bootstrap)
@@ -986,7 +993,7 @@ def send_request(to_peer_shared_id: str, from_peer_id: str, from_peer_shared_id:
         response_key_id = conn.connection_id
         response_key_bytes = conn.our_key
         to_key = {
-            'id': crypto.b64decode(conn.their_connection_id)[:16],
+            'id': crypto.b64decode(conn.their_connection_id),
             'key': conn.their_key,
             'type': 'symmetric'
         }
@@ -1244,8 +1251,8 @@ def send_response(to_peer_id: str, to_peer_shared_id: str, from_peer_id: str, tr
         log.debug(f"[SYNC_RESPONSE] wrapping event={event_id[:20]}... with transit_key_hint={hint_for_wrapping} ({len(hint_for_wrapping)} chars)")
         wrapped_blob = crypto.wrap(event_blob, transit_key_dict, db)
         log.warning(f"[SYNC_RESPONSE] wrapped result: wrapped_blob_size={len(wrapped_blob)}B")
-        actual_hint_in_blob = crypto.b64encode(wrapped_blob[:16])
-        log.debug(f"[SYNC_RESPONSE] wrapped blob hint={actual_hint_in_blob} ({len(actual_hint_in_blob)} chars), matches_expected={actual_hint_in_blob == hint_for_wrapping}")
+        actual_key_id_in_blob = crypto.b64encode(wrapped_blob[:crypto.KEY_ID_SIZE])
+        log.debug(f"[SYNC_RESPONSE] wrapped blob key_id={actual_key_id_in_blob} ({len(actual_key_id_in_blob)} chars), matches_expected={actual_key_id_in_blob == hint_for_wrapping}")
 
         # Count blobs in queue before adding
         from core.db import create_unsafe_db

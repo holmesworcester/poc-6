@@ -534,6 +534,33 @@ def get_device_name(peer_shared_id: str, recorded_by: str, db: Any) -> str:
     return row['device_name'] if row and row['device_name'] else "Device"
 
 
+def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get peer_shared info for a local peer.
+
+    Combines get_self (peer_shared_id, user_id) with device_name lookup.
+
+    Args:
+        peer_id: Local peer ID
+        recorded_by: Peer ID requesting access
+        db: Database connection
+
+    Returns:
+        Dict with peer_shared_id, user_id, device_name if found, None otherwise
+    """
+    self_info = get_self(peer_id, db)
+    if not self_info:
+        return None
+
+    peer_shared_id = self_info['peer_shared_id']
+    device_name = get_device_name(peer_shared_id, recorded_by, db)
+
+    return {
+        'peer_shared_id': peer_shared_id,
+        'user_id': self_info.get('user_id'),
+        'device_name': device_name
+    }
+
+
 def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
          user_id: str | None, prekey_id: str | None, t_ms: int, db: Any,
          device_name: str = "Device", network_id: str | None = None) -> dict[str, Any]:

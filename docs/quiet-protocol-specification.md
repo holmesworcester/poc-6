@@ -536,7 +536,7 @@ TODO: align this with the existing prototype
 ```
 seal(k,n,pt,ad) = crypto_aead_xchacha20poly1305_ietf_encrypt(pt,ad,-,n,k)
 open(k,n,ct,ad) = crypto_aead_xchacha20poly1305_ietf_decrypt(-,ct,ad,n,k)
-hint64(k,n)     = **TODO: UPDATE THIS** crypto_auth_hmacsha256(n, k)[0..1]       # TODO: not the first 2 bytes, the whole thing
+key_id          = hash(key)                                                     # 16-byte BLAKE2b-128 key ID
 ```
 
 `created_at` and `ttl` live outside this encryption layer so that peers can support lazy loading (see: [Sync](#Sync)). (Because active peers can infer this timestamp from "received at", the metadata leak is insignificant and outweighed by the benefits.)
@@ -788,7 +788,7 @@ The `recorded_by` identifies the local peer who owns this connection.
 
 ## Connection Identity and Bootstrap
 
-Connections are keyed by `connection_id` — the event hash of our connection request. This ID appears as the hint in the first 16 bytes of incoming blobs, enabling routing before decryption.
+Connections are keyed by `connection_id` — the event hash of our connection request. This ID appears as the hint in the first 32 bytes of incoming blobs (the full key ID), enabling routing before decryption.
 
 ### Identity Labels
 
@@ -923,7 +923,7 @@ On devices with multiple local peers (linked accounts), incoming messages must b
 
 ### Stage 1: Route to Connection (by hint)
 
-The first 16 bytes of every transit-wrapped blob is a hint matching `connection_id`. This routes the blob to the correct connection's inbox without decryption.
+The first 32 bytes of every transit-wrapped blob is the full `connection_id` (key ID) as hint. This routes the blob to the correct connection's inbox without decryption.
 
 ### Stage 2: Route to Local Peer (by connection ownership)
 

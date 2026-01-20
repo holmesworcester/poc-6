@@ -204,7 +204,7 @@ def create_ack(
     return connection_id, symmetric_key
 
 
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
+def project(event_id: str, recorded_by: str, recorded_at: int, db: Any, connection_data: dict | None = None) -> str | None:
     """Project connection event into connections table.
 
     For mode=req: Creates new connection entry with our_key
@@ -215,6 +215,7 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         recorded_by: Local peer who received this event
         recorded_at: When received
         db: Database connection
+        connection_data: Optional pre-parsed event data (for ephemeral events not in store)
 
     Returns:
         event_id on success, None on failure
@@ -224,13 +225,17 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get blob from store
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        log.warning(f"connection.project: blob not found for {event_id[:20]}...")
-        return None
+    # Use provided event_data or load from store
+    if connection_data is not None:
+        event_data = connection_data
+    else:
+        # Get blob from store
+        blob = store.get(event_id, unsafedb)
+        if not blob:
+            log.warning(f"connection.project: blob not found for {event_id[:20]}...")
+            return None
+        event_data = crypto.parse_json(blob)
 
-    event_data = crypto.parse_json(blob)
     mode = event_data.get('mode')
 
     if mode == 'req':
@@ -331,7 +336,7 @@ def _project_request(
     # NOTE: We do NOT store a connection row or pending request here.
     # The responder's connection row is created in _send_ack_for_request with
     # connection_id = ack_id (not request_id). This ensures routing works correctly:
-    # when the ack is sent with hint = request_id[:16], only the original requester's
+    # when the ack is sent with key_id = request_id, only the original requester's
     # connection row (where connection_id = request_id) matches for decryption.
 
     # Update address for existing connection if we have one for this peer
@@ -476,7 +481,7 @@ def _send_ack_for_request(
         unsafedb = create_unsafe_db(db)
         ack_blob = store.get(ack_id, unsafedb)
         to_key = {
-            'id': crypto.b64decode(request_id)[:16],
+            'id': crypto.b64decode(request_id),  # key ID for routing
             'key': their_key,
             'type': 'symmetric'
         }
@@ -532,7 +537,7 @@ def _send_ack_for_request(
     ack_blob = store.get(ack_id, unsafedb)
 
     to_key = {
-        'id': crypto.b64decode(request_id)[:16],  # Use request_id as hint
+        'id': crypto.b64decode(request_id),  # key ID for routing
         'key': their_key,
         'type': 'symmetric'
     }
@@ -615,7 +620,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
                     inviter_transit_prekey = None
                     if invite_row.get('inviter_transit_prekey_public_key'):
                         inviter_transit_prekey = {
-                            'id': crypto.b64decode(invite_row['inviter_transit_prekey_id'])[:16],
+                            'id': crypto.b64decode(invite_row['inviter_transit_prekey_id']),  # key ID
                             'public_key': invite_row['inviter_transit_prekey_public_key'],
                             'type': 'asymmetric'
                         }
@@ -755,7 +760,7 @@ def _send_request(
 
         if inviter_row and inviter_row['inviter_transit_prekey_public_key']:
             to_key = {
-                'id': crypto.b64decode(inviter_row['inviter_transit_prekey_id'])[:16],
+                'id': crypto.b64decode(inviter_row['inviter_transit_prekey_id']),  # key ID
                 'public_key': inviter_row['inviter_transit_prekey_public_key'],
                 'type': 'asymmetric'
             }
@@ -1214,9 +1219,8 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
 
     THE interface for all outbound traffic on connections. Handles:
     - Looking up connection by connection_id
-    - Wrapping blob with their_key (symmetric)
-    - Adding hint (their_connection_id[:16])
-    - Queuing to incoming
+    - Wrapping blob with their_key (symmetric, key_id = their_connection_id)
+    - Queuing to outgoing
 
     Args:
         recorded_by: Local peer ID
@@ -1248,9 +1252,9 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
         log.debug(f"connection.send: connection {connection_id[:20]}... not ready (no their_key)")
         return False
 
-    # Wrap with their key using their_connection_id as hint
+    # Wrap with their key (their_connection_id is the key ID for routing)
     to_key = {
-        'id': crypto.b64decode(their_connection_id)[:16],
+        'id': crypto.b64decode(their_connection_id),  # key ID for routing
         'key': their_key,
         'type': 'symmetric'
     }

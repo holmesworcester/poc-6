@@ -426,7 +426,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
 
     # Generate deterministic prekey ID from public key hash (for bootstrap user invite)
     # This is needed for invite_accepted.project() to restore invite secrets
-    bootstrap_invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey)[:16])
+    bootstrap_invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey))
 
     invite_link_data = {
         'invite_blob': base64.urlsafe_b64encode(invite_blob).decode().rstrip('='),
@@ -693,6 +693,27 @@ def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
         return row["name"]
 
     return None
+
+
+def get(user_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get user info by user_id.
+
+    Returns:
+        Dict with user_id, name, network_id, created_at if found, None otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT user_id, name, network_id, created_at FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if not row:
+        return None
+    return {
+        'user_id': row['user_id'],
+        'name': row['name'],
+        'network_id': row['network_id'],
+        'created_at': row['created_at']
+    }
 
 
 def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,

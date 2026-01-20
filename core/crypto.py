@@ -19,7 +19,7 @@ from . import store
 
 # ===== Constants =====
 
-HINT_SIZE = 16  # bytes (128 bits)
+KEY_ID_SIZE = 16  # bytes (128 bits) - BLAKE2b-128 for all IDs
 SECRET_SIZE = 32  # bytes (256 bits) for symmetric keys
 NONCE_SIZE = 24  # bytes (192 bits) for XChaCha20-Poly1305
 
@@ -36,8 +36,8 @@ def generate_keypair() -> Tuple[bytes, bytes]:
     return bytes(signing_key), bytes(signing_key.verify_key)
 
 
-def hash(data: bytes, size: int = HINT_SIZE) -> bytes:
-    """BLAKE2b hash. Default 16 bytes (128 bits) for IDs and hints."""
+def hash(data: bytes, size: int = KEY_ID_SIZE) -> bytes:
+    """BLAKE2b hash. Default 16 bytes (128 bits) for key/event IDs."""
     return nacl.hash.blake2b(data, digest_size=size, encoder=nacl.encoding.RawEncoder)
 
 
@@ -230,12 +230,9 @@ def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
 
 # ===== Key Lookup Functions =====
 
-ID_SIZE = 16  # bytes (128 bits)
-
-
 def extract_id(blob: bytes) -> bytes:
-    """Extract the first ID_SIZE bytes from a wrapped blob."""
-    return blob[:ID_SIZE]
+    """Extract the key ID from a wrapped blob (first KEY_ID_SIZE bytes)."""
+    return blob[:KEY_ID_SIZE]
 
 
 def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] | None:
@@ -304,10 +301,10 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     )
     for conn_row in conn_rows:
         conn_id = conn_row['connection_id']
-        # Decode connection_id, take first 16 bytes, compare with id_bytes
+        # Decode connection_id and compare with id_bytes
         try:
             conn_id_bytes = b64decode(conn_id)
-            if conn_id_bytes[:16] == id_bytes:
+            if conn_id_bytes == id_bytes:
                 log.debug(f"get_transit_key_by_id() found connection key for connection_id={conn_id[:20]}...")
                 return {
                     'id': id_bytes,
@@ -409,7 +406,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
         conn_id = conn_row['connection_id']
         try:
             conn_id_bytes = b64decode(conn_id)
-            if conn_id_bytes[:16] == id_bytes:
+            if conn_id_bytes == id_bytes:
                 log.debug(f"get_key_by_id() found connection key for connection_id={conn_id[:20]}...")
                 return {
                     'id': id_bytes,
