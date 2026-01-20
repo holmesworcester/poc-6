@@ -88,52 +88,9 @@ def create(t_ms: int, db: Any) -> str:
     log.info(f"peer.create() generated peer_id={peer_id}")
 
     # Then create recorded wrapper where peer sees itself
-    from events.network import recorded
+    from core import recorded
     recorded_id = recorded.create(peer_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
-
-    return peer_id
-
-
-def project(peer_id: str, recorded_by: str, recorded_at: int, db: Any) -> str:
-    """Project peer event into peers table (for local peers, both IDs are the same)."""
-    log.debug(f"peer.project() projecting peer_id={peer_id}, seen_by={recorded_by}")
-
-    unsafedb = create_unsafe_db(db)
-    from core.db import create_safe_db
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    blob = store.get(peer_id, unsafedb)
-    if not blob:
-        log.warning(f"peer.project() blob not found for peer_id={peer_id}")
-        return
-
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-
-    # Insert into local_peers table (local-only, not shareable)
-    # Note: peer_id → peer_shared_id mapping is stored in peer_self table (subjective)
-    unsafedb.execute(
-        """INSERT OR IGNORE INTO local_peers (peer_id, public_key, private_key, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (
-            peer_id,
-            event_data['public_key'],
-            crypto.b64decode(event_data['private_key']),
-            event_data['created_at']
-        )
-    )
-
-    # Mark as valid immediately (before returning) to ensure other events
-    # see this peer as valid during dependency checking. This is critical
-    # for convergence - the timing of when events become valid matters.
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (peer_id, recorded_by)
-    )
-
-    log.info(f"peer.project() projected peer_id={peer_id} into peers table")
 
     return peer_id
 
@@ -188,3 +145,14 @@ def get_public_key(peer_id: str, recorded_by: str, db: Any) -> bytes:
         raise ValueError(f"peer not found: {peer_id}")
     # public_key is stored as base64 string in the table
     return crypto.b64decode(row['public_key'])
+
+
+def list_local(db: Any) -> list[str]:
+    """List all local peer IDs we control.
+
+    Returns:
+        List of peer_id strings
+    """
+    unsafedb = create_unsafe_db(db)
+    rows = unsafedb.query("SELECT peer_id FROM local_peers")
+    return [row['peer_id'] for row in rows]

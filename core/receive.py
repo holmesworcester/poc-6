@@ -24,18 +24,18 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     (asymmetric) to find all local peers who have the decryption key for this blob.
 
     Args:
-        blob: Transit-wrapped blob with hint in first KEY_ID_SIZE bytes
+        blob: Transit-wrapped blob with key ID in first KEY_ID_SIZE bytes
         db: Database connection
 
     Returns:
         List of peer_ids who can decrypt this blob (empty if no keys found)
     """
 
-    hint = blob[:crypto.KEY_ID_SIZE]
-    hint_b64 = crypto.b64encode(hint)
+    key_id = blob[:crypto.KEY_ID_SIZE]
+    key_id_b64 = crypto.b64encode(key_id)
 
     # Try connections first (symmetric keys from connection handshake)
-    # The hint is first KEY_ID_SIZE bytes of connection_id
+    # The key ID is first KEY_ID_SIZE bytes of the blob
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT connection_id, recorded_by FROM connections"
@@ -45,7 +45,7 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
             conn_id = row[0]
             try:
                 conn_id_bytes = crypto.b64decode(conn_id)
-                if conn_id_bytes[:crypto.KEY_ID_SIZE] == hint:
+                if conn_id_bytes[:crypto.KEY_ID_SIZE] == key_id:
                     recorded_by_peers.append(row[1])
             except Exception:
                 continue
@@ -56,11 +56,11 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
     # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
-    # Hint is KEY_ID_SIZE bytes, matches connection_prekey_id
+    # Key ID matches connection_prekey_id
     try:
         cursor = db._conn.execute(
             "SELECT DISTINCT owner_peer_id FROM connection_prekeys WHERE connection_prekey_id = ?",
-            (hint_b64,)
+            (key_id_b64,)
         )
         recorded_by_peers = [row[0] for row in cursor.fetchall()]
         if recorded_by_peers:
@@ -115,7 +115,7 @@ def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db
     Returns:
         List of recorded_ids (one per peer who can decrypt), or empty list if unwrap fails
     """
-    from events.network import recorded
+    from core import recorded
 
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
@@ -166,7 +166,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any,
     Returns:
         Dict with 'recorded_ids', 'event_id', 'recorded_by_peers', or empty dict if unwrap fails
     """
-    from events.network import recorded
+    from core import recorded
 
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
@@ -264,7 +264,7 @@ def _process_address_observations(transit_packets: list[dict], t_ms: int, db: An
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
-    from events.network import recorded, negentropy
+    from core import recorded, negentropy
 
     transit_packets = queues.incoming.drain(batch_size, t_ms, db)
     log.info(f"receive: processing {len(transit_packets)} blobs")

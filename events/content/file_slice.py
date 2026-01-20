@@ -137,55 +137,6 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
     return slice_event_id
 
 
-def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
-            recorded_at: int, db: Any) -> None:
-    """Project file_slice event into file_slices table.
-
-    Args:
-        event_id: Event ID
-        event_data: Decrypted/unwrapped event data
-        recorded_by: Peer who recorded this event
-        recorded_at: Timestamp when recorded
-        db: Database connection
-    """
-    log.debug(f"file_slice.project() event_id={event_id[:20]}..., recorded_by={recorded_by[:20]}...")
-
-    file_id = event_data.get('file_id')
-    slice_number = event_data.get('slice_number')
-    nonce_b64 = event_data.get('nonce')
-    ciphertext_b64 = event_data.get('ciphertext')
-    poly_tag_b64 = event_data.get('poly_tag')
-
-    if not all([file_id, slice_number is not None, nonce_b64, ciphertext_b64, poly_tag_b64]):
-        log.warning(f"file_slice.project() missing fields in event_data: {list(event_data.keys())}")
-        return
-
-    # Decode from base64
-    nonce = crypto.b64decode(nonce_b64)
-    ciphertext = crypto.b64decode(ciphertext_b64)
-    poly_tag = crypto.b64decode(poly_tag_b64)
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Insert or ignore (now includes event_id for sync_file)
-    safedb.execute(
-        """INSERT OR IGNORE INTO file_slices
-           (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (file_id, slice_number, nonce, ciphertext, poly_tag, event_id, recorded_by, recorded_at)
-    )
-
-    # Record dependency: slice depends on file (for cascading deletion)
-    safedb.execute(
-        """INSERT OR IGNORE INTO event_dependencies
-           (child_event_id, parent_event_id, recorded_by, dependency_type)
-           VALUES (?, ?, ?, ?)""",
-        (event_id, file_id, recorded_by, 'file')
-    )
-
-    log.debug(f"file_slice.project() projected slice {file_id[:20]}.../{slice_number}")
-
-
 def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
                         t_ms: int, db: Any, defer_bucket_rebuild: bool = False) -> int:
     """Efficiently create many file slices in batch mode.

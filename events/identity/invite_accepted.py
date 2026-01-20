@@ -12,7 +12,8 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
+from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if invite_link_data.get('inviter_connection_prekey_public_key'):
         inviter_connection_prekey_public_key = crypto.b64decode(invite_link_data['inviter_connection_prekey_public_key'])
 
-    writes = (
+    writes = [
         WriteOp(
             op='insert',
             table='invite_accepteds',
@@ -91,9 +92,36 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'recorded_by': ctx.recorded_by,
             },
         ),
-    )
+    ]
 
-    return ProjectorResult(writes=writes, valid_event=True)
+    # Add trust anchor for network if present (device-wide table)
+    if network_id:
+        writes.append(WriteOp(
+            op='insert',
+            table='trust_anchors',
+            values={
+                'network_id': network_id,
+                'recorded_by': ctx.recorded_by,
+                'created_at': ctx.recorded_at,
+            },
+        ))
+
+    # Command to handle network bootstrap (project network if in store, store inviter blob)
+    commands = ()
+    inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
+    if network_id or inviter_peer_shared_blob_b64:
+        commands = (
+            Command(
+                command_type='handle_invite_accepted_bootstrap',
+                args={
+                    'network_id': network_id,
+                    'inviter_peer_shared_id': inviter_peer_shared_id,
+                    'inviter_peer_shared_blob_b64': inviter_peer_shared_blob_b64,
+                }
+            ),
+        )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
 
 
 def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
@@ -141,124 +169,92 @@ def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
     return invite_accepted_id
 
 
-def project(invite_accepted_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project invite_accepted: establish trust anchor for network join.
+def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Command handler for invite_accepted bootstrap side effects.
 
-    This is the trust anchor for the network join. It:
-    1. Marks network_id as valid (TRUST ANCHOR) - unblocks bootstrap invite
-    2. Stores inviter's peer_shared from link data (enabling sync)
-    3. Stores connection metadata (ip/port)
-    4. The cascade then naturally flows: network -> invite -> user -> etc.
-
-    The invite itself syncs normally like all other events.
-
-    Returns:
-        invite_accepted_id on success, None on failure
+    1. Project network if blob is in store (trust anchor already set by write)
+    2. Store inviter's peer_shared blob from link data
     """
-    log.info(f"[INVITE_ACCEPTED_PROJECT] id={invite_accepted_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    from core import recorded as recorded_module
+    from events.identity import network as network_module
+    from events import registry
+    from core.projection_v2 import resolver as v2_resolver
+    from core.projection_v2 import apply as v2_apply
+    from core import queues
 
-    unsafedb = create_unsafe_db(db)
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
 
-    # Get blob from store
-    blob = store.get(invite_accepted_id, unsafedb)
-    if not blob:
-        log.warning(f"invite_accepted.project() blob not found")
-        return None
+    network_id = args.get('network_id')
+    inviter_peer_shared_id = args.get('inviter_peer_shared_id')
+    inviter_peer_shared_blob_b64 = args.get('inviter_peer_shared_blob_b64')
 
-    event_data = crypto.parse_json(blob)
-
-    # Extract invite link data
-    invite_link_data = event_data['invite_link_data']
-
-    invite_id = invite_link_data['invite_id']
-    network_id = invite_link_data.get('network_id')
-    inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
-
-    # =========================================================================
-    # 1. STORE NETWORK_ID IN TRUST_ANCHORS
-    # Network will validate when it arrives via sync, then trigger cascade
-    # =========================================================================
+    # Project network if blob is in store and not already projected
     if network_id:
-        safedb.execute(
-            "INSERT OR IGNORE INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
-            (network_id, recorded_by, event_data['created_at'])
-        )
-        log.info(f"[INVITE_ACCEPTED_PROJECT] stored network_id={network_id[:20]}... in trust_anchors (will validate on arrival)")
+        network_blob = store.get(network_id, unsafedb)
+        if network_blob:
+            already_projected = safedb.query_one(
+                "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
+                (network_id, recorded_by)
+            )
+            if not already_projected:
+                # Use v2 projection path instead of legacy project()
+                try:
+                    network_data = crypto.parse_json(network_blob)
+                except Exception as e:
+                    log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] failed to parse network blob: {e}")
+                    network_data = None
 
-    # =========================================================================
-    # 2. STORE INVITER'S PEER_SHARED FROM LINK DATA
-    # This allows Bob to know Alice for sync purposes
-    # =========================================================================
-    inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
+                if network_data:
+                    resolve_result = v2_resolver.resolve_event(
+                        ref_id=network_id,
+                        event_type='network',
+                        event_data=network_data,
+                        recorded_by=recorded_by,
+                        recorded_at=recorded_at,
+                        db=db,
+                    )
 
+                    if resolve_result.status == 'ok' and resolve_result.ctx:
+                        project_pure_fn = registry.get_project_pure_fn('network')
+                        if project_pure_fn:
+                            projector_result = project_pure_fn(resolve_result.ctx)
+                            v2_apply.apply_writes(projector_result, recorded_by, recorded_at, db)
+
+                            if projector_result.valid_event:
+                                log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] projected network event {network_id[:20]}...")
+                                # Mark network as valid
+                                safedb.execute(
+                                    "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+                                    (network_id, recorded_by)
+                                )
+                                # Notify blocked queue to unblock events waiting on network
+                                unblocked_by_network = queues.blocked.notify_event_valid(network_id, recorded_by, safedb)
+                                if unblocked_by_network:
+                                    log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] unblocked {len(unblocked_by_network)} events after network became valid")
+                                    # Re-project unblocked events recursively
+                                    recorded_module.project_ids(unblocked_by_network, db)
+                            else:
+                                log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] network projection returned invalid for {network_id[:20]}...")
+                    else:
+                        log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] network resolve failed: {resolve_result.status} - {resolve_result.error}")
+            else:
+                log.debug(f"[INVITE_ACCEPTED_BOOTSTRAP] network already projected {network_id[:20]}...")
+
+    # Store inviter's peer_shared blob from link data (for sync)
     if inviter_peer_shared_blob_b64 and inviter_peer_shared_id:
-        # Decode from urlsafe base64
         padding = 4 - len(inviter_peer_shared_blob_b64) % 4
         if padding != 4:
             inviter_peer_shared_blob_b64 += '=' * padding
         inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64)
 
-        # Store the inviter's peer_shared blob
         stored_ps_id = store.blob(inviter_peer_shared_blob, recorded_at, True, unsafedb)
-        log.info(f"[INVITE_ACCEPTED_PROJECT] stored inviter peer_shared blob, id={stored_ps_id[:20]}...")
+        log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] stored inviter peer_shared blob, id={stored_ps_id[:20]}...")
 
-        # Create recorded wrapper for the inviter's peer_shared so it can be projected
+        # Create recorded wrapper for inviter's peer_shared so it can be projected
         ps_recorded_id = recorded_module.create(stored_ps_id, recorded_by, recorded_at, db, return_dupes=False)
-        log.info(f"[INVITE_ACCEPTED_PROJECT] created recorded wrapper for inviter peer_shared")
+        log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] created recorded wrapper for inviter peer_shared")
 
-    # =========================================================================
-    # 3. MARK INVITE_ACCEPTED AS VALID
-    # =========================================================================
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (invite_accepted_id, recorded_by)
-    )
 
-    # =========================================================================
-    # 4. STORE CONNECTION METADATA IN invite_accepteds TABLE
-    # =========================================================================
-    address = invite_link_data.get('ip')
-    port = invite_link_data.get('port')
-    invite_private_key_b64 = invite_link_data.get('invite_private_key')
-    invite_private_key = crypto.b64decode(invite_private_key_b64) if invite_private_key_b64 else None
-
-    # Derive invite_pubkey from invite_private_key
-    invite_pubkey_b64 = None
-    if invite_private_key:
-        from nacl.signing import SigningKey
-        signing_key = SigningKey(invite_private_key)
-        invite_pubkey_b64 = crypto.b64encode(bytes(signing_key.verify_key))
-
-    # Extract inviter's transit prekey for initial connection
-    inviter_connection_prekey_id = invite_link_data.get('inviter_connection_prekey_id')
-    inviter_connection_prekey_public_key = None
-    if invite_link_data.get('inviter_connection_prekey_public_key'):
-        inviter_connection_prekey_public_key = crypto.b64decode(invite_link_data['inviter_connection_prekey_public_key'])
-
-    # Extract user_id for device linking (peer invites carry the user_id being linked to)
-    link_user_id = invite_link_data.get('user_id')
-
-    safedb.execute("""
-        INSERT OR IGNORE INTO invite_accepteds
-        (invite_id, inviter_peer_shared_id, address, port, network_id, user_id,
-         inviter_connection_prekey_id, inviter_connection_prekey_public_key,
-         invite_private_key, invite_pubkey, created_at, recorded_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        invite_id,
-        inviter_peer_shared_id,
-        address,
-        port,
-        network_id,
-        link_user_id,
-        inviter_connection_prekey_id,
-        inviter_connection_prekey_public_key,
-        invite_private_key,
-        invite_pubkey_b64,
-        event_data['created_at'],
-        recorded_by
-    ))
-
-    log.info(f"invite_accepted.project() completed for {recorded_by}")
-    return invite_accepted_id
+# Register command handler at module load
+register_command_handler('handle_invite_accepted_bootstrap', _handle_invite_accepted_bootstrap)

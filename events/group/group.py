@@ -14,7 +14,7 @@ from core import store
 from events.group import group_key
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
 
 EVENT_SPEC = {
     'encrypted': True,
@@ -163,91 +163,12 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     )
 
-    return ProjectorResult(writes=writes, valid_event=True)
-
-
-def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project group event into groups table.
-
-    Supports polymorphic signature verification:
-    - If signed_by matches a network_id, verify with network's public key
-    - Otherwise, verify with peer_shared's public key
-    """
-    log.debug(f"group.project() projecting group_id={event_id}, seen_by={recorded_by}")
-
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Get blob from store
-    blob = store.get(event_id, unsafedb)
-    if not blob:
-        log.warning(f"group.project() blob not found for group_id={event_id}")
-        return None
-
-    # Unwrap (decrypt)
-    unwrapped, _ = crypto.unwrap(blob, recorded_by, db)
-    if not unwrapped:
-        log.warning(f"group.project() unwrap failed for group_id={event_id}")
-        return None  # Already blocked by recorded.project() if keys missing
-
-    # Parse JSON
-    event_data = crypto.parse_json(unwrapped)
-
-    # Polymorphic signature verification
-    # Check if signed_by is a network_id or a peer_shared_id
-    # Use store-based lookups to avoid timing issues with projection tables
-    signed_by = event_data['signed_by']
-
-    # Try network first (from store - avoids timing issues with projection tables)
-    from events.identity import network
-    public_key = network.get_public_key_from_store(signed_by, db)
-
-    if public_key:
-        log.debug(f"group.project() verifying network-signed group {event_id[:20]}...")
-    else:
-        # Try peer_shared (from store)
-        from events.identity import peer_shared
-        public_key = peer_shared.get_public_key_from_store(signed_by, db)
-        if public_key:
-            log.debug(f"group.project() verifying peer-signed group {event_id[:20]}...")
-        else:
-            log.warning(f"group.project() signed_by={signed_by[:20]}... not found as network or peer_shared")
-            return None
-
-    if not crypto.verify_event(event_data, public_key):
-        log.warning(f"group.project() signature verification FAILED for group_id={event_id}")
-        return None  # Reject unsigned or invalid signature
-
-    # Extract network_id from event data (for dependency ordering)
-    network_id = event_data.get('network_id', '')
-
-    # Insert into groups table (use REPLACE to overwrite stubs from user.project())
-    safedb.execute(
-        """INSERT OR REPLACE INTO groups
-           (group_id, name, signed_by, created_at, key_id, is_main, network_id, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            event_id,
-            event_data['name'],
-            event_data['signed_by'],
-            event_data['created_at'],
-            event_data['key_id'],
-            event_data.get('is_main', 0),  # Default to 0 (not main group)
-            network_id,
-            recorded_by,
-            recorded_at
-        )
+    # Trigger retry of pending name updates now that group is available
+    commands = (
+        Command(command_type='retry_pending_name_updates', args={}),
     )
 
-    if network_id:
-        log.info(f"group.project() stored group {event_id[:20]}... in network {network_id[:20]}...")
-
-    # DETERMINISTIC TRIGGER: Retry pending name updates now that group is available
-    # This handles the case where group_key_shared arrived before the group event
-    from events.group.group_key_shared import retry_pending_name_updates
-    retry_pending_name_updates(recorded_by, db)
-
-    return event_id
+    return ProjectorResult(writes=writes, valid_event=True, commands=commands)
 
 
 def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:

@@ -19,7 +19,7 @@ from . import store
 
 # ===== Constants =====
 
-KEY_ID_SIZE = 16  # bytes (128 bits) - BLAKE2b-128 for event/key IDs
+KEY_ID_SIZE = 16  # bytes (128 bits) - BLAKE2b-128 for key IDs
 SECRET_SIZE = 32  # bytes (256 bits) for symmetric keys
 NONCE_SIZE = 24  # bytes (192 bits) for XChaCha20-Poly1305
 
@@ -37,7 +37,7 @@ def generate_keypair() -> Tuple[bytes, bytes]:
 
 
 def hash(data: bytes, size: int = KEY_ID_SIZE) -> bytes:
-    """BLAKE2b hash. Default 16 bytes (128 bits) for event/key IDs."""
+    """BLAKE2b hash. Default 16 bytes (128 bits) for key IDs."""
     return nacl.hash.blake2b(data, digest_size=size, encoder=nacl.encoding.RawEncoder)
 
 
@@ -232,7 +232,7 @@ def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
 
 
 def extract_id(blob: bytes) -> bytes:
-    """Extract the first KEY_ID_SIZE bytes from a wrapped blob."""
+    """Extract the key ID from a wrapped blob (first KEY_ID_SIZE bytes)."""
     return blob[:KEY_ID_SIZE]
 
 
@@ -240,7 +240,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     """Get transit decryption key. Only checks LOCAL key tables with our private keys.
 
     Checks:
-    - connections WHERE our_key and connection_id hint matches
+    - connections WHERE our_key and connection_id key ID matches
     - connection_prekeys WHERE owner_peer_id == recorded_by
     - local_peers.private_key WHERE peer_id == recorded_by
 
@@ -249,7 +249,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
     - group_keys, group_prekeys (wrong namespace)
 
     Args:
-        id_bytes: Key ID bytes (16 bytes) - hint ID from blob
+        id_bytes: Key ID bytes (16 bytes) - key ID from blob
         recorded_by: Peer ID attempting to decrypt (ownership filter)
         db: Database connection
 
@@ -293,7 +293,7 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
             }
 
     # Check connections table (symmetric keys from connection handshake)
-    # The hint is first 16 bytes of connection_id hash, so we need to compare
+    # The key ID is first KEY_ID_SIZE bytes of connection_id, so we compare the prefix
     from .db import create_safe_db
     safedb = create_safe_db(db, recorded_by=recorded_by)
     conn_rows = safedb.query(
@@ -331,7 +331,7 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
     - transit_keys, connection_prekeys (wrong namespace)
 
     Args:
-        id_bytes: Key ID bytes (16 bytes) - hint ID from blob
+        id_bytes: Key ID bytes (16 bytes) - key ID from blob
         recorded_by: Peer ID attempting to decrypt (ownership filter)
         db: Database connection
 
@@ -382,7 +382,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
     """Get key from database by id bytes. Checks transit keys, group keys, and prekeys.
 
     Args:
-        id_bytes: Key ID bytes (16 bytes) - hint ID from blob
+        id_bytes: Key ID bytes (16 bytes) - key ID from blob
         recorded_by: Peer ID attempting to access this key (for ownership filtering)
         db: Database connection
 

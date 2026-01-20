@@ -17,6 +17,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer as peer_module
 from events.content import channel, message, channel_update
+from core import recorded
 from core import purge_expired
 from core import tick
 
@@ -126,9 +127,9 @@ def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     )
     db.commit()
 
-    # Project channel for both
-    channel.project(channel_id, alice['peer_id'], 3000, db)
-    channel.project(channel_id, bob['peer_id'], 3500, db)
+    # Project channel for Bob (Alice already has it from create)
+    bob_recorded_id = recorded.create(channel_id, bob['peer_id'], 3500, db, return_dupes=False)
+    recorded.project(bob_recorded_id, db)
     db.commit()
 
     # Alice sends a message
@@ -143,9 +144,9 @@ def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     message_id = msg_result['id']
     db.commit()
 
-    # Project message for both
-    message.project(message_id, alice['peer_id'], 4000, db)
-    message.project(message_id, bob['peer_id'], 4500, db)
+    # Project message for Bob (Alice already has it from create)
+    bob_msg_recorded_id = recorded.create(message_id, bob['peer_id'], 4500, db, return_dupes=False)
+    recorded.project(bob_msg_recorded_id, db)
     db.commit()
 
     # Both see the message
@@ -215,7 +216,7 @@ def test_channel_ttl_update_affects_new_messages(fresh_db):
         db=db,
         new_disappearing_time_ms=2000
     )
-    channel_update.project(update_id, alice['peer_id'], 5000, db)
+    # Projection happens automatically via store.event() in create()
     db.commit()
     print("✓ Channel updated")
 

@@ -82,7 +82,7 @@ def event(event_blob: bytes, recorded_by: str, t_ms: int, db: Any) -> str:
         t_ms: Timestamp in milliseconds
         db: Raw Database instance (creates safe/unsafe internally)
     """
-    from events.network import recorded
+    from core import recorded
     from .db import create_unsafe_db
     if not _batch_mode:
         log.info(f"store.event() called: recorded_by={recorded_by}, t_ms={t_ms}")
@@ -134,7 +134,7 @@ def batch_store_events(event_blobs: list[bytes], recorded_by: str, t_ms: int, db
     Returns:
         List of event IDs corresponding to the input blobs
     """
-    from events.network import recorded
+    from core import recorded
     from .db import create_unsafe_db
 
     unsafedb = create_unsafe_db(db)

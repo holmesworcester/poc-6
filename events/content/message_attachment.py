@@ -147,12 +147,7 @@ def _handle_maybe_request_file_sync(args: dict, recorded_by: str, recorded_at: i
     have_slices = our_slices['cnt'] if our_slices else 0
 
     if have_slices < total_slices:
-        log.info(f"message_attachment: auto-requesting file sync: have {have_slices}/{total_slices} slices")
-        try:
-            from events.network import sync_file
-            sync_file.request_file_sync(file_id, recorded_by, priority=5, ttl_ms=0, t_ms=recorded_at, db=db)
-        except Exception as e:
-            log.warning(f"message_attachment: failed to request sync: {e}")
+        log.info(f"message_attachment: need file sync: have {have_slices}/{total_slices} slices (handled by negentropy)")
 
 
 # Register the command handler at module load time
@@ -851,107 +846,37 @@ def create_from_data_uri(peer_id: str, message_id: str, data_uri: str,
     )
 
 
-def project(event_id: str, event_data: dict[str, Any], recorded_by: str,
-            recorded_at: int, db: Any) -> None:
-    """Project message_attachment event into message_attachments table.
-
-    Now includes file descriptor fields (enc_key, root_hash, etc.)
-    VALIDATION: Only the message creator can attach files to their message.
+def is_file_complete(file_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if all slices for a file have been received.
 
     Args:
-        event_id: Event ID
-        event_data: Decrypted/unwrapped event data
-        recorded_by: Peer who recorded this event
-        recorded_at: Timestamp when recorded
+        file_id: File ID to check
+        recorded_by: Peer ID who owns the file
         db: Database connection
+
+    Returns:
+        True if all slices received, False otherwise
     """
-    log.debug(f"message_attachment.project() event_id={event_id[:20]}..., "
-              f"recorded_by={recorded_by[:20]}...")
-
-    # Verify signature before trusting event data
-    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
-        log.warning(f"message_attachment.project() signature verification failed for {event_id[:20]}...")
-        return
-
-    message_id = event_data.get('message_id')
-    file_id = event_data.get('file_id')
-    filename = event_data.get('filename')
-    mime_type = event_data.get('mime_type')
-    signed_by = event_data.get('signed_by')
-
-    # File descriptor fields (now in this event)
-    blob_bytes = event_data.get('blob_bytes')
-    nonce_prefix_b64 = event_data.get('nonce_prefix')
-    enc_key_b64 = event_data.get('enc_key')
-    root_hash_b64 = event_data.get('root_hash')
-    total_slices = event_data.get('total_slices')
-
-    if not all([message_id, file_id, signed_by, blob_bytes is not None,
-                nonce_prefix_b64, enc_key_b64, root_hash_b64, total_slices is not None]):
-        log.warning(f"message_attachment.project() missing required fields: {list(event_data.keys())}")
-        return
-
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Validate: attachment creator must match message creator
-    # NOTE: message_id is a dependency, so the message should already be projected
-    # Compare signed_by (peer_shared_id) - the device that signed both events must match
-    message_row = safedb.query_one(
-        "SELECT signed_by FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-        (message_id, recorded_by)
+    # Get total slices from attachment metadata
+    attachment = safedb.query_one(
+        "SELECT total_slices FROM message_attachments WHERE file_id = ? LIMIT 1",
+        (file_id,)
     )
+    if not attachment or not attachment['total_slices']:
+        return False
 
-    if not message_row:
-        log.error(f"message_attachment.project() BUG: message not found (should be blocked by deps): {message_id[:20]}...")
-        return
+    total_slices = attachment['total_slices']
 
-    if message_row['signed_by'] != signed_by:
-        log.warning(f"message_attachment.project() VALIDATION FAILED: attachment signed_by={signed_by[:20]}... "
-                   f"does not match message signed_by={message_row['signed_by'][:20]}...")
-        return
-
-    # Decode file descriptor fields
-    nonce_prefix = crypto.b64decode(nonce_prefix_b64)
-    enc_key = crypto.b64decode(enc_key_b64)
-    root_hash = crypto.b64decode(root_hash_b64)
-
-    # Insert or ignore (now includes file descriptor fields)
-    safedb.execute(
-        """INSERT OR IGNORE INTO message_attachments
-           (message_id, file_id, filename, mime_type, blob_bytes, nonce_prefix,
-            enc_key, root_hash, total_slices, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (message_id, file_id, filename, mime_type, blob_bytes, nonce_prefix,
-         enc_key, root_hash, total_slices, recorded_by, recorded_at)
+    # Count received slices
+    result = safedb.query_one(
+        "SELECT COUNT(*) as count FROM file_slices WHERE file_id = ?",
+        (file_id,)
     )
+    received = result['count'] if result else 0
 
-    # Record dependency for cascading deletion
-    # attachment depends on message (attachment is a child of message)
-    safedb.execute(
-        """INSERT OR IGNORE INTO event_dependencies
-           (child_event_id, parent_event_id, recorded_by, dependency_type)
-           VALUES (?, ?, ?, ?)""",
-        (event_id, message_id, recorded_by, 'message')
-    )
-
-    log.debug(f"message_attachment.project() projected attachment "
-              f"message={message_id[:20]}... file={file_id[:20]}... slices={total_slices}")
-
-    # Auto-trigger file sync if we don't have all slices
-    # This enables automatic file downloads when receiving attachments
-    our_slices = safedb.query_one(
-        "SELECT COUNT(*) as cnt FROM file_slices WHERE file_id = ? AND recorded_by = ?",
-        (file_id, recorded_by)
-    )
-    have_slices = our_slices['cnt'] if our_slices else 0
-
-    if have_slices < total_slices:
-        log.info(f"message_attachment.project() auto-requesting file sync: have {have_slices}/{total_slices} slices")
-        try:
-            from events.network import sync_file
-            sync_file.request_file_sync(file_id, recorded_by, priority=5, ttl_ms=0, t_ms=recorded_at, db=db)
-        except Exception as e:
-            log.warning(f"message_attachment.project() failed to request sync: {e}")
+    return received >= total_slices
 
 
 def consolidate_file_slices(file_id: str, recorded_by: str, db: Any) -> bool:
@@ -1171,13 +1096,7 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
         log.info(f"message_attachment.get_file_data() incomplete: have {len(slice_rows)}/{total_slices} slices, "
                  f"requesting sync from peers")
 
-        # Auto-trigger file sync with high priority (TTL = 0 means forever)
-        try:
-            from events.network import sync_file
-            sync_file.request_file_sync(file_id, recorded_by, priority=10, ttl_ms=0, t_ms=0, db=db)
-        except Exception as e:
-            log.warning(f"message_attachment.get_file_data() failed to request sync: {e}")
-
+        # File slices will be synced via negentropy
         return None
 
     # Decrypt slices

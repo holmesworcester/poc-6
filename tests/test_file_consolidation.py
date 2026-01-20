@@ -13,7 +13,6 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
-from events.network import sync_file
 from core import tick
 
 
@@ -153,17 +152,7 @@ def test_auto_consolidation_on_download_complete():
 
     print("\n=== Bob downloads file ===")
 
-    # Bob requests file sync
-    sync_file.request_file_sync(
-        file_id=file_id,
-        peer_id=bob['peer_id'],
-        priority=10,
-        ttl_ms=0,
-        t_ms=6000,
-        db=db
-    )
-    db.commit()
-
+    # File slices sync automatically via negentropy during tick()
     # Sync until complete - 30 rounds is enough for 30KB file
     for round_num in range(30):
         tick.tick(t_ms=7000 + round_num * 100, db=db)

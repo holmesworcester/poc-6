@@ -20,7 +20,7 @@ from pathlib import Path
 
 from core.db import Database, create_safe_db, create_unsafe_db
 from core import schema, store, crypto
-from events.network import recorded
+from core import recorded
 from events.identity import peer
 
 
@@ -332,7 +332,7 @@ class TestIdentityChainCascade:
 
     def test_network_cascade_unblocks_dependents(self):
         """When network validates, it should unblock events waiting on it."""
-        from events.network import recorded
+        from core import recorded
         from core import queues
 
         db = create_test_db()

@@ -109,26 +109,6 @@ def _handle_negentropy_sync(args: dict, recorded_by: str, recorded_at: int, db: 
 register_command_handler('handle_negentropy_sync', _handle_negentropy_sync)
 
 
-def project(ref_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project negentropy event by handling the sync message.
-
-    Standard projector signature - fetches event data and delegates to handle_incoming.
-    """
-    blob = store.get(ref_id, db)
-    if not blob:
-        log.warning(f"negentropy.project: blob not found for {ref_id[:20]}...")
-        return None
-
-    event_data = crypto.parse_json(blob)
-    connection_id = event_data.get('reply_connection_id')
-
-    if not connection_id:
-        log.warning(f"negentropy.project: missing reply_connection_id in {ref_id[:20]}...")
-        return None
-
-    handle_incoming(db, recorded_by, connection_id, event_data, recorded_at)
-    return ref_id
-
 # Hierarchy levels - reduced to 4 levels for efficiency
 # root (0) -> prefix_2 -> prefix_4 -> prefix_6
 # prefix_6 (24 bits) = 16.7M possible buckets, enough for 100GB+ files

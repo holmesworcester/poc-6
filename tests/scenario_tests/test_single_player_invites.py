@@ -51,7 +51,7 @@ def test_alice_creates_device_and_user_invites(fresh_db):
     print(f"Device invite link: {device_invite_link[:60]}...")
 
     # Validate device invite returned data (what the UI receives)
-    assert len(device_invite_id) == 24, "Device invite ID should be 44 chars"
+    assert len(device_invite_id) == 24, "Device invite ID should be 24 chars"
     assert device_invite_link.startswith("quiet://link/"), "Device invite link should use 'link' prefix"
     assert device_invite_data['invite_id'] == device_invite_id, "Returned invite_id should match"
     assert device_invite_data.get('user_id') == alice['user_id'], "Device invite should reference Alice's user_id"
@@ -74,7 +74,7 @@ def test_alice_creates_device_and_user_invites(fresh_db):
     print(f"User invite link: {user_invite_link[:60]}...")
 
     # Validate user invite returned data
-    assert len(user_invite_id) == 24, "User invite ID should be 44 chars"
+    assert len(user_invite_id) == 24, "User invite ID should be 24 chars"
     assert user_invite_link.startswith("quiet://invite/"), "User invite link should use 'invite' prefix"
     assert user_invite_data['invite_id'] == user_invite_id, "Returned invite_id should match"
     assert 'user_id' not in user_invite_data, "User invite should NOT have user_id (new user will be created)"

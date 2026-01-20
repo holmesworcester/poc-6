@@ -151,7 +151,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     )
 
     # Create recorded wrapper where peer sees itself
-    from events.network import recorded
+    from core import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 
@@ -201,45 +201,11 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     )
 
     # Create recorded wrapper where peer sees itself
-    from events.network import recorded
+    from core import recorded
     recorded_id = recorded.create(prekey_id, peer_id, t_ms, db, return_dupes=False)
     recorded.project(recorded_id, db)
 
     log.info(f"connection_prekey.create_with_material() projected prekey_id={prekey_id}, ttl_ms={ttl_ms}")
-    return prekey_id
-
-
-def project(prekey_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project transit prekey event into connection_prekeys table with owner_peer_id.
-
-    Returns:
-        prekey_id on success, None on failure
-    """
-    log.info(f"connection_prekey.project() prekey_id={prekey_id[:30]}..., seen_by={recorded_by[:20]}...")
-
-    unsafedb = create_unsafe_db(db)
-
-    # Get blob from store
-    blob = store.get(prekey_id, unsafedb)
-    if not blob:
-        log.warning(f"connection_prekey.project() blob not found for prekey_id={prekey_id}")
-        return None
-
-    # Parse JSON
-    event_data = crypto.parse_json(blob)
-    owner_peer_id = event_data['signed_by']
-    created_at = event_data['created_at']
-
-    # Calculate TTL: absolute time when this prekey expires
-    ttl_ms = created_at + TRANSIT_PREKEY_TTL_MS
-
-    # Insert into connection_prekeys table with owner (device-wide)
-    unsafedb.execute(
-        "INSERT OR IGNORE INTO connection_prekeys (connection_prekey_id, owner_peer_id, public_key, private_key, created_at, ttl_ms) VALUES (?, ?, ?, ?, ?, ?)",
-        (prekey_id, owner_peer_id, crypto.b64decode(event_data['public_key']),
-         crypto.b64decode(event_data['private_key']), created_at, ttl_ms)
-    )
-
     return prekey_id
 
 

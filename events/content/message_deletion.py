@@ -334,136 +334,6 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
     return deletion_id
 
 
-def project(deletion_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project message_deletion event.
-
-    Analogous to unblocking: when a deletion is projected, it acts like adding a permanent block.
-    The message is removed from the messages table, the blob is deleted from store,
-    and future message projections are skipped (via deleted_events table).
-
-    For forward secrecy: marks the encryption key for purging so it can be rekeyed
-    and later destroyed.
-
-    Args:
-        deletion_id: Deletion event ID
-        recorded_by: Peer who recorded this event
-        recorded_at: When this peer recorded it
-        db: Database connection
-
-    Returns:
-        deletion_id if successful, None if blocked
-    """
-    log.info(f"message_deletion.project() deletion_id={deletion_id[:20]}..., recorded_by={recorded_by[:20]}...")
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    unsafedb = create_unsafe_db(db)
-
-    # Get blob from store
-    blob = store.get(deletion_id, unsafedb)
-    if not blob:
-        log.warning(f"message_deletion.project() blob not found for deletion_id={deletion_id}")
-        return None
-
-    # Unwrap (decrypt)
-    plaintext, missing_key_ids = crypto.unwrap_event(blob, recorded_by, db)
-    if not plaintext or missing_key_ids:
-        # Encrypted but we don't have the key yet - will be blocked by recorded.project()
-        log.info(f"message_deletion.project() cannot decrypt deletion {deletion_id[:20]}... - missing key")
-        return None
-
-    # Parse event
-    event_data = crypto.parse_json(plaintext)
-
-    # Verify signature before trusting event data
-    if not crypto.verify_signed_by_peer_shared(event_data, recorded_by, db):
-        log.warning(f"message_deletion.project() signature verification failed for {deletion_id[:20]}...")
-        return None
-
-    message_id = event_data['message_id']
-    deleted_by = event_data['signed_by']
-    created_at = event_data['created_at']
-
-    log.info(f"message_deletion.project() deleting message_id={message_id[:20]}... deleted_by={deleted_by[:20]}...")
-
-    # Check if message exists for authorization validation
-    message_row = safedb.query_one(
-        "SELECT author_id, group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
-        (message_id, recorded_by)
-    )
-
-    # If message exists, validate authorization strictly
-    if message_row:
-        if not validate(message_id, deleted_by, recorded_by, db):
-            log.warning(f"message_deletion.project() authorization FAILED: {deleted_by[:20]}... cannot delete message {message_id[:20]}...")
-            return None
-    else:
-        # Message doesn't exist yet - accept deletion as a "pre-block"
-        # Authorization will be validated if/when message arrives and tries to project
-        log.info(f"message_deletion.project() message not found yet - accepting deletion as pre-block")
-
-    # Insert deletion record (idempotent with PRIMARY KEY on message_id, recorded_by)
-    safedb.execute(
-        """INSERT OR IGNORE INTO message_deletions
-           (deletion_id, message_id, deleted_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (deletion_id, message_id, deleted_by, created_at, recorded_by, recorded_at)
-    )
-
-    # Get message blob to extract the key_id it was encrypted with
-    message_blob = store.get(message_id, unsafedb)
-    if message_blob:
-        try:
-            # Extract key_id from blob (first 16 bytes)
-            key_id_bytes = message_blob[:crypto.KEY_ID_SIZE]
-            key_id_b64 = crypto.b64encode(key_id_bytes)
-
-            # Mark this key for purging (for forward secrecy)
-            safedb.execute(
-                """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
-                   VALUES (?, ?, ?)""",
-                (key_id_b64, recorded_at, recorded_by)
-            )
-            log.info(f"message_deletion.project() marked key {key_id_b64[:20]}... for purging (forward secrecy)")
-        except Exception as e:
-            log.warning(f"message_deletion.project() failed to mark key for purging: {e}")
-            # Continue anyway - forward secrecy is best-effort
-
-    # Delete the message if it exists (analogous to unblocking - but we remove instead of project)
-    safedb.execute(
-        "DELETE FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, recorded_by)
-    )
-    log.info(f"message_deletion.project() deleted message {message_id[:20]}... from messages table (may have already been deleted or not yet arrived)")
-
-    # Mark message as deleted in deleted_events table to prevent future projection
-    safedb.execute(
-        """INSERT OR IGNORE INTO deleted_events (event_id, recorded_by, deleted_at)
-           VALUES (?, ?, ?)""",
-        (message_id, recorded_by, recorded_at)
-    )
-    log.info(f"message_deletion.project() marked message {message_id[:20]}... as deleted in deleted_events")
-
-    # Cascade delete from valid_events to ensure convergence
-    deleted_count = _cascade_delete_from_valid_events(message_id, recorded_by, safedb)
-    log.info(f"message_deletion.project() cascaded deletion of {deleted_count} events from valid_events (message + dependents)")
-
-    # Remove from shareable_events if it was marked shareable
-    safedb.execute(
-        "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-        (message_id, recorded_by)
-    )
-
-    # Delete blob from store to clean up storage
-    unsafedb.execute(
-        "DELETE FROM store WHERE id = ?",
-        (message_id,)
-    )
-    log.info(f"message_deletion.project() deleted message blob {message_id[:20]}... from store")
-
-    # Return deletion_id to mark as valid
-    return deletion_id
-
-
 def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Execute forward secrecy purge cycle for messages with deleted content.
 
@@ -570,8 +440,7 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
         for message_id in messages_using_purge_key:
             try:
                 rekey_id = message_rekey.create(message_id, clean_key_id, peer_id, t_ms, db)
-                # Immediately project the rekey
-                message_rekey.project(rekey_id, peer_id, t_ms, db)
+                # Projection happens automatically via store.event() in create()
                 log.info(f"message_deletion.run_message_purge_cycle() rekeyed message {message_id[:20]}...")
                 stats['messages_rekeyed'] += 1
             except Exception as e:

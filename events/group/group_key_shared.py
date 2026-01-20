@@ -13,6 +13,7 @@ from events.group import group_prekey
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp, EmitEvent
+from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -239,116 +240,6 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     return key_shared_id
 
 
-def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project key_shared event into keys table and shareable_events."""
-    log.debug(f"key_shared.project() key_shared_id={key_shared_id[:20]}..., recorded_by={recorded_by[:20]}...")
-
-    # Get blob from store (already unwrapped by recorded)
-    blob = store.get(key_shared_id, db)
-    if not blob:
-        log.warning(f"key_shared.project() blob not found for key_shared_id={key_shared_id}")
-        return None
-
-    # Unwrap (decrypt) - recorded should have already done this, but we need the plaintext
-    plaintext, missing_keys = crypto.unwrap_event(blob, recorded_by, db)
-    log.debug(f"key_shared.project() unwrap result: plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_keys}")
-    if not plaintext:
-        # Can't decrypt - this event is not for us
-        # It's already shareable (marked by recorded.py), but we don't project it
-        # Examples:
-        # - Alice creates group_key_shared wrapped to Bob's invite prekey - Alice can't decrypt
-        # - Bob will receive it and decrypt it
-        log.info(f"key_shared.project() can't decrypt, event not for us (wrapped to someone else)")
-        # Don't mark as valid - we can't use this event
-        # recorded.py already handled crypto blocking if needed
-        return None
-
-    # Parse JSON
-    event_data = crypto.parse_json(plaintext)
-
-    # If we successfully decrypted it, we should add the key to our group_keys table
-    # This handles both:
-    # 1. Regular case: recipient_peer_id matches our peer_id
-    # 2. Invite case: recipient_peer_id is invite prekey ID, but we have invite private key
-    # The ability to decrypt is the authorization, not the recipient_peer_id field
-
-    # Verify signature - get public key from signed_by peer_shared
-    from events.identity import peer_shared
-    signed_by = event_data['signed_by']
-    public_key = peer_shared.get_public_key(signed_by, recorded_by, db)
-    if not crypto.verify_event(event_data, public_key):
-        log.warning(f"key_shared.project() signature verification failed for key_shared_id={key_shared_id}")
-        return None
-
-    # Create DETERMINISTIC group_key event from the shared key material
-    # This produces the SAME key_id that the creator has (same key material = same hash)
-    original_key_id = event_data['key_id']
-    symmetric_key = crypto.b64decode(event_data['symmetric_key'])
-
-    # Create deterministic group_key event
-    from events.group import group_key
-    computed_key_id = group_key.create_with_material(
-        symmetric_key,
-        recorded_by,
-        event_data['created_at'],  # Use sharing event's timestamp for metadata
-        db
-    )
-
-    # Verify determinism: computed key_id MUST match original
-    # Since group_key events are deterministic (content-addressed), a mismatch indicates
-    # either corruption or a malicious sender providing wrong key material
-    if computed_key_id != original_key_id:
-        log.error(f"key_shared.project() key_id mismatch! computed={computed_key_id[:20]}... vs original={original_key_id[:20]}... - rejecting")
-        return None
-
-    log.debug(f"key_shared.project() created deterministic key {computed_key_id[:20]}... for peer {recorded_by[:20]}...")
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Extract recipient_prekey_id from blob (first 16 bytes is the hint/prekey_id)
-    recipient_prekey_id = crypto.b64encode(blob[:crypto.KEY_ID_SIZE])
-
-    # Insert into group_keys_shared table to track this event
-    # Store original_key_id for auditing (what sender claimed), but we use computed_key_id
-    safedb.execute(
-        """INSERT OR IGNORE INTO group_keys_shared
-           (key_shared_id, original_key_id, recipient_prekey_id, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            key_shared_id,
-            computed_key_id,  # Use computed (deterministic) key_id
-            recipient_prekey_id,
-            event_data['signed_by'],
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
-        )
-    )
-
-    # Mark key_shared event as valid for this peer
-    # Note: computed_key_id is already marked valid by group_key.create_with_material()
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (key_shared_id, recorded_by)
-    )
-
-    # Notify blocked queue - unblock events that were waiting for this key
-    from core import queues
-    unblocked_ids = queues.blocked.notify_event_valid(computed_key_id, recorded_by, safedb)
-    if unblocked_ids:
-        log.info(f"key_shared.project() unblocked {len(unblocked_ids)} events waiting for key {computed_key_id[:20]}...")
-        # Re-project the unblocked events
-        from events.network import recorded
-        recorded.project_ids(unblocked_ids, db)
-
-    # DETERMINISTIC TRIGGER: Retry pending name updates now that key is available
-    # This handles username_update and network_name_update creation
-    # when the group key needed for encryption wasn't available before
-    retry_pending_name_updates(recorded_by, db)
-
-    return key_shared_id
-
-
 def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
     """Retry creating pending name update events now that group key is available.
 
@@ -376,7 +267,7 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
     log.info(f"retry_pending_name_updates() found {len(pending_items)} pending items")
 
     from events.identity import username_update, network_name_update, peer_name_update
-    from events.network import recorded
+    from core import recorded
 
     for item in pending_items:
         try:
@@ -461,6 +352,15 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                 "UPDATE pending_name_updates SET status='failed', error=? WHERE id=? AND recorded_by=?",
                 (str(e), item['id'], recorded_by)
             )
+
+
+def _handle_retry_pending_name_updates(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Command handler for retry_pending_name_updates."""
+    retry_pending_name_updates(recorded_by, db)
+
+
+# Register command handler at module load
+register_command_handler('retry_pending_name_updates', _handle_retry_pending_name_updates)
 
 
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,

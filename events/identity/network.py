@@ -22,6 +22,13 @@ EVENT_SPEC = {
     'requires': {},
     'optional': {},
     'cascade_on_delete': [],
+    # Trust anchor enforcement: network events require a trust anchor before projection
+    # Trust anchors are inserted by invite_accepted for both creators and joiners
+    'trust_anchor': {
+        'table': 'trust_anchors',
+        'key': 'network_id',
+        'key_from': '@event_id',  # The network_id IS the event_id
+    },
 }
 
 log = logging.getLogger(__name__)
@@ -108,94 +115,6 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
-
-
-def project(network_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
-    """Project self-signed network event into networks table.
-
-    The network event is self-signed (root of trust). Admin grants are handled
-    by separate admin_grant events, and groups are created after the network.
-
-    Args:
-        network_id: The network event ID
-        recorded_by: Peer ID recording this event
-        recorded_at: Timestamp when recorded
-        db: Database connection
-
-    Returns:
-        network_id if successful, None if verification fails
-    """
-    log.debug(f"network.project() projecting network_id={network_id}, recorded_by={recorded_by}")
-
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # TRUST ANCHOR ENFORCEMENT: Only accept networks we've agreed to join
-    # Trust anchors are inserted by invite_accepted.project() for ALL cases:
-    # - Creator: self-invites via peer_shared.join() → invite_accepted → trust anchor
-    # - Joiner: accepts invite → invite_accepted → trust anchor
-    # This is a uniform model - no special case for "creator detection".
-    trust_anchor = safedb.query_one(
-        "SELECT 1 FROM trust_anchors WHERE network_id = ? AND recorded_by = ?",
-        (network_id, recorded_by)
-    )
-    existing = safedb.query_one(
-        "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
-        (network_id, recorded_by)
-    )
-    already_valid = safedb.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
-        (network_id, recorded_by)
-    )
-    if not trust_anchor and not existing and not already_valid:
-        log.warning(f"network.project() REJECTED - network_id={network_id[:20]}... not in trust_anchors")
-        return None
-
-    # Get blob from store
-    blob = store.get(network_id, unsafedb)
-    if not blob:
-        log.warning(f"network.project() blob not found for network_id={network_id}")
-        return None
-
-    # Parse JSON (plaintext, no unwrap needed)
-    event_data = crypto.parse_json(blob)
-
-    # Verify self-signature using network_pubkey from event body
-    # Network events have no signed_by field - they're self-signed (root of trust)
-    network_pubkey_b64 = event_data.get('network_pubkey')
-
-    if not network_pubkey_b64:
-        log.warning(f"network.project() missing network_pubkey in event")
-        return None
-
-    network_pubkey = crypto.b64decode(network_pubkey_b64)
-    if not crypto.verify_event(event_data, network_pubkey):
-        log.warning(f"network.project() self-signature verification FAILED for network_id={network_id}")
-        return None
-
-    log.info(f"network.project() verified self-signed network event")
-
-    # Insert into networks table (minimal - no groups, no creator)
-    # Groups and admin grants are separate events created after network
-    # Network only stores its own identity data - groups store their network_id/network_role
-    # signed_by = network_id for self-signed network events
-    safedb.execute(
-        """INSERT OR REPLACE INTO networks
-           (network_id, creator_user_id, network_pubkey, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, '', ?, ?, ?, ?, ?)""",
-        (
-            network_id,
-            network_pubkey_b64,
-            network_id,  # Self-signed: signed_by = network_id
-            event_data['created_at'],
-            recorded_by,
-            recorded_at
-        )
-    )
-
-    log.info(f"network.project() inserted self-signed network in networks table")
-
-    return network_id
 
 
 def get_all_users_group_id(network_id: str, recorded_by: str, db: Any) -> str:
