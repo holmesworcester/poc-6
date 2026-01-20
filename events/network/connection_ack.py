@@ -192,16 +192,22 @@ def send_ack_for_request(
     # Our connection_id is the ack_id, their_connection_id is the request_id
     # In bootstrap mode: peer_shared_id is NULL, invite_id is set
     # In normal mode: peer_shared_id is set, invite_id is NULL
+    # Store reply_addr so we can send sync messages back to this peer
+    from_addr_ip = reply_addr[0] if reply_addr else None
+    from_addr_port = reply_addr[1] if reply_addr else None
+
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
             connection_id, recorded_by, peer_shared_id, invite_id,
             our_key, their_connection_id, their_key,
-            created_at, last_handshake_ms, ttl_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, last_handshake_ms, ttl_ms,
+            from_addr_ip, from_addr_port
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         ack_id, local_peer_id, remote_peer_shared_id, remote_invite_id,
         ack_key, request_id, their_key,
-        t_ms, t_ms, CONNECTION_TTL_MS
+        t_ms, t_ms, CONNECTION_TTL_MS,
+        from_addr_ip, from_addr_port
     ))
 
     # Wrap ack with their symmetric key and queue for delivery
@@ -209,7 +215,7 @@ def send_ack_for_request(
     ack_blob = store.get(ack_id, unsafedb)
 
     to_key = {
-        'id': crypto.b64decode(request_id),  # Use request_id as hint
+        'id': crypto.b64decode(request_id)[:crypto.KEY_ID_SIZE],  # Use first 16 bytes as hint
         'key': their_key,
         'type': 'symmetric'
     }
@@ -226,16 +232,9 @@ def send_ack_for_request(
     if not to_addr and remote_peer_shared_id:
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
-    if to_addr:
-        # Real networking - send via transport with addresses
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-        log.info(f"connection_ack.send_ack_for_request: sent via transport to {to_addr}")
-    else:
-        # Loopback mode - deliver directly to incoming queue
-        from_addr = ('127.0.0.1', 0)
-        transport.deliver(wrapped, from_addr)
-        log.debug(f"connection_ack.send_ack_for_request: sent via loopback")
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
+    log.info(f"connection_ack.send_ack_for_request: sent via transport to {to_addr}")
 
     # Remove from pending requests since we successfully acked
     safedb.execute(

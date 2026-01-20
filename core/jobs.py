@@ -108,11 +108,8 @@ class ReceiveJob(Job):
         from core import transport, receive
         from events.network import recorded
 
-        # 1. Transfer packets (loopback for testing, UDP for production)
-        if transport.is_udp_active():
-            transport.udp_transfer()
-        else:
-            transport.loopback_transfer()
+        # 1. Transfer packets based on configured mode (loopback, simulator, or UDP)
+        transport.transfer()
 
         # 2. Grab batch from incoming (pure - no DB)
         batch = transport.drain_incoming(100)

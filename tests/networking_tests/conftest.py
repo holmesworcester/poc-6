@@ -260,8 +260,11 @@ def create_client(fresh_client_db, udp_port_allocator):
     clients = []
 
     def _create(name: str) -> Client:
-        # Reset transport state for each test
+        # Reset transport state for each test, then enable loopback
+        # (the custom UDP routing in these tests handles actual network I/O,
+        # but tick() still uses transport.transfer() which needs a mode)
         transport.reset()
+        transport.enable_loopback()
 
         db = fresh_client_db()
         port = udp_port_allocator()

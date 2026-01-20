@@ -22,7 +22,8 @@ class TestBasicLatency:
     """Test latency simulation."""
 
     def test_immediate_delivery_without_simulator(self):
-        """Without simulator, packets are delivered immediately."""
+        """Without simulator, packets are delivered immediately in loopback mode."""
+        transport.enable_loopback()  # Enable loopback mode first
         transport.send(b"test", ('127.0.0.1', 1000), ('127.0.0.1', 2000))
         count = transport.loopback_transfer()
         assert count == 1
@@ -415,8 +416,8 @@ class TestIntegrationWithTick:
         assert batch[0][0] == b"test"
 
     def test_loopback_without_simulator_is_immediate(self):
-        """Without simulator, loopback_transfer() delivers immediately."""
-        # No simulator set (reset in fixture)
+        """Without simulator, loopback_transfer() delivers immediately in loopback mode."""
+        transport.enable_loopback()  # Enable loopback mode first
         transport.send(b"test", ('127.0.0.1', 1000), ('127.0.0.1', 2000))
         count = transport.loopback_transfer()
         assert count == 1

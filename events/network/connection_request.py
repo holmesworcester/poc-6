@@ -492,11 +492,8 @@ def _send_ack_for_request(
         if not to_addr:
             to_addr = transport.get_peer_address(remote_peer_shared_id)
 
-        if to_addr:
-            from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-            transport.send(wrapped, from_addr, to_addr)
-        else:
-            transport.deliver(wrapped, ('127.0.0.1', 0))
+        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+        transport.send(wrapped, from_addr, to_addr)
 
         log.info(f"connection._send_ack: updated existing connection and sent ack {ack_id[:20]}... for request {request_id[:20]}...")
         return
@@ -549,11 +546,8 @@ def _send_ack_for_request(
     if not to_addr:
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
-    if to_addr:
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-    else:
-        transport.deliver(wrapped, ('127.0.0.1', 0))
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
 
     log.info(f"connection._send_ack: sent ack {ack_id[:20]}... for request {request_id[:20]}...")
 
@@ -918,16 +912,9 @@ def _send_request(
     if not to_addr:
         to_addr = transport.get_peer_address(to_peer_shared_id)
 
-    if to_addr:
-        # Real networking - send via transport with addresses
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-        log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
-    else:
-        # Loopback mode - deliver directly to incoming queue
-        from_addr = ('127.0.0.1', 0)
-        transport.deliver(wrapped, from_addr)
-        log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... (loopback)")
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
+    log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
 
 
 def purge_expired(t_ms: int, db: Any) -> int:
@@ -1438,11 +1425,8 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     if not to_addr:
         to_addr = transport.get_peer_address(to_peer_shared_id)
 
-    if to_addr:
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-    else:
-        transport.deliver(wrapped, ('127.0.0.1', 0))
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
 
     log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}...")
     return True
@@ -1456,8 +1440,22 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
     """Handle send_connection_ack command.
 
     Sends a connection ack in response to a connection request.
+    Looks up the reply_addr from packet_metadata (stored during receive).
     """
     from events.network import connection_ack
+
+    # Look up reply_addr from packet_metadata staging table
+    # This was stored by store_incoming() when the request arrived
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    from_addr_row = safedb.query_one("""
+        SELECT from_addr_ip, from_addr_port FROM packet_metadata
+        WHERE event_id = ? AND recorded_by = ?
+    """, (args['request_id'], recorded_by))
+
+    reply_addr = None
+    if from_addr_row and from_addr_row['from_addr_ip']:
+        reply_addr = (from_addr_row['from_addr_ip'], from_addr_row['from_addr_port'])
+        log.debug(f"_handle_send_connection_ack: found reply_addr {reply_addr} for request {args['request_id'][:20]}...")
 
     connection_ack.send_ack_for_request(
         request_id=args['request_id'],
@@ -1467,6 +1465,7 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
         local_peer_id=recorded_by,
         t_ms=recorded_at,
         db=db,
+        reply_addr=reply_addr,
     )
 
 

@@ -173,6 +173,50 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                 elif action == 'get_state':
                     result_queue.put({'ok': True, 'state': state.copy()})
 
+                elif action == 'debug_sync_status':
+                    from core.db import create_safe_db, create_unsafe_db
+                    from events.network import connection_request as conn_module
+                    sdb = create_safe_db(db, recorded_by=state['peer_id'])
+                    unsafedb = create_unsafe_db(db)
+
+                    # Get connections
+                    conns = conn_module.get_connections(state['peer_id'], cmd['t_ms'], db)
+                    conn_info = []
+                    for c in conns:
+                        conn_info.append({
+                            'connection_id': c.connection_id[:20],
+                            'peer_shared_id': c.peer_shared_id[:20] if c.peer_shared_id else None,
+                            'can_send': c.can_send(),
+                            'their_connection_id': c.their_connection_id[:20] if c.their_connection_id else None,
+                            'from_addr_ip': c.peer_ip,
+                            'from_addr_port': c.peer_port,
+                        })
+
+                    # Get shareable events count
+                    shareable = sdb.query_one(
+                        "SELECT COUNT(*) as cnt FROM shareable_events WHERE can_share_peer_id = ?",
+                        (state['peer_id'],)
+                    )
+                    shareable_count = shareable['cnt'] if shareable else 0
+
+                    # Get negentropy bucket info (use raw conn to bypass scope)
+                    try:
+                        cursor = db._conn.execute(
+                            "SELECT root_hash FROM negentropy_buckets WHERE peer_id = ? AND level = 0 AND idx = 0",
+                            (state['peer_id'],)
+                        )
+                        root_row = cursor.fetchone()
+                        root_hash = root_row[0].hex()[:16] if root_row and root_row[0] else None
+                    except Exception as e:
+                        root_hash = f"error: {e}"
+
+                    result_queue.put({
+                        'ok': True,
+                        'connections': conn_info,
+                        'shareable_events': shareable_count,
+                        'root_hash': root_hash,
+                    })
+
                 elif action == 'get_peer_addresses':
                     # Debug: return registered peer addresses
                     addrs = dict(transport._peer_addresses)
@@ -353,6 +397,15 @@ class RemoteClient:
         result = self._send({'action': 'get_peer_addresses'})
         return result['addresses']
 
+    def debug_sync_status(self, t_ms: int) -> dict:
+        """Debug: Get detailed sync status."""
+        result = self._send({'action': 'debug_sync_status', 't_ms': t_ms})
+        return {
+            'connections': result.get('connections', []),
+            'shareable_events': result.get('shareable_events', 0),
+            'root_hash': result.get('root_hash'),
+        }
+
 
 def tick_all(*clients: RemoteClient, t_ms: int, rounds: int = 1, interval_ms: int = 100):
     """Tick all clients for multiple rounds.
@@ -368,3 +421,70 @@ def tick_all(*clients: RemoteClient, t_ms: int, rounds: int = 1, interval_ms: in
             client.tick(current_t)
         # Give UDP time to deliver between rounds
         time.sleep(0.02)
+
+
+def assert_eventually(
+    check,
+    *clients: RemoteClient,
+    t_ms: int,
+    max_rounds: int = 200,
+    interval_ms: int = 100,
+    ticks_per_check: int = 5,
+    msg: str = None
+) -> int:
+    """Tick clients until check() passes or timeout.
+
+    This is the multiprocess equivalent of tick_helper.assert_eventually.
+    Use this to wait for sync conditions instead of guessing round counts.
+
+    Args:
+        check: Callable that returns True when condition is met, or raises
+        clients: RemoteClient instances to tick
+        t_ms: Starting timestamp
+        max_rounds: Maximum total ticks before timeout (default 200)
+        interval_ms: Time between ticks (default 100ms)
+        ticks_per_check: How many ticks between condition checks (default 5)
+        msg: Optional message for timeout failure
+
+    Returns:
+        Final timestamp after condition was met
+
+    Example:
+        # Wait until Bob has at least 1 message
+        t_ms = assert_eventually(
+            lambda: len(bob.get_messages()) >= 1,
+            alice, bob,
+            t_ms=t_ms,
+            msg="Bob should have at least 1 message"
+        )
+    """
+    import time
+
+    last_error = None
+    for round_num in range(0, max_rounds, ticks_per_check):
+        # Tick all clients
+        for i in range(ticks_per_check):
+            current_t = t_ms + (round_num + i) * interval_ms
+            for client in clients:
+                client.tick(current_t)
+            time.sleep(0.02)
+
+        # Check condition
+        try:
+            result = check()
+            if result:
+                return t_ms + (round_num + ticks_per_check) * interval_ms
+        except Exception as e:
+            last_error = e
+            continue
+
+    # Final check with real error
+    timeout_msg = msg or f"Condition not met after {max_rounds} rounds ({max_rounds * interval_ms}ms)"
+    try:
+        result = check()
+        if not result:
+            raise AssertionError(f"{timeout_msg}: check returned {result}")
+    except Exception as e:
+        raise AssertionError(f"{timeout_msg}: {e}") from last_error
+
+    return t_ms + max_rounds * interval_ms
