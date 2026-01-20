@@ -188,3 +188,14 @@ def get_public_key(peer_id: str, recorded_by: str, db: Any) -> bytes:
         raise ValueError(f"peer not found: {peer_id}")
     # public_key is stored as base64 string in the table
     return crypto.b64decode(row['public_key'])
+
+
+def list_local(db: Any) -> list[str]:
+    """List all local peer IDs we control.
+
+    Returns:
+        List of peer_id strings
+    """
+    unsafedb = create_unsafe_db(db)
+    rows = unsafedb.query("SELECT peer_id FROM local_peers")
+    return [row['peer_id'] for row in rows]

@@ -54,6 +54,7 @@ import shlex
 import readline
 import atexit
 import os
+import time
 from typing import Optional, Dict, List, Any
 
 # Configure logging BEFORE importing any modules that use logging
@@ -293,11 +294,11 @@ class AccountContext:
     'Account' is the frontend term - internally corresponds to a peer.
     """
 
-    def __init__(self, user_name: str, device_name: str, peer_id: str, peer_shared_id: str):
+    def __init__(self, user_name: str, device_name: str, peer_id: str, peer_shared_id: Optional[str]):
         self.user_name = user_name        # User's display name (e.g., "alice")
         self.device_name = device_name    # Device name (e.g., "desktop", "phone")
         self.peer_id = peer_id            # Backend peer ID
-        self.peer_shared_id = peer_shared_id
+        self.peer_shared_id = peer_shared_id  # May be None during bootstrap
         self.user_id: Optional[str] = None       # Set after network join
         self.network_id: Optional[str] = None    # Set after network join
 
@@ -315,7 +316,7 @@ class CLISession:
         self.accounts: Dict[str, AccountContext] = {}  # full_name -> AccountContext
         self.selected_account: Optional[str] = None    # Currently selected account full_name
         self.selected_channel_id: Optional[str] = None  # Currently selected channel ID
-        self.current_time_ms: int = 0
+        self.current_time_ms: int = int(time.time() * 1000)  # Use real time for production
         self.auto_tick_count: int = 10  # Number of auto-ticks after event commands (default 10 = 1 second)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
@@ -350,6 +351,64 @@ class CLISession:
 
         self.db = Database(conn)
         schema.create_all(self.db)
+
+        # Load existing accounts from database using API modules
+        self._load_accounts_from_db()
+
+    def _load_accounts_from_db(self):
+        """Load accounts from existing database for CLI restart support."""
+        from events.identity import peer, peer_shared, user as user_module, network as network_module
+
+        # Get all local peers we control
+        local_peer_ids = peer.list_local(self.db)
+
+        for peer_id in local_peer_ids:
+            # Look up peer_shared info for this peer
+            ps = peer_shared.get_for_peer(peer_id, peer_id, self.db)
+
+            # During bootstrap, peer_shared may not be projected yet
+            # Create a minimal account anyway so the peer is usable
+            if ps:
+                peer_shared_id = ps['peer_shared_id']
+                device_name = ps.get('device_name') or 'unknown'
+                user_id = ps.get('user_id')
+            else:
+                # Bootstrap mode - peer_shared not yet projected
+                peer_shared_id = None
+                device_name = 'pending'
+                user_id = None
+
+            # Look up user info
+            user_name = 'unknown'
+            network_id = None
+            if user_id:
+                user_info = user_module.get(user_id, peer_id, self.db)
+                if user_info:
+                    user_name = user_info.get('name', 'unknown')
+                    network_id = user_info.get('network_id')
+
+            # Create account context (works even with None peer_shared_id during bootstrap)
+            account = AccountContext(
+                user_name=user_name,
+                device_name=device_name,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id
+            )
+            account.user_id = user_id
+            account.network_id = network_id
+
+            self.add_account(account)
+
+        # Auto-select first account if any loaded
+        if self.accounts and not self.selected_account:
+            first_account = list(self.accounts.values())[0]
+            self.selected_account = first_account.full_name
+
+            # Auto-select first channel
+            from events.content import channel
+            channels = channel.list(recorded_by=first_account.peer_id, db=self.db)
+            if channels:
+                self.selected_channel_id = channels[0]['channel_id']
 
     def get_selected_account(self) -> AccountContext:
         """Get the currently selected account context."""
@@ -1179,6 +1238,7 @@ def cmd_create_invite(session: CLISession):
 
     print(f"✓ created invite #{invite_num}")
     print(f"  use: accept-invite --username <name> --devicename <device> --invite {invite_num}")
+    print(f"  link: {invite_link}")
     session.event_log.display()
 
 
@@ -2950,7 +3010,7 @@ def main():
     if args.listen:
         host, port = args.listen.rsplit(':', 1)
         transport.start_udp(host, int(port))
-        print(f"Listening on {host}:{port}")
+        print(f"Listening on {host}:{port}", flush=True)
 
     # Register peer addresses
     if args.peer:
@@ -2958,7 +3018,7 @@ def main():
             peer_id, addr = peer_spec.split('@')
             host, port = addr.rsplit(':', 1)
             transport.add_peer_address(peer_id, host, int(port))
-            print(f"Added peer {peer_id[:20]}... at {host}:{port}")
+            print(f"Added peer {peer_id[:20]}... at {host}:{port}", flush=True)
 
     try:
         if args.exec_cmd:
