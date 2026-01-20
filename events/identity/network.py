@@ -22,6 +22,13 @@ EVENT_SPEC = {
     'requires': {},
     'optional': {},
     'cascade_on_delete': [],
+    # Trust anchor enforcement: network events require a trust anchor before projection
+    # Trust anchors are inserted by invite_accepted for both creators and joiners
+    'trust_anchor': {
+        'table': 'trust_anchors',
+        'key': 'network_id',
+        'key_from': '@event_id',  # The network_id IS the event_id
+    },
 }
 
 log = logging.getLogger(__name__)

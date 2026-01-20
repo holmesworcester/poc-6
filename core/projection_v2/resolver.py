@@ -365,6 +365,54 @@ def _resolve_signer(
     return "ok", signer_info, [], None
 
 
+def _check_trust_anchor(
+    event_spec: dict[str, Any],
+    ref_id: str,
+    recorded_by: str,
+    safedb: Any,
+) -> tuple[str, str | None]:
+    """Check trust anchor requirement if specified in event_spec.
+
+    Returns:
+        (status, error) - status is 'ok' or 'reject', error is message if rejected
+    """
+    trust_anchor_spec = event_spec.get("trust_anchor")
+    if not trust_anchor_spec:
+        return "ok", None
+
+    table = trust_anchor_spec.get("table")
+    key = trust_anchor_spec.get("key")
+    key_from = trust_anchor_spec.get("key_from")
+
+    if not table or not key:
+        return "reject", "trust_anchor spec missing table or key"
+
+    # Resolve key value
+    if key_from == "@event_id":
+        key_value = ref_id
+    else:
+        return "reject", f"trust_anchor key_from '{key_from}' not supported"
+
+    # Check if trust anchor exists
+    trust_anchor = safedb.query_one(
+        f"SELECT 1 FROM {table} WHERE {key} = ? AND recorded_by = ?",
+        (key_value, recorded_by)
+    )
+    if trust_anchor:
+        return "ok", None
+
+    # Also accept if already projected (for idempotency)
+    # This handles re-projection and existing valid events
+    already_valid = safedb.query_one(
+        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
+        (ref_id, recorded_by)
+    )
+    if already_valid:
+        return "ok", None
+
+    return "reject", f"trust anchor not found in {table}"
+
+
 def resolve_event(
     ref_id: str,
     event_type: str,
@@ -389,6 +437,11 @@ def resolve_event(
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
+
+    # Check trust anchor requirement (e.g., network events need trust anchor before projection)
+    trust_status, trust_error = _check_trust_anchor(event_spec, ref_id, recorded_by, safedb)
+    if trust_status == "reject":
+        return ResolveResult(status="reject", ctx=None, error=trust_error)
 
     deps: dict[str, Any] = {}
     missing: list[str] = []

@@ -214,27 +214,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     event_type = event_data.get('type')
     projected_id = None
 
-    # TRUST ANCHOR ENFORCEMENT for network events
-    # Trust anchors are inserted by invite_accepted.project() for ALL cases:
-    # - Creator: self-invites via peer_shared.join() → invite_accepted → trust anchor
-    # - Joiner: accepts invite → invite_accepted → trust anchor
-    # This is a uniform model - no special case for "creator detection".
-    if event_type == 'network':
-        trust_anchor = safedb.query_one(
-            "SELECT 1 FROM trust_anchors WHERE network_id = ? AND recorded_by = ?",
-            (ref_id, recorded_by)
-        )
-        existing = safedb.query_one(
-            "SELECT 1 FROM networks WHERE network_id = ? AND recorded_by = ?",
-            (ref_id, recorded_by)
-        )
-        already_valid = safedb.query_one(
-            "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ?",
-            (ref_id, recorded_by)
-        )
-        if not trust_anchor and not existing and not already_valid:
-            log.warning(f"[TRUST_ANCHOR] Rejecting network {ref_id[:20]}... - not trusted by {recorded_by[:20]}...")
-            return [None, recorded_id]
+    # Trust anchor enforcement moved to resolver via EVENT_SPEC['trust_anchor']
 
     project_pure_fn = registry.get_project_pure_fn(event_type) if event_type else None
     event_spec = registry.get_event_spec(event_type) if event_type else None
