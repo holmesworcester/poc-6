@@ -184,10 +184,10 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                     conn_info = []
                     for c in conns:
                         conn_info.append({
-                            'connection_id': c.connection_id[:20],
+                            'key_id': c.key_id[:20],
                             'peer_shared_id': c.peer_shared_id[:20] if c.peer_shared_id else None,
                             'can_send': c.can_send(),
-                            'their_connection_id': c.their_connection_id[:20] if c.their_connection_id else None,
+                            'their_key_id': c.their_key_id[:20] if c.their_key_id else None,
                             'from_addr_ip': c.peer_ip,
                             'from_addr_port': c.peer_port,
                         })
