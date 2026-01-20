@@ -10,7 +10,8 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
+from core.projection_v2.apply import register_command_handler
 from events.identity import user, peer_shared, network
 
 log = logging.getLogger(__name__)
@@ -163,7 +164,19 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     ]
 
-    return ProjectorResult(writes=tuple(writes), valid_event=True)
+    # Side effects: cascade peer removal, delete connections, rotate keys
+    commands = (
+        Command(
+            command_type='handle_user_removed_side_effects',
+            args={
+                'removed_user_id': removed_user_id,
+                'removed_at': removed_at,
+                'removed_by': signed_by,
+            }
+        ),
+    )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -311,3 +324,20 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
         except Exception as e:
             log.warning(f"user_removed._rotate_keys_for_removed_user() failed to rotate key for group {group_id[:20]}...: {e}")
             # Continue rotating keys for other groups even if one fails
+
+
+def _command_handle_user_removed_side_effects(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Command handler wrapper for _handle_user_removed_side_effects."""
+    removed_user_id = args.get('removed_user_id')
+    removed_at = args.get('removed_at')
+    removed_by = args.get('removed_by')
+
+    if not removed_user_id:
+        log.warning("handle_user_removed_side_effects: missing removed_user_id")
+        return
+
+    _handle_user_removed_side_effects(removed_user_id, removed_at, removed_by, recorded_by, db)
+
+
+# Register command handler at module load
+register_command_handler('handle_user_removed_side_effects', _command_handle_user_removed_side_effects)

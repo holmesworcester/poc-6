@@ -13,6 +13,7 @@ from events.group import group_prekey
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp, EmitEvent
+from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -461,6 +462,15 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
                 "UPDATE pending_name_updates SET status='failed', error=? WHERE id=? AND recorded_by=?",
                 (str(e), item['id'], recorded_by)
             )
+
+
+def _handle_retry_pending_name_updates(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Command handler for retry_pending_name_updates."""
+    retry_pending_name_updates(recorded_by, db)
+
+
+# Register command handler at module load
+register_command_handler('retry_pending_name_updates', _handle_retry_pending_name_updates)
 
 
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,

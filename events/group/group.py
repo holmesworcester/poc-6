@@ -14,7 +14,7 @@ from core import store
 from events.group import group_key
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
 
 EVENT_SPEC = {
     'encrypted': True,
@@ -163,7 +163,12 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     )
 
-    return ProjectorResult(writes=writes, valid_event=True)
+    # Trigger retry of pending name updates now that group is available
+    commands = (
+        Command(command_type='retry_pending_name_updates', args={}),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True, commands=commands)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:

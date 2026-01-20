@@ -10,7 +10,8 @@ import logging
 from core import crypto
 from core import store
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
+from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +144,15 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     ]
 
-    return ProjectorResult(writes=tuple(writes), valid_event=True)
+    # Side effects: delete connections, rotate group keys
+    commands = (
+        Command(
+            command_type='handle_peer_removed_side_effects',
+            args={'removed_peer_shared_id': removed_peer_shared_id}
+        ),
+    )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
 
 
 def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str | None:
@@ -245,3 +254,36 @@ def _rotate_keys_for_removed_peer_user(removed_user_id: str, recorded_by: str, t
         except Exception as e:
             log.warning(f"peer_removed._rotate_keys_for_removed_peer_user() failed to rotate key for group {group_id[:20]}...: {e}")
             # Continue rotating keys for other groups even if one fails
+
+
+def _handle_peer_removed_side_effects(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Command handler for peer_removed side effects.
+
+    1. Delete all connections with the removed peer
+    2. Rotate group keys if this was a user's peer
+    """
+    from events.network import connection_request
+
+    removed_peer_shared_id = args.get('removed_peer_shared_id')
+    if not removed_peer_shared_id:
+        log.warning("handle_peer_removed_side_effects: missing removed_peer_shared_id")
+        return
+
+    # Delete connections
+    deleted_count = connection_request.remove_connections_for_peer(removed_peer_shared_id, db)
+    log.info(f"handle_peer_removed_side_effects: deleted {deleted_count} connection(s) for removed peer {removed_peer_shared_id[:20]}...")
+
+    # Rotate group keys - lookup user_id for the removed peer
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    peer_row = safedb.query_one(
+        "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ? LIMIT 1",
+        (removed_peer_shared_id, recorded_by)
+    )
+    if peer_row and peer_row.get('user_id'):
+        removed_user_id = peer_row['user_id']
+        log.info(f"handle_peer_removed_side_effects: rotating keys for user {removed_user_id[:20]}...")
+        _rotate_keys_for_removed_peer_user(removed_user_id, recorded_by, recorded_at, db)
+
+
+# Register command handler at module load
+register_command_handler('handle_peer_removed_side_effects', _handle_peer_removed_side_effects)
