@@ -462,7 +462,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     log.info(f"peer_shared.join() created transit prekey_shared: {connection_prekey_shared_id[:20]}...")
 
     # 4. Project peer_shared immediately (establishes peer↔user link, updates peer_self)
-    from events.network import recorded
+    from core import recorded
     peer_shared_recorded_id = recorded.create(peer_shared_id, peer_id, t_ms, db, return_dupes=True)
     recorded.project_ids([peer_shared_recorded_id], db)
     log.info(f"peer_shared.join() projected peer_shared, peer_self updated with user_id")

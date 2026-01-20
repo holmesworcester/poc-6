@@ -115,7 +115,7 @@ def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db
     Returns:
         List of recorded_ids (one per peer who can decrypt), or empty list if unwrap fails
     """
-    from events.network import recorded
+    from core import recorded
 
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
@@ -166,7 +166,7 @@ def unwrap_and_store(blob: bytes, t_ms: int, db: Any,
     Returns:
         Dict with 'recorded_ids', 'event_id', 'recorded_by_peers', or empty dict if unwrap fails
     """
-    from events.network import recorded
+    from core import recorded
 
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
@@ -264,7 +264,7 @@ def _process_address_observations(transit_packets: list[dict], t_ms: int, db: An
 
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
-    from events.network import recorded, negentropy
+    from core import recorded, negentropy
 
     transit_packets = queues.incoming.drain(batch_size, t_ms, db)
     log.info(f"receive: processing {len(transit_packets)} blobs")

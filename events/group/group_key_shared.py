@@ -267,7 +267,7 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
     log.info(f"retry_pending_name_updates() found {len(pending_items)} pending items")
 
     from events.identity import username_update, network_name_update, peer_name_update
-    from events.network import recorded
+    from core import recorded
 
     for item in pending_items:
         try:

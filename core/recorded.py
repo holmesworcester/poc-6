@@ -26,8 +26,6 @@ import json
 import logging
 
 from events import registry
-from events.group import group
-from events.content import message
 from core import store
 from core import crypto
 from core.db import create_safe_db, create_unsafe_db
@@ -71,11 +69,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         _triggered_by: What triggered this projection (for debugging causality)
         skip_negentropy: If True, skip negentropy bucket updates (caller will batch them)
     """
-    from events.identity import peer
-    from events.content import channel
     from core import queues
-    import json
-    from tests.utils import timeline
 
     unsafedb = create_unsafe_db(db)
 
@@ -90,23 +84,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     ref_id = recorded_event['ref_id']
     recorded_by = recorded_event['recorded_by']
 
-    log.info(f"recorded.project(): ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..., recorded_id={recorded_id[:20]}...")
-
-    # DEBUG: Check if this is a sync request that we're about to process
-    temp_type = None
-    temp_blob = store.get(ref_id, unsafedb)
-    if temp_blob:
-        try:
-            temp_data = crypto.parse_json(temp_blob)
-            temp_type = temp_data.get('type')
-            if temp_type == 'sync':
-                log.info(f"recorded.project(): SYNC EVENT FOUND! Processing sync request recorded_by={recorded_by[:20]}...")
-        except:
-            pass
-
-    # Timeline: Log projection start
-    timeline.log('proj_start', ref_id=ref_id, ref_type=temp_type, recorded_by=recorded_by,
-                 triggered_by=_triggered_by, depth=_recursion_depth)
+    log.debug(f"recorded.project(): ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -122,13 +100,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Try to unwrap (for encrypted events)
     plaintext, missing_key_ids = crypto.unwrap_event(event_blob, recorded_by, db)
 
-    # DEBUG: Log unwrap results for all events to understand what's happening
-    log.error(f"[UNWRAP_RESULT] ref_id={ref_id[:20]}... plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_key_ids}, temp_type={temp_type}")
-
-    # DEBUG: Check if sync events are being blocked on keys
-    if temp_type == 'sync':
-        log.info(f"recorded.project(): SYNC unwrap result: plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_key_ids}")
-
     # Parse event data to determine type (needed for shareable check)
     event_data = None
     event_type = None
@@ -137,8 +108,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         # Successfully decrypted or was plaintext
         event_data = crypto.parse_json(plaintext)
         event_type = event_data.get('type')
-        if temp_type == 'sync':
-            log.info(f"recorded.project(): SYNC parsed, event_type={event_type}")
     elif not missing_key_ids:
         # Not encrypted, try plaintext parsing
         try:
@@ -149,25 +118,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             # Can't parse - skip projection
             log.warning(f"Failed to parse event: ref_id={ref_id[:20] if ref_id else 'N/A'}..., error={str(e)[:50]}")
             return [None, recorded_id]
-
-    log.info(f"Parsed event data, type={event_type}")
-
-    # Timeline: Log event type and plaintext data for debugging
-    if event_data:
-        import json
-        # Truncate large fields for readability
-        timeline_data = {}
-        for k, v in event_data.items():
-            if k in ('ciphertext', 'blob', 'data') and isinstance(v, (str, bytes)) and len(str(v)) > 50:
-                timeline_data[k] = f"{str(v)[:50]}..."
-            else:
-                timeline_data[k] = v
-        timeline.log('event_data', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
-                    data=json.dumps(timeline_data, default=str))
-
-    # DEBUG: Log if this is a channel event
-    if event_type == 'channel':
-        log.error(f"[CHANNEL_AFTER_PARSE] type=channel, ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     # Mark shareable events for sync (centralized marking via registry)
     # This happens BEFORE blocking so blocked events (crypto or semantic deps) are still shareable
@@ -202,8 +152,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync
     if missing_key_ids:
-        timeline.log('blocked', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by,
-                     status='blocked_crypto', blocked_on=missing_key_ids)
         queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
         return [None, recorded_id]
 
@@ -248,14 +196,6 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
                     f"missing_deps={missing_deps}"
                 )
 
-            timeline.log(
-                'blocked',
-                ref_id=ref_id,
-                ref_type=event_type,
-                recorded_by=recorded_by,
-                status='blocked_deps',
-                blocked_on=missing_deps,
-            )
             queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
             return [None, recorded_id]
 
@@ -263,21 +203,18 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             log.warning(
                 f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... rejected: {resolve_result.error}"
             )
-            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
             return [None, recorded_id]
 
         if resolve_result.status != 'ok' or resolve_result.ctx is None:
             log.error(
                 f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... resolve returned {resolve_result.status}"
             )
-            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
             return [None, recorded_id]
 
-        log.warning(
+        log.debug(
             f"[PROJECTION_DISPATCH] (v2) Projecting event type: {event_type}, "
             f"ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}..."
         )
-        timeline.log('dispatching', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by)
 
         if event_type == 'message':
             deleted_check = safedb.query_one(
@@ -292,21 +229,18 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
             projector_result = project_pure_fn(resolve_result.ctx)
         except Exception as e:
             log.error(f"[PROJECTION_FAILED] project_pure raised for {ref_id[:20]}...: {e}")
-            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
             return [None, recorded_id]
 
         try:
             v2_apply.apply_writes(projector_result, recorded_by, recorded_at, db)
         except Exception as e:
             log.error(f"[PROJECTION_FAILED] apply_writes raised for {ref_id[:20]}...: {e}")
-            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
             return [None, recorded_id]
 
         if not projector_result.valid_event:
             log.warning(
                 f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid"
             )
-            timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
             return [None, recorded_id]
 
         projected_id = ref_id
@@ -316,40 +250,15 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # They will be retried later when dependencies are satisfied
     if projected_id is None:
         log.warning(f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid")
-        timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='failed')
         return [None, recorded_id]
 
     # Mark event as valid for this peer
-    log.warning(f"[VALID_EVENT] Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
-
-    # Check if blob is in store before marking as valid
-    unsafedb = create_unsafe_db(db)
-    in_store = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (ref_id,))
-    if not in_store:
-        log.error(f"[VALID_EVENT_BUG] ❌ Marking event {ref_id[:20]}... as valid but blob NOT in store! type={event_type}")
-
-    # Log before and after valid_events insert
-    already_valid = safedb.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
-        (ref_id, recorded_by)
-    )
-    if already_valid:
-        log.warning(f"[VALID_EVENT_ALREADY] Event {ref_id[:20]}... already in valid_events for peer {recorded_by[:20]}...")
+    log.debug(f"Marking {event_type} event {ref_id[:20]}... as valid for peer {recorded_by[:20]}...")
 
     safedb.execute(
         "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
         (ref_id, recorded_by)
     )
-
-    # Verify insertion
-    check_valid = safedb.query_one(
-        "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
-        (ref_id, recorded_by)
-    )
-    if check_valid:
-        log.warning(f"[VALID_EVENT_SUCCESS] ✓ Event {ref_id[:20]}... is now in valid_events for peer {recorded_by[:20]}...")
-    else:
-        log.error(f"[VALID_EVENT_FAILED] ✗ Event {ref_id[:20]}... NOT in valid_events after insert! peer={recorded_by[:20]}...")
 
     # Add to projected_events if event has created_at (for UI lazy loading)
     if event_data and event_data.get('created_at') is not None and event_type:
@@ -363,16 +272,11 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     # Notify blocked queue - unblock events that were waiting for this event
     unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
     if unblocked_ids:
-        log.warning(f"Unblocked {len(unblocked_ids)} events after {ref_id[:20]}... became valid for peer {recorded_by[:20]}...")
+        log.debug(f"Unblocked {len(unblocked_ids)} events after {ref_id[:20]}... became valid")
         # Re-project unblocked events recursively
         project_ids(unblocked_ids, db, _recursion_depth + 1)
         # Clean up successfully projected events from blocked queue
         _cleanup_successfully_projected_events(unblocked_ids, recorded_by, db)
-    else:
-        log.debug(f"No events to unblock after {ref_id[:20]}... for peer {recorded_by[:20]}...")
-
-    # Timeline: Log successful projection completion
-    timeline.log('proj_end', ref_id=ref_id, ref_type=event_type, recorded_by=recorded_by, status='success')
 
     return [projected_id, recorded_id]
 
@@ -445,10 +349,7 @@ def _cleanup_successfully_projected_events(unblocked_ids: list[str], recorded_by
 def create(ref_id: str, recorded_by: str, t_ms: int, db: Any, return_dupes: bool) -> str:
     """Create a recorded event for the given ref_id and return the recorded_id."""
 
-    log.debug(f"recorded.create() creating recorded event: ref_id={ref_id}, recorded_by={recorded_by}, t_ms={t_ms}")
-
-    # Log ALL recorded event creations with ref_id and recorded_by for debugging
-    log.info(f">>> recorded.create(): ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
+    log.debug(f"recorded.create(): ref_id={ref_id[:20]}..., recorded_by={recorded_by[:20]}...")
 
     # Build recorded event (no created_by, no created_at - deterministic per peer+event)
     event_data = {

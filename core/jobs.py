@@ -106,7 +106,7 @@ class ReceiveJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from core import transport, receive
-        from events.network import recorded
+        from core import recorded
 
         # 1. Transfer packets (loopback for testing, UDP for production)
         if transport.is_udp_active():

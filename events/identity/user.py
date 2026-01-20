@@ -350,7 +350,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     # Content setup (after peer_shared exists)
     # =========================================================================
 
-    from events.network import recorded
+    from core import recorded
 
     # 7. Create admin_grant event signed by network (grants admin to first user)
     admin_grant_id = admin.create(

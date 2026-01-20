@@ -175,7 +175,7 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
     1. Project network if blob is in store (trust anchor already set by write)
     2. Store inviter's peer_shared blob from link data
     """
-    from events.network import recorded as recorded_module
+    from core import recorded as recorded_module
     from events.identity import network as network_module
     from events import registry
     from core.projection_v2 import resolver as v2_resolver

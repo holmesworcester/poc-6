@@ -17,7 +17,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer as peer_module
 from events.content import channel, message, channel_update
-from events.network import recorded
+from core import recorded
 from core import purge_expired
 from core import tick
 
