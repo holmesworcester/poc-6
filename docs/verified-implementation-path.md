@@ -6,6 +6,18 @@ This document outlines an approach for creating a formally verified implementati
 
 The goal is to move from the current Python prototype + TLA+ specification to a verified Rust implementation that provides strong security guarantees while remaining practical to build and maintain.
 
+### Alignment With Current Causal Model (TLA+)
+
+The current model treats `invite_accepted` as the trust anchor and separates recorded vs valid events. This plan should reflect that:
+
+- `network` is only valid after `invite_accepted` establishes a trust anchor.
+- `invite_accepted` only projects when matching invite data is recorded (link material is present).
+- Invites are never force-validated; they become valid only after their signer is valid.
+- Recorded blobs are not trusted until validity checks pass; projection is gated by validity.
+- Connection bootstrap ordering (request -> ack -> invite-connection -> peer-connection) is part of the trust chain.
+
+References: `docs/tla/BootstrapGraph.tla`, `docs/tla/EventGraphSchema.tla`, `docs/tla/IMPLEMENTATION_GUIDE.md`.
+
 ### Architecture
 
 ```
@@ -137,6 +149,8 @@ Verus has limited support for concurrent code, but this doesn't matter for the Q
 - Dependency checking
 - Projection to database
 - State queries
+
+**Constraint:** the verified core must be the sole authority for marking events valid and writing projections. Async I/O, timers, and sync jobs may enqueue events, but must not bypass or race the validity/projection pipeline.
 
 This means Verus can verify the entire protocol core without reasoning about concurrency. The concurrent parts (I/O, UI) are outside the verified boundary and interact only through well-defined interfaces (event queue in, state snapshots out).
 
@@ -295,6 +309,10 @@ Invite ──[signed by peer_shared, requires admin]──→ valid
 
 Each event type has one verification rule. The inductive trust chain emerges from the dependency DAG.
 
+### Trust Anchor Note (Keep Isomorphism)
+
+Even with genesis event types, the network signature is only integrity, not trust. Validity should still be gated by `invite_accepted` so the bootstrap case is isomorphic with later joins. This keeps the same trust anchor across the entire chain and prevents implicit trust in the bootstrap creator.
+
 ### Schema Change Summary
 
 ```
@@ -308,6 +326,8 @@ New event types:
 
 Removed field:
 - signer_type (no longer needed)
+
+Note: event counts and names are illustrative and should be updated to match the current event graph. If genesis variants remain, their validity must still be gated by `invite_accepted` to preserve the trust-anchor model.
 ```
 
 ### Key Insight: Signer Polymorphism vs Dependency Polymorphism
@@ -536,6 +556,8 @@ fn parse_event_id(input: &[u8]) -> IResult<&[u8], EventId> {
 4. **Invertible:** Can generate serializers from same grammar
 5. **Testable:** Property-based testing with arbitrary inputs
 
+**Verification realism:** Verus does not directly reason about `nom` combinators. If parser verification is a goal, plan for either (a) a small verified reference parser that the `nom` implementation is tested/refined against, or (b) keeping parsing outside the verified core and proving properties about the decoded event structure instead.
+
 ### Integration with Verus
 
 ```rust
@@ -740,6 +762,16 @@ verus! {
 ```
 
 ## Verification Strategy
+
+### Current Schema Invariants To Carry Into Verus
+
+These are modeled today and should be treated as first-class verification targets:
+
+- `invite_accepted` requires recorded invite data (link material present).
+- `message_deletion` requires the target message; `message_reaction_deletion` requires the target reaction.
+- `group_key_shared` requires `group_key`; `group_prekey_shared` requires `group_prekey`.
+- `user_removed` and `peer_removed` require an admin event (boot or ongoing).
+- `file_slice` becomes trusted only after `message_attachment` and `file_slice` are valid.
 
 ### Phase 1: Parser Verification (Weeks)
 
