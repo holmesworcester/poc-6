@@ -166,16 +166,10 @@ def test_three_player_messaging(fresh_db):
     print(f"\nBob has {bob_blocked_count['cnt'] if bob_blocked_count else 0} events blocked (pending deps)")
     print(f"Bob has {len(bob_events_after)} events in shareable_events")
 
-    # Debug: Check what Bob's 4 original events were
+    # Debug: List Bob's original events (event IDs only - don't decode blobs)
     print("\n=== Bob's original events ===")
-    from core import store, crypto
     for row in bob_events_before:
-        try:
-            blob = store.get(row['event_id'], db)
-            data = crypto.parse_json(blob)
-            print(f"  {row['event_id'][:20]}... type={data.get('type', '?')}")
-        except Exception as e:
-            print(f"  {row['event_id'][:20]}... (encrypted or error: {e})")
+        print(f"  {row['event_id'][:20]}...")
 
     # Check what's blocked BEFORE assertions (query blocked_events_ephemeral directly)
     alice_blocked = db.query(
