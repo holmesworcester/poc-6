@@ -118,6 +118,10 @@ class Database:
         """Execute INSERT/UPDATE/DELETE statement."""
         self._conn.execute(sql, params)
 
+    def executemany(self, sql: str, seq_of_params: list[tuple[Any, ...]]) -> None:
+        """Execute INSERT/UPDATE/DELETE for multiple parameter sets."""
+        self._conn.executemany(sql, seq_of_params)
+
     def execute_returning(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute UPDATE/INSERT/DELETE with RETURNING clause and return results."""
         cursor = self._conn.execute(sql, params)
@@ -278,6 +282,32 @@ class SafeDB:
                 )
 
         self._db.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params: list[tuple[Any, ...]]) -> None:
+        """Execute INSERT/UPDATE/DELETE on subjective table for multiple parameter sets."""
+        if not seq_of_params:
+            return
+
+        table = self._extract_table(sql)
+        self._validate_table_access(table)
+
+        sql_upper = sql.upper()
+        if 'INSERT' in sql_upper:
+            for params in seq_of_params:
+                if self.recorded_by not in str(params):
+                    raise ScopingViolation(
+                        f"INSERT into subjective table must include recorded_by={self.recorded_by}\n"
+                        f"SQL: {sql}\n"
+                        f"Params: {params}"
+                    )
+        elif 'UPDATE' in sql_upper or 'DELETE' in sql_upper:
+            if 'recorded_by' not in sql.lower() and 'can_share_peer_id' not in sql.lower():
+                raise ScopingViolation(
+                    f"UPDATE/DELETE on subjective table must filter by recorded_by\n"
+                    f"SQL: {sql}"
+                )
+
+        self._db.executemany(sql, seq_of_params)
 
     def execute_returning(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute with RETURNING clause and validate results."""
@@ -446,6 +476,14 @@ class UnsafeDB:
         table = self._extract_table(sql)
         self._validate_table_access(table)
         self._db.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params: list[tuple[Any, ...]]) -> None:
+        """Execute INSERT/UPDATE/DELETE on device table for multiple parameter sets."""
+        if not seq_of_params:
+            return
+        table = self._extract_table(sql)
+        self._validate_table_access(table)
+        self._db.executemany(sql, seq_of_params)
 
     def execute_returning(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute with RETURNING clause."""

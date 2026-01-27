@@ -251,6 +251,7 @@ class SyncUpdateJob(Job):
                     budget_ms = min(max_budget, max(budget_ms, int(budget_ms * scale)))
 
         processed = 0
+        shareable_by_peer: dict[str, list[tuple[str, int | None, int]]] = {}
         start = time.perf_counter()
 
         while True:
@@ -274,22 +275,22 @@ class SyncUpdateJob(Job):
                         negentropy.handle_incoming(db, recorded_by, connection_id, event_data, t_ms)
 
             if shareable_rows and not skip_negentropy:
-                by_peer: dict[str, list[tuple[str, int | None, int]]] = {}
                 for event_id, recorded_by, recorded_at in shareable_rows:
-                    by_peer.setdefault(recorded_by, []).append((event_id, None, recorded_at))
-
-                for peer_id, events in by_peer.items():
-                    negentropy.add_shareable_events_batch(
-                        events,
-                        peer_id,
-                        db,
-                        defer_buckets=defer_buckets,
-                    )
+                    shareable_by_peer.setdefault(recorded_by, []).append((event_id, None, recorded_at))
 
             processed += len(recorded_ids)
 
             if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
                 break
+
+        if shareable_by_peer and not skip_negentropy:
+            for peer_id, events in shareable_by_peer.items():
+                negentropy.add_shareable_events_batch(
+                    events,
+                    peer_id,
+                    db,
+                    defer_buckets=defer_buckets,
+                )
 
         db.commit()
         return {'materialized': processed}

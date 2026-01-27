@@ -419,20 +419,25 @@ def add_shareable_events_batch(
 
     safedb = create_safe_db(db, recorded_by=can_share_peer_id)
 
-    # Batch insert into shareable_events
+    shareable_batch: list[tuple[str, str, int | None, int, int]] = []
+    negentropy_events: list[tuple[str, int]] = []
+
     for event_id, created_at, recorded_at in events:
         event_id_bytes = crypto.b64decode(event_id)
         window_id = sync_window.SyncWindow.storage_window_from_event_id(event_id_bytes)
+        shareable_batch.append((event_id, can_share_peer_id, created_at, recorded_at, window_id))
+        if not skip_negentropy:
+            negentropy_events.append((event_id, recorded_at))
 
-        safedb.execute(
-            """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
-               VALUES (?, ?, ?, ?, ?)""",
-            (event_id, can_share_peer_id, created_at, recorded_at, window_id)
-        )
+    # Batch insert into shareable_events
+    safedb.executemany(
+        """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+           VALUES (?, ?, ?, ?, ?)""",
+        shareable_batch,
+    )
 
     # Batch add to negentropy (unless skipped)
     if not skip_negentropy:
-        negentropy_events = [(event_id, recorded_at) for event_id, created_at, recorded_at in events]
         add_events_to_sync_batch(db, can_share_peer_id, negentropy_events, defer_buckets=defer_buckets)
 
     log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (defer={defer_buckets})")
