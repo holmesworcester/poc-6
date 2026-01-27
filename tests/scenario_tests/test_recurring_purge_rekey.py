@@ -14,6 +14,7 @@ from events.content import message, message_deletion
 from events.group import group_prekey
 from core import tick
 from core import crypto
+from core import wire_format
 
 
 def test_tick_runs_message_rekey_and_purge(fresh_db):
@@ -58,7 +59,10 @@ def test_tick_runs_message_rekey_and_purge(fresh_db):
     )
     assert message_1_blob is not None
 
-    key_id_bytes = message_1_blob['blob'][:crypto.KEY_ID_SIZE]
+    blob = message_1_blob['blob']
+    assert wire_format.is_wire_message_envelope(blob)
+    _header, payload, _signature = wire_format.parse_envelope(blob)
+    key_id_bytes = payload[:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
     print(f"Message 1 encrypted with key: {key_id_b64[:20]}...")
 
@@ -124,7 +128,10 @@ def test_tick_runs_message_rekey_and_purge(fresh_db):
         (message_id_1,)
     )
     assert message_1_blob_after is not None
-    new_key_id_bytes = message_1_blob_after['blob'][:crypto.KEY_ID_SIZE]
+    blob_after = message_1_blob_after['blob']
+    assert wire_format.is_wire_message_envelope(blob_after)
+    _header, payload, _signature = wire_format.parse_envelope(blob_after)
+    new_key_id_bytes = payload[:crypto.KEY_ID_SIZE]
     new_key_id_b64 = crypto.b64encode(new_key_id_bytes)
     assert new_key_id_b64 != key_id_b64, "Message 1 should be encrypted with a new key"
     print(f"✓ Message 1 rekeyed with new key: {new_key_id_b64[:20]}...")
@@ -235,14 +242,17 @@ def test_end_to_end_forward_secrecy_with_tick(fresh_db):
 
     # Get the encryption key
     message_blob = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (message_id,))
-    key_id_bytes = message_blob['blob'][:crypto.KEY_ID_SIZE]
+    blob = message_blob['blob']
+    assert wire_format.is_wire_message_envelope(blob)
+    _header, payload, _signature = wire_format.parse_envelope(blob)
+    key_id_bytes = payload[:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
     print(f"Message encrypted with key: {key_id_b64[:20]}...")
 
     # Verify we can decrypt the message
     original_plaintext, _ = crypto.unwrap_event(message_blob['blob'], alice['peer_id'], db)
     assert original_plaintext is not None
-    original_content = crypto.parse_json(original_plaintext)
+    original_content = wire_format.decode_message_plaintext(original_plaintext)
     assert original_content['content'] == "Sensitive data that must be destroyed"
     print(f"✓ Message decryptable with original key")
 

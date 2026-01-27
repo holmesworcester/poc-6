@@ -9,12 +9,25 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.identity import peer
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+
+
+def _wire_shadow_self_address(peer_shared_id: str, ip: str, port: int) -> None:
+    """Validate self_address fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_self_address_plaintext(
+        peer_id=crypto.b64decode(peer_shared_id),
+        ip=ip,
+        port=port,
+    )
+    decoded = wire_format.decode_self_address_plaintext(plaintext)
+    if decoded["ip"] != ip or decoded["port"] != port:
+        raise ValueError("wire shadow decode self_address mismatch")
 
 # v2 event specification - signed by peer_shared, no deps
 EVENT_SPEC = {
@@ -40,6 +53,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not all([peer_shared_id, ip, port is not None, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_self_address(peer_shared_id, ip, port)
 
     writes = (
         WriteOp(
@@ -79,24 +94,15 @@ def create(peer_id: str, peer_shared_id: str, ip: str, port: int, t_ms: int, db:
     # Get peer's private key for signing
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Create event dict (plaintext, will be signed)
-    event_data = {
-        'type': 'self_address',
-        'peer_id': peer_shared_id,
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',  # Required for v2 resolver
-        'ip': ip,
-        'port': port,
-        'created_at': t_ms
-    }
+    _wire_shadow_self_address(peer_shared_id, ip, port)
 
-    # Sign the event with peer's private key
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Canonicalize to get deterministic blob
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Store event with recorded wrapper and projection
+    blob = wire_format.encode_self_address_wire_event(
+        peer_id_b64=peer_shared_id,
+        ip=ip,
+        port=port,
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
     address_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"self_address.create() created address_id={address_id[:20]}...")

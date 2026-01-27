@@ -9,11 +9,13 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp, Command
 from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
+
 
 # V2 Projector specification
 # Note: peer_removed uses 'removed_by' as the signer field (not standard 'signed_by')
@@ -88,23 +90,17 @@ def create(removed_peer_shared_id: str, removed_by_peer_shared_id: str, removed_
     if not validate(removed_peer_shared_id, removed_by_peer_shared_id, removed_by_local_peer_id, db):
         raise ValueError("Not authorized to remove this peer")
 
-    # Create event data
-    event_data = {
-        'type': 'peer_removed',
-        'removed_peer_shared_id': removed_peer_shared_id,
-        'removed_by': removed_by_peer_shared_id,
-        'signer_type': 'peer_shared',  # For v2 resolver
-        'created_at': t_ms
-    }
+    _wire_shadow_peer_removed(removed_peer_shared_id)
 
-    # Sign the event with remover's private key
     from events.identity import peer
     private_key = peer.get_private_key(removed_by_local_peer_id, removed_by_local_peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Store as signed plaintext (no inner encryption)
-    # store.event() creates recorded wrapper and triggers projection
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_peer_removed_wire_event(
+        removed_peer_id_b64=removed_peer_shared_id,
+        removed_by_b64=removed_by_peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
 
     return event_id
@@ -130,6 +126,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
         log.warning(f"peer_removed.project_pure() missing removed_by field")
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_peer_removed(removed_peer_shared_id)
+
     # Core write: insert into removed_peers table
     # Note: removed_peers is device-wide (no recorded_by column)
     writes = [
@@ -153,6 +151,16 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
+
+
+def _wire_shadow_peer_removed(removed_peer_shared_id: str) -> None:
+    """Validate peer_removed fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_peer_removed_plaintext(
+        removed_peer_id=crypto.b64decode(removed_peer_shared_id),
+    )
+    decoded = wire_format.decode_peer_removed_plaintext(plaintext)
+    if decoded["removed_peer_id"] != crypto.b64decode(removed_peer_shared_id):
+        raise ValueError("wire shadow decode removed_peer_id mismatch")
 
 
 def _rotate_keys_for_removed_peer_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:

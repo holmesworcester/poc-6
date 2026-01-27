@@ -9,6 +9,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -32,6 +33,17 @@ EVENT_SPEC = {
 }
 
 log = logging.getLogger(__name__)
+
+
+
+def _wire_shadow_network(network_pubkey_b64: str) -> None:
+    """Validate network fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_network_plaintext(
+        network_pubkey=crypto.b64decode(network_pubkey_b64)
+    )
+    decoded = wire_format.decode_network_plaintext(plaintext)
+    if decoded["network_pubkey"] != crypto.b64decode(network_pubkey_b64):
+        raise ValueError("wire shadow decode network_pubkey mismatch")
 
 
 def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
@@ -59,31 +71,12 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Generate network's own keypair (network is self-signed)
     network_private_key, network_public_key = crypto.generate_keypair()
 
-    # Create event data - minimal, just the network identity
-    # Groups are created LATER after peer_shared exists
-    # Network events are self-signed: verified using network_pubkey from event body
-    event_data = {
-        'type': 'network',
-        'network_pubkey': crypto.b64encode(network_public_key),
-        'signer_type': 'network',
-        'created_at': t_ms
-    }
-    # Note: no signed_by field - network events are self-signed (root of trust)
-
-    # Self-sign with network's own private key
-    signed_event = crypto.sign_event(event_data, network_private_key)
-
-    # Store as signed plaintext (no encryption)
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Compute network_id (hash of blob) before storing
-    network_id = crypto.b64encode(crypto.hash(blob))
-
-    # Store event - projection will be blocked until trust anchor exists
-    # Trust anchor is inserted by invite_accepted.project() (uniform model)
-    # Creator self-invites via peer_shared.join() → invite_accepted → trust anchor → network projects
-    stored_id = store.event(blob, peer_id, t_ms, db)
-    assert stored_id == network_id, f"network_id mismatch: {stored_id} != {network_id}"
+    blob = wire_format.encode_network_wire_event(
+        network_pubkey=network_public_key,
+        created_at_ms=t_ms,
+        private_key=network_private_key,
+    )
+    network_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"network.create() created self-signed network_id={network_id}")
     return network_id, network_private_key
@@ -97,6 +90,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not network_pubkey or created_at is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_network(network_pubkey)
 
     writes = (
         WriteOp(
@@ -203,7 +198,10 @@ def get_public_key_from_store(network_id: str, db: Any) -> bytes | None:
         return None
 
     try:
-        event_data = crypto.parse_json(blob)
+        if not wire_format.is_wire_network_envelope(blob):
+            log.warning(f"get_public_key_from_store() expected wire network event: {network_id[:20]}...")
+            return None
+        event_data = wire_format.decode_network_wire_event(blob)
         if event_data.get('type') != 'network':
             log.warning(f"get_public_key_from_store() not a network event: {network_id[:20]}...")
             return None

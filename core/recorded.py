@@ -28,6 +28,7 @@ import logging
 from events import registry
 from core import store
 from core import crypto
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -97,27 +98,164 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if not event_blob:
         return [None, recorded_id]
 
-    # Try to unwrap (for encrypted events)
-    plaintext, missing_key_ids = crypto.unwrap_event(event_blob, recorded_by, db)
-
-    # Parse event data to determine type (needed for shareable check)
+    # Decode wire format event payload
     event_data = None
     event_type = None
+    missing_key_ids: list[str] = []
 
-    if plaintext:
-        # Successfully decrypted or was plaintext
-        event_data = crypto.parse_json(plaintext)
-        event_type = event_data.get('type')
-    elif not missing_key_ids:
-        # Not encrypted, try plaintext parsing
-        try:
-            plaintext = event_blob
-            event_data = crypto.parse_json(plaintext)
-            event_type = event_data.get('type')
-        except Exception as e:
-            # Can't parse - skip projection
-            log.warning(f"Failed to parse event: ref_id={ref_id[:20] if ref_id else 'N/A'}..., error={str(e)[:50]}")
-            return [None, recorded_id]
+    if wire_format.is_wire_message_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_message_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_channel_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_channel_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_message_update_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_message_update_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_message_deletion_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_message_deletion_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_message_reaction_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_message_reaction_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_message_reaction_deletion_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_message_reaction_deletion_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_message_attachment_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_message_attachment_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_message_rekey_envelope(event_blob):
+        event_data = wire_format.decode_message_rekey_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_channel_update_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_channel_update_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_group_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_group_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_group_member_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_group_member_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_group_key_envelope(event_blob):
+        event_data = wire_format.decode_group_key_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_group_key_shared_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_group_key_shared_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_group_prekey_envelope(event_blob):
+        event_data = wire_format.decode_group_prekey_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_group_prekey_shared_envelope(event_blob):
+        event_data = wire_format.decode_group_prekey_shared_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_connection_prekey_envelope(event_blob):
+        event_data = wire_format.decode_connection_prekey_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_connection_prekey_shared_envelope(event_blob):
+        event_data = wire_format.decode_connection_prekey_shared_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_connection_request_envelope(event_blob):
+        event_data = wire_format.decode_connection_request_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_connection_ack_envelope(event_blob):
+        event_data = wire_format.decode_connection_ack_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_file_slice(event_blob):
+        event_data = wire_format.decode_file_slice_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_user_envelope(event_blob):
+        event_data = wire_format.decode_user_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_username_update_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_username_update_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_user_removed_envelope(event_blob):
+        event_data = wire_format.decode_user_removed_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_peer_envelope(event_blob):
+        event_data = wire_format.decode_peer_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_peer_shared_envelope(event_blob):
+        event_data = wire_format.decode_peer_shared_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_peer_name_update_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_peer_name_update_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_peer_removed_envelope(event_blob):
+        event_data = wire_format.decode_peer_removed_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_network_envelope(event_blob):
+        event_data = wire_format.decode_network_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_network_name_update_envelope(event_blob):
+        wire_event_data, missing_key_ids = wire_format.decode_network_name_update_wire_event(
+            event_blob, recorded_by, db
+        )
+        event_data = wire_event_data
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_admin_envelope(event_blob):
+        event_data = wire_format.decode_admin_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_invite_envelope(event_blob):
+        event_data = wire_format.decode_invite_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_invite_accepted_envelope(event_blob):
+        event_data = wire_format.decode_invite_accepted_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_self_address_envelope(event_blob):
+        event_data = wire_format.decode_self_address_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_observed_address_envelope(event_blob):
+        event_data = wire_format.decode_observed_address_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_network_intro_envelope(event_blob):
+        event_data = wire_format.decode_network_intro_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    elif wire_format.is_wire_negentropy_envelope(event_blob):
+        event_data = wire_format.decode_negentropy_wire_event(event_blob)
+        event_type = event_data.get('type') if event_data else None
+    else:
+        log.warning(f"recorded.project(): non-wire event blob for ref_id={ref_id[:20] if ref_id else 'N/A'}..., skipping")
+        return [None, recorded_id]
 
     # Check if event is pre-deleted (deletion arrived before the event itself)
     # Must check BEFORE marking shareable - deleted events should never sync

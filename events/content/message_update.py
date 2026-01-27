@@ -7,13 +7,16 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.content import message
-from events.identity import peer_shared
+from events.identity import peer_shared, peer
+from events.group import group as group_module
 from core import global_counter
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 # v2 event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
@@ -52,6 +55,14 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not new_content.strip():
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_message_update(
+        message_id=message_id,
+        group_id=group_id,
+        edited_by=edited_by,
+        author_id=author_id,
+        new_content=new_content,
+    )
 
     message_row = ctx.deps.get('message')
     if not message_row:
@@ -141,20 +152,29 @@ def create(
     # Get global count from framework (Lamport clock)
     global_count = global_counter.get_next_global_count(peer_id, db)
 
-    # Build update event
-    event_data = {
-        'type': 'message_update',
-        'message_id': message_id,
-        'group_id': group_id,
-        'edited_by': peer_shared_id,
-        'signer_type': 'peer_shared',
-        'author_id': user_id,
-        'global_count': global_count,
-        'new_content': new_content,
-        'created_at': t_ms,
-    }
+    _wire_shadow_message_update(
+        message_id=message_id,
+        group_id=group_id,
+        edited_by=peer_shared_id,
+        author_id=user_id,
+        new_content=new_content,
+    )
 
-    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group_module.pick_key(group_id, peer_id, db)
+    blob = wire_format.encode_message_update_wire_event(
+        message_id_b64=message_id,
+        group_id_b64=group_id,
+        edited_by_b64=peer_shared_id,
+        author_id_b64=user_id,
+        signer_type="peer_shared",
+        new_content=new_content,
+        global_count=global_count,
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(
         f"message_update.create() created update_id={event_id} for message_id={message_id}, "
@@ -162,6 +182,26 @@ def create(
     )
 
     return event_id
+
+
+def _wire_shadow_message_update(
+    message_id: str,
+    group_id: str,
+    edited_by: str,
+    author_id: str,
+    new_content: str,
+) -> None:
+    """Validate message_update fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_message_update_plaintext(
+        message_id=crypto.b64decode(message_id),
+        group_id=crypto.b64decode(group_id),
+        edited_by=crypto.b64decode(edited_by),
+        author_id=crypto.b64decode(author_id),
+        new_content=new_content,
+    )
+    decoded = wire_format.decode_message_update_plaintext(plaintext)
+    if decoded["new_content"] != new_content:
+        raise ValueError("wire shadow decode new_content mismatch")
 
 
 def get(message_id: str, recorded_by: str, db: Any) -> dict | None:

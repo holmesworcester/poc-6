@@ -21,11 +21,13 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp, Command
 from core.projection_v2 import register_command_handler
 
 log = logging.getLogger(__name__)
+
 
 # Connection TTL (5 minutes default)
 CONNECTION_TTL_MS = 300_000
@@ -105,33 +107,28 @@ def create(
     # Generate fresh symmetric key
     symmetric_key = crypto.generate_secret()
 
-    # Build connection request event
-    event_data = {
-        'type': 'connection_request',
-        'key': crypto.b64encode(symmetric_key),
-        'to_peer_shared_id': to_peer_shared_id,
-        'invite_id': invite_id,
-        'signed_by': signed_by,
-        'signer_type': signer_type,
-        'created_at': t_ms,
-        'ttl_ms': CONNECTION_TTL_MS,
-    }
-
     # Sign based on signer_type
     if signer_type == 'invite':
         # Bootstrap mode: sign with invite key
         invite_private_key = _get_invite_private_key(from_peer_id, invite_id, db)
         if not invite_private_key:
             raise ValueError(f"No invite private key found for invite {invite_id[:20]}...")
-        signed_event = crypto.sign_event(event_data, invite_private_key)
+        private_key = invite_private_key
         log.debug(f"connection_request.create: signed with invite key for {invite_id[:20]}...")
     else:
         # Normal mode: sign with peer's private key
         private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
-        signed_event = crypto.sign_event(event_data, private_key)
 
-    # Store the event
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_connection_request_wire_event(
+        key=symmetric_key,
+        to_peer_shared_id_b64=to_peer_shared_id,
+        invite_id_b64=invite_id,
+        signed_by_b64=signed_by,
+        signer_type=signer_type,
+        created_at_ms=t_ms,
+        ttl_ms=CONNECTION_TTL_MS,
+        private_key=private_key,
+    )
     unsafedb = create_unsafe_db(db)
     request_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 
@@ -202,6 +199,12 @@ def project_pure(ctx: Any) -> ProjectorResult:
         log.warning(f"connection_request.project_pure: missing key in {event_id[:20]}...")
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_connection_request(
+        key_b64,
+        event_data.get('to_peer_shared_id'),
+        event_data.get('invite_id'),
+    )
+
     symmetric_key = crypto.b64decode(key_b64)
 
     log.info(f"connection_request.project_pure: storing {event_id[:20]}... from {remote_peer_shared_id[:20] if remote_peer_shared_id else remote_invite_id[:20] if remote_invite_id else 'unknown'}...")
@@ -236,6 +239,22 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True, commands=commands)
+
+
+def _wire_shadow_connection_request(
+    key_b64: str,
+    to_peer_shared_id: str | None,
+    invite_id: str | None,
+) -> None:
+    """Validate connection_request fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_connection_request_plaintext(
+        key=crypto.b64decode(key_b64),
+        to_peer_shared_id=crypto.b64decode(to_peer_shared_id) if to_peer_shared_id else None,
+        invite_id=crypto.b64decode(invite_id) if invite_id else None,
+    )
+    decoded = wire_format.decode_connection_request_plaintext(plaintext)
+    if decoded["key"] != crypto.b64decode(key_b64):
+        raise ValueError("wire shadow decode key mismatch")
 
 
 def _project_ack(
@@ -769,7 +788,7 @@ def _send_request(
 
     # 2. Look up from connection_prekeys_shared table (normal mode)
     if not to_key:
-        to_key = connection_prekey.get_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+        to_key = connection_prekey.get_connection_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
 
     # 3. BOOTSTRAP FALLBACK: Check invite_accepteds for inviter's transit prekey
     if not to_key:

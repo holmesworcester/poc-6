@@ -9,11 +9,13 @@ import base64
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - signed by invite_id
@@ -63,6 +65,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     user_pubkey = event_data.get('user_pubkey', '')
     network_id = event_data.get('network_id')
     created_at = event_data.get('created_at')
+
+    _wire_shadow_user(invite_id, user_pubkey, network_id)
 
     # Try to get network_id from invite dep if not in event
     invite_row = ctx.deps.get('invite')
@@ -159,27 +163,17 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
     # is established when peer_shared is projected (user_id stored in peers_shared table)
     # NOTE: name is NOT included in event - usernames are transmitted via encrypted
     # username_update events to protect privacy from NETWORK ACTIVE ATTACKER
-    event_data = {
-        'type': 'user',
-        'invite_id': invite_id,  # Reference to invite that authorized this user
-        'signed_by': invite_id,  # Polymorphic signer field (verified with invite_pubkey)
-        'signer_type': 'invite',  # v2: user events are signed by invite
-        'user_pubkey': crypto.b64encode(user_pubkey),  # User's OWN public key (for signing first peer invite)
-        'created_at': t_ms
-    }
+    user_pubkey_b64 = crypto.b64encode(user_pubkey)
 
-    # Add network_id if present
-    if network_id:
-        event_data['network_id'] = network_id
+    _wire_shadow_user(invite_id, user_pubkey_b64, network_id)
 
-    # Sign with invite_private_key (proves possession of invite link)
-    # NOT with peer's private key - the signature proves invite possession
-    signed_event = crypto.sign_event(event_data, invite_private_key)
-
-    # Store as signed plaintext (no inner encryption)
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Store event with recorded wrapper and projection
+    blob = wire_format.encode_user_wire_event(
+        invite_id_b64=invite_id,
+        user_pubkey_b64=user_pubkey_b64,
+        network_id_b64=network_id,
+        created_at_ms=t_ms,
+        private_key=invite_private_key,
+    )
     user_id = store.event(blob, peer_id, t_ms, db)
 
     # Note: peer_self.user_id is now set by peer_shared.project() when the peer_shared
@@ -191,6 +185,18 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
 
     # Return user_private_key for caller to sign first peer invite
     return user_id, user_private_key
+
+
+def _wire_shadow_user(invite_id: str, user_pubkey_b64: str, network_id: str | None) -> None:
+    """Validate user fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_user_plaintext(
+        invite_id=crypto.b64decode(invite_id),
+        user_pubkey=crypto.b64decode(user_pubkey_b64),
+        network_id=crypto.b64decode(network_id) if network_id else None,
+    )
+    decoded = wire_format.decode_user_plaintext(plaintext)
+    if decoded["invite_id"] != crypto.b64decode(invite_id):
+        raise ValueError("wire shadow decode invite_id mismatch")
 
 
 def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", network_name: str | None = None) -> dict[str, Any]:

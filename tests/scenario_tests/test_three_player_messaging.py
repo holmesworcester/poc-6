@@ -12,6 +12,7 @@ Tests:
 import sqlite3
 from core.db import Database
 from core import schema
+from core import wire_format
 from events.identity import user, invite, peer
 from events.content import message
 from tests.utils.tick_helper import run_ticks, assert_eventually
@@ -275,8 +276,15 @@ def test_three_player_messaging(fresh_db):
         for inv in all_invites[:5]:
             inv_blob = store.get(inv['invite_id'], db)
             if inv_blob:
-                inv_data = json.loads(inv_blob.decode())
-                if inv_data.get('signed_by') == net_id:
+                inv_data = None
+                if wire_format.is_wire_invite_envelope(inv_blob):
+                    inv_data = wire_format.decode_invite_wire_event(inv_blob)
+                else:
+                    try:
+                        inv_data = json.loads(inv_blob.decode())
+                    except Exception:
+                        inv_data = None
+                if inv_data and inv_data.get('signed_by') == net_id:
                     print(f"Bootstrap invite: {inv['invite_id'][:25]}... mode={inv['mode']}")
 
                     # Check if Alice has this in shareable_events

@@ -9,6 +9,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group_prekey
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
@@ -16,6 +17,7 @@ from core.projection_v2.types import ProjectorResult, WriteOp, EmitEvent
 from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - asymmetrically encrypted, signed by peer_shared
@@ -66,7 +68,10 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     # Verify the computed key_id matches the claimed key_id
     # Security check: prevents sender from claiming wrong key_id
-    deterministic_blob = crypto.canonicalize_json(group_key_event_data)
+    deterministic_blob = wire_format.encode_group_key_wire_event(
+        key=crypto.b64decode(symmetric_key_b64),
+        created_at_ms=0,
+    )
     computed_key_id = crypto.b64encode(crypto.hash(deterministic_blob))
     if computed_key_id != key_id:
         log.error(f"group_key_shared key_id mismatch: computed={computed_key_id[:20]}... claimed={key_id[:20]}...")
@@ -128,7 +133,9 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     if not key_blob:
         raise ValueError(f"key not found: {key_id}")
 
-    key_data = crypto.parse_json(key_blob)
+    if not wire_format.is_wire_group_key_envelope(key_blob):
+        raise ValueError("group_key_shared requires wire group_key event")
+    key_data = wire_format.decode_group_key_wire_event(key_blob)
     symmetric_key_b64 = key_data['key']
 
     # Get recipient's group prekey for wrapping (asymmetric encryption)
@@ -140,24 +147,19 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     # Extract recipient_prekey_id for inclusion in signed event data
     recipient_prekey_id = crypto.b64encode(recipient_prekey['id'])
 
-    # Create the inner event (to be wrapped to recipient's prekey)
-    inner_event_data = {
-        'type': 'group_key_shared',
-        'key_id': key_id,  # Reference to the key being shared
-        'symmetric_key': symmetric_key_b64,  # The actual key material
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',
-        'recipient_prekey_id': recipient_prekey_id,  # Cryptographically bound recipient
-        'created_at': t_ms
-    }
-
     # Sign the inner event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_inner_event = crypto.sign_event(inner_event_data, private_key)
 
-    # Wrap (asymmetric encrypt) to recipient's prekey
-    canonical = crypto.canonicalize_json(signed_inner_event)
-    wrapped_blob = crypto.wrap(canonical, recipient_prekey, db)
+    wrapped_blob = wire_format.encode_group_key_shared_wire_event(
+        key_id_b64=key_id,
+        symmetric_key_b64=symmetric_key_b64,
+        recipient_prekey_id_b64=recipient_prekey_id,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        recipient_prekey=recipient_prekey,
+        private_key=private_key,
+    )
 
     # Store event with recorded wrapper and projection
     key_shared_id = store.event(wrapped_blob, peer_id, t_ms, db)
@@ -193,7 +195,9 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     if not key_blob:
         raise ValueError(f"key not found: {key_id}")
 
-    key_data = crypto.parse_json(key_blob)
+    if not wire_format.is_wire_group_key_envelope(key_blob):
+        raise ValueError("group_key_shared requires wire group_key event")
+    key_data = wire_format.decode_group_key_wire_event(key_blob)
     symmetric_key_b64 = key_data['key']
 
     # Get invite event to extract prekey info
@@ -201,7 +205,9 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     if not invite_blob:
         raise ValueError(f"invite not found: {invite_id}")
 
-    invite_data = crypto.parse_json(invite_blob)
+    if not wire_format.is_wire_invite_envelope(invite_blob):
+        raise ValueError("group_key_shared requires wire invite event")
+    invite_data = wire_format.decode_invite_wire_event(invite_blob)
     invite_prekey_id = invite_data['invite_prekey_id']
     invite_pubkey_b64 = invite_data['invite_pubkey']
 
@@ -214,22 +220,18 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
 
     log.info(f"key_shared.create_for_invite() extracted invite_prekey_id={invite_prekey_id[:20]}... from invite")
 
-    # Create inner event
-    inner_event_data = {
-        'type': 'group_key_shared',
-        'key_id': key_id,
-        'symmetric_key': symmetric_key_b64,
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',
-        'recipient_prekey_id': invite_prekey_id,  # Cryptographically bound recipient
-        'created_at': t_ms
-    }
-
     # Sign and wrap
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_inner_event = crypto.sign_event(inner_event_data, private_key)
-    canonical = crypto.canonicalize_json(signed_inner_event)
-    wrapped_blob = crypto.wrap(canonical, recipient_prekey_dict, db)
+    wrapped_blob = wire_format.encode_group_key_shared_wire_event(
+        key_id_b64=key_id,
+        symmetric_key_b64=symmetric_key_b64,
+        recipient_prekey_id_b64=invite_prekey_id,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        recipient_prekey=recipient_prekey_dict,
+        private_key=private_key,
+    )
 
     # Store with recorded wrapper (for replay)
     # Note: Alice can't decrypt this (only Bob can), so it will remain blocked for Alice

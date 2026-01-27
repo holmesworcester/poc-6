@@ -9,6 +9,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group
 from events.identity import peer, peer_shared, user
 from events.content import channel
@@ -19,6 +20,22 @@ log = logging.getLogger(__name__)
 
 # Default message TTL: 1 week (in milliseconds)
 DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+
+
+def _wire_shadow_message(channel_id: str, author_id: str, content: str, disappearing_time_ms: int) -> None:
+    """Validate message fields against the fixed-size wire payload layout."""
+    channel_id_bytes = crypto.b64decode(channel_id)
+    author_id_bytes = crypto.b64decode(author_id)
+    plaintext = wire_format.encode_message_plaintext(
+        channel_id=channel_id_bytes,
+        author_id=author_id_bytes,
+        content=content,
+        disappearing_time_ms=disappearing_time_ms,
+    )
+    decoded = wire_format.decode_message_plaintext(plaintext)
+    if decoded["content"] != content:
+        raise ValueError("wire shadow decode content mismatch")
 
 
 # v2 event specification - signed by peer_shared, encrypted
@@ -71,6 +88,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not channel_id or not author_id or not signed_by or created_at is None or content is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_message(channel_id, author_id, content, disappearing_time_ms)
+
     channel_row = ctx.deps.get('channel')
     if not channel_row or not channel_row.get('group_id'):
         return ProjectorResult(writes=tuple(), valid_event=False)
@@ -87,7 +106,10 @@ def project_pure(ctx: Any) -> ProjectorResult:
     else:
         ttl_ms = 0
 
-    key_id_bytes = event_blob[:crypto.KEY_ID_SIZE]
+    if not wire_format.is_wire_message_envelope(event_blob):
+        return ProjectorResult(writes=tuple(), valid_event=False)
+    _header, payload, _signature = wire_format.parse_envelope(event_blob)
+    key_id_bytes = payload[:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
 
     writes = (
@@ -189,30 +211,25 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     if not username_row:
         raise ValueError(f"No username found for user {user_id}. Username must be set before sending messages.")
 
-    # Build standardized event structure
-    # Note: group_id is NOT included - it's derived from channel_id at projection time
-    # This saves ~36 bytes in the event, allowing more space for content
-    event_data = {
-        'type': 'message',
-        'channel_id': channel_id,
-        'signed_by': peer_shared_id,  # Device that signed the event (for signature verification)
-        'signer_type': 'peer_shared',
-        'author_id': user_id,  # User who authored the message content (for display)
-        'content': content,
-        'created_at': t_ms,
-        'disappearing_time_ms': disappearing_time_ms  # TTL setting at creation time (0 = permanent)
-    }
+    _wire_shadow_message(channel_id, user_id, content, disappearing_time_ms)
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption (group.pick_key uses peer_id for access control)
     key_data = group.pick_key(group_id, peer_id, db)
 
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    blob = wire_format.encode_message_wire_event(
+        channel_id_b64=channel_id,
+        author_id_b64=user_id,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        content=content,
+        created_at_ms=t_ms,
+        ttl_ms=disappearing_time_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
 
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
@@ -324,20 +341,19 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
     for i, content in enumerate(contents):
         t_ms = start_t_ms + i
 
-        event_data = {
-            'type': 'message',
-            'channel_id': channel_id,
-            'signed_by': peer_shared_id,
-            'signer_type': 'peer_shared',
-            'author_id': user_id,
-            'content': content,
-            'created_at': t_ms,
-            'disappearing_time_ms': disappearing_time_ms
-        }
+        _wire_shadow_message(channel_id, user_id, content, disappearing_time_ms)
 
-        signed_event = crypto.sign_event(event_data, private_key)
-        canonical = crypto.canonicalize_json(signed_event)
-        blob = crypto.wrap(canonical, key_data, db)
+        blob = wire_format.encode_message_wire_event(
+            channel_id_b64=channel_id,
+            author_id_b64=user_id,
+            signed_by_b64=peer_shared_id,
+            signer_type="peer_shared",
+            content=content,
+            created_at_ms=t_ms,
+            ttl_ms=disappearing_time_ms,
+            key_data=key_data,
+            private_key=private_key,
+        )
         event_blobs.append(blob)
 
     if skip_projection:
@@ -397,5 +413,3 @@ def list(channel_id: int, recorded_by: str, db: Any) -> list[dict[str, Any]]:
         msg['reactions'] = reactions if reactions else []
 
     return messages
-
-

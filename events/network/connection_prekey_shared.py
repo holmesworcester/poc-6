@@ -12,11 +12,12 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.identity import peer
-from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - signed by peer_shared, no deps
@@ -44,6 +45,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not all([connection_prekey_id, peer_id, public_key_b64, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_connection_prekey_shared(connection_prekey_id, peer_id, public_key_b64)
+
     public_key = crypto.b64decode(public_key_b64)
 
     writes = (
@@ -62,6 +65,22 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_connection_prekey_shared(
+    connection_prekey_id: str,
+    peer_id: str,
+    public_key_b64: str,
+) -> None:
+    """Validate connection_prekey_shared fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_connection_prekey_shared_plaintext(
+        connection_prekey_id=crypto.b64decode(connection_prekey_id),
+        peer_id=crypto.b64decode(peer_id),
+        public_key=crypto.b64decode(public_key_b64),
+    )
+    decoded = wire_format.decode_connection_prekey_shared_plaintext(plaintext)
+    if decoded["connection_prekey_id"] != crypto.b64decode(connection_prekey_id):
+        raise ValueError("wire shadow decode connection_prekey_id mismatch")
 
 
 def create(prekey_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
@@ -84,32 +103,26 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any
     if not prekey_blob:
         raise ValueError(f"connection_prekey not found: {prekey_id}")
 
-    prekey_data = crypto.parse_json(prekey_blob)
+    if not wire_format.is_wire_connection_prekey_envelope(prekey_blob):
+        raise ValueError("connection_prekey must be wire format")
+    prekey_data = wire_format.decode_connection_prekey_wire_event(prekey_blob)
     prekey_public_b64 = prekey_data['public_key']
-
-    # Create shareable event (signed plaintext)
-    # Include connection_prekey_id for linking back during projection
-    event_data = {
-        'type': 'connection_prekey_shared',
-        'connection_prekey_id': prekey_id,
-        'peer_id': peer_shared_id,  # Public identity (peer_shared_id)
-        'public_key': prekey_public_b64,
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',  # Required for v2 resolver
-        'created_at': t_ms
-    }
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
 
-    # Store as signed plaintext (no encryption)
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_connection_prekey_shared_wire_event(
+        connection_prekey_id_b64=prekey_id,
+        peer_id_b64=peer_shared_id,
+        public_key_b64=prekey_public_b64,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
 
     # Store event with recorded wrapper and projection
     connection_prekey_shared_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"connection_prekey_shared.create() created connection_prekey_shared_id={connection_prekey_shared_id}")
     return connection_prekey_shared_id
-
-

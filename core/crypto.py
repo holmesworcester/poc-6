@@ -399,6 +399,7 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     # First try connections table (symmetric keys from connection handshake)
     safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
     conn_rows = safedb.query(
         "SELECT connection_id, our_key FROM connections WHERE recorded_by = ?",
         (recorded_by,)
@@ -462,7 +463,11 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
         # Need to get connection_prekey_id from event data
         connection_prekey_shared_blob = store.get(key_id, db)
         if connection_prekey_shared_blob:
-            connection_prekey_shared_data = parse_json(connection_prekey_shared_blob)
+            from . import wire_format
+            if not wire_format.is_wire_connection_prekey_shared_envelope(connection_prekey_shared_blob):
+                log.warning(f"get_key_by_id() non-wire connection_prekey_shared blob for {key_id}")
+                return None
+            connection_prekey_shared_data = wire_format.decode_connection_prekey_shared_wire_event(connection_prekey_shared_blob)
             connection_prekey_id = connection_prekey_shared_data.get('connection_prekey_id')
             if connection_prekey_id:
                 transit_prekey_row = unsafedb.query_one(
@@ -635,6 +640,41 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes 
     - If key missing: (None, [key_id]) - blocks for convergence guarantee
     - If other error: (None, [])
     """
+    from . import wire_format
+    try:
+        if len(wrapped_blob) == wire_format.WIRE_SIZE:
+            header, payload, _signature = wire_format.parse_envelope(wrapped_blob)
+            if header.flags & wire_format.FLAG_ENCRYPTED:
+                decryptors = {
+                    wire_format.TYPE_MESSAGE: wire_format._decrypt_message_payload,
+                    wire_format.TYPE_CHANNEL: wire_format._decrypt_channel_payload,
+                    wire_format.TYPE_MESSAGE_UPDATE: wire_format._decrypt_message_update_payload,
+                    wire_format.TYPE_MESSAGE_DELETION: wire_format._decrypt_message_deletion_payload,
+                    wire_format.TYPE_MESSAGE_REACTION: wire_format._decrypt_message_reaction_payload,
+                    wire_format.TYPE_MESSAGE_REACTION_DELETION: wire_format._decrypt_message_reaction_deletion_payload,
+                    wire_format.TYPE_MESSAGE_ATTACHMENT: wire_format._decrypt_message_attachment_payload,
+                    wire_format.TYPE_CHANNEL_UPDATE: wire_format._decrypt_channel_update_payload,
+                    wire_format.TYPE_GROUP: wire_format._decrypt_group_payload,
+                    wire_format.TYPE_GROUP_MEMBER: wire_format._decrypt_group_member_payload,
+                    wire_format.TYPE_GROUP_KEY_SHARED: wire_format._decrypt_group_key_shared_payload,
+                    wire_format.TYPE_USERNAME_UPDATE: wire_format._decrypt_username_update_payload,
+                    wire_format.TYPE_NETWORK_NAME_UPDATE: wire_format._decrypt_network_name_update_payload,
+                    wire_format.TYPE_PEER_NAME_UPDATE: wire_format._decrypt_peer_name_update_payload,
+                }
+                decryptor = decryptors.get(header.event_type)
+                if decryptor:
+                    key_id = payload[:KEY_ID_SIZE]
+                    key_data = get_event_key_by_id(key_id, recorded_by, db)
+                    if not key_data:
+                        return None, [b64encode(key_id)]
+                    try:
+                        plaintext = decryptor(payload, key_data)
+                        return plaintext, []
+                    except Exception:
+                        return None, []
+    except Exception:
+        pass
+
     return _unwrap_common(wrapped_blob, recorded_by, db,
                          get_event_key_by_id, block_on_missing=True,
                          namespace_name="event")

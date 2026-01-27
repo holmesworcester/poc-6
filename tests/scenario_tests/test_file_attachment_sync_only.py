@@ -16,6 +16,7 @@ from core import schema
 from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
 from core import tick
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_file_attachment_sync_only(fresh_db):
@@ -92,34 +93,14 @@ def test_file_attachment_sync_only(fresh_db):
     db.commit()
 
     print("\n=== Sync message to Bob ===")
-    # Need extra rounds with new timing model:
-    # - Message needs to be added to shareable_events (1 tick)
-    # - Sync request sent (1 tick)
-    # - Sync response delivered (1 tick)
-    # - Plus initial convergence
-    for round_num in range(15):
-        tick.tick(t_ms=4000 + round_num * 100, db=db)
-
-    # Check if Bob received the message
-    bob_msg_count = db.query_all(
-        "SELECT message_id FROM messages WHERE recorded_by = ?",
-        (bob['peer_id'],)
-    )
-    print(f"Bob has {len(bob_msg_count)} message(s) after sync")
-
-    if len(bob_msg_count) == 0:
-        print("ERROR: Message not synced to Bob")
-        # Check shareable_events to see if message is there
-        msg_in_bob_shareable = db.query_one(
-            "SELECT event_id FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-            (message_id, bob['peer_id'])
+    def bob_has_message():
+        bob_msg_count = db.query_all(
+            "SELECT message_id FROM messages WHERE recorded_by = ?",
+            (bob['peer_id'],)
         )
-        if msg_in_bob_shareable:
-            print("  Message IS in Bob's shareable_events (sync logic issue)")
-        else:
-            print("  Message NOT in Bob's shareable_events (sync didn't send it)")
+        assert len(bob_msg_count) > 0, "Bob should receive message after sync"
 
-    assert len(bob_msg_count) > 0, "Bob should receive message after sync"
+    assert_eventually(bob_has_message, db=db, start_t_ms=4000)
     print(f"✓ Bob received message")
 
     print("\n=== Alice creates file and attachment ===")

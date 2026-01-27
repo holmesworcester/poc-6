@@ -10,6 +10,7 @@ import sqlite3
 from core.db import Database
 from core import schema
 from core import crypto
+from core import wire_format
 from core import store
 from events.identity import user, network
 
@@ -34,7 +35,9 @@ def test_bootstrap_user_invite_signed_by_network():
 
     # Verify network event has network_pubkey
     network_blob = store.get(network_id, db)
-    network_event = crypto.parse_json(network_blob)
+    if not wire_format.is_wire_network_envelope(network_blob):
+        raise AssertionError("expected wire network event")
+    network_event = wire_format.decode_network_wire_event(network_blob)
     assert 'network_pubkey' in network_event, "Network event should have network_pubkey"
     print(f"Network has network_pubkey: {network_event['network_pubkey'][:20]}...")
 
@@ -44,7 +47,7 @@ def test_bootstrap_user_invite_signed_by_network():
 
     # Verify signature using network_pubkey
     network_pubkey_bytes = crypto.b64decode(network_event['network_pubkey'])
-    assert crypto.verify_event(network_event, network_pubkey_bytes), \
+    assert crypto.verify(network_event['_wire_signed_bytes'], network_event['_wire_signature'], network_pubkey_bytes), \
         "Network signature should verify with network_pubkey"
     print("✓ Network signature verified with network_pubkey")
 
@@ -62,7 +65,9 @@ def test_bootstrap_user_invite_signed_by_network():
 
     # Verify the invite structure
     invite_blob = store.get(invite_id, db)
-    invite_event = crypto.parse_json(invite_blob)
+    if not wire_format.is_wire_invite_envelope(invite_blob):
+        raise AssertionError("expected wire invite event")
+    invite_event = wire_format.decode_invite_wire_event(invite_blob)
 
     assert invite_event['type'] == 'invite', "Should be invite type"
     assert invite_event['mode'] == 'user', "Should be mode=user"
@@ -93,7 +98,9 @@ def test_network_get_public_key():
 
     # Get network_pubkey from event
     network_blob = store.get(network_id, db)
-    network_event = crypto.parse_json(network_blob)
+    if not wire_format.is_wire_network_envelope(network_blob):
+        raise AssertionError("expected wire network event")
+    network_event = wire_format.decode_network_wire_event(network_blob)
     expected_pubkey = crypto.b64decode(network_event['network_pubkey'])
 
     db.commit()

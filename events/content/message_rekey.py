@@ -23,12 +23,14 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.projection_v2.types import ProjectorResult, WriteOp, Command
 from core.projection_v2.apply import register_command_handler
 from events.group import group_key
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
@@ -48,10 +50,20 @@ def project_pure(ctx: Any) -> ProjectorResult:
         log.warning(f"message_rekey.project_pure() missing required fields")
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_message_rekey(original_message_id, new_key_id, new_ciphertext_and_nonce_b64)
+
     # Decode ciphertext and nonce
     new_ciphertext_and_nonce = crypto.b64decode(new_ciphertext_and_nonce_b64)
-    nonce = new_ciphertext_and_nonce[-crypto.NONCE_SIZE:]
-    new_ciphertext = new_ciphertext_and_nonce[:-crypto.NONCE_SIZE]
+    if event_data.get("_wire_ciphertext_only"):
+        nonce_hint = f"{original_message_id}{new_key_id}".encode('utf-8')
+        nonce = crypto.hash(nonce_hint, size=crypto.NONCE_SIZE)
+        new_ciphertext = new_ciphertext_and_nonce
+    else:
+        if len(new_ciphertext_and_nonce) <= crypto.NONCE_SIZE:
+            log.warning("message_rekey.project_pure() new_ciphertext missing nonce")
+            return ProjectorResult(writes=tuple(), valid_event=False)
+        nonce = new_ciphertext_and_nonce[-crypto.NONCE_SIZE:]
+        new_ciphertext = new_ciphertext_and_nonce[:-crypto.NONCE_SIZE]
 
     writes = (
         WriteOp(
@@ -128,7 +140,16 @@ def _handle_replace_message_blob(args: dict, recorded_by: str, recorded_at: int,
 
     # Replace original message blob in store with new ciphertext
     new_key_id_bytes = crypto.b64decode(new_key_id)
-    new_blob = new_key_id_bytes + nonce + new_ciphertext
+    original_blob = store.get(original_message_id, unsafedb)
+    if not wire_format.is_wire_message_envelope(original_blob):
+        log.warning("message_rekey: non-wire message blob, skipping blob replacement")
+        return
+    header, _payload, signature = wire_format.parse_envelope(original_blob)
+    new_payload = new_key_id_bytes + nonce + new_ciphertext
+    if len(new_payload) != wire_format.PAYLOAD_SIZE:
+        log.warning("message_rekey: unexpected wire payload size, skipping blob replacement")
+        return
+    new_blob = header.pack() + new_payload + signature
 
     unsafedb.execute(
         "UPDATE store SET blob = ? WHERE id = ?",
@@ -170,14 +191,16 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
         raise ValueError(f"Original message {original_message_id} not found in store")
 
     # Unwrap (decrypt) original message to get plaintext
-    plaintext, missing_keys = crypto.unwrap_event(original_blob, peer_id, db)
-    if not plaintext or missing_keys:
-        raise ValueError(f"Cannot decrypt original message {original_message_id} - missing key: {missing_keys}")
-
-    # Parse plaintext to verify it's a valid message
-    event_data = crypto.parse_json(plaintext)
-    if event_data.get('type') != 'message':
+    if not wire_format.is_wire_message_envelope(original_blob):
+        raise ValueError(f"Non-wire message blob for {original_message_id} cannot be rekeyed")
+    header, payload, _signature = wire_format.parse_envelope(original_blob)
+    if header.event_type != wire_format.TYPE_MESSAGE:
         raise ValueError(f"Event {original_message_id} is not a message, cannot rekey")
+    key_id = payload[:crypto.KEY_ID_SIZE]
+    key_data = crypto.get_key_by_id(key_id, peer_id, db)
+    if not key_data:
+        raise ValueError(f"Cannot decrypt original message {original_message_id} - missing key")
+    plaintext = wire_format._decrypt_message_payload(payload, key_data)
 
     log.info(f"message_rekey.create() decrypted original message, plaintext_size={len(plaintext)}B")
 
@@ -198,19 +221,26 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
     log.info(f"message_rekey.create() re-encrypted with deterministic nonce, ciphertext_size={len(new_ciphertext)}B")
 
     # Create rekey event record (plaintext, no additional encryption)
-    event_data = {
-        'type': 'message_rekey',
-        'original_message_id': original_message_id,
-        'new_key_id': new_key_id,
-        'new_ciphertext': crypto.b64encode(new_ciphertext + deterministic_nonce),  # Store nonce with ciphertext
-        'signed_by': peer_id,
-        'created_at': t_ms
-    }
-
-    canonical = crypto.canonicalize_json(event_data)
-    rekey_id = store.event(canonical, peer_id, t_ms, db)
+    blob = wire_format.encode_message_rekey_wire_event(
+        original_message_id_b64=original_message_id,
+        new_key_id_b64=new_key_id,
+        new_ciphertext=new_ciphertext,
+        signed_by_b64=peer_id,
+        created_at_ms=t_ms,
+    )
+    rekey_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_rekey.create() created rekey_id={rekey_id[:20]}...")
     return rekey_id
 
 
+def _wire_shadow_message_rekey(original_message_id: str, new_key_id: str, new_ciphertext_b64: str) -> None:
+    """Validate message_rekey fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_message_rekey_plaintext(
+        original_message_id=crypto.b64decode(original_message_id),
+        new_key_id=crypto.b64decode(new_key_id),
+        new_ciphertext=crypto.b64decode(new_ciphertext_b64),
+    )
+    decoded = wire_format.decode_message_rekey_plaintext(plaintext)
+    if decoded["new_key_id"] != crypto.b64decode(new_key_id):
+        raise ValueError("wire shadow decode new_key_id mismatch")
