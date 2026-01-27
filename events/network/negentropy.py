@@ -38,6 +38,7 @@ Protocol flow:
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -279,6 +280,108 @@ def xor_into_bucket(db, recorded_by: str, level: str, prefix: str, fingerprint: 
 # Database operations
 # ============================================================================
 
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    if size <= 0:
+        return [items]
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _fetch_existing_event_ids(db, recorded_by: str, event_ids: list[str]) -> set[str]:
+    if not event_ids:
+        return set()
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    chunk_size = int(os.getenv("NEGENTROPY_EVENT_CHUNK", "400"))
+    existing: set[str] = set()
+
+    for chunk in _chunked(event_ids, chunk_size):
+        placeholders = ",".join("?" for _ in chunk)
+        sql = (
+            "SELECT event_id FROM negentropy_events "
+            f"WHERE recorded_by = ? AND event_id IN ({placeholders})"
+        )
+        params: list[Any] = [recorded_by, *chunk]
+        rows = safedb.query(sql, tuple(params))
+        existing.update(row['event_id'] for row in rows)
+
+    return existing
+
+
+def _apply_bucket_deltas(
+    db,
+    recorded_by: str,
+    new_events: list[tuple[str, int]],
+    unified_key_by_event: dict[str, str],
+) -> None:
+    if not new_events:
+        return
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    bucket_xors: dict[tuple[str, str], bytes] = {}
+    bucket_counts: dict[tuple[str, str], int] = {}
+
+    for event_id, _created_at in new_events:
+        unified_key = unified_key_by_event[event_id]
+        fingerprint = compute_fingerprint(event_id)
+
+        for level in LEVELS:
+            prefix_len = LEVEL_PREFIX_LEN[level]
+            prefix = unified_key[:prefix_len]
+            bucket_key = (level, prefix)
+            if bucket_key in bucket_xors:
+                bucket_xors[bucket_key] = xor_bytes(bucket_xors[bucket_key], fingerprint)
+                bucket_counts[bucket_key] += 1
+            else:
+                bucket_xors[bucket_key] = fingerprint
+                bucket_counts[bucket_key] = 1
+
+    if not bucket_xors:
+        return
+
+    chunk_size = int(os.getenv("NEGENTROPY_BUCKET_CHUNK", "400"))
+    existing: dict[tuple[str, str], tuple[bytes, int]] = {}
+    bucket_keys = list(bucket_xors.keys())
+
+    for chunk in _chunked(bucket_keys, chunk_size):
+        placeholders = ",".join("(?, ?)" for _ in chunk)
+        sql = (
+            "SELECT level, prefix, hash, event_count FROM negentropy_buckets "
+            f"WHERE recorded_by = ? AND (level, prefix) IN ({placeholders})"
+        )
+        params: list[Any] = [recorded_by]
+        for level, prefix in chunk:
+            params.extend([level, prefix])
+        rows = safedb.query(sql, tuple(params))
+        for row in rows:
+            existing[(row['level'], row['prefix'])] = (row['hash'], row['event_count'] or 0)
+
+    upsert_batch: list[tuple[str, str, str, bytes, int, int]] = []
+    for bucket_key, delta_hash in bucket_xors.items():
+        existing_hash, existing_count = existing.get(bucket_key, (None, 0))
+        if existing_hash:
+            new_hash = xor_bytes(existing_hash, delta_hash)
+        else:
+            new_hash = delta_hash
+        new_count = existing_count + bucket_counts[bucket_key]
+        level, prefix = bucket_key
+        upsert_batch.append((recorded_by, level, prefix, new_hash, new_count, now))
+
+    safedb.executemany(
+        """
+        INSERT INTO negentropy_buckets
+        (recorded_by, level, prefix, hash, event_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
+            hash = excluded.hash,
+            event_count = excluded.event_count,
+            updated_at = excluded.updated_at
+        """,
+        upsert_batch,
+    )
+
+
 def add_events_to_sync_batch(
     db,
     recorded_by: str,
@@ -288,23 +391,34 @@ def add_events_to_sync_batch(
     """Add multiple events to the sync system efficiently.
 
     For large batches, set defer_buckets=True and call rebuild_buckets_for_peer()
-    once after all events are added. This is much faster for bulk operations.
+    once after all events are added.
 
     Args:
         db: Database connection
         recorded_by: Peer ID
         events: List of (event_id, created_at) tuples
         defer_buckets: If True, skip bucket updates (caller must call rebuild_buckets_for_peer).
-                       If False (default), rebuild buckets immediately.
+                       If False (default), apply bucket deltas incrementally.
     """
     if not events:
         return
 
-    # Build batch data for executemany
-    batch_data = []
+    # Build batch data for executemany and cache unified keys
+    batch_data: list[tuple[str, str, str, int]] = []
+    unified_key_by_event: dict[str, str] = {}
+    event_ids: list[str] = []
+    seen_event_ids: set[str] = set()
     for event_id, created_at in events:
+        if event_id in seen_event_ids:
+            continue
+        seen_event_ids.add(event_id)
         unified_key = compute_unified_key(event_id, created_at)
+        unified_key_by_event[event_id] = unified_key
+        event_ids.append(event_id)
         batch_data.append((recorded_by, event_id, unified_key, created_at))
+
+    existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
+    new_events = [(event_id, created_at) for event_id, created_at in events if event_id not in existing_event_ids]
 
     # Batch insert using executemany (much faster than individual inserts)
     db._conn.executemany("""
@@ -313,9 +427,9 @@ def add_events_to_sync_batch(
         VALUES (?, ?, ?, ?)
     """, batch_data)
 
-    # Optionally update buckets immediately (for small batches or single events)
+    # Optionally update buckets immediately via incremental deltas
     if not defer_buckets:
-        rebuild_buckets_for_peer(db, recorded_by)
+        _apply_bucket_deltas(db, recorded_by, new_events, unified_key_by_event)
 
 
 def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
