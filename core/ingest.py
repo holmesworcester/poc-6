@@ -17,7 +17,12 @@ def get_stream_cursor(db: Any, stream_name: str) -> int:
         "SELECT last_log_id FROM projection_streams WHERE stream_name = ?",
         (stream_name,),
     ).fetchone()
-    return row[0] if row else 0
+    if not row:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
 
 
 def get_log_tail_id(db: Any) -> int:
@@ -254,5 +259,8 @@ def materialize_log_batch(
             [(log_id,) for log_id in protocol_log_ids],
         )
 
-    max_log_id = rows[-1][0]
+    try:
+        max_log_id = int(rows[-1][0])
+    except (TypeError, ValueError):
+        max_log_id = start_log_id
     return (list(dict.fromkeys(recorded_ids)), max_log_id, plaintext_recorded_ids, shareable_rows, protocol_rows)
