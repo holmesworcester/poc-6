@@ -25,6 +25,7 @@ from events.content import message
 from core import tick
 from core import jobs
 from core import network_config
+from core import transport
 
 BENCH_DIR = Path(__file__).parent.parent / ".bench_dbs"
 
@@ -33,6 +34,8 @@ def reset_state():
     """Reset global state between runs."""
     network_config.reset_network_config()
     jobs.reset_frequency_multiplier()
+    transport.reset()
+    transport.enable_loopback()
 
 
 def create_db(mode: str) -> tuple[Database, Path]:
@@ -128,82 +131,6 @@ def bench_message_sync(mode: str, num_messages: int = 500) -> dict:
     return results
 
 
-def bench_file_sync(mode: str, file_size_kb: int = 100) -> dict:
-    """Benchmark file creation and sync."""
-    from events.content import message_attachment
-
-    reset_state()
-
-    if mode == "memory":
-        conn = sqlite3.Connection(":memory:")
-        db = Database(conn)
-        schema.create_all(db)
-        db_path = None
-    else:
-        db, db_path = create_db(mode)
-
-    results = {"mode": mode, "file_size_kb": file_size_kb}
-
-    # Setup
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    db.commit()
-
-    # Create file
-    file_data = b'X' * (file_size_kb * 1024)
-
-    msg_result = message.create(
-        peer_id=alice['peer_id'],
-        channel_id=alice['channel_id'],
-        content='File',
-        t_ms=3000,
-        db=db
-    )
-
-    start = time.time()
-    file_result = message_attachment.create(
-        peer_id=alice['peer_id'],
-        message_id=msg_result['id'],
-        file_data=file_data,
-        filename='test.dat',
-        mime_type='application/octet-stream',
-        t_ms=3100,
-        db=db
-    )
-    db.commit()
-    results["file_create_time"] = time.time() - start
-    results["slice_count"] = file_result['slice_count']
-
-    # File slices sync automatically via negentropy during tick()
-
-    # Sync until complete
-    start = time.time()
-    rounds = 0
-    max_rounds = 500
-
-    while rounds < max_rounds:
-        tick.tick(t_ms=5000 + rounds * 100, db=db)
-        db.commit()
-        rounds += 1
-
-        progress = message_attachment.get_file_download_progress(
-            file_result['file_id'], bob['peer_id'], db
-        )
-        if progress and progress['is_complete']:
-            break
-
-    results["file_sync_time"] = time.time() - start
-    results["file_sync_rounds"] = rounds
-
-    # Cleanup
-    if db_path:
-        cleanup_db(db_path)
-
-    return results
-
-
 def main():
     print("=" * 60)
     print("WAL vs No-WAL Benchmark")
@@ -223,24 +150,6 @@ def main():
     for mode in modes:
         r = bench_message_sync(mode, num_messages=500)
         print(f"{r['mode']:<10} {r['create_time']:.2f}s      {r['sync_time']:.2f}s      {r['sync_rounds']}")
-
-    # File sync benchmark
-    print("\n### File Sync (100 KB) ###\n")
-    print(f"{'Mode':<10} {'Create':<10} {'Sync':<10} {'Rounds':<10} {'Slices':<10}")
-    print("-" * 50)
-
-    for mode in modes:
-        r = bench_file_sync(mode, file_size_kb=100)
-        print(f"{r['mode']:<10} {r['file_create_time']:.2f}s      {r['file_sync_time']:.2f}s      {r['file_sync_rounds']:<10} {r['slice_count']}")
-
-    # Larger file sync
-    print("\n### File Sync (1 MB) ###\n")
-    print(f"{'Mode':<10} {'Create':<10} {'Sync':<10} {'Rounds':<10} {'Slices':<10}")
-    print("-" * 50)
-
-    for mode in modes:
-        r = bench_file_sync(mode, file_size_kb=1024)
-        print(f"{r['mode']:<10} {r['file_create_time']:.2f}s      {r['file_sync_time']:.2f}s      {r['file_sync_rounds']:<10} {r['slice_count']}")
 
     # Cleanup
     if BENCH_DIR.exists():

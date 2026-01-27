@@ -5,6 +5,8 @@ its own logic. The tick() function asks each job if it should_run() and
 executes those that say yes.
 """
 import logging
+import os
+import time
 from typing import Any, Dict
 from abc import ABC, abstractmethod
 from .db import create_unsafe_db
@@ -30,6 +32,17 @@ def reset_frequency_multiplier() -> None:
     _frequency_multiplier = 1.0
 
 
+def _parse_event_types_env(name: str | None, default_types: list[str]) -> list[str] | None:
+    if not name:
+        return None
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        types = default_types
+    else:
+        types = [t.strip() for t in raw.split(",") if t.strip()]
+    return types or None
+
+
 class Job(ABC):
     """Base class for stateless, deterministic jobs.
 
@@ -37,15 +50,17 @@ class Job(ABC):
     passes in last_run_at as a parameter for scheduling decisions.
     """
 
-    def __init__(self, name: str, every_ms: int):
-        """Initialize job with name and execution frequency.
+    def __init__(self, name: str, every_ms: int, budget_ms: int | None = None):
+        """Initialize job with name, execution frequency, and time budget.
 
         Args:
             name: Unique identifier for this job
             every_ms: Minimum milliseconds between executions
+            budget_ms: Optional time budget for a single run (None/0 = unlimited)
         """
         self.name = name
         self.every_ms = every_ms
+        self.budget_ms = budget_ms or 0
 
     def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
         """Determine if this job should run now.
@@ -75,6 +90,20 @@ class Job(ABC):
         effective_interval = int(self.every_ms * _frequency_multiplier)
         return t_ms - last_run_at >= effective_interval
 
+    def budget_limit_ms(self, override_env: str | None = None) -> int:
+        """Return budget in ms for this job, with env override."""
+        if override_env:
+            raw = os.getenv(override_env)
+            if raw is not None and raw.strip() != "":
+                return int(raw)
+        env_name = "JOB_BUDGET_MS_" + "".join(
+            ch if ch.isalnum() else "_" for ch in self.name.upper()
+        )
+        raw = os.getenv(env_name)
+        if raw is not None and raw.strip() != "":
+            return int(raw)
+        return self.budget_ms
+
     @abstractmethod
     def run(self, t_ms: int, db: Any) -> Dict[str, Any]:
         """Execute the job.
@@ -92,49 +121,232 @@ class Job(ABC):
 
 
 class ReceiveJob(Job):
-    """Receive and process incoming transit blobs using address-based transport.
+    """Receive incoming transport blobs and append to ingest log.
 
     This job:
     1. Transfers packets (loopback for testing, UDP for production)
     2. Drains batch from transport.drain_incoming()
-    3. Stores all events via sync.store_incoming()
-    4. Projects all recorded events
+    3. Routes by transit key hint + appends to incoming_event_log
     """
 
     def __init__(self):
-        super().__init__('receive', every_ms=100)
+        super().__init__('receive', every_ms=50, budget_ms=5)
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from core import transport, receive
-        from core import recorded
+        from core import transport, ingest
 
-        # 1. Transfer packets based on configured mode (loopback, simulator, or UDP)
         transport.transfer()
 
-        # 2. Grab batch from incoming (pure - no DB)
-        batch = transport.drain_incoming(100)
-        if not batch:
-            return {'received': 0}
+        budget_ms = self.budget_limit_ms()
+        chunk_size = int(os.getenv("RECEIVE_INSERT_CHUNK", "1000"))
+        batch_size = int(os.getenv("RECEIVE_BATCH", "200"))
 
-        # 3. Store all (touches DB)
-        all_recorded_ids = []
-        for blob, from_addr in batch:
-            recorded_ids = receive.store_incoming(blob, from_addr, t_ms, db)
-            all_recorded_ids.extend(recorded_ids)
+        start = time.perf_counter()
+        total_received = 0
+        total_queued = 0
 
-        # 4. Project all (touches DB)
-        if all_recorded_ids:
-            recorded.project_ids(all_recorded_ids, db)
+        while True:
+            batch = transport.drain_incoming(batch_size)
+            if not batch:
+                break
+            queued = ingest.queue_incoming(batch, t_ms, db, chunk_size=chunk_size)
+            total_received += len(batch)
+            total_queued += queued
+            if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
+                break
+
+        if total_received == 0:
+            return {'received': 0, 'queued': 0}
 
         db.commit()
-        return {'received': len(batch)}
+        return {'received': total_received, 'queued': total_queued}
+
+
+class SyncRespondJob(Job):
+    """Handle incoming negentropy protocol messages quickly."""
+
+    def __init__(self):
+        super().__init__('sync_respond', every_ms=50, budget_ms=5)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from core import ingest, crypto
+        from events.network import negentropy
+
+        batch_size = int(os.getenv("SYNC_RESPOND_BATCH", "500"))
+        budget_ms = self.budget_limit_ms("SYNC_RESPOND_BUDGET_MS")
+
+        last_log_id = ingest.get_stream_cursor(db, "sync_respond")
+        start = time.perf_counter()
+        processed = 0
+        handled = 0
+
+        while (time.perf_counter() - start) * 1000 < budget_ms:
+            rows = db._conn.execute(
+                "SELECT id, recorded_by, blob "
+                "FROM incoming_event_log "
+                "WHERE id > ? AND (event_type IS NULL OR event_type != 'negentropy') "
+                "ORDER BY id LIMIT ?",
+                (last_log_id, batch_size),
+            ).fetchall()
+            if not rows:
+                break
+
+            handled_log_ids: list[tuple[int]] = []
+            for log_id, recorded_by, blob in rows:
+                event_blob, _missing = crypto.unwrap_transit(blob, recorded_by, db)
+                if not event_blob or event_blob[:1] not in (b'{', b'['):
+                    continue
+                try:
+                    event_data = crypto.parse_json(event_blob)
+                except Exception:
+                    continue
+                if not isinstance(event_data, dict) or event_data.get("type") != "negentropy":
+                    continue
+                connection_id = event_data.get("reply_connection_id")
+                if not connection_id:
+                    continue
+                negentropy.handle_incoming(db, recorded_by, connection_id, event_data, t_ms)
+                handled += 1
+                handled_log_ids.append((log_id,))
+
+            if handled_log_ids:
+                db._conn.executemany(
+                    "UPDATE incoming_event_log SET event_type = 'negentropy' WHERE id = ?",
+                    handled_log_ids,
+                )
+
+            processed += len(rows)
+            last_log_id = rows[-1][0]
+            ingest.set_stream_cursor(db, "sync_respond", last_log_id, t_ms)
+
+        db.commit()
+        return {'processed': processed, 'handled': handled}
+
+
+class SyncUpdateJob(Job):
+    """Materialize ingest log, update shareable events, and handle protocol fallbacks."""
+
+    def __init__(self):
+        super().__init__('sync_update', every_ms=50, budget_ms=10)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from core import ingest
+        from events.network import negentropy
+
+        batch_size = int(os.getenv("SYNC_UPDATE_BATCH", "2000"))
+        max_batch = int(os.getenv("SYNC_UPDATE_BATCH_MAX", str(batch_size)))
+        budget_ms = self.budget_limit_ms("SYNC_UPDATE_BUDGET_MS")
+        max_budget = int(os.getenv("SYNC_UPDATE_BUDGET_MAX", str(budget_ms)))
+        skip_negentropy = os.getenv("SYNC_UPDATE_SKIP_NEGENTROPY") == "1"
+        defer_buckets = os.getenv("SYNC_UPDATE_DEFER_BUCKETS") == "1"
+
+        start_log_id = ingest.get_stream_cursor(db, "sync_update")
+        log_tail_id = ingest.get_log_tail_id(db)
+        backlog = max(0, log_tail_id - start_log_id)
+        if backlog > 0 and batch_size > 0:
+            scale = min(4.0, backlog / batch_size)
+            if scale > 1.0:
+                batch_size = min(max_batch, max(batch_size, int(batch_size * scale)))
+                if budget_ms > 0:
+                    budget_ms = min(max_budget, max(budget_ms, int(budget_ms * scale)))
+
+        processed = 0
+        start = time.perf_counter()
+
+        while True:
+            recorded_ids, max_log_id, _plaintext_recorded_ids, shareable_rows, protocol_rows = ingest.materialize_log_batch(
+                db,
+                start_log_id,
+                batch_size,
+                t_ms,
+            )
+
+            if max_log_id <= start_log_id:
+                break
+
+            ingest.set_stream_cursor(db, "sync_update", max_log_id, t_ms)
+            start_log_id = max_log_id
+
+            if protocol_rows and not skip_negentropy:
+                for _log_id, recorded_by, event_data in protocol_rows:
+                    connection_id = event_data.get("reply_connection_id")
+                    if connection_id:
+                        negentropy.handle_incoming(db, recorded_by, connection_id, event_data, t_ms)
+
+            if shareable_rows and not skip_negentropy:
+                by_peer: dict[str, list[tuple[str, int | None, int]]] = {}
+                for event_id, recorded_by, recorded_at in shareable_rows:
+                    by_peer.setdefault(recorded_by, []).append((event_id, None, recorded_at))
+
+                for peer_id, events in by_peer.items():
+                    negentropy.add_shareable_events_batch(
+                        events,
+                        peer_id,
+                        db,
+                        defer_buckets=defer_buckets,
+                    )
+
+            processed += len(recorded_ids)
+
+            if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
+                break
+
+        db.commit()
+        return {'materialized': processed}
+
+
+class ProjectionStreamJob(Job):
+    """Project recorded events from a named ingest stream."""
+
+    def __init__(
+        self,
+        name: str,
+        stream_name: str,
+        every_ms: int,
+        batch_env: str,
+        default_batch: int,
+        budget_ms: int,
+        include_env: str | None,
+        exclude_env: str | None,
+        default_types: list[str] | None,
+    ):
+        super().__init__(name, every_ms=every_ms, budget_ms=budget_ms)
+        self.stream_name = stream_name
+        self.batch_env = batch_env
+        self.default_batch = default_batch
+        self.include_env = include_env
+        self.exclude_env = exclude_env
+        self.default_types = default_types or []
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from core import projection_streams, recorded
+
+        batch_size = int(os.getenv(self.batch_env, str(self.default_batch)))
+        budget_ms = self.budget_limit_ms()
+
+        include_types = _parse_event_types_env(self.include_env, self.default_types)
+        exclude_types = _parse_event_types_env(self.exclude_env, self.default_types)
+
+        processed = projection_streams.project_stream(
+            db,
+            self.stream_name,
+            include_types,
+            exclude_types,
+            batch_size,
+            budget_ms,
+            t_ms,
+            lambda recorded_ids: recorded.project_ids(recorded_ids, db, skip_negentropy=True),
+        )
+
+        db.commit()
+        return {'projected': processed, 'stream': self.stream_name}
 
 
 class MessageRekeyAndPurgeJob(Job):
     """Rekey messages and purge old encryption keys (forward secrecy)."""
 
     def __init__(self):
-        super().__init__('message_rekey_and_purge', every_ms=300_000)
+        super().__init__('message_rekey_and_purge', every_ms=300_000, budget_ms=100)
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.content import message_deletion
@@ -145,7 +357,7 @@ class PurgeExpiredEventsJob(Job):
     """Purge expired events based on TTL (forward secrecy)."""
 
     def __init__(self):
-        super().__init__('purge_expired_events', every_ms=600_000)
+        super().__init__('purge_expired_events', every_ms=600_000, budget_ms=100)
 
     def run(self, t_ms: int, db: Any) -> dict:
         from . import purge_expired
@@ -156,7 +368,7 @@ class TransitPrekeyReplenishmentJob(Job):
     """Replenish transit prekeys when running low (smart conditional)."""
 
     def __init__(self):
-        super().__init__('transit_prekey_replenishment', every_ms=3_600_000)
+        super().__init__('transit_prekey_replenishment', every_ms=3_600_000, budget_ms=200)
 
     def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
         """Run if interval elapsed AND at least one peer has low prekeys."""
@@ -188,7 +400,7 @@ class GroupPrekeyReplenishmentJob(Job):
     """Replenish group prekeys when running low (smart conditional)."""
 
     def __init__(self):
-        super().__init__('group_prekey_replenishment', every_ms=3_600_000)
+        super().__init__('group_prekey_replenishment', every_ms=3_600_000, budget_ms=200)
 
     def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
         """Run if interval elapsed AND at least one peer has low prekeys."""
@@ -222,7 +434,7 @@ class ConnectionSendJob(Job):
     """Send connection requests to establish/refresh connections."""
 
     def __init__(self):
-        super().__init__('connection_send', every_ms=1_000)  # 1 second
+        super().__init__('connection_send', every_ms=1_000, budget_ms=5)  # 1 second
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import connection_request
@@ -234,7 +446,7 @@ class ConnectionPurgeJob(Job):
     """Purge expired connections."""
 
     def __init__(self):
-        super().__init__('connection_purge', every_ms=60_000)  # 1 minute
+        super().__init__('connection_purge', every_ms=60_000, budget_ms=25)  # 1 minute
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import connection_request
@@ -246,7 +458,7 @@ class SelfAddressAnnounceJob(Job):
     """Announce self-address for all local peers when address changes."""
 
     def __init__(self):
-        super().__init__('self_address_announce', every_ms=60_000)  # 1 minute
+        super().__init__('self_address_announce', every_ms=60_000, budget_ms=25)  # 1 minute
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import self_address
@@ -265,7 +477,7 @@ class IntroProcessJob(Job):
     """
 
     def __init__(self):
-        super().__init__('intro_process', every_ms=500)  # Check twice per second
+        super().__init__('intro_process', every_ms=500, budget_ms=25)  # Check twice per second
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import intro, connection_request
@@ -341,17 +553,77 @@ class NegentropySyncJob(Job):
     """Send negentropy sync messages to all established connections."""
 
     def __init__(self):
-        super().__init__('negentropy_sync', every_ms=1_000)  # 1 second
+        super().__init__('negentropy_sync', every_ms=1_000, budget_ms=25)  # 1 second
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import negentropy
         return negentropy.sync_all_connections(t_ms=t_ms, db=db)
 
 
+HIGH_PRIORITY_DEFAULT_TYPES = [
+    # Auth / membership / routing
+    "connection_request",
+    "connection_ack",
+    "connection_prekey",
+    "connection_prekey_shared",
+    "network_intro",
+    "self_address",
+    "invite",
+    "invite_accepted",
+    "admin",
+    "user_removed",
+    "peer_removed",
+    "peer",
+    "peer_shared",
+    "user",
+    "network",
+    "group",
+    "group_member",
+    "channel",
+    "channel_update",
+    # Keys
+    "group_key",
+    "group_key_shared",
+    "group_prekey",
+    "group_prekey_shared",
+    # Messages
+    "message",
+    "message_update",
+    "message_deletion",
+    "message_reaction",
+    "message_reaction_deletion",
+    "message_attachment",
+]
+
+
 # Registry of job instances
 JOBS = [
     ConnectionSendJob(),
     ReceiveJob(),
+    SyncRespondJob(),
+    SyncUpdateJob(),
+    ProjectionStreamJob(
+        name="high_priority_project",
+        stream_name="high_priority",
+        every_ms=50,
+        batch_env="HIGH_PRIORITY_BATCH",
+        default_batch=200,
+        budget_ms=15,
+        include_env="HIGH_PRIORITY_TYPES",
+        exclude_env=None,
+        default_types=HIGH_PRIORITY_DEFAULT_TYPES,
+    ),
+    ProjectionStreamJob(
+        name="low_priority_project",
+        stream_name="gc",
+        every_ms=100,
+        batch_env="LOW_PRIORITY_BATCH",
+        default_batch=1000,
+        budget_ms=25,
+        include_env=None,
+        exclude_env="HIGH_PRIORITY_TYPES",
+        default_types=HIGH_PRIORITY_DEFAULT_TYPES,
+    ),
     NegentropySyncJob(),
     ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),

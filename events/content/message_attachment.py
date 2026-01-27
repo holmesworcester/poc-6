@@ -33,8 +33,7 @@ import logging
 from PIL import Image
 from core import crypto
 from core import store
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler
+from core.projection_v2.types import ProjectorResult, WriteOp
 from events.identity import peer_shared, peer
 from events.group import group
 from events.content import file_slice, message
@@ -117,41 +116,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     )
 
-    # Command to trigger file sync if needed
-    commands = (
-        Command(
-            command_type='maybe_request_file_sync',
-            args={
-                'file_id': file_id,
-                'total_slices': total_slices,
-            }
-        ),
-    )
-
-    return ProjectorResult(writes=writes, valid_event=True, commands=commands)
-
-
-def _handle_maybe_request_file_sync(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
-    """Handle file sync request command.
-
-    Checks if we have all slices; if not, requests sync from peers.
-    """
-    file_id = args['file_id']
-    total_slices = args['total_slices']
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    our_slices = safedb.query_one(
-        "SELECT COUNT(*) as cnt FROM file_slices WHERE file_id = ? AND recorded_by = ?",
-        (file_id, recorded_by)
-    )
-    have_slices = our_slices['cnt'] if our_slices else 0
-
-    if have_slices < total_slices:
-        log.info(f"message_attachment: need file sync: have {have_slices}/{total_slices} slices (handled by negentropy)")
-
-
-# Register the command handler at module load time
-register_command_handler('maybe_request_file_sync', _handle_maybe_request_file_sync)
+    return ProjectorResult(writes=writes, valid_event=True, commands=())
 
 
 SLICE_SIZE = 450  # bytes - matches ideal protocol design

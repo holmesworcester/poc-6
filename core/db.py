@@ -72,6 +72,11 @@ DEVICE_TABLES = {
     'local_peers',
     'connection_prekeys',             # Asymmetric keys for initial contact
     'store',
+    'incoming_event_log',
+    'ingest_index',
+    'projection_streams',
+    'ui_active_channel',
+    'ui_channel_updates',
     'incoming_blobs',
     'sync_state_ephemeral',
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
