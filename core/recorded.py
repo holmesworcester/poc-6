@@ -103,6 +103,66 @@ def _pre_projection_gate(
                 unsafedb.execute("DELETE FROM store WHERE id = ?", (ref_id,))
                 return False, [None, recorded_id]
 
+    if event_type == "message" and isinstance(event_data, dict):
+        pending_rows = safedb.query(
+            "SELECT deletion_id, deleted_by, created_at, recorded_at "
+            "FROM pending_message_deletions WHERE message_id = ? AND recorded_by = ?",
+            (ref_id, recorded_by)
+        )
+        if pending_rows:
+            author_id = event_data.get("author_id")
+            authorized = False
+            from events.identity import invite as invite_module
+            for pending in pending_rows:
+                deleted_by = pending.get("deleted_by")
+                if not deleted_by:
+                    continue
+                deleter_user_row = safedb.query_one(
+                    "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+                    (deleted_by, recorded_by)
+                )
+                deleter_user_id = deleter_user_row.get("user_id") if deleter_user_row else None
+                if deleter_user_id and author_id and deleter_user_id == author_id:
+                    authorized = True
+                elif deleted_by and invite_module.is_admin(deleted_by, recorded_by, db):
+                    authorized = True
+                if authorized:
+                    safedb.execute(
+                        """INSERT OR IGNORE INTO message_deletions
+                           (deletion_id, message_id, deleted_by, created_at, recorded_by, recorded_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            pending.get("deletion_id"),
+                            ref_id,
+                            deleted_by,
+                            pending.get("created_at"),
+                            recorded_by,
+                            pending.get("recorded_at"),
+                        ),
+                    )
+                    safedb.execute(
+                        "INSERT OR IGNORE INTO deleted_events (event_id, recorded_by, deleted_at) VALUES (?, ?, ?)",
+                        (ref_id, recorded_by, pending.get("recorded_at") or recorded_at),
+                    )
+                    safedb.execute(
+                        "DELETE FROM pending_message_deletions WHERE message_id = ? AND recorded_by = ?",
+                        (ref_id, recorded_by)
+                    )
+                    safedb.execute(
+                        "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+                        (ref_id, recorded_by)
+                    )
+                    from events.network import negentropy
+                    negentropy.remove_events_from_sync_batch(db, recorded_by, [ref_id])
+                    unsafedb.execute("DELETE FROM store WHERE id = ?", (ref_id,))
+                    return False, [None, recorded_id]
+
+            # No authorized pending deletions found (clean up invalid ones we can resolve)
+            safedb.execute(
+                "DELETE FROM pending_message_deletions WHERE message_id = ? AND recorded_by = ?",
+                (ref_id, recorded_by)
+            )
+
     should_mark_shareable = False
     if event_type:
         should_mark_shareable = registry.is_shareable(event_type)

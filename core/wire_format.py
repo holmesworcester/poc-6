@@ -2676,6 +2676,7 @@ def decode_message_deletion_wire_event(
         "type": "message_deletion",
         "message_id": crypto.b64encode(decoded["message_id"]),
         "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,
         "_wire_signature": signature,
         "_wire_signed_bytes": _signing_bytes(header, plaintext),

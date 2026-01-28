@@ -91,7 +91,6 @@ def test_key_rotation_only_by_remover(fresh_db):
 
 
 # TODO: Fix duplicate key creation during projection
-@pytest.mark.xfail(reason="Duplicate keys created during projection (8 instead of 4)")
 def test_multiple_removals_no_key_explosion(fresh_db):
     """Verify that multiple removals don't cause exponential key growth."""
     db = fresh_db

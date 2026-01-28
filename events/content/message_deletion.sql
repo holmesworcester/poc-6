@@ -18,3 +18,18 @@ ON message_deletions(message_id, recorded_by);
 -- Index for querying deletions by deleter
 CREATE INDEX IF NOT EXISTS idx_message_deletions_deleter
 ON message_deletions(deleted_by);
+
+-- Pending deletions for messages that have not been projected yet
+-- Used to suppress messages once they arrive, after validating auth
+CREATE TABLE IF NOT EXISTS pending_message_deletions (
+    deletion_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    deleted_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    recorded_by TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    PRIMARY KEY (deletion_id, recorded_by)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_message_deletions_message
+ON pending_message_deletions(message_id, recorded_by);
