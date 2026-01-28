@@ -224,7 +224,7 @@ class SyncRespondJob(Job):
 
 
 class SyncUpdateJob(Job):
-    """Materialize ingest log, update shareable events, and handle protocol fallbacks."""
+    """Materialize ingest log into store/recorded/index and add shareable events."""
 
     def __init__(self):
         super().__init__('sync_update', every_ms=50, budget_ms=10)
@@ -237,9 +237,6 @@ class SyncUpdateJob(Job):
         max_batch = int(os.getenv("SYNC_UPDATE_BATCH_MAX", str(batch_size)))
         budget_ms = self.budget_limit_ms("SYNC_UPDATE_BUDGET_MS")
         max_budget = int(os.getenv("SYNC_UPDATE_BUDGET_MAX", str(budget_ms)))
-        skip_negentropy = os.getenv("SYNC_UPDATE_SKIP_NEGENTROPY") == "1"
-        defer_buckets = os.getenv("SYNC_UPDATE_DEFER_BUCKETS") == "1"
-
         start_log_id = ingest.get_stream_cursor(db, "sync_update")
         log_tail_id = ingest.get_log_tail_id(db)
         backlog = max(0, log_tail_id - start_log_id)
@@ -255,7 +252,7 @@ class SyncUpdateJob(Job):
         start = time.perf_counter()
 
         while True:
-            recorded_ids, max_log_id, _plaintext_recorded_ids, shareable_rows, protocol_rows = ingest.materialize_log_batch(
+            recorded_ids, max_log_id, _plaintext_recorded_ids, shareable_rows, _protocol_rows = ingest.materialize_log_batch(
                 db,
                 start_log_id,
                 batch_size,
@@ -268,13 +265,7 @@ class SyncUpdateJob(Job):
             ingest.set_stream_cursor(db, "sync_update", max_log_id, t_ms)
             start_log_id = max_log_id
 
-            if protocol_rows and not skip_negentropy:
-                for _log_id, recorded_by, event_data in protocol_rows:
-                    connection_id = event_data.get("reply_connection_id")
-                    if connection_id:
-                        negentropy.handle_incoming(db, recorded_by, connection_id, event_data, t_ms)
-
-            if shareable_rows and not skip_negentropy:
+            if shareable_rows:
                 for event_id, recorded_by, recorded_at in shareable_rows:
                     shareable_by_peer.setdefault(recorded_by, []).append((event_id, None, recorded_at))
 
@@ -283,17 +274,74 @@ class SyncUpdateJob(Job):
             if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
                 break
 
-        if shareable_by_peer and not skip_negentropy:
+        if shareable_by_peer:
             for peer_id, events in shareable_by_peer.items():
                 negentropy.add_shareable_events_batch(
                     events,
                     peer_id,
                     db,
-                    defer_buckets=defer_buckets,
+                    skip_negentropy=True,
                 )
 
         db.commit()
         return {'materialized': processed}
+
+
+class BucketUpdateJob(Job):
+    """Incrementally update negentropy buckets from shareable events."""
+
+    def __init__(self):
+        super().__init__('bucket_update', every_ms=100, budget_ms=10)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from core.db import create_safe_db
+        from events.network import negentropy
+
+        batch_size = int(os.getenv("BUCKET_UPDATE_BATCH", "2000"))
+        budget_ms = self.budget_limit_ms("BUCKET_UPDATE_BUDGET_MS")
+
+        unsafedb = create_unsafe_db(db)
+        peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+        processed = 0
+        start = time.perf_counter()
+
+        for row in peers:
+            peer_id = row['peer_id']
+            safedb = create_safe_db(db, recorded_by=peer_id)
+            last_recorded_at, last_event_id = negentropy.get_bucket_cursor(db, peer_id)
+
+            while True:
+                rows = safedb.query(
+                    "SELECT event_id, created_at, recorded_at FROM shareable_events "
+                    "WHERE can_share_peer_id = ? AND (recorded_at > ? OR (recorded_at = ? AND event_id > ?)) "
+                    "ORDER BY recorded_at, event_id LIMIT ?",
+                    (peer_id, last_recorded_at, last_recorded_at, last_event_id, batch_size),
+                )
+                if not rows:
+                    break
+
+                events: list[tuple[str, int]] = []
+                for event_row in rows:
+                    created_at = event_row['created_at'] if event_row['created_at'] is not None else 0
+                    events.append((event_row['event_id'], created_at))
+
+                negentropy.add_events_to_sync_batch(db, peer_id, events, defer_buckets=False)
+
+                last_recorded_at = rows[-1]['recorded_at']
+                last_event_id = rows[-1]['event_id']
+                negentropy.set_bucket_cursor(db, peer_id, last_recorded_at, last_event_id, t_ms)
+
+                processed += len(rows)
+                if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
+                    db.commit()
+                    return {'processed': processed}
+
+            if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
+                break
+
+        db.commit()
+        return {'processed': processed}
 
 
 class ProjectionStreamJob(Job):
@@ -603,6 +651,7 @@ JOBS = [
     ReceiveJob(),
     SyncRespondJob(),
     SyncUpdateJob(),
+    BucketUpdateJob(),
     ProjectionStreamJob(
         name="high_priority_project",
         stream_name="high_priority",

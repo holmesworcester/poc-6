@@ -83,6 +83,7 @@ SYNC_ONLY_JOBS = {
     'receive',
     'sync_respond',
     'sync_update',
+    'bucket_update',
     'high_priority_project',
     'low_priority_project',
     'negentropy_sync',

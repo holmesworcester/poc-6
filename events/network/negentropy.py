@@ -417,9 +417,6 @@ def add_events_to_sync_batch(
         event_ids.append(event_id)
         batch_data.append((recorded_by, event_id, unified_key, created_at))
 
-    existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
-    new_events = [(event_id, created_at) for event_id, created_at in events if event_id not in existing_event_ids]
-
     # Batch insert using executemany (much faster than individual inserts)
     db._conn.executemany("""
         INSERT OR IGNORE INTO negentropy_events
@@ -429,7 +426,32 @@ def add_events_to_sync_batch(
 
     # Optionally update buckets immediately via incremental deltas
     if not defer_buckets:
+        existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
+        new_events = [(event_id, created_at) for event_id, created_at in events if event_id not in existing_event_ids]
         _apply_bucket_deltas(db, recorded_by, new_events, unified_key_by_event)
+
+
+def get_bucket_cursor(db, recorded_by: str) -> tuple[int, str]:
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT last_recorded_at, last_event_id FROM negentropy_bucket_state WHERE recorded_by = ?",
+        (recorded_by,),
+    )
+    if not row:
+        return (0, "")
+    last_recorded_at = int(row.get('last_recorded_at') or 0)
+    last_event_id = row.get('last_event_id') or ""
+    return (last_recorded_at, last_event_id)
+
+
+def set_bucket_cursor(db, recorded_by: str, last_recorded_at: int, last_event_id: str, t_ms: int) -> None:
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
+        "INSERT OR REPLACE INTO negentropy_bucket_state "
+        "(recorded_by, last_recorded_at, last_event_id, updated_at) "
+        "VALUES (?, ?, ?, ?)",
+        (recorded_by, last_recorded_at, last_event_id, t_ms),
+    )
 
 
 def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
