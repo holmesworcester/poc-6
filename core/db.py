@@ -98,6 +98,41 @@ class Database:
         # Enable secure delete to overwrite deleted data (per threat model requirement)
         # This ensures deleted rows are zeroed out, not just marked free
         self._conn.execute("PRAGMA secure_delete = ON")
+        self._apply_optional_pragmas()
+
+    def _apply_optional_pragmas(self) -> None:
+        """Apply optional perf pragmas from environment variables.
+
+        These are opt-in and should be used only when their tradeoffs are acceptable.
+        """
+        import os
+
+        def apply_token(name: str, env_key: str, allowed: set[str]) -> None:
+            value = os.getenv(env_key)
+            if not value:
+                return
+            token = value.strip().upper()
+            if token not in allowed:
+                return
+            self._conn.execute(f"PRAGMA {name} = {token}")
+
+        def apply_int(name: str, env_key: str) -> None:
+            value = os.getenv(env_key)
+            if not value:
+                return
+            try:
+                numeric = int(value)
+            except ValueError:
+                return
+            self._conn.execute(f"PRAGMA {name} = {numeric}")
+
+        apply_token("synchronous", "SQLITE_SYNCHRONOUS", {"OFF", "NORMAL", "FULL", "EXTRA"})
+        apply_token("temp_store", "SQLITE_TEMP_STORE", {"DEFAULT", "FILE", "MEMORY"})
+        apply_int("cache_size", "SQLITE_CACHE_SIZE")
+        apply_int("mmap_size", "SQLITE_MMAP_SIZE")
+        apply_int("wal_autocheckpoint", "SQLITE_WAL_AUTOCHECKPOINT")
+        apply_int("journal_size_limit", "SQLITE_JOURNAL_SIZE_LIMIT")
+        apply_int("busy_timeout", "SQLITE_BUSY_TIMEOUT_MS")
 
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute query and return all rows as list of dicts."""

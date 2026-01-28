@@ -37,6 +37,10 @@ def _apply_perf_tuning(fast: bool) -> None:
     os.environ["JOB_BUDGET_MS_HIGH_PRIORITY_PROJECT"] = "25"
     os.environ["JOB_BUDGET_MS_LOW_PRIORITY_PROJECT"] = "50"
     os.environ["RECEIVE_INSERT_CHUNK"] = "2000"
+    os.environ.setdefault("SQLITE_SYNCHRONOUS", "NORMAL")
+    os.environ.setdefault("SQLITE_TEMP_STORE", "MEMORY")
+    os.environ.setdefault("SQLITE_CACHE_SIZE", "-131072")  # ~128MB (desktop perf)
+    os.environ.setdefault("SQLITE_WAL_AUTOCHECKPOINT", "1000")
     jobs.set_frequency_multiplier(0.5)
 
 
