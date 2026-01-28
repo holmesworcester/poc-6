@@ -219,7 +219,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         # Build batch: (event_id, created_at, recorded_at)
         shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
         # Defer bucket computation for efficiency - we'll rebuild once at the end
-        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=True)
+        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=False)
 
         # Rebuild all bucket hashes in one efficient pass (unless caller defers)
         if not defer_bucket_rebuild:

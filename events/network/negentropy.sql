@@ -56,19 +56,6 @@ CREATE TABLE IF NOT EXISTS negentropy_events (
 -- Index for efficient bucket lookups by unified key prefix
 CREATE INDEX IF NOT EXISTS idx_negentropy_events_unified_key
 ON negentropy_events(recorded_by, unified_key);
-
--- ============================================================================
--- negentropy_bucket_state table (SUBJECTIVE - bucket update cursor)
--- ============================================================================
--- Tracks incremental bucket update progress per peer.
-
-CREATE TABLE IF NOT EXISTS negentropy_bucket_state (
-    recorded_by TEXT PRIMARY KEY,
-    last_recorded_at INTEGER NOT NULL DEFAULT 0,
-    last_event_id TEXT NOT NULL DEFAULT '',
-    updated_at INTEGER NOT NULL
-);
-
 -- ============================================================================
 -- negentropy_sync_state table (SUBJECTIVE - per-connection sync state)
 -- ============================================================================

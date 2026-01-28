@@ -239,8 +239,6 @@ class SyncUpdateJob(Job):
 
     def run(self, t_ms: int, db: Any) -> dict:
         from core import ingest
-        from events.network import negentropy
-
         batch_size = int(os.getenv("SYNC_UPDATE_BATCH", "2000"))
         max_batch = int(os.getenv("SYNC_UPDATE_BATCH_MAX", str(batch_size)))
         budget_ms = self.budget_limit_ms("SYNC_UPDATE_BUDGET_MS")
@@ -283,73 +281,17 @@ class SyncUpdateJob(Job):
                 break
 
         if shareable_by_peer:
+            from events.network import negentropy
             for peer_id, events in shareable_by_peer.items():
                 negentropy.add_shareable_events_batch(
                     events,
                     peer_id,
                     db,
-                    skip_negentropy=True,
+                    skip_negentropy=False,
                 )
 
         db.commit()
         return {'materialized': processed}
-
-
-class BucketUpdateJob(Job):
-    """Incrementally update negentropy buckets from shareable events."""
-
-    def __init__(self):
-        super().__init__('bucket_update', every_ms=100, budget_ms=10)
-
-    def run(self, t_ms: int, db: Any) -> dict:
-        from core.db import create_safe_db
-        from events.network import negentropy
-
-        batch_size = int(os.getenv("BUCKET_UPDATE_BATCH", "2000"))
-        budget_ms = self.budget_limit_ms("BUCKET_UPDATE_BUDGET_MS")
-
-        unsafedb = create_unsafe_db(db)
-        peers = unsafedb.query("SELECT peer_id FROM local_peers")
-
-        processed = 0
-        start = time.perf_counter()
-
-        for row in peers:
-            peer_id = row['peer_id']
-            safedb = create_safe_db(db, recorded_by=peer_id)
-            last_recorded_at, last_event_id = negentropy.get_bucket_cursor(db, peer_id)
-
-            while True:
-                rows = safedb.query(
-                    "SELECT event_id, created_at, recorded_at FROM shareable_events "
-                    "WHERE can_share_peer_id = ? AND (recorded_at > ? OR (recorded_at = ? AND event_id > ?)) "
-                    "ORDER BY recorded_at, event_id LIMIT ?",
-                    (peer_id, last_recorded_at, last_recorded_at, last_event_id, batch_size),
-                )
-                if not rows:
-                    break
-
-                events: list[tuple[str, int]] = []
-                for event_row in rows:
-                    created_at = event_row['created_at'] if event_row['created_at'] is not None else 0
-                    events.append((event_row['event_id'], created_at))
-
-                negentropy.add_events_to_sync_batch(db, peer_id, events, defer_buckets=False)
-
-                last_recorded_at = rows[-1]['recorded_at']
-                last_event_id = rows[-1]['event_id']
-                negentropy.set_bucket_cursor(db, peer_id, last_recorded_at, last_event_id, t_ms)
-
-                processed += len(rows)
-                if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
-                    db.commit()
-                    return {'processed': processed}
-
-            if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
-                break
-
-        db.commit()
-        return {'processed': processed}
 
 
 class ProjectionStreamJob(Job):
@@ -659,7 +601,6 @@ JOBS = [
     ReceiveJob(),
     SyncRespondJob(),
     SyncUpdateJob(),
-    BucketUpdateJob(),
     ProjectionStreamJob(
         name="high_priority_project",
         stream_name="high_priority",

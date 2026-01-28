@@ -39,6 +39,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -310,8 +311,7 @@ def _fetch_existing_event_ids(db, recorded_by: str, event_ids: list[str]) -> set
 def _apply_bucket_deltas(
     db,
     recorded_by: str,
-    new_events: list[tuple[str, int]],
-    unified_key_by_event: dict[str, str],
+    new_events: list[tuple[str, str]],
 ) -> None:
     if not new_events:
         return
@@ -322,8 +322,7 @@ def _apply_bucket_deltas(
     bucket_xors: dict[tuple[str, str], bytes] = {}
     bucket_counts: dict[tuple[str, str], int] = {}
 
-    for event_id, _created_at in new_events:
-        unified_key = unified_key_by_event[event_id]
+    for event_id, unified_key in new_events:
         fingerprint = compute_fingerprint(event_id)
 
         for level in LEVELS:
@@ -382,6 +381,34 @@ def _apply_bucket_deltas(
     )
 
 
+def _insert_negentropy_events_returning(
+    db,
+    recorded_by: str,
+    batch_data: list[tuple[str, str, str, int]],
+) -> list[tuple[str, str]]:
+    if not batch_data:
+        return []
+
+    max_vars = int(os.getenv("NEGENTROPY_INSERT_CHUNK", "200"))
+    inserted_rows: list[tuple[str, str]] = []
+
+    for chunk in _chunked(batch_data, max_vars):
+        placeholders = ",".join("(?, ?, ?, ?)" for _ in chunk)
+        sql = (
+            "INSERT OR IGNORE INTO negentropy_events "
+            "(recorded_by, event_id, unified_key, created_at) "
+            f"VALUES {placeholders} "
+            "RETURNING event_id, unified_key"
+        )
+        params: list[Any] = []
+        for recorded_by_value, event_id, unified_key, created_at in chunk:
+            params.extend([recorded_by_value, event_id, unified_key, created_at])
+        rows = db._conn.execute(sql, tuple(params)).fetchall()
+        inserted_rows.extend((row[0], row[1]) for row in rows)
+
+    return inserted_rows
+
+
 def add_events_to_sync_batch(
     db,
     recorded_by: str,
@@ -403,55 +430,42 @@ def add_events_to_sync_batch(
     if not events:
         return
 
-    # Build batch data for executemany and cache unified keys
+    # Build batch data for insert and cache unified keys
     batch_data: list[tuple[str, str, str, int]] = []
-    unified_key_by_event: dict[str, str] = {}
-    event_ids: list[str] = []
     seen_event_ids: set[str] = set()
     for event_id, created_at in events:
         if event_id in seen_event_ids:
             continue
         seen_event_ids.add(event_id)
         unified_key = compute_unified_key(event_id, created_at)
-        unified_key_by_event[event_id] = unified_key
-        event_ids.append(event_id)
         batch_data.append((recorded_by, event_id, unified_key, created_at))
 
-    # Batch insert using executemany (much faster than individual inserts)
+    # Batch insert and get inserted rows for bucket deltas
+    if not defer_buckets:
+        try:
+            inserted_rows = _insert_negentropy_events_returning(db, recorded_by, batch_data)
+        except sqlite3.OperationalError:
+            db._conn.executemany("""
+                INSERT OR IGNORE INTO negentropy_events
+                (recorded_by, event_id, unified_key, created_at)
+                VALUES (?, ?, ?, ?)
+            """, batch_data)
+            event_ids = [event_id for _recorded_by, event_id, _unified_key, _created_at in batch_data]
+            existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
+            inserted_rows = [
+                (event_id, unified_key)
+                for _recorded_by, event_id, unified_key, _created_at in batch_data
+                if event_id not in existing_event_ids
+            ]
+        _apply_bucket_deltas(db, recorded_by, inserted_rows)
+        return
+
+    # Deferred path: insert only
     db._conn.executemany("""
         INSERT OR IGNORE INTO negentropy_events
         (recorded_by, event_id, unified_key, created_at)
         VALUES (?, ?, ?, ?)
     """, batch_data)
-
-    # Optionally update buckets immediately via incremental deltas
-    if not defer_buckets:
-        existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
-        new_events = [(event_id, created_at) for event_id, created_at in events if event_id not in existing_event_ids]
-        _apply_bucket_deltas(db, recorded_by, new_events, unified_key_by_event)
-
-
-def get_bucket_cursor(db, recorded_by: str) -> tuple[int, str]:
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        "SELECT last_recorded_at, last_event_id FROM negentropy_bucket_state WHERE recorded_by = ?",
-        (recorded_by,),
-    )
-    if not row:
-        return (0, "")
-    last_recorded_at = int(row.get('last_recorded_at') or 0)
-    last_event_id = row.get('last_event_id') or ""
-    return (last_recorded_at, last_event_id)
-
-
-def set_bucket_cursor(db, recorded_by: str, last_recorded_at: int, last_event_id: str, t_ms: int) -> None:
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    safedb.execute(
-        "INSERT OR REPLACE INTO negentropy_bucket_state "
-        "(recorded_by, last_recorded_at, last_event_id, updated_at) "
-        "VALUES (?, ?, ?, ?)",
-        (recorded_by, last_recorded_at, last_event_id, t_ms),
-    )
 
 
 def rebuild_buckets_for_peer(db, recorded_by: str) -> None:

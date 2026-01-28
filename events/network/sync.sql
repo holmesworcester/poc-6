@@ -19,10 +19,6 @@ CREATE INDEX IF NOT EXISTS idx_shareable_events_peer
 CREATE INDEX IF NOT EXISTS idx_shareable_events_peer_received
     ON shareable_events(can_share_peer_id, recorded_at DESC);
 
--- Cursor-friendly ordering for incremental bucket updates
-CREATE INDEX IF NOT EXISTS idx_shareable_events_peer_recorded_cursor
-    ON shareable_events(can_share_peer_id, recorded_at, event_id);
-
 -- Index for windowed sync queries (can_share_peer_id + window_id)
 CREATE INDEX IF NOT EXISTS idx_shareable_events_window
     ON shareable_events(can_share_peer_id, window_id, created_at);
