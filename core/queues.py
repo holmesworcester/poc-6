@@ -449,31 +449,25 @@ class blocked:
         # For now, we keep the event in blocked_events_ephemeral with deps_remaining=0.
         # The convergence test and sync protocol will handle cleaning up truly unblocked events.
 
-        # ADDITIONAL FIX: Also check for any events that already have deps_remaining=0
-        # (they may have reached 0 in a previous call but weren't re-projected successfully)
-        all_ready = safedb.query("""
-            SELECT recorded_id FROM blocked_events_ephemeral
-            WHERE deps_remaining = 0 AND recorded_by = ?
-        """, (recorded_by,))
+        # NOTE: We deliberately do NOT include "all_ready" events (all events with deps_remaining=0).
+        # Previously, this code queried for ALL events with deps_remaining=0 and included them
+        # in the return value. This caused an exponential cascade during recursive projection:
+        # - Event A projected -> unblocks B, C, D + returns ALL_READY (including X, Y, Z)
+        # - B projected -> unblocks E + returns ALL_READY (still includes B, C, D, X, Y, Z)
+        # - This creates O(n^2) or worse re-processing of events
+        #
+        # The fix is to only return newly unblocked events. Events that were ready from previous
+        # calls will be picked up in subsequent projection passes, not recursively in the current one.
 
-        all_ready_ids = [row['recorded_id'] for row in all_ready]
-
-        # Combine newly unblocked with already-ready events (dedupe)
-        unblocked_set = set(unblocked) | set(all_ready_ids)
-        final_unblocked = list(unblocked_set)
-
-        if final_unblocked:
-            if len(all_ready_ids) > len(unblocked):
-                log.info(f"queues.blocked.notify_event_valid() UNBLOCKED {len(unblocked)} new + {len(all_ready_ids) - len(unblocked)} pre-existing = {len(final_unblocked)} total events")
-            else:
-                log.info(f"queues.blocked.notify_event_valid() UNBLOCKED (awaiting re-projection confirmation) {len(final_unblocked)} events: {final_unblocked[:3]}")
+        if unblocked:
+            log.info(f"queues.blocked.notify_event_valid() UNBLOCKED {len(unblocked)} events: {unblocked[:3]}")
 
             # Timeline: Log unblocking event
             from tests.utils import timeline
             timeline.log('unblock', ref_id=event_id, recorded_by=recorded_by,
-                         count=len(final_unblocked), unblocked=final_unblocked[:3])  # First 3 IDs
+                         count=len(unblocked), unblocked=unblocked[:3])  # First 3 IDs
 
-        return final_unblocked
+        return unblocked
 
     @staticmethod
     def assert_deps_consistency(recorded_by: str, safedb: SafeDB) -> None:

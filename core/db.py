@@ -134,6 +134,11 @@ class Database:
         apply_int("journal_size_limit", "SQLITE_JOURNAL_SIZE_LIMIT")
         apply_int("busy_timeout", "SQLITE_BUSY_TIMEOUT_MS")
 
+        # Set default busy_timeout if not already set by environment variable
+        # This prevents "database is locked" errors when CLI and daemon share a database
+        if not os.getenv("SQLITE_BUSY_TIMEOUT_MS"):
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         """Execute query and return all rows as list of dicts."""
         cursor = self._conn.execute(sql, params)
