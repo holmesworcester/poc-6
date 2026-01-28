@@ -38,7 +38,12 @@ def reset_global_state():
     """
     # Reset network configuration
     from core import network_config
+    from core import transport
     network_config.reset_network_config()
+
+    # Reset transport and enable loopback mode for testing
+    transport.reset()
+    transport.enable_loopback()
 
     # Reset job frequency multiplier
     jobs.reset_frequency_multiplier()
@@ -53,6 +58,7 @@ def reset_global_state():
     # Also reset after test to catch tests that modify global state
     jobs.reset_frequency_multiplier()
     network_config.reset_network_config()
+    transport.reset()
 
 
 @pytest.fixture

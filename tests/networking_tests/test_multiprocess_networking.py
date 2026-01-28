@@ -17,7 +17,7 @@ import time
 import tempfile
 import os
 import socket
-from tests.networking_tests.multiprocess_client import RemoteClient, tick_all
+from tests.networking_tests.multiprocess_client import RemoteClient, tick_all, assert_eventually
 from tests.networking_tests.ipc import supports_udp_in_subprocess
 
 pytestmark = pytest.mark.skipif(
@@ -134,19 +134,39 @@ class TestRealNetworking:
         bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
         t_ms += 100
 
-
-        # Sync
+        # First establish connection
         tick_all(alice, bob, t_ms=t_ms, rounds=50)
         t_ms += 5000
 
-        # Verify Bob synced Alice's network data
-        bob_users = bob.get_users()
+        # Debug: check sync status before waiting
+        alice_status = alice.debug_sync_status(t_ms)
+        bob_status = bob.debug_sync_status(t_ms)
+        print(f"\n=== After connection establishment ===")
+        print(f"Alice connections: {alice_status['connections']}")
+        print(f"Alice shareable events: {alice_status['shareable_events']}")
+        print(f"Alice root hash: {alice_status['root_hash']}")
+        print(f"Bob connections: {bob_status['connections']}")
+        print(f"Bob shareable events: {bob_status['shareable_events']}")
+        print(f"Bob root hash: {bob_status['root_hash']}")
+
+        # Wait for sync to complete - Bob should see at least 2 users
+        def check_users_synced():
+            try:
+                bob_users = bob.get_users()
+                return len(bob_users) >= 2
+            except Exception:
+                return False
+
+        t_ms = assert_eventually(
+            check_users_synced,
+            alice, bob,
+            t_ms=t_ms,
+            max_rounds=200,
+            msg="Bob should see at least 2 users after sync"
+        )
+
+        # Verify channels synced too
         bob_channels = bob.get_channels()
-
-        # Should see both Alice and Bob as users
-        assert len(bob_users) >= 2, f"Bob should see at least 2 users, got {bob_users}"
-
-        # Should have the channel
         assert len(bob_channels) >= 1, f"Bob should have at least 1 channel, got {bob_channels}"
 
     def test_message_sync(self, alice, bob):

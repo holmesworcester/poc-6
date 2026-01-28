@@ -281,14 +281,14 @@ def _project_ack(
 
     their_key = crypto.b64decode(key_b64)
 
-    # Find the original request we sent
+    # Find the original request we sent (for_connection_id is our key_id)
     existing = safedb.query_one("""
-        SELECT connection_id FROM connections
-        WHERE connection_id = ? AND recorded_by = ?
+        SELECT key_id FROM connections
+        WHERE key_id = ? AND recorded_by = ?
     """, (for_connection_id, recorded_by))
 
     if not existing:
-        log.warning(f"connection.project: no matching request for ack {event_id[:20]}... (for_connection_id={for_connection_id[:20]}...)")
+        log.warning(f"connection.project: no matching request for ack {event_id[:20]}... (for_key_id={for_connection_id[:20]}...)")
         return None
 
     # Look up from_addr from packet_metadata staging table
@@ -302,13 +302,13 @@ def _project_ack(
     # Update connection with their info + address
     safedb.execute("""
         UPDATE connections
-        SET their_connection_id = ?,
+        SET their_key_id = ?,
             their_key = ?,
             peer_shared_id = COALESCE(peer_shared_id, ?),
             last_handshake_ms = ?,
             from_addr_ip = COALESCE(?, from_addr_ip),
             from_addr_port = COALESCE(?, from_addr_port)
-        WHERE connection_id = ? AND recorded_by = ?
+        WHERE key_id = ? AND recorded_by = ?
     """, (
         event_id, their_key, peer_shared_id,
         recorded_at, from_addr_ip, from_addr_port,
@@ -355,7 +355,7 @@ def _send_ack_for_request(
     # Check if we already have a connection to this peer (from our own request)
     # If so, update it instead of creating a new one
     existing = safedb.query_one("""
-        SELECT connection_id, our_key FROM connections
+        SELECT key_id, our_key FROM connections
         WHERE peer_shared_id = ? AND recorded_by = ?
         ORDER BY created_at DESC LIMIT 1
     """, (remote_peer_shared_id, local_peer_id))
@@ -365,10 +365,10 @@ def _send_ack_for_request(
         safedb.execute("""
             UPDATE connections
             SET their_key = ?,
-                their_connection_id = ?,
+                their_key_id = ?,
                 last_handshake_ms = ?
-            WHERE connection_id = ? AND recorded_by = ?
-        """, (their_key, request_id, t_ms, existing['connection_id'], local_peer_id))
+            WHERE key_id = ? AND recorded_by = ?
+        """, (their_key, request_id, t_ms, existing['key_id'], local_peer_id))
 
         # Create and send ack using our existing key
         ack_id, _ = create_ack(
@@ -397,11 +397,8 @@ def _send_ack_for_request(
         if not to_addr:
             to_addr = transport.get_peer_address(remote_peer_shared_id)
 
-        if to_addr:
-            from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-            transport.send(wrapped, from_addr, to_addr)
-        else:
-            transport.deliver(wrapped, ('127.0.0.1', 0))
+        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+        transport.send(wrapped, from_addr, to_addr)
 
         log.info(f"connection._send_ack: updated existing connection and sent ack {ack_id[:20]}... for request {request_id[:20]}...")
         return
@@ -416,14 +413,14 @@ def _send_ack_for_request(
     )
 
     # Store our outgoing connection (we're the one who received the request)
-    # Our connection_id is the ack_id, their_connection_id is the request_id
+    # Our key_id is the ack_id, their_key_id is the request_id
     # Include from_addr so we can send sync messages later
     from_addr_ip = reply_addr[0] if reply_addr else None
     from_addr_port = reply_addr[1] if reply_addr else None
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
-            connection_id, recorded_by, peer_shared_id, invite_id,
-            our_key, their_connection_id, their_key,
+            key_id, recorded_by, peer_shared_id, invite_id,
+            our_key, their_key_id, their_key,
             created_at, last_handshake_ms, ttl_ms,
             from_addr_ip, from_addr_port
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -454,11 +451,8 @@ def _send_ack_for_request(
     if not to_addr:
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
-    if to_addr:
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-    else:
-        transport.deliver(wrapped, ('127.0.0.1', 0))
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
 
     log.info(f"connection._send_ack: sent ack {ack_id[:20]}... for request {request_id[:20]}...")
 
@@ -475,9 +469,9 @@ from dataclasses import dataclass
 
 @dataclass
 class Connection:
-    """Bidirectional channel identified by connection_id, labeled by identity."""
+    """Bidirectional channel identified by key_id, labeled by identity."""
 
-    connection_id: str               # Our connection event ID (mode=req)
+    key_id: str                      # Identifies our_key (our connection event ID)
     recorded_by: str                 # Local peer who owns this connection
 
     # Identity labels (at least one set)
@@ -486,7 +480,7 @@ class Connection:
 
     # Keys
     our_key: bytes                   # Symmetric key we created (they send to us)
-    their_connection_id: str | None  # Their ack's connection_id (NULL until they ack)
+    their_key_id: str | None         # Identifies their_key (their connection event ID)
     their_key: bytes | None          # Symmetric key they created (we send to them)
 
     # Lifecycle
@@ -507,12 +501,12 @@ class Connection:
     def from_row(cls, row: dict) -> 'Connection':
         """Create Connection from database row."""
         return cls(
-            connection_id=row['connection_id'],
+            key_id=row['key_id'],
             recorded_by=row['recorded_by'],
             peer_shared_id=row.get('peer_shared_id'),
             invite_id=row.get('invite_id'),
             our_key=row['our_key'],
-            their_connection_id=row.get('their_connection_id'),
+            their_key_id=row.get('their_key_id'),
             their_key=row.get('their_key'),
             created_at=row['created_at'],
             last_handshake_ms=row['last_handshake_ms'],
@@ -527,7 +521,7 @@ class Connection:
     @property
     def label(self) -> str:
         """Human-readable identity: peer_shared_id or invite_id."""
-        return self.peer_shared_id or self.invite_id or self.connection_id
+        return self.peer_shared_id or self.invite_id or self.key_id
 
     @property
     def short_label(self) -> str:
@@ -536,9 +530,9 @@ class Connection:
         return label[:8] + '...' if len(label) > 11 else label
 
     @property
-    def short_connection_id(self) -> str:
-        """Short connection_id for display (first 11 chars)."""
-        return self.connection_id[:11] + '...' if len(self.connection_id) > 14 else self.connection_id
+    def short_key_id(self) -> str:
+        """Short key_id for display (first 11 chars)."""
+        return self.key_id[:11] + '...' if len(self.key_id) > 14 else self.key_id
 
     def is_active(self, t_ms: int) -> bool:
         """Check if connection is still valid (not expired)."""
@@ -550,11 +544,11 @@ class Connection:
 
     def is_pending(self) -> bool:
         """Check if connection is pending (awaiting ack)."""
-        return self.their_connection_id is None
+        return self.their_key_id is None
 
     def is_bidirectional(self) -> bool:
         """Check if connection is fully established (both directions)."""
-        return self.their_connection_id is not None and self.their_key is not None
+        return self.their_key_id is not None and self.their_key is not None
 
     def is_bootstrap(self) -> bool:
         """Check if this is a bootstrap connection (via invite)."""
@@ -765,11 +759,12 @@ def _send_request(
     )
 
     # Store our outgoing connection (PENDING)
+    # key_id = connection_id (the event ID of our connection_request)
     safedb = create_safe_db(db, recorded_by=from_peer_id)
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
-            connection_id, recorded_by, peer_shared_id, invite_id,
-            our_key, their_connection_id, their_key,
+            key_id, recorded_by, peer_shared_id, invite_id,
+            our_key, their_key_id, their_key,
             created_at, last_handshake_ms, ttl_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
@@ -823,16 +818,9 @@ def _send_request(
     if not to_addr:
         to_addr = transport.get_peer_address(to_peer_shared_id)
 
-    if to_addr:
-        # Real networking - send via transport with addresses
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-        log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
-    else:
-        # Loopback mode - deliver directly to incoming queue
-        from_addr = ('127.0.0.1', 0)
-        transport.deliver(wrapped, from_addr)
-        log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... (loopback)")
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
+    log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
 
 
 def purge_expired(t_ms: int, db: Any) -> int:
@@ -925,7 +913,7 @@ def get_active_connection(peer_id: str, remote_peer_shared_id: str, t_ms: int, d
         SELECT * FROM connections
         WHERE peer_shared_id = ?
           AND recorded_by = ?
-          AND their_connection_id IS NOT NULL
+          AND their_key_id IS NOT NULL
           AND their_key IS NOT NULL
           AND last_handshake_ms + ttl_ms > ?
         ORDER BY last_handshake_ms DESC
@@ -967,7 +955,7 @@ def format_time_remaining(ms: int) -> str:
 # Address learning and lookup
 # ============================================================================
 
-def learn_address(connection_id: str, peer_ip: str, peer_port: int,
+def learn_address(key_id: str, peer_ip: str, peer_port: int,
                   source: str, t_ms: int, recorded_by: str, db: Any) -> None:
     """Update connection with learned address from incoming packet.
 
@@ -975,7 +963,7 @@ def learn_address(connection_id: str, peer_ip: str, peer_port: int,
     to record the sender's network address.
 
     Args:
-        connection_id: The connection that received the packet
+        key_id: The connection's key_id that received the packet
         peer_ip: IP address learned from UDP source
         peer_port: Port learned from UDP source
         source: How we learned it ('packet', 'invite', 'manual')
@@ -988,12 +976,12 @@ def learn_address(connection_id: str, peer_ip: str, peer_port: int,
         UPDATE connections SET
             peer_ip = ?, peer_port = ?,
             address_source = ?, address_learned_ms = ?
-        WHERE connection_id = ? AND recorded_by = ?
-    """, (peer_ip, peer_port, source, t_ms, connection_id, recorded_by))
-    log.debug(f"connection_request.learn_address: learned {peer_ip}:{peer_port} for connection {connection_id[:20]}...")
+        WHERE key_id = ? AND recorded_by = ?
+    """, (peer_ip, peer_port, source, t_ms, key_id, recorded_by))
+    log.debug(f"connection_request.learn_address: learned {peer_ip}:{peer_port} for key_id {key_id[:20]}...")
 
 
-def get_address(connection_id: str, recorded_by: str, db: Any) -> tuple | None:
+def get_address(key_id: str, recorded_by: str, db: Any) -> tuple | None:
     """Get address for a connection, checking all sources.
 
     Priority:
@@ -1001,7 +989,7 @@ def get_address(connection_id: str, recorded_by: str, db: Any) -> tuple | None:
     2. Bootstrap address from invite_accepteds
 
     Args:
-        connection_id: The connection to get address for
+        key_id: The connection's key_id to get address for
         recorded_by: Local peer who owns this connection
         db: Database connection
 
@@ -1013,8 +1001,8 @@ def get_address(connection_id: str, recorded_by: str, db: Any) -> tuple | None:
     # Priority 1: Learned address on connection
     conn = safedb.query_one("""
         SELECT peer_ip, peer_port, peer_shared_id, invite_id
-        FROM connections WHERE connection_id = ? AND recorded_by = ?
-    """, (connection_id, recorded_by))
+        FROM connections WHERE key_id = ? AND recorded_by = ?
+    """, (key_id, recorded_by))
 
     if not conn:
         return None
@@ -1255,16 +1243,16 @@ def get_connection_by_invite(peer_id: str, invite_id: str, t_ms: int, db: Any) -
     return Connection.from_row(row) if row else None
 
 
-def get_connection_by_their_id(peer_id: str, their_connection_id: str, t_ms: int, db: Any) -> Connection | None:
-    """Get connection by the remote party's connection_id.
+def get_connection_by_their_key_id(peer_id: str, their_key_id: str, t_ms: int, db: Any) -> Connection | None:
+    """Get connection by the remote party's key_id.
 
-    When receiving a message from a connection, the sender's connection_id
+    When receiving a message from a connection, the sender's key_id
     is in the message envelope. We need to find OUR connection where
-    their_connection_id matches the sender's connection_id.
+    their_key_id matches the sender's key_id.
 
     Args:
         peer_id: Local peer ID
-        their_connection_id: Remote party's connection_id (from received message)
+        their_key_id: Remote party's key_id (from received message)
         t_ms: Current timestamp
         db: Database connection
 
@@ -1275,8 +1263,8 @@ def get_connection_by_their_id(peer_id: str, their_connection_id: str, t_ms: int
 
     row = safedb.query_one("""
         SELECT * FROM connections
-        WHERE their_connection_id = ? AND recorded_by = ? AND last_handshake_ms + ttl_ms > ?
-    """, (their_connection_id, peer_id, t_ms))
+        WHERE their_key_id = ? AND recorded_by = ? AND last_handshake_ms + ttl_ms > ?
+    """, (their_key_id, peer_id, t_ms))
 
     return Connection.from_row(row) if row else None
 
@@ -1285,18 +1273,18 @@ def get_connection_by_their_id(peer_id: str, their_connection_id: str, t_ms: int
 # Sending on connections
 # ============================================================================
 
-def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) -> bool:
+def send(recorded_by: str, key_id: str, blob: bytes, t_ms: int, db: Any) -> bool:
     """Send a blob on an established connection.
 
     THE interface for all outbound traffic on connections. Handles:
-    - Looking up connection by connection_id
+    - Looking up connection by key_id
     - Wrapping blob with their_key (symmetric)
-    - Adding hint (their_connection_id, full 32 bytes)
+    - Adding hint (their_key_id)
     - Queuing to incoming
 
     Args:
         recorded_by: Local peer ID
-        connection_id: Our connection_id for this connection
+        key_id: Our key_id for this connection
         blob: Raw blob to send (event data)
         t_ms: Current timestamp
         db: Database connection
@@ -1307,26 +1295,26 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     conn = safedb.query_one("""
-        SELECT their_connection_id, their_key, peer_shared_id, from_addr_ip, from_addr_port
+        SELECT their_key_id, their_key, peer_shared_id, from_addr_ip, from_addr_port
         FROM connections
-        WHERE connection_id = ? AND recorded_by = ?
-    """, (connection_id, recorded_by))
+        WHERE key_id = ? AND recorded_by = ?
+    """, (key_id, recorded_by))
 
     if not conn:
-        log.warning(f"connection_request.send: no connection {connection_id[:20]}...")
+        log.warning(f"connection_request.send: no connection {key_id[:20]}...")
         return False
 
-    their_connection_id = conn['their_connection_id']
+    their_key_id = conn['their_key_id']
     their_key = conn['their_key']
     to_peer_shared_id = conn['peer_shared_id']
 
-    if not their_key or not their_connection_id:
-        log.debug(f"connection_request.send: connection {connection_id[:20]}... not ready (no their_key)")
+    if not their_key or not their_key_id:
+        log.debug(f"connection_request.send: connection {key_id[:20]}... not ready (no their_key)")
         return False
 
-    # Wrap with their key using their_connection_id as hint (first 16 bytes)
+    # Wrap with their key using their_key_id as hint
     to_key = {
-        'id': crypto.b64decode(their_connection_id)[:crypto.KEY_ID_SIZE],
+        'id': crypto.b64decode(their_key_id),
         'key': their_key,
         'type': 'symmetric'
     }
@@ -1343,13 +1331,10 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     if not to_addr:
         to_addr = transport.get_peer_address(to_peer_shared_id)
 
-    if to_addr:
-        from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
-    else:
-        transport.deliver(wrapped, ('127.0.0.1', 0))
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+    transport.send(wrapped, from_addr, to_addr)
 
-    log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}...")
+    log.debug(f"connection_request.send: sent {len(blob)}B on {key_id[:20]}...")
     return True
 
 
@@ -1361,8 +1346,22 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
     """Handle send_connection_ack command.
 
     Sends a connection ack in response to a connection request.
+    Looks up the reply_addr from packet_metadata (stored during receive).
     """
     from events.network import connection_ack
+
+    # Look up reply_addr from packet_metadata staging table
+    # This was stored by store_incoming() when the request arrived
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    from_addr_row = safedb.query_one("""
+        SELECT from_addr_ip, from_addr_port FROM packet_metadata
+        WHERE event_id = ? AND recorded_by = ?
+    """, (args['request_id'], recorded_by))
+
+    reply_addr = None
+    if from_addr_row and from_addr_row['from_addr_ip']:
+        reply_addr = (from_addr_row['from_addr_ip'], from_addr_row['from_addr_port'])
+        log.debug(f"_handle_send_connection_ack: found reply_addr {reply_addr} for request {args['request_id'][:20]}...")
 
     connection_ack.send_ack_for_request(
         request_id=args['request_id'],
@@ -1372,6 +1371,7 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
         local_peer_id=recorded_by,
         t_ms=recorded_at,
         db=db,
+        reply_addr=reply_addr,
     )
 
 

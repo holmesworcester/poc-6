@@ -536,6 +536,30 @@ def try_create_username(user_id: str, name: str, peer_id: str, peer_shared_id: s
         return None, True
 
 
+def get(user_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
+    """Get user info by user_id.
+
+    Returns dict with 'name' and 'network_id', or None if user not found.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    row = safedb.query_one(
+        "SELECT name, network_id FROM users WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (user_id, recorded_by),
+    )
+    if row:
+        # Try to get decrypted name from user_names table
+        name_row = safedb.query_one(
+            "SELECT name FROM user_names WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+            (user_id, recorded_by),
+        )
+        name = name_row['name'] if name_row and name_row.get('name') else row.get('name')
+        return {
+            'name': name,
+            'network_id': row.get('network_id'),
+        }
+    return None
+
+
 def get_display_name(user_id: str, recorded_by: str, db: Any) -> str | None:
     """Return the best available display name for a user_id.
 

@@ -51,6 +51,9 @@ def tick(t_ms: int, db: Any) -> None:
         t_ms: Current time in milliseconds
         db: Database connection
     """
+    from core import transport
+    transport.set_simulator_time(t_ms)
+
     unsafedb = create_unsafe_db(db)
 
     for job in jobs.JOBS:
