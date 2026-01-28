@@ -40,36 +40,6 @@ def set_stream_cursor(db: Any, stream_name: str, last_log_id: int, t_ms: int) ->
     )
 
 
-def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
-    """Device-wide routing: determine which local peers can decrypt this blob."""
-    key_id = blob[:crypto.KEY_ID_SIZE]
-    key_id_b64 = crypto.b64encode(key_id)
-
-    try:
-        cursor = db._conn.execute(
-            "SELECT DISTINCT recorded_by FROM connections WHERE key_id = ?",
-            (key_id_b64,),
-        )
-        recorded_by_peers = [row[0] for row in cursor.fetchall()]
-        if recorded_by_peers:
-            return recorded_by_peers
-    except Exception as e:
-        log.warning("route_blob_to_peers: Failed to query connections: %s", e)
-
-    try:
-        cursor = db._conn.execute(
-            "SELECT DISTINCT owner_peer_id FROM connection_prekeys WHERE connection_prekey_id = ?",
-            (key_id_b64,),
-        )
-        recorded_by_peers = [row[0] for row in cursor.fetchall()]
-        if recorded_by_peers:
-            return recorded_by_peers
-    except Exception as e:
-        log.warning("route_blob_to_peers: Failed to query connection_prekeys: %s", e)
-
-    return []
-
-
 def _unwrap_transit_with_key(blob: bytes, key_data: dict[str, Any]) -> bytes | None:
     if not key_data:
         return None
@@ -93,96 +63,84 @@ def queue_incoming(
     t_ms: int,
     db: Any,
     chunk_size: int = 1000,
-    unwrap_transit: bool = False,
 ) -> int:
     """Route and append incoming blobs to the ingest log.
 
-    When unwrap_transit is True, we batch-resolve key hints and store unwrapped
-    event blobs with transit_wrapped=0.
+    We batch-resolve key hints and store unwrapped event blobs with
+    transit_wrapped=0.
     """
     rows: list[tuple[bytes, str, int, str | None, int | None, str | None, bytes, int]] = []
+    entries: list[tuple[bytes, tuple[str, int] | None, bytes, str]] = []
+    key_ids: set[str] = set()
 
-    if not unwrap_transit:
-        for blob, from_addr in batch:
-            recorded_by_peers = route_blob_to_peers(blob, db)
-            if not recorded_by_peers:
+    for blob, from_addr in batch:
+        if not blob:
+            continue
+        key_id_bytes = blob[:crypto.KEY_ID_SIZE] if len(blob) >= crypto.KEY_ID_SIZE else b""
+        if not key_id_bytes:
+            continue
+        key_id_b64 = crypto.b64encode(key_id_bytes)
+        entries.append((blob, from_addr, key_id_bytes, key_id_b64))
+        key_ids.add(key_id_b64)
+
+    if key_ids:
+        placeholders = ",".join("?" for _ in key_ids)
+        params = tuple(key_ids)
+
+        key_map: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+
+        conn_rows = db._conn.execute(
+            f"SELECT key_id, recorded_by, our_key FROM connections WHERE key_id IN ({placeholders})",
+            params,
+        ).fetchall()
+        for key_id, recorded_by, our_key in conn_rows:
+            key_data = {
+                'id': crypto.b64decode(key_id),
+                'key': our_key,
+                'type': 'symmetric',
+            }
+            key_map.setdefault(key_id, []).append((recorded_by, key_data))
+
+        prekey_rows = db._conn.execute(
+            f"SELECT connection_prekey_id, owner_peer_id, private_key "
+            f"FROM connection_prekeys WHERE connection_prekey_id IN ({placeholders})",
+            params,
+        ).fetchall()
+        for key_id, owner_peer_id, private_key in prekey_rows:
+            key_data = {
+                'id': crypto.b64decode(key_id),
+                'private_key': private_key,
+                'type': 'asymmetric',
+            }
+            key_map.setdefault(key_id, []).append((owner_peer_id, key_data))
+
+        peer_rows = db._conn.execute(
+            f"SELECT peer_id, private_key FROM local_peers WHERE peer_id IN ({placeholders})",
+            params,
+        ).fetchall()
+        for peer_id, private_key in peer_rows:
+            key_data = {
+                'id': crypto.b64decode(peer_id),
+                'private_key': private_key,
+                'type': 'asymmetric',
+            }
+            key_map.setdefault(peer_id, []).append((peer_id, key_data))
+
+        for blob, from_addr, _key_id_bytes, key_id_b64 in entries:
+            candidates = key_map.get(key_id_b64, [])
+            if not candidates:
                 continue
-            hint = blob[:crypto.KEY_ID_SIZE] if len(blob) >= crypto.KEY_ID_SIZE else b""
             source_ip, source_port = (from_addr if from_addr else (None, None))
-            for peer_id in recorded_by_peers:
-                rows.append((hint, peer_id, t_ms, source_ip, source_port, None, blob, 1))
-    else:
-        entries: list[tuple[bytes, tuple[str, int] | None, bytes, str]] = []
-        key_ids: set[str] = set()
-
-        for blob, from_addr in batch:
-            if not blob:
-                continue
-            key_id_bytes = blob[:crypto.KEY_ID_SIZE] if len(blob) >= crypto.KEY_ID_SIZE else b""
-            if not key_id_bytes:
-                continue
-            key_id_b64 = crypto.b64encode(key_id_bytes)
-            entries.append((blob, from_addr, key_id_bytes, key_id_b64))
-            key_ids.add(key_id_b64)
-
-        if key_ids:
-            placeholders = ",".join("?" for _ in key_ids)
-            params = tuple(key_ids)
-
-            key_map: dict[str, list[tuple[str, dict[str, Any]]]] = {}
-
-            conn_rows = db._conn.execute(
-                f"SELECT key_id, recorded_by, our_key FROM connections WHERE key_id IN ({placeholders})",
-                params,
-            ).fetchall()
-            for key_id, recorded_by, our_key in conn_rows:
-                key_data = {
-                    'id': crypto.b64decode(key_id),
-                    'key': our_key,
-                    'type': 'symmetric',
-                }
-                key_map.setdefault(key_id, []).append((recorded_by, key_data))
-
-            prekey_rows = db._conn.execute(
-                f"SELECT connection_prekey_id, owner_peer_id, private_key "
-                f"FROM connection_prekeys WHERE connection_prekey_id IN ({placeholders})",
-                params,
-            ).fetchall()
-            for key_id, owner_peer_id, private_key in prekey_rows:
-                key_data = {
-                    'id': crypto.b64decode(key_id),
-                    'private_key': private_key,
-                    'type': 'asymmetric',
-                }
-                key_map.setdefault(key_id, []).append((owner_peer_id, key_data))
-
-            peer_rows = db._conn.execute(
-                f"SELECT peer_id, private_key FROM local_peers WHERE peer_id IN ({placeholders})",
-                params,
-            ).fetchall()
-            for peer_id, private_key in peer_rows:
-                key_data = {
-                    'id': crypto.b64decode(peer_id),
-                    'private_key': private_key,
-                    'type': 'asymmetric',
-                }
-                key_map.setdefault(peer_id, []).append((peer_id, key_data))
-
-            for blob, from_addr, _key_id_bytes, key_id_b64 in entries:
-                candidates = key_map.get(key_id_b64, [])
-                if not candidates:
+            for recorded_by, key_data in candidates:
+                event_blob = _unwrap_transit_with_key(blob, key_data)
+                if not event_blob:
                     continue
-                source_ip, source_port = (from_addr if from_addr else (None, None))
-                for recorded_by, key_data in candidates:
-                    event_blob = _unwrap_transit_with_key(blob, key_data)
-                    if not event_blob:
-                        continue
-                    hint = (
-                        b""
-                        if event_blob[:1] in (b"{", b"[")
-                        else event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b""
-                    )
-                    rows.append((hint, recorded_by, t_ms, source_ip, source_port, None, event_blob, 0))
+                hint = (
+                    b""
+                    if event_blob[:1] in (b"{", b"[")
+                    else event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b""
+                )
+                rows.append((hint, recorded_by, t_ms, source_ip, source_port, None, event_blob, 0))
 
     if not rows:
         return 0

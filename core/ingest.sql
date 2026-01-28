@@ -1,4 +1,4 @@
--- Raw ingest log for fast-path receive (no unwrap/parse)
+-- Ingest log for fast-path receive (transit-unwrapped)
 CREATE TABLE IF NOT EXISTS incoming_event_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     hint BLOB NOT NULL,            -- Transit key hint

@@ -140,7 +140,6 @@ class ReceiveJob(Job):
         budget_ms = self.budget_limit_ms()
         chunk_size = int(os.getenv("RECEIVE_INSERT_CHUNK", "1000"))
         batch_size = int(os.getenv("RECEIVE_BATCH", "200"))
-        unwrap_transit = os.getenv("RECEIVE_UNWRAP_TRANSIT", "1") == "1"
 
         start = time.perf_counter()
         total_received = 0
@@ -155,7 +154,6 @@ class ReceiveJob(Job):
                 t_ms,
                 db,
                 chunk_size=chunk_size,
-                unwrap_transit=unwrap_transit,
             )
             total_received += len(batch)
             total_queued += queued
