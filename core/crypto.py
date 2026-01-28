@@ -387,13 +387,14 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     log = logging.getLogger(__name__)
     key_id = b64encode(id_bytes)
+    unsafedb = create_unsafe_db(db)
 
     log.debug(f"get_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
     # First try connections table (symmetric keys from connection handshake)
     # key_id IS the connection identifier - direct indexed lookup
     safedb = create_safe_db(db, recorded_by=recorded_by)
-conn_row = safedb.query_one(
+    conn_row = safedb.query_one(
         "SELECT our_key FROM connections WHERE key_id = ? AND recorded_by = ?",
         (key_id, recorded_by)
     )

@@ -999,7 +999,7 @@ def sync_connection(
     sent = 0
     for msg in msgs:
         # Wrap in negentropy envelope for ephemeral detection
-# Include reply_key_id so receiver knows which key_id to use
+        # Include reply_key_id so receiver knows which key_id to use
         blob = wire_format.encode_negentropy_wire_event(
             connection_id_b64=conn.key_id,
             reply_connection_id_b64=conn.their_key_id,

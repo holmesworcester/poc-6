@@ -4,7 +4,7 @@ Basic UDP tests to verify the fundamentals work.
 import pytest
 import time
 import socket
-from multiprocessing import Process
+from multiprocessing import Process, Queue
 from tests.networking_tests.ipc import make_queue_pair, supports_udp_in_subprocess
 
 pytestmark = pytest.mark.skipif(
