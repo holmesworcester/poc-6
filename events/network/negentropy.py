@@ -126,7 +126,7 @@ LEVEL_PREFIX_LEN = {
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down
 # 100 is a good balance: small enough for reliable delivery, large enough for efficiency
-EVENTS_THRESHOLD = 100
+EVENTS_THRESHOLD = 50
 
 
 # ============================================================================
