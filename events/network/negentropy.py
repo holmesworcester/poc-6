@@ -146,7 +146,7 @@ class CCState:
 
 # Constants for congestion control
 CC_MIN_WINDOW = 1
-CC_MAX_WINDOW = 8
+CC_MAX_WINDOW = 32
 CC_RTT_ALPHA = 0.2               # EMA smoothing factor
 CC_TIMEOUT_MULTIPLIER = 3        # Timeout = 3 * RTT
 
@@ -1002,6 +1002,9 @@ def handle_range_events(
     Sends actual event blobs for events they need.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Track for congestion control - we received a response
+    _cc_on_response(recorded_by, connection_id, t_ms)
 
     range_id = msg['range_id']
     prefix = msg.get('prefix', '')
