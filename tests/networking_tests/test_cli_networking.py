@@ -12,6 +12,7 @@ import time
 import socket
 import re
 import sys
+from pathlib import Path
 from tests.networking_tests.ipc import supports_udp_in_subprocess
 
 pytestmark = pytest.mark.skipif(
@@ -60,7 +61,7 @@ def wait_for_condition(condition_fn, timeout: float = 30.0, interval: float = 1.
 
 def run_cli(db_path: str, command: str, listen_port: int = None, peer_addrs: list = None, timeout: float = 10.0) -> str:
     """Run a CLI command and return output."""
-    cmd = [sys.executable, 'cli.py', '--db', db_path, '-e', command]
+    cmd = [sys.executable, str(CLI_PATH), '--db', db_path, '-e', command]
     
     if listen_port:
         cmd.extend(['--listen', f'127.0.0.1:{listen_port}'])
@@ -78,14 +79,14 @@ def run_cli(db_path: str, command: str, listen_port: int = None, peer_addrs: lis
         text=True,
         timeout=timeout,
         env=env,
-        cwd='/home/holmes/poc-6-api'
+        cwd=str(REPO_ROOT)
     )
     return result.stdout + result.stderr
 
 
 def run_cli_daemon(db_path: str, listen_port: int, peer_addrs: list = None, duration: float = 5.0) -> subprocess.Popen:
     """Start CLI in sync daemon mode. Returns Popen object."""
-    cmd = [sys.executable, 'cli.py', '--db', db_path, '--listen', f'127.0.0.1:{listen_port}', '--sync-only']
+    cmd = [sys.executable, str(CLI_PATH), '--db', db_path, '--listen', f'127.0.0.1:{listen_port}', '--sync-only']
     
     if peer_addrs:
         for addr in peer_addrs:
@@ -100,7 +101,7 @@ def run_cli_daemon(db_path: str, listen_port: int, peer_addrs: list = None, dura
         stderr=subprocess.PIPE,
         text=True,
         env=env,
-        cwd='/home/holmes/poc-6-api'
+        cwd=str(REPO_ROOT)
     )
     return proc
 
@@ -308,3 +309,5 @@ class TestCLIThreePlayer:
             alice_daemon.wait(timeout=2)
             bob_daemon.wait(timeout=2)
             charlie_daemon.wait(timeout=2)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CLI_PATH = REPO_ROOT / "cli.py"

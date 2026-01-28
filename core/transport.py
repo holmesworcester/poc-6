@@ -7,8 +7,10 @@ Transport modes:
 
 The mode MUST be set explicitly. Sending without a configured mode is an error.
 """
+from dataclasses import dataclass
 from enum import Enum, auto
 from threading import Lock
+import time
 from typing import Any, Optional, TYPE_CHECKING
 import logging
 
@@ -26,6 +28,54 @@ class TransportMode(Enum):
     UDP = auto()       # Production: real UDP sockets
 
 
+# Simple pacing configuration (leaky bucket per destination).
+@dataclass
+class PacerConfig:
+    rate_bytes_per_sec: int
+    burst_bytes: int
+
+
+DEFAULT_PACER_RATE_BYTES_PER_SEC = 2_000_000
+DEFAULT_PACER_BURST_BYTES = 256_000
+
+
+class _LeakyBucket:
+    def __init__(self, config: PacerConfig) -> None:
+        self.rate_bytes_per_sec = max(0, config.rate_bytes_per_sec)
+        self.burst_bytes = max(0, config.burst_bytes)
+        self.tokens = float(self.burst_bytes)
+        self.last_ms: Optional[int] = None
+
+    def allow(self, size_bytes: int, now_ms: int) -> bool:
+        if self.rate_bytes_per_sec <= 0:
+            return True
+        if self.last_ms is None:
+            self.last_ms = now_ms
+        else:
+            elapsed_ms = max(0, now_ms - self.last_ms)
+            if elapsed_ms > 0:
+                self.tokens = min(
+                    float(self.burst_bytes),
+                    self.tokens + (self.rate_bytes_per_sec * elapsed_ms) / 1000.0,
+                )
+                self.last_ms = now_ms
+
+        if self.burst_bytes <= 0:
+            return False
+
+        if size_bytes > self.burst_bytes:
+            # Allow oversized packets when we have any tokens.
+            if self.tokens <= 0:
+                return False
+            self.tokens = 0.0
+            return True
+
+        if self.tokens >= size_bytes:
+            self.tokens -= size_bytes
+            return True
+        return False
+
+
 # Current mode
 _mode: TransportMode = TransportMode.NONE
 
@@ -41,6 +91,10 @@ _peer_addresses: dict[str, tuple[str, int]] = {}  # peer_shared_id -> (host, por
 # Simulator state
 _simulator: Optional['NetworkSimulator'] = None
 _simulator_time_ms: int = 0  # Current simulation time
+
+# Pacer state (optional)
+_pacer_config: Optional[PacerConfig] = None
+_pacer_buckets: dict[tuple[str, int], _LeakyBucket] = {}
 
 
 class TransportError(Exception):
@@ -80,6 +134,8 @@ def set_mode(mode: TransportMode) -> None:
         raise TransportError("Cannot set SIMULATOR mode: No simulator set. Call set_simulator() first.")
 
     _mode = mode
+    if mode == TransportMode.LOOPBACK:
+        _ensure_default_pacer()
     log.info(f"transport: mode set to {mode.name}")
 
 
@@ -91,6 +147,37 @@ def get_mode() -> TransportMode:
 def enable_loopback() -> None:
     """Convenience: enable loopback mode for testing."""
     set_mode(TransportMode.LOOPBACK)
+
+
+def set_pacer(rate_bytes_per_sec: Optional[int], burst_bytes: Optional[int] = None) -> None:
+    """Enable or disable send pacing.
+
+    Args:
+        rate_bytes_per_sec: Max bytes per second (None disables pacing)
+        burst_bytes: Max burst size in bytes (defaults to rate_bytes_per_sec)
+    """
+    global _pacer_config, _pacer_buckets
+
+    if rate_bytes_per_sec is None:
+        _pacer_config = None
+        _pacer_buckets.clear()
+        log.info("transport: pacer disabled")
+        return
+
+    burst = burst_bytes if burst_bytes is not None else rate_bytes_per_sec
+    _pacer_config = PacerConfig(rate_bytes_per_sec=rate_bytes_per_sec, burst_bytes=burst)
+    _pacer_buckets.clear()
+    log.info(f"transport: pacer enabled rate={rate_bytes_per_sec}B/s burst={burst}B")
+
+
+def get_pacer_config() -> Optional[PacerConfig]:
+    """Get current pacing configuration (if any)."""
+    return _pacer_config
+
+
+def _ensure_default_pacer() -> None:
+    if _pacer_config is None:
+        set_pacer(DEFAULT_PACER_RATE_BYTES_PER_SEC, DEFAULT_PACER_BURST_BYTES)
 
 
 # ============================================================================
@@ -186,6 +273,39 @@ def pending_count() -> tuple[int, int]:
         return len(_incoming), len(_outgoing)
 
 
+def _now_ms() -> int:
+    return int(time.monotonic() * 1000)
+
+
+def _drain_outgoing_for_send(
+    t_ms: Optional[int],
+) -> list[tuple[bytes, tuple[str, int], tuple[str, int]]]:
+    """Drain outgoing packets, applying pacing if enabled."""
+    global _outgoing
+    if _pacer_config is None:
+        with _lock:
+            batch = _outgoing[:]
+            _outgoing.clear()
+            return batch
+
+    now_ms = _now_ms() if t_ms is None else t_ms
+    with _lock:
+        batch: list[tuple[bytes, tuple[str, int], tuple[str, int]]] = []
+        remaining: list[tuple[bytes, tuple[str, int], tuple[str, int]]] = []
+        for blob, from_addr, to_addr in _outgoing:
+            key = to_addr or ('', 0)
+            bucket = _pacer_buckets.get(key)
+            if not bucket:
+                bucket = _LeakyBucket(_pacer_config)
+                _pacer_buckets[key] = bucket
+            if bucket.allow(len(blob), now_ms):
+                batch.append((blob, from_addr, to_addr))
+            else:
+                remaining.append((blob, from_addr, to_addr))
+        _outgoing = remaining
+        return batch
+
+
 # ============================================================================
 # Transfer Functions (move outgoing -> incoming based on mode)
 # ============================================================================
@@ -220,12 +340,11 @@ def transfer() -> int:
 
 def _loopback_transfer() -> int:
     """Move all outgoing -> incoming directly (ignores to_addr)."""
+    batch = _drain_outgoing_for_send(_simulator_time_ms if _simulator_time_ms else None)
     with _lock:
-        count = len(_outgoing)
-        for blob, from_addr, to_addr in _outgoing:
+        for blob, from_addr, _ in batch:
             _incoming.append((blob, from_addr))
-        _outgoing.clear()
-        return count
+    return len(batch)
 
 
 # Legacy alias for tests that call loopback_transfer() directly
@@ -256,6 +375,7 @@ def set_simulator(sim: Optional['NetworkSimulator']) -> None:
     _simulator = sim
     if sim:
         _mode = TransportMode.SIMULATOR
+        _ensure_default_pacer()
         log.info("transport: simulator enabled, mode set to SIMULATOR")
     else:
         if _mode == TransportMode.SIMULATOR:
@@ -292,10 +412,9 @@ def _simulator_transfer(t_ms: int) -> int:
         return _loopback_transfer()
 
     # Move outgoing -> simulator
-    with _lock:
-        for blob, from_addr, to_addr in _outgoing:
-            _simulator.add(blob, from_addr, to_addr, t_ms)
-        _outgoing.clear()
+    batch = _drain_outgoing_for_send(t_ms)
+    for blob, from_addr, to_addr in batch:
+        _simulator.add(blob, from_addr, to_addr, t_ms)
 
     # Drain ready packets from simulator -> incoming
     ready = _simulator.drain(t_ms)
@@ -328,6 +447,7 @@ def start_udp(host: str, port: int) -> None:
     _udp_socket = UDPSocket(host, port)
     _udp_socket.start()
     _mode = TransportMode.UDP
+    _ensure_default_pacer()
     log.info(f"transport: UDP started on {host}:{port}, mode set to UDP")
 
 
@@ -373,14 +493,13 @@ def _udp_transfer() -> int:
         raise TransportError("UDP transfer called but UDP socket not started")
 
     count = 0
-    with _lock:
-        # Send outgoing packets via UDP
-        for blob, from_addr, to_addr in _outgoing:
-            _udp_socket.send_to(to_addr, blob)
-            count += 1
-            log.debug(f"transport: UDP sent {len(blob)}B to {to_addr}")
-        _outgoing.clear()
+    batch = _drain_outgoing_for_send(None)
+    for blob, from_addr, to_addr in batch:
+        _udp_socket.send_to(to_addr, blob)
+        count += 1
+        log.debug(f"transport: UDP sent {len(blob)}B to {to_addr}")
 
+    with _lock:
         # Receive incoming packets from UDP
         for data, addr in _udp_socket.drain():
             _incoming.append((data, addr))
@@ -419,6 +538,7 @@ def get_listen_address() -> Optional[tuple[str, int]]:
 def reset():
     """Clear all queues, stop UDP, clear simulator, reset mode to NONE."""
     global _simulator, _simulator_time_ms, _udp_socket, _mode, _peer_addresses
+    global _pacer_config, _pacer_buckets
 
     # Stop UDP if running
     if _udp_socket:
@@ -441,5 +561,7 @@ def reset():
 
     # Reset mode
     _mode = TransportMode.NONE
+    _pacer_config = None
+    _pacer_buckets.clear()
 
     log.info("transport: reset complete")
