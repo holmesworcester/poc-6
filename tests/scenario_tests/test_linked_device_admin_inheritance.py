@@ -88,7 +88,7 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
         )
         assert is_admin_device2, "Device 2 should be admin (linked to admin user)"
 
-    t_ms = assert_eventually(device2_is_admin, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(device2_is_admin, db=db, start_t_ms=None)
     print("✅ Device 2 is admin")
 
     # Verify device 2 can create invites
@@ -144,7 +144,7 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
         assert device1_sees_bob, "Device 1 should see Bob as member"
         assert device2_sees_bob, "Device 2 should see Bob as member"
 
-    assert_eventually(both_devices_see_bob, db=db, start_t_ms=7000)
+    assert_eventually(both_devices_see_bob, db=db, start_t_ms=None)
     print("✅ Both Alice devices see Bob as member")
 
     print(f"\n✅ All assertions passed! Admin privileges inherited correctly.")

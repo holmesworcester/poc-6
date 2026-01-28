@@ -100,7 +100,7 @@ def test_file_attachment_sync_only(fresh_db):
         )
         assert len(bob_msg_count) > 0, "Bob should receive message after sync"
 
-    assert_eventually(bob_has_message, db=db, start_t_ms=4000)
+    assert_eventually(bob_has_message, db=db, start_t_ms=None)
     print(f"✓ Bob received message")
 
     print("\n=== Alice creates file and attachment ===")

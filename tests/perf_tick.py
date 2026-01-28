@@ -10,14 +10,14 @@ Usage:
     # Run until condition met
     final_t_ms, report = perf_tick.run_realtime(
         db=db,
-        start_t_ms=1000,
+        start_t_ms=None,
         until_condition=lambda t, db: some_check(t, db)
     )
 
     # Run N ticks at wall-clock time
     final_t_ms, report = perf_tick.run_ticks_timed(
         db=db,
-        start_t_ms=1000,
+        start_t_ms=None,
         num_ticks=100,
         realtime=True
     )

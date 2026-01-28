@@ -41,7 +41,7 @@ def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Wait for Bob to appear in Alice's member list
     def bob_in_member_list():
@@ -108,7 +108,7 @@ def test_authorization_rules(fresh_db):
         assert len(bob_channels) >= 1
         assert len(charlie_channels) >= 1
 
-    t_ms = assert_eventually(all_joined, db=db, start_t_ms=3500)
+    t_ms = assert_eventually(all_joined, db=db, start_t_ms=None)
 
     # Bob can remove himself (self-removal)
     user_removed.create(
@@ -192,7 +192,7 @@ def test_user_removal_rotates_group_keys(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
     # Get original key
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
@@ -235,7 +235,7 @@ def test_peer_removal_last_device_rotates_keys(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
     # Get original key
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
@@ -278,7 +278,7 @@ def test_removed_peer_cannot_sync_messages(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
     # Alice sends a message before Bob is removed
     message.create(
@@ -353,7 +353,7 @@ def test_removed_user_cannot_send_messages(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
     # Bob sends a message successfully before removal
     message.create(
@@ -423,7 +423,7 @@ def test_removed_user_not_in_user_list(fresh_db):
         assert len(bob_channels) >= 1
         assert len(charlie_channels) >= 1
 
-    t_ms = assert_eventually(all_joined, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(all_joined, db=db, start_t_ms=None)
 
     # Wait for all members to appear in the list
     def all_members_visible():

@@ -41,7 +41,7 @@ def test_keys_display():
     db.commit()
 
     # Sync to create initial keys
-    run_ticks(db=db, start_t_ms=2000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Send 3 messages
     msg1 = message.create(
@@ -68,7 +68,7 @@ def test_keys_display():
     db.commit()
 
     # Sync to project messages
-    run_ticks(db=db, start_t_ms=6000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys and verify
     keys = group_key.list(alice_peer_id, db)
@@ -104,7 +104,7 @@ def test_delete_and_purge():
     db.commit()
 
     # Sync to create initial keys
-    run_ticks(db=db, start_t_ms=2000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Send 2 messages
     msg1 = message.create(
@@ -124,7 +124,7 @@ def test_delete_and_purge():
     db.commit()
 
     # Sync to project messages
-    run_ticks(db=db, start_t_ms=6000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys before deletion
     keys_before = group_key.list(alice_peer_id, db)
@@ -141,7 +141,7 @@ def test_delete_and_purge():
     db.commit()
 
     # Sync to project deletion
-    run_ticks(db=db, start_t_ms=8000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys after deletion - should have pending_purge
     keys_after_delete = group_key.list(alice_peer_id, db)
@@ -161,7 +161,7 @@ def test_delete_and_purge():
     db.commit()
 
     # Sync after purge
-    run_ticks(db=db, start_t_ms=10000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys after purge
     keys_after_purge = group_key.list(alice_peer_id, db)
@@ -211,7 +211,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync to create initial keys
     print("Step 1: Syncing to create initial keys...")
-    run_ticks(db=db, start_t_ms=2000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Send 3 messages
     print("Step 2: Sending 3 messages...")
@@ -240,7 +240,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync to project messages
     print("Step 3: Syncing to project messages...")
-    run_ticks(db=db, start_t_ms=6000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys before deletion (simulate "keys" command)
     keys_before = group_key.list(alice_peer_id, db)
@@ -262,7 +262,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync to project deletion
     print("Step 6: Syncing deletion...")
-    run_ticks(db=db, start_t_ms=8000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys after deletion (should have pending_purge)
     keys_after_delete = group_key.list(alice_peer_id, db)
@@ -284,7 +284,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync after manual purge
     print("Step 9a: Syncing after manual purge...")
-    run_ticks(db=db, start_t_ms=10000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get keys after manual purge
     keys_after_manual_purge = group_key.list(alice_peer_id, db)
@@ -323,7 +323,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync to create keys
     print("Step 1: Syncing to create initial keys...")
-    run_ticks(db=db2, start_t_ms=2000, num_rounds=20)
+    run_ticks(db=db2, start_t_ms=None, num_rounds=20)
 
     # Send messages
     print("Step 2: Sending 3 messages...")
@@ -352,7 +352,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync to project messages
     print("Step 3: Syncing to project messages...")
-    run_ticks(db=db2, start_t_ms=6000, num_rounds=20)
+    run_ticks(db=db2, start_t_ms=None, num_rounds=20)
 
     # Delete message (but don't manually call purge-keys)
     print("Step 4: Deleting message 1 (NOT calling purge-keys)...")
@@ -366,7 +366,7 @@ def test_forward_secrecy_workflow_manual_and_auto_purge():
 
     # Sync deletion
     print("Step 5: Syncing deletion (NOT triggering auto-purge yet)...")
-    run_ticks(db=db2, start_t_ms=8000, num_rounds=20)
+    run_ticks(db=db2, start_t_ms=None, num_rounds=20)
 
     # Get keys - should still have pending_purge (job hasn't run yet)
     keys_after_delete_auto = group_key.list(alice_peer_id2, db=db2)
@@ -422,7 +422,7 @@ def test_message_rekey_mechanism():
     db.commit()
 
     # Sync to create keys
-    run_ticks(db=db, start_t_ms=2000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Send message
     msg = message.create(
@@ -436,7 +436,7 @@ def test_message_rekey_mechanism():
     db.commit()
 
     # Sync to project message
-    run_ticks(db=db, start_t_ms=6000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get original message details
     safedb = create_safe_db(db, recorded_by=alice_peer_id)
@@ -561,7 +561,7 @@ def test_rekeyed_message_with_deterministic_encryption():
     db.commit()
 
     # Sync to create keys
-    run_ticks(db=db, start_t_ms=2000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Send message
     msg = message.create(
@@ -575,7 +575,7 @@ def test_rekeyed_message_with_deterministic_encryption():
     db.commit()
 
     # Sync to project
-    run_ticks(db=db, start_t_ms=6000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Get original blob
     unsafedb = create_unsafe_db(db)
@@ -663,7 +663,7 @@ def test_cascading_prekey_purge():
     db.commit()
 
     # Sync to converge
-    run_ticks(db=db, start_t_ms=4000, num_rounds=30)
+    run_ticks(db=db, start_t_ms=None, num_rounds=30)
 
     # Alice sends messages
     msg1 = message.create(
@@ -676,7 +676,7 @@ def test_cascading_prekey_purge():
     db.commit()
 
     # Sync to share keys with Bob
-    run_ticks(db=db, start_t_ms=6000, num_rounds=30)
+    run_ticks(db=db, start_t_ms=None, num_rounds=30)
 
     # Get Alice's prekeys before purge
     alice_prekeys_before = group_prekey.list(alice_peer_id, 7000, db)
@@ -693,7 +693,7 @@ def test_cascading_prekey_purge():
     db.commit()
 
     # Sync deletion
-    run_ticks(db=db, start_t_ms=8000, num_rounds=20)
+    run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
     # Run purge cycle
     stats = message_deletion.run_message_purge_cycle(

@@ -97,7 +97,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         )
         assert has_key, "Device 2 should have group key"
 
-    t_ms = assert_eventually(device2_has_key, db=db, start_t_ms=5000)
+    t_ms = assert_eventually(device2_has_key, db=db, start_t_ms=None)
     print("✅ Device 2 has group key")
 
     # Wait for device 2 to sync the channel
@@ -171,7 +171,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         assert "Message from device 2" in device2_contents, \
             "Device 2 should see its own message"
 
-    assert_eventually(both_devices_see_both_messages, db=db, start_t_ms=7000)
+    assert_eventually(both_devices_see_both_messages, db=db, start_t_ms=None)
     print("✅ Both devices see both messages")
 
     print(f"\n✅ All assertions passed! Bidirectional messaging works correctly.")

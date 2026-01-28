@@ -230,7 +230,7 @@ def test_two_player_message_visibility(api_setup, test_client):
         assert messages[0]["content"] == "Hello Bob!"
         assert messages[0]["author_name"] == "Alice"
 
-    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=6000)
+    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=None)
 
     print("✓ Two player message visibility works via API")
 
@@ -276,7 +276,7 @@ def test_deleted_message_syncs_to_other_user(api_setup, test_client):
         )
         assert len(resp.json()["items"]) == 1
 
-    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=6000)
+    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=None)
 
     # Alice deletes the message
     alice_api.set_time(8000)
@@ -294,6 +294,6 @@ def test_deleted_message_syncs_to_other_user(api_setup, test_client):
         messages = resp.json()["items"]
         assert len(messages) == 0, f"Deleted message should not appear for Bob, got {len(messages)}"
 
-    tick_helper.assert_eventually(bob_sees_deletion, db=db, start_t_ms=9000)
+    tick_helper.assert_eventually(bob_sees_deletion, db=db, start_t_ms=None)
 
     print("✓ Message deletion syncs to other users via API")

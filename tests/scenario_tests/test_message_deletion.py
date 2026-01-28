@@ -108,7 +108,7 @@ def test_message_deletion_admin(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Make Bob an admin
     alice_admin_grant = admin.my_grant(alice['user_id'], alice['network_id'], alice['peer_id'], db)
@@ -203,7 +203,7 @@ def test_message_deletion_unauthorized(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Make Bob admin
     alice_admin_grant = admin.my_grant(alice['user_id'], alice['network_id'], alice['peer_id'], db)
