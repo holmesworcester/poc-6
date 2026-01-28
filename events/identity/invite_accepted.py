@@ -12,8 +12,8 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -216,8 +216,8 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
     from core import recorded as recorded_module
     from events.identity import network as network_module
     from events import registry
-    from core.projection_v2 import resolver as v2_resolver
-    from core.projection_v2 import apply as v2_apply
+    from core.projection import resolver as projection_resolver
+    from core.projection import apply as projection_apply
     from core import queues
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -249,7 +249,7 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
                     network_data = None
 
                 if network_data:
-                    resolve_result = v2_resolver.resolve_event(
+                    resolve_result = projection_resolver.resolve_event(
                         ref_id=network_id,
                         event_type='network',
                         event_data=network_data,
@@ -262,7 +262,7 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
                         project_pure_fn = registry.get_project_pure_fn('network')
                         if project_pure_fn:
                             projector_result = project_pure_fn(resolve_result.ctx)
-                            v2_apply.apply_writes(projector_result, recorded_by, recorded_at, db)
+                            projection_apply.apply_writes(projector_result, recorded_by, recorded_at, db)
 
                             if projector_result.valid_event:
                                 log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] projected network event {network_id[:20]}...")

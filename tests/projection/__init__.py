@@ -6,6 +6,6 @@ This package provides:
 - Example tests showing block/reject/parity patterns
 
 Usage:
-    from tests.projection_v2.helpers import compare_projection, build_minimal_state
-    from tests.projection_v2.conftest import fresh_v2_db  # pytest fixture
+    from tests.projection.helpers import compare_projection, build_minimal_state
+    from tests.projection.conftest import fresh_projection_db  # pytest fixture
 """

@@ -13,8 +13,8 @@ from core import wire_format
 from events.group import group_prekey
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp, EmitEvent
-from core.projection_v2.apply import register_command_handler
+from core.projection.types import ProjectorResult, WriteOp, EmitEvent
+from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 

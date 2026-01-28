@@ -14,7 +14,7 @@ from core import crypto
 from core import store
 from core import wire_format
 from events.identity import peer
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 

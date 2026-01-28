@@ -3,13 +3,13 @@
 These tests exercise the resolver contract defined in proj-v2-split-plan.md.
 """
 from core import crypto
-from core.projection_v2 import resolver as v2_resolver
+from core.projection import resolver as resolver
 
 
 class TestResolverBlockOnMissingDeps:
     """Resolver should return block when required dependencies are missing."""
 
-    def test_block_on_missing_required(self, v2_db, register_event):
+    def test_block_on_missing_required(self, projection_db, register_event):
         event_type = 'test_missing_dep'
         event_spec = {
             'requires': {
@@ -27,13 +27,13 @@ class TestResolverBlockOnMissingDeps:
             'network_id': 'missing_network',
         }
 
-        result = v2_resolver.resolve_event(
+        result = resolver.resolve_event(
             ref_id='evt_missing',
             event_type=event_type,
             event_data=event_data,
             recorded_by='peer1',
             recorded_at=1000,
-            db=v2_db,
+            db=projection_db,
         )
 
         assert result.status == 'block'
@@ -52,17 +52,17 @@ class TestResolverRejectOnInvalidSignature:
             '_wire_signature': signature,
         }
 
-    def _resolve(self, v2_db, event_type, event_data):
-        return v2_resolver.resolve_event(
+    def _resolve(self, projection_db, event_type, event_data):
+        return resolver.resolve_event(
             ref_id='evt_bad_sig',
             event_type=event_type,
             event_data=event_data,
             recorded_by='peer1',
             recorded_at=1000,
-            db=v2_db,
+            db=projection_db,
         )
 
-    def test_reject_signature_too_short(self, v2_db, register_event):
+    def test_reject_signature_too_short(self, projection_db, register_event):
         """Signature shorter than 64 bytes should be rejected."""
         event_type = 'test_bad_sig_short'
         event_spec = {
@@ -75,12 +75,12 @@ class TestResolverRejectOnInvalidSignature:
         event_data = self._make_event_data(
             event_type, public_key, b"test-wire", b'too-short'
         )
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
 
-    def test_reject_signature_too_long(self, v2_db, register_event):
+    def test_reject_signature_too_long(self, projection_db, register_event):
         """Signature longer than 64 bytes should be rejected."""
         event_type = 'test_bad_sig_long'
         event_spec = {
@@ -93,12 +93,12 @@ class TestResolverRejectOnInvalidSignature:
         event_data = self._make_event_data(
             event_type, public_key, b"test-wire", b'x' * 65
         )
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
 
-    def test_reject_signature_wrong_content(self, v2_db, register_event):
+    def test_reject_signature_wrong_content(self, projection_db, register_event):
         """64-byte signature with wrong content should be rejected."""
         event_type = 'test_bad_sig_wrong'
         event_spec = {
@@ -111,12 +111,12 @@ class TestResolverRejectOnInvalidSignature:
         event_data = self._make_event_data(
             event_type, public_key, b"test-wire", b'\x00' * 64
         )
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
 
-    def test_reject_signature_wrong_key(self, v2_db, register_event):
+    def test_reject_signature_wrong_key(self, projection_db, register_event):
         """Valid signature but wrong public key should be rejected."""
         event_type = 'test_bad_sig_key'
         event_spec = {
@@ -133,12 +133,12 @@ class TestResolverRejectOnInvalidSignature:
         event_data = self._make_event_data(
             event_type, wrong_public_key, signed_bytes, real_signature
         )
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
 
-    def test_reject_empty_signature(self, v2_db, register_event):
+    def test_reject_empty_signature(self, projection_db, register_event):
         """Empty signature should be rejected."""
         event_type = 'test_bad_sig_empty'
         event_spec = {
@@ -151,12 +151,12 @@ class TestResolverRejectOnInvalidSignature:
         event_data = self._make_event_data(
             event_type, public_key, b"test-wire", b''
         )
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
 
-    def test_reject_public_key_too_short(self, v2_db, register_event):
+    def test_reject_public_key_too_short(self, projection_db, register_event):
         """Public key shorter than 32 bytes should be rejected."""
         event_type = 'test_bad_pubkey_short'
         event_spec = {
@@ -172,12 +172,12 @@ class TestResolverRejectOnInvalidSignature:
             '_wire_signed_bytes': b"test-wire",
             '_wire_signature': b'\x00' * 64,
         }
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
 
-    def test_reject_public_key_too_long(self, v2_db, register_event):
+    def test_reject_public_key_too_long(self, projection_db, register_event):
         """Public key longer than 32 bytes should be rejected."""
         event_type = 'test_bad_pubkey_long'
         event_spec = {
@@ -193,7 +193,7 @@ class TestResolverRejectOnInvalidSignature:
             '_wire_signed_bytes': b"test-wire",
             '_wire_signature': b'\x00' * 64,
         }
-        result = self._resolve(v2_db, event_type, event_data)
+        result = self._resolve(projection_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
@@ -202,7 +202,7 @@ class TestResolverRejectOnInvalidSignature:
 class TestResolverRejectOnMissingSignerType:
     """Resolver should reject when signer_type is missing."""
 
-    def test_reject_missing_signer_type(self, v2_db, register_event):
+    def test_reject_missing_signer_type(self, projection_db, register_event):
         event_type = 'test_missing_signer_type'
         event_spec = {
             'requires': {},
@@ -219,13 +219,13 @@ class TestResolverRejectOnMissingSignerType:
             'network_pubkey': crypto.b64encode(public_key),
         }
 
-        result = v2_resolver.resolve_event(
+        result = resolver.resolve_event(
             ref_id='evt_missing_signer_type',
             event_type=event_type,
             event_data=event_data,
             recorded_by='peer1',
             recorded_at=1000,
-            db=v2_db,
+            db=projection_db,
         )
 
         assert result.status == 'reject'
@@ -235,7 +235,7 @@ class TestResolverRejectOnMissingSignerType:
 class TestResolverAcceptsEvent:
     """Resolver should return ok when deps and signer checks pass."""
 
-    def test_accept_ok(self, v2_db, register_event):
+    def test_accept_ok(self, projection_db, register_event):
         event_type = 'test_ok'
         event_spec = {
             'requires': {},
@@ -248,13 +248,13 @@ class TestResolverAcceptsEvent:
             'created_at': 1000,
         }
 
-        result = v2_resolver.resolve_event(
+        result = resolver.resolve_event(
             ref_id='evt_ok',
             event_type=event_type,
             event_data=event_data,
             recorded_by='peer1',
             recorded_at=1000,
-            db=v2_db,
+            db=projection_db,
         )
 
         assert result.status == 'ok'

@@ -32,8 +32,8 @@ from core import store
 from core import crypto
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2 import resolver as v2_resolver
-from core.projection_v2.apply import apply_writes
+from core.projection import resolver as projection_resolver
+from core.projection.apply import apply_writes
 
 log = logging.getLogger(__name__)
 
@@ -531,7 +531,7 @@ def _project_with_context(
     if not (event_spec and project_pure_fn):
         return [None, recorded_id]
 
-    resolve_result = v2_resolver.resolve_event(
+    resolve_result = projection_resolver.resolve_event(
         ref_id=ref_id,
         event_type=event_type,
         event_data=event_data,
@@ -589,7 +589,7 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
     log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth}, skip_neg={skip_negentropy})")
     contexts, fallback_ids = _prefetch_project_contexts(recorded_ids, db)
 
-    dep_cache = v2_resolver.prefetch_dependencies(contexts, db)
+    dep_cache = projection_resolver.prefetch_dependencies(contexts, db)
     verify_queue: list[tuple[str, bytes, bytes, bytes]] = []
     pending: list[tuple[dict[str, Any], Any, Any]] = []
     projected_ids: list[list[str | None]] = []
@@ -615,7 +615,7 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
                 projected_ids.append([None, recorded_id])
                 continue
 
-            resolve_result = v2_resolver.resolve_event(
+            resolve_result = projection_resolver.resolve_event(
                 ref_id=ref_id,
                 event_type=event_type,
                 event_data=event_data,

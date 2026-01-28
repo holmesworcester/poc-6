@@ -24,8 +24,8 @@ import logging
 from core import crypto
 from core import store
 from core import wire_format
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 from events.group import group_key
 from core.db import create_safe_db, create_unsafe_db
 

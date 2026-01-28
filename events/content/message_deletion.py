@@ -33,8 +33,8 @@ import logging
 from core import crypto
 from core import store
 from core import wire_format
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler, cascade_delete_from_valid_events
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler, cascade_delete_from_valid_events
 from events.content import message
 from events.identity import peer_shared, peer
 from events.group import group as group_module

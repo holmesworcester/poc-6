@@ -13,7 +13,7 @@ from events.identity import peer_shared, peer
 from events.group import group as group_module
 from core import global_counter
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 

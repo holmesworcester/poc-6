@@ -9,7 +9,7 @@ from events import registry
 
 
 @pytest.fixture
-def v2_db():
+def projection_db():
     """Create a fresh in-memory database for v2 projection tests.
 
     This is similar to fresh_db but kept separate to allow v2-specific
@@ -22,7 +22,7 @@ def v2_db():
 
 
 @pytest.fixture
-def v2_network_state(v2_db):
+def network_state(projection_db):
     """Create minimal network state for v2 projection testing.
 
     Returns a dict with:
@@ -37,7 +37,7 @@ def v2_network_state(v2_db):
     from core.db import create_unsafe_db, create_safe_db
     from core import store
 
-    db = v2_db
+    db = projection_db
     unsafedb = create_unsafe_db(db)
 
     # Create local peer
@@ -98,7 +98,7 @@ def register_event(monkeypatch):
     ) -> None:
         registry._registry[event_type] = {
             "module": None,
-            "module_name": "tests.projection_v2",
+            "module_name": "tests.projection",
             "shareable": shareable,
             "ephemeral": ephemeral,
             "projection_table": projection_table,

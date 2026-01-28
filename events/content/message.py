@@ -14,7 +14,7 @@ from events.group import group
 from events.identity import peer, peer_shared, user
 from events.content import channel
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
