@@ -129,6 +129,92 @@ LEVEL_PREFIX_LEN = {
 EVENTS_THRESHOLD = 100
 
 
+# ============================================================================
+# Congestion Control State
+# ============================================================================
+# Per-connection adaptive windowing based on RTT measurement.
+# See docs/quiet-protocol-specification.md "Congestion control" section.
+
+@dataclass
+class CCState:
+    """Congestion control state for a single connection."""
+    window: int = 1              # Max in-flight range operations
+    in_flight: int = 0           # Currently awaiting response
+    rtt_ms: float = 200.0        # RTT estimate (exponential moving average)
+    last_send_ms: int = 0        # Time of oldest in-flight request
+
+
+# Constants for congestion control
+CC_MIN_WINDOW = 1
+CC_MAX_WINDOW = 8
+CC_RTT_ALPHA = 0.2               # EMA smoothing factor
+CC_TIMEOUT_MULTIPLIER = 3        # Timeout = 3 * RTT
+
+
+# Module-level CC state per connection
+# Key: (recorded_by, connection_id) tuple
+_cc_state: dict[tuple[str, str], CCState] = {}
+
+
+def _get_cc_state(recorded_by: str, connection_id: str) -> CCState:
+    """Get or create CC state for a connection."""
+    key = (recorded_by, connection_id)
+    if key not in _cc_state:
+        _cc_state[key] = CCState()
+    return _cc_state[key]
+
+
+def _cc_can_send(recorded_by: str, connection_id: str) -> bool:
+    """Check if congestion control allows sending more requests."""
+    state = _get_cc_state(recorded_by, connection_id)
+    return state.in_flight < state.window
+
+
+def _cc_on_send(recorded_by: str, connection_id: str, t_ms: int) -> None:
+    """Record that we sent a range request."""
+    state = _get_cc_state(recorded_by, connection_id)
+    if state.in_flight == 0:
+        state.last_send_ms = t_ms
+    state.in_flight += 1
+
+
+def _cc_on_response(recorded_by: str, connection_id: str, t_ms: int) -> None:
+    """Record that we received a response (range_matched or range_response)."""
+    state = _get_cc_state(recorded_by, connection_id)
+    if state.in_flight > 0:
+        state.in_flight -= 1
+
+    if state.in_flight == 0 and state.last_send_ms > 0:
+        # All requests answered - measure RTT and grow window
+        rtt_sample = t_ms - state.last_send_ms
+        if rtt_sample > 0:
+            state.rtt_ms = (1 - CC_RTT_ALPHA) * state.rtt_ms + CC_RTT_ALPHA * rtt_sample
+        state.window = min(state.window + 1, CC_MAX_WINDOW)
+        log.debug(f"CC: conn={connection_id[:16]}... RTT={state.rtt_ms:.0f}ms window={state.window}")
+
+
+def _cc_check_timeout(recorded_by: str, connection_id: str, t_ms: int) -> bool:
+    """Check for timeout and shrink window if needed. Returns True if timed out."""
+    state = _get_cc_state(recorded_by, connection_id)
+    if state.in_flight > 0 and state.last_send_ms > 0:
+        timeout_ms = CC_TIMEOUT_MULTIPLIER * state.rtt_ms
+        if (t_ms - state.last_send_ms) > timeout_ms:
+            # Timeout - shrink window and reset in_flight
+            old_window = state.window
+            state.window = max(CC_MIN_WINDOW, state.window // 2)
+            state.in_flight = 0
+            log.info(f"CC: timeout conn={connection_id[:16]}... window {old_window}->{state.window}")
+            return True
+    return False
+
+
+def _cc_reset(recorded_by: str, connection_id: str) -> None:
+    """Reset CC state for a connection (e.g., on disconnect)."""
+    key = (recorded_by, connection_id)
+    if key in _cc_state:
+        del _cc_state[key]
+
+
 class RangeStatus(Enum):
     PENDING = 'pending'          # Waiting for their response
     MATCHED = 'matched'          # Hashes match, range synced
@@ -845,6 +931,9 @@ def handle_range_matched(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     range_id = msg['range_id']
 
+    # Track for congestion control - we received a response
+    _cc_on_response(recorded_by, connection_id, t_ms)
+
     safedb.execute("""
         UPDATE negentropy_sync_state
         SET status = 'complete', updated_at = ?
@@ -1008,6 +1097,8 @@ def sync_connection(
         )
         if conn_module.send(recorded_by, conn.key_id, blob, t_ms, db):
             sent += 1
+            # Track for congestion control
+            _cc_on_send(recorded_by, conn.key_id, t_ms)
     return sent
 
 
@@ -1098,9 +1189,13 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
 
             total_connections += 1
 
-            # Note: We removed the "skip if our root unchanged" optimization here.
-            # Even if OUR hash is unchanged, the remote peer may have new events
-            # that we need to pull. Sync must be initiated regularly for all connections.
+            # Check for CC timeout first (shrinks window if needed)
+            _cc_check_timeout(peer_id, conn.key_id, t_ms)
+
+            # Congestion control: only send if window allows
+            if not _cc_can_send(peer_id, conn.key_id):
+                log.debug(f"CC: skipping conn={conn.key_id[:16]}... (window full)")
+                continue
 
             sent = sync_connection(db, peer_id, conn, t_ms)
             total_messages += sent
