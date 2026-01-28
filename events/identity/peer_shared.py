@@ -12,13 +12,13 @@ from core import store
 from core import wire_format
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 
 
-# v2 event specification - peer_shared uses legacy NO_DEPS_TYPES behavior
+# event specification - peer_shared uses legacy NO_DEPS_TYPES behavior
 # peer_shared has invite as optional dep with required_if_present:
 # - If invite_id is in event data, block until invite is projected (to get user_id)
 # - If no invite_id (bootstrap peer_shared), don't block
@@ -153,7 +153,7 @@ def create(peer_id: str, t_ms: int, db: Any,
         'peer_id': peer_id,  # Link back to local peer
         'invite_id': invite_id,  # Link to invite that authorized this peer
         'signed_by': invite_id,  # Polymorphic signer field
-        'signer_type': 'invite',  # v2: peer_shared events are signed by invite
+        'signer_type': 'invite',  # peer_shared events are signed by invite
         'created_at': t_ms
     }
 

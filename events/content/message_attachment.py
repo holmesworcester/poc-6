@@ -10,7 +10,7 @@ EVENT_TYPE = 'message_attachment'
 SHAREABLE = True  # Attachments sync with messages
 PROJECTION_TABLE = None  # No created_at lookup needed
 
-# v2 event specification
+# event specification
 EVENT_SPEC = {
     'encrypted': True,  # Group-wrapped via store.publish
     'signer': None,  # Signature verified manually via crypto.verify_signed_by_peer_shared
@@ -34,7 +34,7 @@ from PIL import Image
 from core import crypto
 from core import store
 from core import wire_format
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 from events.identity import peer_shared, peer
 from events.group import group
 from events.content import file_slice, message

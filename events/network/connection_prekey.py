@@ -14,7 +14,7 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_unsafe_db, create_safe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 TRANSIT_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 
-# v2 event specification - no signer, no deps (local-only unsigned)
+# event specification - no signer, no deps (local-only unsigned)
 EVENT_SPEC = {
     'encrypted': False,
     'signer': None,

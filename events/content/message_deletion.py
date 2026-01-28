@@ -12,7 +12,7 @@ EVENT_TYPE = 'message_deletion'
 SHAREABLE = True  # Deletions sync to remove messages from all peers
 PROJECTION_TABLE = ('message_deletions', 'deletion_id')
 
-# v2 event specification
+# event specification
 EVENT_SPEC = {
     'encrypted': True,  # Group-wrapped via store.publish
     'signer': None,  # Signature verified in project_pure() via crypto.verify_signed_by_peer_shared
@@ -33,8 +33,8 @@ import logging
 from core import crypto
 from core import store
 from core import wire_format
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler, cascade_delete_from_valid_events
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler, cascade_delete_from_valid_events
 from events.content import message
 from events.identity import peer_shared, peer
 from events.group import group as group_module

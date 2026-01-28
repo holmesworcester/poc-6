@@ -14,7 +14,7 @@ from events.content import message
 from events.group import group
 from events.identity import peer_shared, peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ EVENT_TYPE = 'message_reaction'
 SHAREABLE = True  # Sync reactions to other peers
 PROJECTION_TABLE = ('message_reactions', 'reaction_id')
 
-# v2 event specification - signed by peer_shared, encrypted
+# event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
     'encrypted': True,
     'signer': {

@@ -14,7 +14,7 @@ from events.group import group
 from events.identity import peer, peer_shared, user
 from events.content import channel
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def _wire_shadow_message(channel_id: str, author_id: str, content: str, disappea
         raise ValueError("wire shadow decode content mismatch")
 
 
-# v2 event specification - signed by peer_shared, encrypted
+# event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
     'encrypted': True,
     'skip_if_deleted': True,  # Skip projection if in deleted_events (deletion arrived first)

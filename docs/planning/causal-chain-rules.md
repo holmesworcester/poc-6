@@ -13,7 +13,7 @@ Model projection as a rule system:
 - Semantics: monotone, repeat until no new facts (fixpoint).
 
 Blocked events are just rules whose required facts are missing. When a required
-fact appears, the rule unblocks and can fire. This mirrors how projection_v2
+fact appears, the rule unblocks and can fire. This mirrors how projection
 blocks on missing deps and unblocks when those deps project.
 
 ## Academic Foundation (Short List)

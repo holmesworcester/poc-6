@@ -74,7 +74,7 @@ EVENT_SPEC = {
 }
 ```
 
-**File**: `core/projection_v2/resolver.py` (around line 105)
+**File**: `core/projection/resolver.py` (around line 105)
 
 Add fallback logic when primary table lookup fails:
 
@@ -98,7 +98,7 @@ if not _is_event_valid(dep_id, recorded_by, safedb):
 
 Add explicit handling for peer_shared events when `owner_peer_id == recorded_by`:
 
-**File**: `core/projection_v2/resolver.py`
+**File**: `core/projection/resolver.py`
 
 ```python
 # In _resolve_table_dep(), after line 107:
@@ -155,7 +155,7 @@ This code is correct but **never reached** because:
 
 | File | Change |
 |------|--------|
-| `core/projection_v2/resolver.py` | Add fallback logic for invite_accepteds |
+| `core/projection/resolver.py` | Add fallback logic for invite_accepteds |
 | Optionally: `events/identity/peer_shared.py` | Add `fallback_table` to EVENT_SPEC |
 
 ## Testing

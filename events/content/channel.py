@@ -14,13 +14,13 @@ from core import wire_format
 from events.group import group_key, group as group_module, group_member
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 
 
-# v2 event specification - signed by peer_shared, encrypted
+# event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
     'encrypted': True,
     'signer': {

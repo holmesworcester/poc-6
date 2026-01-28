@@ -9,9 +9,9 @@ migration steps. It is the coordination reference for parallel work.
 - Ensure behavior equivalence before cutover.
 
 ## V2 API Shape (Frozen)
-Module: `core/projection_v2/`
+Module: `core/projection/`
 
-Types (`core/projection_v2/types.py`):
+Types (`core/projection/types.py`):
 - `ProjectionContext(event_id, event_type, event_data, recorded_by, recorded_at, deps, signer)`
 - `ProjectorResult(writes, valid_event=True)`
 - `WriteOp(op, table, values, where=None)`
@@ -64,7 +64,7 @@ For each event:
 4) Add tests that compare legacy vs v2 outcomes on the same inputs.
 
 ## Testing Guidelines
-Add tests under `tests/projection_v2/`:
+Add tests under `tests/projection/`:
 - Build a minimal DB state.
 - Project an event via legacy path and snapshot relevant rows.
 - Project the same event via v2 path and compare rows.

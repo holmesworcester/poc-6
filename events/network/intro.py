@@ -25,7 +25,7 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 from events.identity import peer_shared
 
 log = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def _wire_shadow_network_intro(peer1_id: str, peer2_id: str) -> None:
     decoded = wire_format.decode_network_intro_plaintext(plaintext)
     if decoded["peer1_id"] != crypto.b64decode(peer1_id):
         raise ValueError("wire shadow decode peer1_id mismatch")
-# v2 event specification - signed by peer_shared, no deps
+# event specification - signed by peer_shared, no deps
 EVENT_SPEC = {
     'encrypted': False,
     'signer': {

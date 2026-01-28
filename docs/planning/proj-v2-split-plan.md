@@ -7,7 +7,7 @@ created from `proj-v2-base`.
 ## Snapshot
 
 - Base branch: `proj-v2-base` (scaffolding commit `Add projection v2 scaffolding`)
-- Scaffolding: `core/projection_v2/*`, registry hooks in `events/registry.py`,
+- Scaffolding: `core/projection/*`, registry hooks in `events/registry.py`,
   and `docs/planning/projection-v2-migration.md`
 - Existing worktrees created from `proj-v2-base`:
   - `/home/holmes/poc-6-proj-v2-core-codex` (branch `proj-v2-core-codex`)
@@ -21,13 +21,13 @@ created from `proj-v2-base`.
 ## Shared References
 
 - `docs/planning/projection-v2-migration.md` (v2 API shape, dual-dispatch, pilot list)
-- `core/projection_v2/*` (stubs: `types.py`, `resolver.py`, `engine.py`, `apply.py`)
+- `core/projection/*` (stubs: `types.py`, `resolver.py`, `engine.py`, `apply.py`)
 - `events/registry.py` (hooks: `get_event_spec`, `get_project_pure_fn`)
 
 ## Pre-split Work (done before splitting)
 
 1. Keep prototypes separate and uncommitted to avoid conflicts.
-2. Add v2 scaffolding files under `core/projection_v2/`.
+2. Add v2 scaffolding files under `core/projection/`.
 3. Extend `events/registry.py` to expose `EVENT_SPEC` + `project_pure`.
 4. Add `docs/planning/projection-v2-migration.md`.
 5. Commit scaffolding as "Add projection v2 scaffolding".
@@ -108,7 +108,7 @@ Deliverables:
 Worktree: `/home/holmes/poc-6-proj-v2-tests`
 
 Scope:
-- Add `tests/projection_v2/` with legacy vs v2 comparison tests.
+- Add `tests/projection/` with legacy vs v2 comparison tests.
 - Include accept, block, and reject cases.
 
 Deliverables:
@@ -126,7 +126,7 @@ Deliverables:
 
 ### Prompt 1 (Codex core)
 You are in `/home/holmes/poc-6-proj-v2-core-codex` on branch `proj-v2-core-codex`.
-Implement the v2 core pipeline (`core/projection_v2/resolver.py`, `apply.py`,
+Implement the v2 core pipeline (`core/projection/resolver.py`, `apply.py`,
 `engine.py`) per `docs/planning/projection-v2-migration.md`. Do not touch
 `events/network/recorded.py`. Keep changes minimal and well-scoped. Report back
 using the AGENTS.md handoff format.
@@ -158,6 +158,6 @@ format.
 
 ### Prompt 6 (Tests harness)
 You are in `/home/holmes/poc-6-proj-v2-tests` on branch `proj-v2-tests`.
-Create `tests/projection_v2/` and implement a minimal harness that runs legacy
+Create `tests/projection/` and implement a minimal harness that runs legacy
 and v2 projection on the same inputs and compares rows. Include accept, block,
 and reject cases. Report back with handoff format.

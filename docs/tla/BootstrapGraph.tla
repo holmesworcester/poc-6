@@ -8,7 +8,7 @@ EXTENDS Naturals
 \*
 \* Sources:
 \* - docs/planning/network-root-linking-design.md
-\* - tests/v2_projectors/test_identity_chain.py
+\* - tests/projectors/test_identity_chain.py
 
 VARIABLES recorded, valid, trustAnchor, connReq, connAck, connInvite, connPeer
 

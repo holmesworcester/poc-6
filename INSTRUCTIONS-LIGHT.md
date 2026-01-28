@@ -1,7 +1,7 @@
 # INSTRUCTIONS-LIGHT
 
-This is a short, low-risk set of v2 conversion tasks meant to be easy to follow.
-Keep legacy `project()` intact and add v2 (`EVENT_SPEC` + `project_pure`) alongside it.
+This is a short, low-risk set of conversion tasks meant to be easy to follow.
+Keep legacy `project()` intact and add `EVENT_SPEC` + `project_pure` alongside it.
 
 ## Easy Events To Convert (Pick 1-3)
 
@@ -31,17 +31,17 @@ Optional: `events/network/self_address.py` is almost identical to `observed_addr
 
 ## Minimal Testing Pattern (Parity)
 
-Add a new file under `tests/projection_v2/` (e.g., `test_parity_peer_prekey_addresses.py`):
+Add a new file under `tests/projection/` (e.g., `test_parity_peer_prekey_addresses.py`):
 
 - Create two fresh in-memory DBs.
 - Legacy path:
   - Store blob via `store.blob(...)`.
   - Call legacy `project(...)`.
-- v2 path:
+- projection path:
   - Call `resolve_event(...)`.
   - Call `project_pure(...)`.
   - Apply via `apply_writes(...)`.
-- Compare table rows using `tests/projection_v2/helpers.get_table_rows`.
+- Compare table rows using `tests/projection/helpers.get_table_rows`.
 
 Keep tests small: one parity test per event is enough.
 
@@ -51,10 +51,10 @@ Run after every change:
 
 ```
 PYTHONPATH=/home/holmes/functional-projectors-and-commands \
-pytest /home/holmes/functional-projectors-and-commands/tests/projection_v2 -v
+pytest /home/holmes/functional-projectors-and-commands/tests/projection -v
 ```
 
-Then run mixed scenario tests to exercise v2 + legacy together:
+Then run mixed scenario tests to exercise projection + legacy together:
 
 ```
 PYTHONPATH=/home/holmes/functional-projectors-and-commands \

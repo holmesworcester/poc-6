@@ -23,8 +23,8 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2 import register_command_handler
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 CONNECTION_TTL_MS = 300_000
 
 
-# v2 event specification
+# event specification
 EVENT_SPEC = {
     'encrypted': False,
     'signer': {

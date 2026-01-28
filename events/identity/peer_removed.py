@@ -11,13 +11,13 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
 
-# V2 Projector specification
+# Projector specification
 # Note: peer_removed uses 'removed_by' as the signer field (not standard 'signed_by')
 EVENT_SPEC = {
     'encrypted': False,

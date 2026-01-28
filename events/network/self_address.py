@@ -12,7 +12,7 @@ from core import store
 from core import wire_format
 from events.identity import peer
 from core.db import create_safe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def _wire_shadow_self_address(peer_shared_id: str, ip: str, port: int) -> None:
     if decoded["ip"] != ip or decoded["port"] != port:
         raise ValueError("wire shadow decode self_address mismatch")
 
-# v2 event specification - signed by peer_shared, no deps
+# event specification - signed by peer_shared, no deps
 EVENT_SPEC = {
     'encrypted': False,
     'signer': {

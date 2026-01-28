@@ -23,7 +23,7 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 CONNECTION_TTL_MS = 300_000
 
 
-# v2 event specification
+# event specification
 # No signer verification needed - auth is via encryption (only someone who
 # decrypted our request could have our symmetric key to encrypt this ack)
 EVENT_SPEC = {

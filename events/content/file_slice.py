@@ -23,13 +23,13 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 
 
-# v2 event specification - unsigned, not encrypted
+# event specification - unsigned, not encrypted
 # Integrity verified via root_hash in message_attachment
 EVENT_SPEC = {
     'encrypted': False,

@@ -7,7 +7,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import wire_format
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ EVENT_TYPE = 'message_reaction_deletion'
 SHAREABLE = True  # Sync deletions to other peers
 PROJECTION_TABLE = ('message_reaction_deletions', 'deletion_id')
 
-# v2 event specification - signed by peer_shared, encrypted
+# event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
     'encrypted': True,
     'signer': {

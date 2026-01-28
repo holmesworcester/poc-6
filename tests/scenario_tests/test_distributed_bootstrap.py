@@ -2,7 +2,7 @@
 Scenario test: Distributed bootstrap - cascade via sync.
 
 Tests that device linking works correctly in a distributed scenario where phone
-and laptop eventually sync to exchange events. The v2 projection model blocks
+and laptop eventually sync to exchange events. The projection model blocks
 until dependencies are valid (delivered via sync), ensuring proper causal ordering.
 """
 import sqlite3

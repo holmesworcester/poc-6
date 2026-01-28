@@ -63,7 +63,7 @@ def verify(message: bytes, signature: bytes, public_key: bytes) -> bool:
         verify_key = nacl.signing.VerifyKey(public_key)
         verify_key.verify(message, signature)
         return True
-    except nacl.exceptions.BadSignatureError:
+    except (nacl.exceptions.BadSignatureError, nacl.exceptions.ValueError):
         return False
 
 

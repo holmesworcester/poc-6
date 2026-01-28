@@ -14,7 +14,7 @@ from core import wire_format
 from events.group import group_key
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
+from core.projection.types import ProjectorResult, WriteOp, Command
 
 EVENT_SPEC = {
     'encrypted': True,

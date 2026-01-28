@@ -11,14 +11,14 @@ from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp, Command
-from core.projection_v2.apply import register_command_handler
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 from events.identity import user, peer_shared, network
 
 log = logging.getLogger(__name__)
 
 
-# V2 Projector specification
+# Projector specification
 EVENT_SPEC = {
     'encrypted': False,
     'signer': {
@@ -193,7 +193,7 @@ def _handle_user_removed_side_effects(
     """Handle side effects of user removal.
 
     This is called both from the legacy project() wrapper and from recorded.py's
-    post-projection hook for the v2 path.
+    post-projection hook for the projection path.
 
     Side effects:
     1. Cascade: Mark all peers of the removed user as removed
