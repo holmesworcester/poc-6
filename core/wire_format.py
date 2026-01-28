@@ -2433,6 +2433,7 @@ def decode_message_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_MESSAGE:
@@ -2440,7 +2441,7 @@ def decode_message_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_message_payload(payload, key_data)
@@ -2507,6 +2508,7 @@ def decode_channel_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_CHANNEL:
@@ -2514,7 +2516,7 @@ def decode_channel_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_channel_payload(payload, key_data)
@@ -2587,6 +2589,7 @@ def decode_message_update_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_MESSAGE_UPDATE:
@@ -2594,7 +2597,7 @@ def decode_message_update_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_message_update_payload(payload, key_data)
@@ -2653,6 +2656,7 @@ def decode_message_deletion_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_MESSAGE_DELETION:
@@ -2660,7 +2664,7 @@ def decode_message_deletion_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_message_deletion_payload(payload, key_data)
@@ -2722,6 +2726,7 @@ def decode_message_reaction_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_MESSAGE_REACTION:
@@ -2729,7 +2734,7 @@ def decode_message_reaction_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_message_reaction_payload(payload, key_data)
@@ -2784,6 +2789,7 @@ def decode_message_reaction_deletion_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_MESSAGE_REACTION_DELETION:
@@ -2791,7 +2797,7 @@ def decode_message_reaction_deletion_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_message_reaction_deletion_payload(payload, key_data)
@@ -2866,6 +2872,7 @@ def decode_message_attachment_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_MESSAGE_ATTACHMENT:
@@ -2873,7 +2880,7 @@ def decode_message_attachment_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_message_attachment_payload(payload, key_data)
@@ -2995,6 +3002,7 @@ def decode_channel_update_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_CHANNEL_UPDATE:
@@ -3002,7 +3010,7 @@ def decode_channel_update_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_channel_update_payload(payload, key_data)
@@ -3068,6 +3076,7 @@ def decode_group_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_GROUP:
@@ -3075,7 +3084,7 @@ def decode_group_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_group_payload(payload, key_data)
@@ -3141,6 +3150,7 @@ def decode_group_member_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_GROUP_MEMBER:
@@ -3148,7 +3158,7 @@ def decode_group_member_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_group_member_payload(payload, key_data)
@@ -3243,6 +3253,7 @@ def decode_group_key_shared_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_GROUP_KEY_SHARED:
@@ -3697,6 +3708,7 @@ def decode_username_update_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_USERNAME_UPDATE:
@@ -3704,7 +3716,7 @@ def decode_username_update_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_username_update_payload(payload, key_data)
@@ -3898,6 +3910,7 @@ def decode_peer_name_update_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_PEER_NAME_UPDATE:
@@ -3905,7 +3918,7 @@ def decode_peer_name_update_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_peer_name_update_payload(payload, key_data)
@@ -4048,6 +4061,7 @@ def decode_network_name_update_wire_event(
     data: bytes,
     recorded_by: str,
     db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     header, payload, signature = parse_envelope(data)
     if header.event_type != TYPE_NETWORK_NAME_UPDATE:
@@ -4055,7 +4069,7 @@ def decode_network_name_update_wire_event(
     if header.flags & FLAG_ENCRYPTED:
         key_id = payload[:16]
         key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
         if not key_data:
             return None, [key_id_b64]
         plaintext = _decrypt_network_name_update_payload(payload, key_data)

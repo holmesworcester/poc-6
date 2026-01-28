@@ -371,7 +371,8 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
     return None
 
 
-def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] | None:
+def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any,
+                  key_cache: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
     """Get key from database by id bytes. Checks transit keys, group keys, and prekeys.
 
     Args:
@@ -387,6 +388,10 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
     log = logging.getLogger(__name__)
     key_id = b64encode(id_bytes)
+    if key_cache is not None:
+        cached = key_cache.get(key_id)
+        if cached:
+            return cached
     unsafedb = create_unsafe_db(db)
 
     log.debug(f"get_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
@@ -508,7 +513,8 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str, Any] 
 
 def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
                    key_lookup_fn, block_on_missing: bool,
-                   namespace_name: str) -> tuple[bytes | None, list[str]]:
+                   namespace_name: str,
+                   key_cache: dict[str, dict[str, Any]] | None = None) -> tuple[bytes | None, list[str]]:
     """Internal helper for unwrapping blobs. Consolidates duplicate code.
 
     Args:
@@ -546,8 +552,12 @@ def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
         log.error(f"crypto._unwrap_common({namespace_name}) failed to extract id from blob: {e}")
         return (None, [])
 
-    # Get the key using the namespace-specific lookup function
-    key_data = key_lookup_fn(id_bytes, recorded_by, db)
+    # Get the key using the namespace-specific lookup function or cache
+    key_data = None
+    if key_cache is not None:
+        key_data = key_cache.get(key_id_b64)
+    if not key_data:
+        key_data = key_lookup_fn(id_bytes, recorded_by, db)
     if not key_data:
         key_id_b64 = b64encode(id_bytes)
         if block_on_missing:
@@ -611,7 +621,8 @@ def unwrap_transit(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[byte
                          namespace_name="transit")
 
 
-def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
+def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any,
+                 key_cache: dict[str, dict[str, Any]] | None = None) -> tuple[bytes | None, list[str]]:
     """Unwrap event-layer blob (application data). Always blocks on missing keys.
 
     Only checks event key namespace: group_keys, group_prekeys.
@@ -665,7 +676,8 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes 
 
     return _unwrap_common(wrapped_blob, recorded_by, db,
                          get_event_key_by_id, block_on_missing=True,
-                         namespace_name="event")
+                         namespace_name="event",
+                         key_cache=key_cache)
 
 
 def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:

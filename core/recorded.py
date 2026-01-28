@@ -22,6 +22,7 @@ Benefits:
 See docs/planning/event-registry-design.md for full design rationale.
 """
 from typing import Any
+import os
 import json
 import logging
 
@@ -34,6 +35,110 @@ from core.db import create_safe_db, create_unsafe_db
 log = logging.getLogger(__name__)
 
 
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    if size <= 0:
+        return [items]
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _prefetch_event_key_cache(
+    recorded_ids: list[str],
+    db: Any,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    if len(recorded_ids) < 2:
+        return {}, {}
+
+    unsafedb = create_unsafe_db(db)
+    chunk_size = int(os.getenv("PROJECT_KEY_CACHE_CHUNK", "400"))
+
+    recorded_meta: dict[str, tuple[str, str]] = {}
+    for chunk in _chunked(recorded_ids, chunk_size):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = unsafedb.query(
+            f"SELECT id, blob FROM store WHERE id IN ({placeholders})",
+            tuple(chunk),
+        )
+        for row in rows:
+            try:
+                recorded_event = crypto.parse_json(row['blob'])
+            except Exception:
+                continue
+            ref_id = recorded_event.get('ref_id')
+            recorded_by = recorded_event.get('recorded_by')
+            if ref_id and recorded_by:
+                recorded_meta[row['id']] = (recorded_by, ref_id)
+
+    if not recorded_meta:
+        return {}, {}
+
+    ref_ids = list({ref_id for _recorded_by, ref_id in recorded_meta.values()})
+    event_blobs: dict[str, bytes] = {}
+    for chunk in _chunked(ref_ids, chunk_size):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = unsafedb.query(
+            f"SELECT id, blob FROM store WHERE id IN ({placeholders})",
+            tuple(chunk),
+        )
+        for row in rows:
+            event_blobs[row['id']] = row['blob']
+
+    key_ids_by_peer: dict[str, set[str]] = {}
+    recorded_by_by_id: dict[str, str] = {}
+
+    for recorded_id, (recorded_by, ref_id) in recorded_meta.items():
+        recorded_by_by_id[recorded_id] = recorded_by
+        event_blob = event_blobs.get(ref_id)
+        if not event_blob:
+            continue
+        if event_blob[:1] in (b'{', b'['):
+            continue
+        if len(event_blob) < crypto.KEY_ID_SIZE:
+            continue
+        key_id_b64 = crypto.b64encode(event_blob[:crypto.KEY_ID_SIZE])
+        key_ids_by_peer.setdefault(recorded_by, set()).add(key_id_b64)
+
+    key_cache_by_peer: dict[str, dict[str, Any]] = {}
+    for recorded_by, key_ids in key_ids_by_peer.items():
+        if not key_ids:
+            continue
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        key_cache: dict[str, dict[str, Any]] = {}
+
+        for chunk in _chunked(list(key_ids), chunk_size):
+            placeholders = ",".join("?" for _ in chunk)
+            params = (*chunk, recorded_by)
+            rows = safedb.query(
+                f"SELECT key_id, key FROM group_keys "
+                f"WHERE key_id IN ({placeholders}) AND recorded_by = ?",
+                params,
+            )
+            for row in rows:
+                key_cache[row['key_id']] = {
+                    'id': crypto.b64decode(row['key_id']),
+                    'key': row['key'],
+                    'type': 'symmetric',
+                }
+
+            params = (*chunk, recorded_by, recorded_by)
+            rows = safedb.query(
+                f"SELECT prekey_id, private_key FROM group_prekeys "
+                f"WHERE prekey_id IN ({placeholders}) AND owner_peer_id = ? AND recorded_by = ?",
+                params,
+            )
+            for row in rows:
+                if row['private_key']:
+                    key_cache[row['prekey_id']] = {
+                        'id': crypto.b64decode(row['prekey_id']),
+                        'private_key': row['private_key'],
+                        'type': 'asymmetric',
+                    }
+
+        if key_cache:
+            key_cache_by_peer[recorded_by] = key_cache
+
+    return key_cache_by_peer, recorded_by_by_id
+
+
 def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
                 skip_negentropy: bool = False) -> list[list[str | None]]:
     """Since `recorded` is the event that triggers projection, this is the central function for projection."""
@@ -44,10 +149,19 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
         return []
 
     log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth}, skip_neg={skip_negentropy})")
+    key_cache_by_peer, recorded_by_by_id = _prefetch_event_key_cache(recorded_ids, db)
     projected_ids = []
     for recorded_id in recorded_ids:
         try:
-            result = project(recorded_id, db, _recursion_depth, skip_negentropy=skip_negentropy)
+            recorded_by = recorded_by_by_id.get(recorded_id)
+            peer_cache = key_cache_by_peer.get(recorded_by) if recorded_by else None
+            result = project(
+                recorded_id,
+                db,
+                _recursion_depth,
+                skip_negentropy=skip_negentropy,
+                key_cache=peer_cache,
+            )
             projected_ids.append(result)
         except Exception as e:
             log.error(f"[PROJECT_IDS_EXCEPTION] ❌ EXCEPTION projecting recorded_id={recorded_id[:20]}... depth={_recursion_depth}: {str(e)[:200]}")
@@ -59,7 +173,8 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
 
 
 def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by: str = 'initial',
-            skip_negentropy: bool = False) -> list[str | None]:
+            skip_negentropy: bool = False,
+            key_cache: dict[str, dict[str, Any]] | None = None) -> list[str | None]:
     """Project recorded event with two-phase dependency checking.
 
     1. Check encryption keys (block if missing).
@@ -105,43 +220,43 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
 
     if wire_format.is_wire_message_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_message_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_channel_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_channel_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_message_update_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_message_update_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_message_deletion_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_message_deletion_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_message_reaction_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_message_reaction_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_message_reaction_deletion_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_message_reaction_deletion_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_message_attachment_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_message_attachment_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
@@ -150,19 +265,19 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_channel_update_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_channel_update_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_group_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_group_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_group_member_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_group_member_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
@@ -171,7 +286,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_group_key_shared_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_group_key_shared_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
@@ -201,7 +316,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_username_update_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_username_update_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
@@ -216,7 +331,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_peer_name_update_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_peer_name_update_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
@@ -228,7 +343,7 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         event_type = event_data.get('type') if event_data else None
     elif wire_format.is_wire_network_name_update_envelope(event_blob):
         wire_event_data, missing_key_ids = wire_format.decode_network_name_update_wire_event(
-            event_blob, recorded_by, db
+            event_blob, recorded_by, db, key_cache=key_cache
         )
         event_data = wire_event_data
         event_type = event_data.get('type') if event_data else None
