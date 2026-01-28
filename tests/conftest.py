@@ -10,6 +10,7 @@ from core.db import Database
 from core import schema
 from core import tick
 from core import jobs
+from tests.utils import tick_helper
 
 # Disable all logging during tests for performance
 # Use pytest -o log_cli=true to re-enable if needed for debugging
@@ -47,6 +48,9 @@ def reset_global_state():
 
     # Reset job frequency multiplier
     jobs.reset_frequency_multiplier()
+
+    # Reset monotonic test clock
+    tick_helper.reset_test_clock()
 
     # Reset tick job state (database-backed, needs a temp db)
     # Note: Each test creates its own DB, but we need to reset the
@@ -152,7 +156,7 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     db.commit()
 
     # Sync to converge - 15 rounds is enough for 2-peer connection
-    run_ticks(db=db, start_t_ms=3000, num_rounds=15)
+    run_ticks(db=db, start_t_ms=None, num_rounds=15)
 
     return db, alice, bob
 

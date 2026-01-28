@@ -43,7 +43,7 @@ def test_remove_connections_for_peer(fresh_db):
     db.commit()
 
     # Run sync to establish connections
-    tick_helper.run_ticks(db=db, start_t_ms=4000, num_rounds=50)
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=50)
     db.commit()
 
     # Check that connections exist
@@ -97,7 +97,7 @@ def test_remove_connections_for_user(fresh_db):
     db.commit()
 
     # Run sync to establish connections
-    tick_helper.run_ticks(db=db, start_t_ms=4000, num_rounds=50)
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=50)
     db.commit()
 
     # Check that connections exist
@@ -183,7 +183,7 @@ def test_user_removal_deletes_connections(fresh_db):
 
     # Run sync to establish connections
     print("\n=== Initial sync to establish connections ===")
-    tick_helper.run_ticks(db=db, start_t_ms=4000, num_rounds=100)
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=100)
     db.commit()
 
     # Check connections before removal

@@ -36,7 +36,7 @@ def test_three_player_messaging_simple(fresh_db):
         assert len(channels) >= 1, f"Bob has {len(channels)} channels, expected 1"
         return channels[0]['channel_id']
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000, msg="Bob should see channel")
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None, msg="Bob should see channel")
 
     # Verify it's the same channel as Alice
     bob_channel = bob_has_channel()

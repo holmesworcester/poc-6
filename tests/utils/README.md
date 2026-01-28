@@ -22,7 +22,7 @@ Use `sync_until_converged()` which automatically detects when sync has stabilize
 from tests.utils import tick_helper
 
 # Instead of guessing round counts, let it run until stable
-tick_helper.sync_until_converged(db=db, start_t_ms=4000, max_rounds=200, check_interval=1)
+tick_helper.sync_until_converged(db=db, start_t_ms=None, max_rounds=200, check_interval=1)
 ```
 
 ### How It Works
@@ -71,14 +71,14 @@ def test_my_scenario():
     # ... setup alice, bob, etc ...
 
     # Initial sync after network creation
-    tick_helper.sync_until_converged(db=db, start_t_ms=3000, max_rounds=200, check_interval=1)
+    tick_helper.sync_until_converged(db=db, start_t_ms=None, max_rounds=200, check_interval=1)
 
     # Create some messages
     message.create(...)
     db.commit()
 
     # Sync messages
-    tick_helper.sync_until_converged(db=db, start_t_ms=5000, max_rounds=200, check_interval=1)
+    tick_helper.sync_until_converged(db=db, start_t_ms=None, max_rounds=200, check_interval=1)
 
     # Verify messages synced
     assert ...
@@ -90,12 +90,12 @@ For simpler cases where you know the round count:
 
 ```python
 # Run fixed number of ticks
-tick_helper.run_ticks(db, start_t_ms=4000, num_rounds=15)
+tick_helper.run_ticks(db, start_t_ms=None, num_rounds=15)
 
 # Preset helpers
-tick_helper.initial_sync(db, start_t_ms=4000)  # 15 rounds
-tick_helper.message_sync(db, start_t_ms=5000)  # 20 rounds
-tick_helper.convergence_sync(db, start_t_ms=6000)  # 100 rounds
+tick_helper.initial_sync(db, start_t_ms=None)  # 15 rounds
+tick_helper.message_sync(db, start_t_ms=None)  # 20 rounds
+tick_helper.convergence_sync(db, start_t_ms=None)  # 100 rounds
 ```
 
 ### Implementation Details

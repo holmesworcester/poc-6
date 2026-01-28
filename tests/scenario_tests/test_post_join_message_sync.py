@@ -53,7 +53,7 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
     )
 
     # Initial sync
-    t_ms = initial_sync(db, start_t_ms=3000)
+    t_ms = initial_sync(db, start_t_ms=None)
 
     # Alice creates invite
     _, invite_link, _ = invite.create(

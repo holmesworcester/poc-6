@@ -131,7 +131,7 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
         assert has_key_a, "Device 2 should have key for Group A"
         assert has_key_b, "Device 2 should have key for Group B"
 
-    t_ms = assert_eventually(device2_has_both_keys, db=db, start_t_ms=6000)
+    t_ms = assert_eventually(device2_has_both_keys, db=db, start_t_ms=None)
 
     # Verify device 2 is member of BOTH groups
     print("\n=== Verifying device 2 group memberships ===")

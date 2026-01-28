@@ -38,7 +38,7 @@ def test_key_rotation_only_by_remover(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Alice removes Bob
     user_removed.create(

@@ -154,7 +154,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         assert has_key_b, "Device 2 should have key for Group B"
         assert has_key_c, "Device 2 should have key for Group C"
 
-    t_ms = assert_eventually(device2_has_all_keys, db=db, start_t_ms=6000)
+    t_ms = assert_eventually(device2_has_all_keys, db=db, start_t_ms=None)
 
     # Verify device 2 is a member of all groups
     print("\n=== Verifying device 2 group memberships ===")

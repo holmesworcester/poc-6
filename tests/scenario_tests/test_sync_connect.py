@@ -292,7 +292,7 @@ def test_two_way_handshake(fresh_db):
         assert bob_can_send, \
             f"Bob should have a connection with their_key (has {len(bob_conns)} conns)"
 
-    tick_helper.assert_eventually(both_can_send, db=db, start_t_ms=4000)
+    tick_helper.assert_eventually(both_can_send, db=db, start_t_ms=None)
 
     # Verify final state: both peers have connections they can send on
     print("\n=== Verifying bidirectional connection state ===")

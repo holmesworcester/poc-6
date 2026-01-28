@@ -188,7 +188,7 @@ class TestWindowGrowthUnderGoodConditions:
         db.commit()
 
         # Initial sync
-        run_ticks(db=db, start_t_ms=3000, num_rounds=15)
+        run_ticks(db=db, start_t_ms=None, num_rounds=15)
 
         # Alice creates messages to give sync work to do
         for i in range(20):
@@ -280,7 +280,7 @@ class TestBulkMessageSyncUnderCongestion:
         db.commit()
 
         # Initial sync WITHOUT congestion to establish connection
-        run_ticks(db=db, start_t_ms=3000, num_rounds=15)
+        run_ticks(db=db, start_t_ms=None, num_rounds=15)
 
         # Alice creates 100 messages
         num_messages = 100
@@ -375,7 +375,7 @@ class TestBulkMessageSyncUnderCongestion:
         db.commit()
 
         # Initial sync WITHOUT congestion
-        run_ticks(db=db, start_t_ms=3000, num_rounds=15)
+        run_ticks(db=db, start_t_ms=None, num_rounds=15)
 
         # Alice creates 50 messages
         num_messages = 50
@@ -464,7 +464,7 @@ class TestFileAttachmentSyncUnderCongestion:
         db.commit()
 
         # Initial sync WITHOUT congestion
-        run_ticks(db=db, start_t_ms=3000, num_rounds=15)
+        run_ticks(db=db, start_t_ms=None, num_rounds=15)
 
         # Alice creates a message
         msg_result = message.create(

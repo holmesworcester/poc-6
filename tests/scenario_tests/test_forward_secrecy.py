@@ -201,7 +201,7 @@ def test_forward_secrecy_multi_peer(fresh_db_with_alice):
         )
         assert bob_msg_check is not None, "Bob should see the message"
 
-    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=None)
     print("✓ Bob sees Alice's message")
 
     # Alice deletes the message
@@ -498,7 +498,7 @@ def test_new_user_joins_after_rekey(fresh_db_with_alice):
     # Run sync ticks for Bob to receive events
     print("\n=== t=6000+: Running sync ticks ===")
     from tests.utils.tick_helper import run_ticks
-    run_ticks(db=db, start_t_ms=6000, num_rounds=200)
+    run_ticks(db=db, start_t_ms=None, num_rounds=200)
     print("✓ Sync ticks completed")
 
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
@@ -631,7 +631,7 @@ def test_new_user_with_preexisting_invite_after_rekey(fresh_db_with_alice):
     # Run sync ticks for Bob to receive events
     print("\n=== t=6000+: Running sync ticks ===")
     from tests.utils.tick_helper import run_ticks
-    run_ticks(db=db, start_t_ms=6000, num_rounds=200)
+    run_ticks(db=db, start_t_ms=None, num_rounds=200)
     print("✓ Sync ticks completed")
 
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])

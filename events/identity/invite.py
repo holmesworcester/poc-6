@@ -122,6 +122,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
     signer = ctx.signer or {}
     admin_grant = event_data.get('admin_grant')
 
+    if mode == "user" and signed_by != network_id and not admin_grant:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
     if admin_grant and signed_by != network_id:
         # Ongoing invite with admin_grant - verify signer is admin
         # The signer's user_id should match the admin_grant's user_id

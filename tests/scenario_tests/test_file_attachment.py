@@ -54,7 +54,7 @@ def test_two_party_file_attachment_and_sync(fresh_db):
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     print("\n=== Initial Sync ===")
-    t_ms = tick_helper.initial_sync(db, start_t_ms=4000)
+    t_ms = tick_helper.initial_sync(db, start_t_ms=None)
     print("✓ Initial sync completed")
 
     print("\n=== Alice creates message with file attachment ===")

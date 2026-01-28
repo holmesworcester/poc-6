@@ -11,11 +11,49 @@ from core import tick as tick_module
 # 500 rounds = 50 seconds of simulated time at 100ms intervals
 DEFAULT_MAX_ROUNDS = 500
 
+# Monotonic test clock to prevent backwards time across helpers
+_TEST_CLOCK_MS = 0
+
+
+def reset_test_clock() -> None:
+    """Reset the monotonic test clock (called by test fixtures)."""
+    global _TEST_CLOCK_MS
+    _TEST_CLOCK_MS = 0
+
+
+def _coerce_start_t_ms(db: Any, start_t_ms: int | None, interval_ms: int) -> int:
+    """Ensure start_t_ms is monotonic and not earlier than job_state."""
+    global _TEST_CLOCK_MS
+
+    if start_t_ms is None:
+        start_t_ms = _TEST_CLOCK_MS
+
+    latest_created_at = 0
+    for table in ("shareable_events", "projected_events"):
+        try:
+            row = db._conn.execute(f"SELECT MAX(created_at) FROM {table}").fetchone()
+        except Exception:
+            continue
+        if row and row[0] is not None:
+            latest_created_at = max(latest_created_at, row[0])
+
+    last_run_row = db._conn.execute("SELECT MAX(last_run_at) FROM job_state").fetchone()
+    last_run_at = last_run_row[0] if last_run_row and last_run_row[0] is not None else 0
+
+    start_t_ms = max(start_t_ms or 0, last_run_at, _TEST_CLOCK_MS, latest_created_at)
+    return start_t_ms
+
+
+def _advance_test_clock(t_ms: int, interval_ms: int) -> None:
+    """Advance the monotonic test clock to at least t_ms + interval."""
+    global _TEST_CLOCK_MS
+    _TEST_CLOCK_MS = max(_TEST_CLOCK_MS, t_ms + interval_ms)
+
 
 def assert_eventually(
     check: Callable[[], Any],
     db: Any,
-    start_t_ms: int,
+    start_t_ms: int | None = None,
     max_rounds: int = None,
     interval_ms: int = 100,
     msg: str = None
@@ -30,7 +68,7 @@ def assert_eventually(
         check: Callable that raises AssertionError if condition not met.
                Can also return a value - truthy = pass, falsy = fail.
         db: Database connection
-        start_t_ms: Starting timestamp
+        start_t_ms: Starting timestamp (None = use monotonic test clock)
         max_rounds: Maximum ticks before giving up (default: DEFAULT_MAX_ROUNDS)
         interval_ms: Time between ticks (default 100ms)
         msg: Optional message for timeout failure
@@ -49,13 +87,15 @@ def assert_eventually(
                 (msg_id, bob_peer_id)
             ),
             db=db,
-            start_t_ms=5000
+            start_t_ms=None
         )
     """
     if max_rounds is None:
         max_rounds = DEFAULT_MAX_ROUNDS
 
     last_error = None
+
+    start_t_ms = _coerce_start_t_ms(db, start_t_ms, interval_ms)
 
     for i in range(max_rounds):
         t_ms = start_t_ms + i * interval_ms
@@ -67,6 +107,7 @@ def assert_eventually(
             # Support both assertion-style (raises) and return-style (truthy/falsy)
             if result is not None and not result:
                 raise AssertionError(f"Check returned falsy: {result}")
+            _advance_test_clock(t_ms, interval_ms)
             return t_ms + interval_ms  # Return next available timestamp
         except Exception as e:
             # Catch all exceptions - sync may not have propagated data yet
@@ -83,6 +124,7 @@ def assert_eventually(
     except Exception as e:
         raise AssertionError(f"{timeout_msg}: {e}") from None
 
+    _advance_test_clock(start_t_ms + max_rounds * interval_ms, interval_ms)
     return start_t_ms + max_rounds * interval_ms
 
 
@@ -98,26 +140,28 @@ MESSAGE_SYNC_ROUNDS = 20  # ~2 seconds - enough for message propagation
 CONVERGENCE_ROUNDS = 100  # ~10 seconds - for complete event convergence tests
 
 
-def run_ticks(db: Any, start_t_ms: int, num_rounds: int, interval_ms: int = TICK_INTERVAL_MS) -> int:
+def run_ticks(db: Any, start_t_ms: int | None, num_rounds: int, interval_ms: int = TICK_INTERVAL_MS) -> int:
     """Run multiple ticks with consistent timing.
 
     Args:
         db: Database connection
-        start_t_ms: Starting timestamp in milliseconds
+        start_t_ms: Starting timestamp in milliseconds (None = use monotonic test clock)
         num_rounds: Number of tick cycles to run
         interval_ms: Time between ticks (default: 100ms to match sync jobs)
 
     Returns:
         Final timestamp after all ticks
     """
+    start_t_ms = _coerce_start_t_ms(db, start_t_ms, interval_ms)
     for i in range(num_rounds):
         t_ms = start_t_ms + (i * interval_ms)
         tick_module.tick(t_ms=t_ms, db=db)
 
+    _advance_test_clock(start_t_ms + (num_rounds * interval_ms), interval_ms)
     return start_t_ms + (num_rounds * interval_ms)
 
 
-def initial_sync(db: Any, start_t_ms: int = 4000) -> int:
+def initial_sync(db: Any, start_t_ms: int | None = None) -> int:
     """Run initial sync rounds for connection establishment.
 
     Runs enough ticks for:
@@ -135,7 +179,7 @@ def initial_sync(db: Any, start_t_ms: int = 4000) -> int:
     return run_ticks(db, start_t_ms, INITIAL_SYNC_ROUNDS)
 
 
-def message_sync(db: Any, start_t_ms: int) -> int:
+def message_sync(db: Any, start_t_ms: int | None) -> int:
     """Run sync rounds for message propagation.
 
     Runs enough ticks for messages to propagate through sync protocol.
@@ -150,7 +194,7 @@ def message_sync(db: Any, start_t_ms: int) -> int:
     return run_ticks(db, start_t_ms, MESSAGE_SYNC_ROUNDS)
 
 
-def convergence_sync(db: Any, start_t_ms: int, max_rounds: int = CONVERGENCE_ROUNDS) -> int:
+def convergence_sync(db: Any, start_t_ms: int | None, max_rounds: int = CONVERGENCE_ROUNDS) -> int:
     """Run sync rounds for complete event convergence.
 
     Used in infrastructure tests that verify all events sync.

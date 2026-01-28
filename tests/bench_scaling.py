@@ -84,7 +84,7 @@ def bench_message_sync(mode: str, num_messages: int, use_batch: bool = False) ->
             peer_id=alice['peer_id'],
             channel_id=alice['channel_id'],
             contents=contents,
-            start_t_ms=3000,
+            start_t_ms=None,
             db=db
         )
     else:
@@ -172,7 +172,7 @@ def main():
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         contents=contents,
-        start_t_ms=3000,
+        start_t_ms=None,
         db=db,
         skip_projection=True
     )

@@ -90,7 +90,7 @@ def test_three_player_messaging(fresh_db):
     # Initial sync - run enough ticks for random window selection to cover all 16 windows
     # With w=4 (16 windows), we need ~100 rounds to have high probability of hitting all windows
     print("\n=== Initial sync ===")
-    final_t_ms = run_ticks(db=db, start_t_ms=4000, num_rounds=100)
+    final_t_ms = run_ticks(db=db, start_t_ms=None, num_rounds=100)
     print(f"Initial sync completed")
 
     # Check connections AFTER sync (use API)
@@ -474,8 +474,8 @@ def test_three_player_messaging(fresh_db):
         bob_message_contents = [msg['content'] for msg in bob_messages]
         assert "Hello from Alice!" in bob_message_contents, "Bob should see Alice's message"
 
-    assert_eventually(alice_sees_bobs_message, db=db, start_t_ms=6000)
-    assert_eventually(bob_sees_alices_message, db=db, start_t_ms=7000)
+    assert_eventually(alice_sees_bobs_message, db=db, start_t_ms=None)
+    assert_eventually(bob_sees_alices_message, db=db, start_t_ms=None)
     print(f"Message sync completed")
 
     # Verify message delivery

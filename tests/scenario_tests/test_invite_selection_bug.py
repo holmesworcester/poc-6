@@ -63,7 +63,7 @@ def test_device_joins_with_older_invite_gets_correct_keys(fresh_db):
         )
         assert len(channels) >= 1
 
-    t_ms = assert_eventually(network_setup_complete, db=db, start_t_ms=2000)
+    t_ms = assert_eventually(network_setup_complete, db=db, start_t_ms=None)
 
     # Alice creates FIRST device link invite (OLDER)
     invite_1_id, invite_1_link, invite_1_data = invite.create(
@@ -200,7 +200,7 @@ def test_multiple_invites_keys_sealed_to_correct_prekey(fresh_db):
         )
         assert len(groups) >= 2
 
-    t_ms = assert_eventually(group_created, db=db, start_t_ms=3000)
+    t_ms = assert_eventually(group_created, db=db, start_t_ms=None)
 
     # Create TWO invites
     invite_1_id, invite_1_link, invite_1_data = invite.create(

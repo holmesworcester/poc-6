@@ -48,7 +48,7 @@ def test_sync_three_players_convergence(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Send messages to verify sync works
     alice_msg = message.create(
