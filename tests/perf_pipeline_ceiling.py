@@ -29,8 +29,9 @@ def _reset_state() -> None:
 def _apply_perf_tuning(fast: bool) -> None:
     if not fast:
         return
-    os.environ["SYNC_UPDATE_BATCH"] = "5000"
-    os.environ["SYNC_UPDATE_DEFER_BUCKETS"] = "1"
+    os.environ["SYNC_UPDATE_BATCH"] = "20000"
+    os.environ["SYNC_UPDATE_BATCH_MAX"] = "20000"
+    os.environ["SYNC_UPDATE_BUDGET_MS"] = "200"
     os.environ["HIGH_PRIORITY_BATCH"] = "500"
     os.environ["LOW_PRIORITY_BATCH"] = "5000"
     os.environ["JOB_BUDGET_MS_HIGH_PRIORITY_PROJECT"] = "25"

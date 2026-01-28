@@ -235,11 +235,11 @@ class SyncUpdateJob(Job):
     """Materialize ingest log into store/recorded/index and add shareable events."""
 
     def __init__(self):
-        super().__init__('sync_update', every_ms=50, budget_ms=10)
+        super().__init__('sync_update', every_ms=50, budget_ms=50)
 
     def run(self, t_ms: int, db: Any) -> dict:
         from core import ingest
-        batch_size = int(os.getenv("SYNC_UPDATE_BATCH", "2000"))
+        batch_size = int(os.getenv("SYNC_UPDATE_BATCH", "8000"))
         max_batch = int(os.getenv("SYNC_UPDATE_BATCH_MAX", str(batch_size)))
         budget_ms = self.budget_limit_ms("SYNC_UPDATE_BUDGET_MS")
         max_budget = int(os.getenv("SYNC_UPDATE_BUDGET_MAX", str(budget_ms)))
