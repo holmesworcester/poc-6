@@ -492,7 +492,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     invite_link_data = {
         'invite_id': invite_id,
-        'invite_blob': base64.urlsafe_b64encode(invite_blob).decode().rstrip('='),
         'invite_prekey_id': invite_prekey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': peer_shared_id,
@@ -735,22 +734,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     except Exception as e:
         raise ValueError(f"Failed to parse invite link: {e}")
 
-    # Store invite blob if present (removes dependency on sync for invite verification).
-    invite_blob_b64 = link_data.get('invite_blob')
-    if invite_blob_b64:
-        blob_padding = '=' * (4 - len(invite_blob_b64) % 4)
-        try:
-            invite_blob = base64.urlsafe_b64decode(invite_blob_b64 + blob_padding)
-            stored_invite_id = store.event(invite_blob, peer_id, t_ms, db)
-            if stored_invite_id != link_data.get('invite_id'):
-                log.warning(
-                    f"invite.accept() invite_id mismatch: link={link_data.get('invite_id')[:20]}... "
-                    f"stored={stored_invite_id[:20]}..."
-                )
-        except Exception as e:
-            log.warning(f"invite.accept() failed to store invite_blob: {e}")
-
-    # Extract link data
+    # Extract link data (no blobs - those sync after connection)
     invite_id = link_data['invite_id']
     invite_prekey_id = link_data['invite_prekey_id']
     invite_private_key = crypto.b64decode(link_data['invite_private_key'])
