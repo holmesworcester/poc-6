@@ -316,70 +316,54 @@ class TestIdentityChainCascade:
             assert valid is not None, f"{event_type} should be valid"
 
     def test_network_cascade_unblocks_dependents(self):
-        """When network validates, it should unblock events waiting on it."""
+        """When network validates, it should unblock events waiting on it.
+
+        Uses real API calls to create events, then simulates Bob receiving
+        them out of order (invite before network) to test cascade behavior.
+        """
         from core import recorded
-        from core import queues
+        from events.identity import user
 
         db = create_test_db()
-        bob_peer_id = peer.create(t_ms=1000, db=db)
+
+        # Alice creates a real network with real events
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        network_id = alice['network_id']
+        alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+
+        # Find the bootstrap invite (signed by network)
+        bootstrap_invite = alice_safedb.query_one(
+            "SELECT invite_id FROM invites WHERE inviter_id = ? AND recorded_by = ?",
+            (network_id, alice['peer_id'])
+        )
+        assert bootstrap_invite is not None, "Bootstrap invite should exist"
+        invite_id = bootstrap_invite['invite_id']
+
+        # Bob is a separate peer who will receive these events
+        bob_peer_id = peer.create(t_ms=2000, db=db)
         bob_safedb = create_safe_db(db, recorded_by=bob_peer_id)
-        unsafedb = create_unsafe_db(db)
 
-        # Create mock network using wire format
-        network_private_key, network_public_key = crypto.generate_keypair()
-        network_blob = wire_format.encode_network_wire_event(
-            network_pubkey=network_public_key,
-            created_at_ms=500,
-            private_key=network_private_key,
-        )
-        network_id = crypto.b64encode(crypto.hash(network_blob))
-        store.blob(network_blob, 500, True, unsafedb)
-
-        # Create mock bootstrap invite (signed by network) using wire format
-        invite_private_key, invite_public_key = crypto.generate_keypair()
-        # Generate a mock group_id (16 bytes)
-        mock_group_id = crypto.b64encode(crypto.hash(b'mock_group'))
-        invite_blob = wire_format.encode_invite_wire_event(
-            mode='user',
-            invite_pubkey_b64=crypto.b64encode(invite_public_key),
-            invite_prekey_id_b64=None,
-            group_id_b64=mock_group_id,
-            channel_id_b64=None,
-            key_id_b64=None,
-            network_id_b64=None,
-            inviter_peer_shared_id_b64=None,
-            inviter_user_id_b64=None,
-            target_user_id_b64=None,
-            admin_grant_id_b64=None,
-            inviter_ip=None,
-            inviter_port=None,
-            signed_by_b64=network_id,
-            signer_type='network',
-            created_at_ms=600,
-            private_key=network_private_key,
-        )
-        invite_id = crypto.b64encode(crypto.hash(invite_blob))
-        store.blob(invite_blob, 600, True, unsafedb)
-
-        # Store trust anchor
+        # Bob stores trust anchor (simulating invite_accepted)
         bob_safedb.execute(
             "INSERT INTO trust_anchors (network_id, recorded_by, created_at) VALUES (?, ?, ?)",
-            (network_id, bob_peer_id, 1000)
+            (network_id, bob_peer_id, 2000)
         )
 
-        # Try to project invite - should block on network
-        invite_recorded_id = recorded.create(invite_id, bob_peer_id, 1100, db, return_dupes=True)
+        # Bob receives invite first (out of order) - should block on network
+        invite_recorded_id = recorded.create(invite_id, bob_peer_id, 2100, db, return_dupes=True)
         recorded.project(invite_recorded_id, db)
 
-        # Invite should be blocked
+        # Invite should be blocked waiting for network
         blocked = bob_safedb.query_one(
             "SELECT 1 FROM blocked_events_ephemeral WHERE recorded_by = ?",
             (bob_peer_id,)
         )
         assert blocked is not None, "Invite should be blocked waiting for network"
 
-        # Now project network - should cascade and unblock invite
-        network_recorded_id = recorded.create(network_id, bob_peer_id, 1200, db, return_dupes=True)
+        # Bob receives network - should cascade and unblock invite
+        network_recorded_id = recorded.create(network_id, bob_peer_id, 2200, db, return_dupes=True)
         recorded.project(network_recorded_id, db)
 
         # Network should be valid
