@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+import os
 
 from core import crypto, store, wire_format
 from core.db import SUBJECTIVE_TABLES, create_safe_db, create_unsafe_db
@@ -16,7 +17,19 @@ _CONTEXT_KEYS = {
 }
 
 
-def _is_event_valid(event_id: str, recorded_by: str, safedb: Any) -> bool:
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    if size <= 0:
+        return [items]
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _is_event_valid(event_id: str, recorded_by: str, safedb: Any,
+                    dep_cache: dict[str, Any] | None = None) -> bool:
+    if dep_cache is not None:
+        valid = dep_cache.get("valid_events", {}).get(recorded_by)
+        if valid is not None and event_id in valid:
+            return True
+
     row = safedb.query_one(
         "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
         (event_id, recorded_by),
@@ -64,6 +77,7 @@ def _fetch_dep_row(
     recorded_by: str,
     safedb: Any,
     unsafedb: Any,
+    dep_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if fields:
         columns = ", ".join(fields)
@@ -72,12 +86,29 @@ def _fetch_dep_row(
     where_clauses = [f"{key_field} = ?"]
     params: list[Any] = [key_value]
     use_safe = table in SUBJECTIVE_TABLES
+    if dep_cache is not None:
+        table_cache = dep_cache.get("tables", {}).get(table, {})
+        key_cache = table_cache.get(key_field, {})
+        if use_safe:
+            peer_cache = key_cache.get(recorded_by, {})
+            cached = peer_cache.get(key_value)
+        else:
+            cached = key_cache.get(None, {}).get(key_value)
+        if cached is not None:
+            return cached
     if use_safe and key_field not in ("recorded_by", "can_share_peer_id"):
         where_clauses.append("recorded_by = ?")
         params.append(recorded_by)
     sql = f"SELECT {columns} FROM {table} WHERE {' AND '.join(where_clauses)}"
     target_db = safedb if use_safe else unsafedb
-    return target_db.query_one(sql, tuple(params))
+    row = target_db.query_one(sql, tuple(params))
+    if row is not None and dep_cache is not None:
+        table_cache = dep_cache.setdefault("tables", {}).setdefault(table, {})
+        key_cache = table_cache.setdefault(key_field, {})
+        peer_key = recorded_by if use_safe else None
+        peer_cache = key_cache.setdefault(peer_key, {})
+        peer_cache[key_value] = row
+    return row
 
 
 def _resolve_table_dep(
@@ -88,6 +119,7 @@ def _resolve_table_dep(
     safedb: Any,
     unsafedb: Any,
     required: bool,
+    dep_cache: dict[str, Any] | None = None,
 ) -> tuple[str, Any | None, list[str], str | None]:
     key_field = dep_spec.get("key")
     if not key_field:
@@ -102,7 +134,7 @@ def _resolve_table_dep(
         if required or dep_spec.get("required_if_present"):
             return "reject", None, [], f"dep '{dep_name}' invalid id type"
         return "ok", None, [], None
-    if not _is_event_valid(dep_id, recorded_by, safedb):
+    if not _is_event_valid(dep_id, recorded_by, safedb, dep_cache=dep_cache):
         if required or dep_spec.get("required_if_present"):
             return "block", None, [dep_id], None
         return "ok", None, [], None
@@ -110,7 +142,7 @@ def _resolve_table_dep(
     if not table:
         return "reject", None, [], f"dep '{dep_name}' missing table"
     fields = dep_spec.get("fields")
-    row = _fetch_dep_row(table, fields, key_field, dep_id, recorded_by, safedb, unsafedb)
+    row = _fetch_dep_row(table, fields, key_field, dep_id, recorded_by, safedb, unsafedb, dep_cache=dep_cache)
     if not row:
         if required:
             return "reject", None, [], f"dep '{dep_name}' missing row in {table}"
@@ -152,6 +184,7 @@ def _resolve_context_dep(
     safedb: Any,
     unsafedb: Any,
     required: bool,
+    dep_cache: dict[str, Any] | None = None,
 ) -> tuple[str, Any | None, list[str], str | None]:
     lookup_value = _context_value(
         dep_spec.get("key_from"),
@@ -174,7 +207,16 @@ def _resolve_context_dep(
             key_field = "recorded_by"
         else:
             return "reject", None, [], f"dep '{dep_name}' missing key"
-    row = _fetch_dep_row(table, dep_spec.get("fields"), key_field, lookup_value, recorded_by, safedb, unsafedb)
+    row = _fetch_dep_row(
+        table,
+        dep_spec.get("fields"),
+        key_field,
+        lookup_value,
+        recorded_by,
+        safedb,
+        unsafedb,
+        dep_cache=dep_cache,
+    )
     if not row:
         if required:
             if isinstance(lookup_value, str):
@@ -195,11 +237,12 @@ def _resolve_dep(
     safedb: Any,
     unsafedb: Any,
     required: bool,
+    dep_cache: dict[str, Any] | None = None,
 ) -> tuple[str, Any | None, list[str], str | None]:
     source = dep_spec.get("source")
     if source == "table":
         return _resolve_table_dep(
-            dep_name, dep_spec, event_data, recorded_by, safedb, unsafedb, required
+            dep_name, dep_spec, event_data, recorded_by, safedb, unsafedb, required, dep_cache=dep_cache
         )
     if source == "value":
         return _resolve_value_dep(dep_name, dep_spec, event_data, required)
@@ -215,8 +258,113 @@ def _resolve_dep(
             safedb,
             unsafedb,
             required,
+            dep_cache=dep_cache,
         )
     return "reject", None, [], f"dep '{dep_name}' has unknown source"
+
+
+
+def prefetch_dependencies(
+    contexts: list[dict[str, Any]],
+    db: Any,
+) -> dict[str, Any]:
+    """Prefetch dependency rows for a batch of events.
+
+    Returns a cache dict used by resolve_event to avoid repeated queries.
+    """
+    dep_cache: dict[str, Any] = {"tables": {}, "valid_events": {}}
+    if not contexts:
+        return dep_cache
+
+    unsafedb = create_unsafe_db(db)
+
+    dep_requests: dict[tuple[str, str, str | None], set[Any]] = {}
+    valid_requests: dict[str, set[str]] = {}
+
+    for ctx in contexts:
+        event_data = ctx.get("event_data")
+        event_type = ctx.get("event_type")
+        recorded_by = ctx.get("recorded_by")
+        if not isinstance(event_data, dict) or not event_type or not recorded_by:
+            continue
+        event_spec = registry.get_event_spec(event_type) or {}
+        for dep_spec in (event_spec.get("requires") or {}).values():
+            _collect_dep_request(dep_spec, event_data, recorded_by, dep_requests, valid_requests)
+        for dep_spec in (event_spec.get("optional") or {}).values():
+            _collect_dep_request(dep_spec, event_data, recorded_by, dep_requests, valid_requests)
+
+        signer_spec = event_spec.get("signer") or {}
+        signer_type_field = signer_spec.get("type_field")
+        signer_id_field = signer_spec.get("id_field")
+        if signer_type_field and signer_id_field:
+            signer_type = event_data.get(signer_type_field)
+            signer_id = event_data.get(signer_id_field)
+            if isinstance(signer_id, str) and signer_type in ("peer_shared", "network", "user"):
+                valid_requests.setdefault(recorded_by, set()).add(signer_id)
+
+    chunk_size = int(os.getenv("PROJECT_DEP_CHUNK", "400"))
+
+    for recorded_by, event_ids in valid_requests.items():
+        if not event_ids:
+            continue
+        valid_set: set[str] = set()
+        safedb = create_safe_db(db, recorded_by)
+        for chunk in _chunked(list(event_ids), chunk_size):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = safedb.query(
+                f"SELECT event_id FROM valid_events WHERE recorded_by = ? AND event_id IN ({placeholders})",
+                tuple([recorded_by, *chunk]),
+            )
+            valid_set.update(row["event_id"] for row in rows)
+        dep_cache["valid_events"][recorded_by] = valid_set
+
+    for (table, key_field, recorded_by), values in dep_requests.items():
+        if not values:
+            continue
+        is_subjective = table in SUBJECTIVE_TABLES
+        columns = "*"
+        table_cache = dep_cache["tables"].setdefault(table, {})
+        key_cache = table_cache.setdefault(key_field, {})
+        peer_key = recorded_by if is_subjective else None
+        peer_cache = key_cache.setdefault(peer_key, {})
+
+        for chunk in _chunked(list(values), chunk_size):
+            placeholders = ",".join("?" for _ in chunk)
+            params: list[Any] = list(chunk)
+            sql = f"SELECT {columns} FROM {table} WHERE {key_field} IN ({placeholders})"
+            if is_subjective and key_field not in ("recorded_by", "can_share_peer_id"):
+                sql += " AND recorded_by = ?"
+                params.append(recorded_by)
+            rows = unsafedb.query(sql, tuple(params)) if not is_subjective else create_safe_db(db, recorded_by).query(sql, tuple(params))
+            for row in rows:
+                row_key = row.get(key_field)
+                if row_key is not None:
+                    peer_cache[row_key] = row
+
+    return dep_cache
+
+
+def _collect_dep_request(
+    dep_spec: dict[str, Any],
+    event_data: dict[str, Any],
+    recorded_by: str,
+    dep_requests: dict[tuple[str, str, str | None], set[Any]],
+    valid_requests: dict[str, set[str]],
+) -> None:
+    if dep_spec.get("source") != "table":
+        return
+    key_field = dep_spec.get("key")
+    if not key_field:
+        return
+    value_field = dep_spec.get("key_from") or key_field
+    dep_id = event_data.get(value_field)
+    if not isinstance(dep_id, str):
+        return
+    table = dep_spec.get("table")
+    if not table:
+        return
+    dep_requests.setdefault((table, key_field, recorded_by), set()).add(dep_id)
+    valid_requests.setdefault(recorded_by, set()).add(dep_id)
 
 
 def _resolve_invite_pubkey(
@@ -431,6 +579,7 @@ def resolve_event(
     recorded_by: str,
     recorded_at: int,
     db: Any,
+    dep_cache: dict[str, Any] | None = None,
 ) -> ResolveResult:
     """Verify signatures and resolve dependencies for a single event."""
     if not isinstance(event_data, dict):
@@ -472,6 +621,7 @@ def resolve_event(
             safedb,
             unsafedb,
             required=True,
+            dep_cache=dep_cache,
         )
         if status == "reject":
             return ResolveResult(status="reject", ctx=None, error=error)
@@ -498,6 +648,7 @@ def resolve_event(
             safedb,
             unsafedb,
             required=False,
+            dep_cache=dep_cache,
         )
         if status == "reject":
             return ResolveResult(status="reject", ctx=None, error=error)
