@@ -103,7 +103,7 @@ Note: `created_by` is deprecated. Where prior drafts used `created_by = peer_sha
 Events include a `signer_type` field (e.g., `peer_shared`, `invite`, `network`) so receivers can deterministically resolve which keyspace the `signed_by` value refers to without guessing.
 
 
-TODO: how does `recorded_by` work again? What events can't include `created_by`?
+`recorded_by` is the local `peer_id` that first received/created the event. It provides peer-scoped views of the database. All projected tables include `recorded_by` for isolation. Events themselves don't contain `recorded_by`—it's metadata added at the recording layer.
 
 ## Recording
 
@@ -512,16 +512,15 @@ For each known `peer_shared_id` belonging to each known `user_id` in a group, Al
 
 Whenever someone adds a member to the group, they seal the existing group key to the member.
 
-TODO: align this with the existing prototype
 ```
 inner := {
     type: 0x04                // KEM
-    peer_pk                 // sender’s Ed25519 (for sig verification)
+    peer_pk                 // sender's Ed25519 (for sig verification)
     count, created_ms, ttl_ms // common bookkeeping
     tagId                     // which ACL this key is for
     group_prekey_shared_id    // ID of the recipient's published group prekey (for lookup/deletion)
     sealedKey = crypto_box_seal(G, group_prekey_shared_pub_recipient)  // Seal to recipient's group_prekey_shared public key (not static pk)
-    
+
     sig64   = crypto_sign_detached(inner[..payload], sk_sender)
 }
 
@@ -531,13 +530,13 @@ sodium_memzero(G, sizeof G);
 
 She then uses XChaCha20-Poly1305 with a 24-byte nonce and the `id` of the `group_prekey` event identifying the key.
 
-TODO: align this with the existing prototype
-
 ```
 seal(k,n,pt,ad) = crypto_aead_xchacha20poly1305_ietf_encrypt(pt,ad,-,n,k)
 open(k,n,ct,ad) = crypto_aead_xchacha20poly1305_ietf_decrypt(-,ct,ad,n,k)
-hint64(k,n)     = **TODO: UPDATE THIS** crypto_auth_hmacsha256(n, k)[0..1]       # TODO: not the first 2 bytes, the whole thing
+key_id(event_id) = BLAKE2b-128(event_id)   # 16-byte key ID for routing
 ```
+
+Key IDs are 16 bytes (128 bits), derived by hashing the event ID. This provides a compact identifier for key lookup without exposing the full event ID.
 
 `created_at` and `ttl` live outside this encryption layer so that peers can support lazy loading (see: [Sync](#Sync)). (Because active peers can infer this timestamp from "received at", the metadata leak is insignificant and outweighed by the benefits.)
 
@@ -600,7 +599,7 @@ Unlike Signal or MLS, we do not pursue Forward Secrecy for not-yet-purged events
 
 ## Removal
 
-TODO: Add note/feature that all invites known to the removed user are invalidated upon removal. Also add invite expiration for good measure.  
+When a user is removed, any pending invites they created are invalidated—the invite's `signed_by` resolves to a removed user, so the invite fails authorization checks. Invites also have a TTL (default 7 days) after which they expire regardless of user status.
 
 All users must be able to remove peers on lost or stolen devices. Admins must be able to remove both peers and users.
 
@@ -1096,7 +1095,7 @@ When another user is blocked, messages are invisible, and their user status disp
 
 # Updating Events
 
-TODO: update this section to align it with the doc. I think it makes more sense to simply have updates be their own first class event named like `message_update`.
+Updates are first-class events with their own types: `message_update`, `channel_update`, `username_update`, etc. Each update type has specific semantics and dependencies.
 
 We must update events, e.g. to edit a message, add attachments, give a `user-id` a username (or change it), add unfurl metadata to a message, update a profile image, or change a setting. To do so we create `update` events than name an `event-id`, specify an `update-type`, and include a `global-count`, along with the type-specific update content.
 
@@ -1110,7 +1109,7 @@ Updates must be done by a peer linked to the same `user-id` as the original even
 
 # Files
 
-TODO: consider simple dependency chains for files, with decryption and projection as completed when we receive the last event in the chain.
+File attachments use a simple dependency model: the `message_attachment` event depends on all its `file_slice` events. Projection completes when all slices are present and the Merkle root matches. Missing slices cause the attachment to remain in "blocked" state until sync delivers them.
 
 Many messages will include images, video, or too much text to fit in one event. These are held in files, which reference file parts called "slices".
 
@@ -1986,6 +1985,12 @@ For files, number of windows W = max(1, ceil(total_slices / 100)) up to 4096 (w=
 ##### Congestion control
 
 When using UDP (no built-in congestion control), each connection uses **adaptive windowing** based on observed round-trip time (RTT) of negentropy request/response pairs.
+
+<!-- NOTE FOR REVIEW (cc): Doc says "range_response" below but code uses range_events + range_matched. Align spec with current message names or update code. -->
+<!-- NOTE FOR REVIEW (cc): RTT sampling here is batch-level (wait for in_flight==0). If we want per-range RTT, track sent_at per range_id. Otherwise call out that RTT is batch RTT. -->
+<!-- NOTE FOR REVIEW (cc): Timeout path resets in_flight=0; need guidance on handling late responses so they don't incorrectly grow the window. -->
+<!-- NOTE FOR REVIEW (cc): Divergence creates child range_request responses; windowing should apply to all outgoing range_requests in either direction, not just requester->responder. -->
+<!-- NOTE FOR REVIEW (cc): Clarify whether MAX_PACKETS_PER_TICK includes event blobs or only negentropy control messages. -->
 
 **Design principles:**
 
