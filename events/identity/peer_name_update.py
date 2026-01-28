@@ -9,6 +9,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
@@ -47,6 +48,7 @@ EVENT_SPEC = {
 }
 
 log = logging.getLogger(__name__)
+
 
 
 def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int,
@@ -112,7 +114,21 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
         'created_at': t_ms
     }
 
-    peer_name_update_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    _wire_shadow_peer_name_update(peer_target_id, name)
+
+    from events.identity import peer as peer_module
+    private_key = peer_module.get_private_key(peer_id, peer_id, db)
+    blob = wire_format.encode_peer_name_update_wire_event(
+        peer_id_b64=peer_target_id,
+        name=name,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        global_count=event_data['global_count'],
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    peer_name_update_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"peer_name_update.create() created peer_name_update_id={peer_name_update_id[:20]}...")
     return peer_name_update_id
@@ -132,6 +148,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not peer_target_id or not name:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_peer_name_update(peer_target_id, name)
 
     existing = ctx.deps.get('existing_name')
     writes: list[WriteOp] = []
@@ -176,6 +194,17 @@ def project_pure(ctx: Any) -> ProjectorResult:
     return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
+def _wire_shadow_peer_name_update(peer_id: str, name: str) -> None:
+    """Validate peer_name_update fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_peer_name_update_plaintext(
+        peer_id=crypto.b64decode(peer_id),
+        name=name,
+    )
+    decoded = wire_format.decode_peer_name_update_plaintext(plaintext)
+    if decoded["name"] != name:
+        raise ValueError("wire shadow decode name mismatch")
+
+
 def validate(event_id: str, recorded_by: str, db: Any) -> str | None:
     """Validate a peer_name_update event.
 
@@ -203,8 +232,12 @@ def validate(event_id: str, recorded_by: str, db: Any) -> str | None:
         return None
 
     try:
-        # Parse the event
-        event_data = crypto.parse_json(blob)
+        if not wire_format.is_wire_peer_name_update_envelope(blob):
+            log.warning(f"peer_name_update.validate() non-wire event blob for {event_id[:20]}...")
+            return None
+        event_data, missing = wire_format.decode_peer_name_update_wire_event(blob, recorded_by, db)
+        if not event_data:
+            return 'BLOCKED' if missing else None
     except Exception as e:
         log.warning(f"peer_name_update.validate() failed to parse event: {e}")
         return None

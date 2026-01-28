@@ -32,13 +32,16 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.projection_v2.types import ProjectorResult, WriteOp, Command
 from core.projection_v2.apply import register_command_handler, cascade_delete_from_valid_events
 from events.content import message
-from events.identity import peer_shared
+from events.identity import peer_shared, peer
+from events.group import group as group_module
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
@@ -56,6 +59,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not all([message_id, deleted_by, created_at is not None]):
         log.warning(f"message_deletion.project_pure() missing required fields")
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_message_deletion(message_id)
 
     # Get message from deps (optional - may be a pre-block)
     message_row = ctx.deps.get('message')
@@ -157,7 +162,11 @@ def _handle_finalize_message_deletion(args: dict, recorded_by: str, recorded_at:
     message_blob = store.get(message_id, unsafedb)
     if message_blob:
         try:
-            key_id_bytes = message_blob[:crypto.KEY_ID_SIZE]
+            if not wire_format.is_wire_message_envelope(message_blob):
+                log.warning("message_deletion: non-wire message blob, skipping key purge mark")
+                return
+            _header, payload, _signature = wire_format.parse_envelope(message_blob)
+            key_id_bytes = payload[:crypto.KEY_ID_SIZE]
             key_id_b64 = crypto.b64encode(key_id_bytes)
             safedb.execute(
                 """INSERT OR IGNORE INTO keys_to_purge (key_id, marked_at, recorded_by)
@@ -320,18 +329,32 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
 
     log.info(f"message_deletion.create() authorization passed")
 
-    # Create deletion event
-    event_data = {
-        'type': 'message_deletion',
-        'message_id': message_id,
-        'signed_by': deleter_peer_shared_id,
-        'created_at': t_ms
-    }
+    _wire_shadow_message_deletion(message_id)
 
-    deletion_id = store.publish(event_data, message_group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group_module.pick_key(message_group_id, peer_id, db)
+    blob = wire_format.encode_message_deletion_wire_event(
+        message_id_b64=message_id,
+        signed_by_b64=deleter_peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    deletion_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_deletion.create() created deletion_id={deletion_id[:20]}...")
     return deletion_id
+
+
+def _wire_shadow_message_deletion(message_id: str) -> None:
+    """Validate message_deletion fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_message_deletion_plaintext(
+        message_id=crypto.b64decode(message_id),
+    )
+    decoded = wire_format.decode_message_deletion_plaintext(plaintext)
+    if decoded["message_id"] != crypto.b64decode(message_id):
+        raise ValueError("wire shadow decode message_id mismatch")
 
 
 def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:

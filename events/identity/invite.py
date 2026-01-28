@@ -10,6 +10,7 @@ import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.identity import peer, peer_shared, network
 from events.content import channel
 from events.group import group
@@ -18,6 +19,45 @@ from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+
+
+def _wire_shadow_invite(
+    mode: str,
+    invite_pubkey_b64: str,
+    invite_prekey_id: str | None,
+    group_id: str | None,
+    channel_id: str | None,
+    key_id: str | None,
+    network_id: str | None,
+    inviter_peer_shared_id: str | None,
+    inviter_user_id: str | None,
+    target_user_id: str | None,
+    admin_grant: str | None,
+    address: str | None,
+    port: int | None,
+) -> None:
+    """Validate invite fields against the fixed-size wire payload layout."""
+    if mode not in ("user", "peer"):
+        raise ValueError("invite mode must be 'user' or 'peer'")
+    mode_value = wire_format.INVITE_MODE_USER if mode == "user" else wire_format.INVITE_MODE_PEER
+    plaintext = wire_format.encode_invite_plaintext(
+        mode=mode_value,
+        invite_pubkey=crypto.b64decode(invite_pubkey_b64),
+        invite_prekey_id=crypto.b64decode(invite_prekey_id) if invite_prekey_id else None,
+        group_id=crypto.b64decode(group_id) if group_id else None,
+        channel_id=crypto.b64decode(channel_id) if channel_id else None,
+        key_id=crypto.b64decode(key_id) if key_id else None,
+        network_id=crypto.b64decode(network_id) if network_id else None,
+        inviter_peer_shared_id=crypto.b64decode(inviter_peer_shared_id) if inviter_peer_shared_id else None,
+        inviter_user_id=crypto.b64decode(inviter_user_id) if inviter_user_id else None,
+        target_user_id=crypto.b64decode(target_user_id) if target_user_id else None,
+        admin_grant_id=crypto.b64decode(admin_grant) if admin_grant else None,
+        inviter_ip=address,
+        inviter_port=port,
+    )
+    decoded = wire_format.decode_invite_plaintext(plaintext)
+    if decoded["mode"] != mode_value:
+        raise ValueError("wire shadow decode mode mismatch")
 
 # v2 event specification - polymorphic signer (network, peer_shared, or user)
 EVENT_SPEC = {
@@ -97,6 +137,22 @@ def project_pure(ctx: Any) -> ProjectorResult:
     # Network address for bootstrap connections (ongoing invites only)
     address = event_data.get('address')
     port = event_data.get('port')
+
+    _wire_shadow_invite(
+        mode=mode,
+        invite_pubkey_b64=invite_pubkey,
+        invite_prekey_id=event_data.get('invite_prekey_id'),
+        group_id=group_id,
+        channel_id=event_data.get('channel_id'),
+        key_id=event_data.get('key_id'),
+        network_id=network_id,
+        inviter_peer_shared_id=event_data.get('inviter_peer_shared_id'),
+        inviter_user_id=event_data.get('inviter_user_id'),
+        target_user_id=user_id,
+        admin_grant=event_data.get('admin_grant'),
+        address=address,
+        port=port,
+    )
 
     writes = (
         WriteOp(
@@ -259,7 +315,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Get the public key from the created prekey for the invite event
     prekey_blob = store.get(local_prekey_id, unsafedb)
-    prekey_data = crypto.parse_json(prekey_blob)
+    if not wire_format.is_wire_group_prekey_envelope(prekey_blob):
+        raise ValueError("invite requires wire group_prekey event")
+    prekey_data = wire_format.decode_group_prekey_wire_event(prekey_blob)
     invite_pubkey_b64 = prekey_data['public_key']
 
     # Create shareable prekey event for sync
@@ -323,38 +381,43 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_ip = address if address is not None else '127.0.0.1'
     inviter_port = port if port is not None else 6100
 
-    # Create minimal invite event (signed by Alice, proves authorization)
-    # SLIM INVITE: Only essential fields for sync. Transit prekey info moved to link.
-    # Address/port included for bootstrap connections.
-    invite_event_data = {
-        'type': 'invite',
-        'mode': mode,
-        'invite_pubkey': invite_pubkey_b64,  # For user proof signature
-        'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
-        'group_id': all_users_group_id,  # All users group (for adding joiner)
-        'inviter_user_id': inviter_user_id,  # For admin validation during projection
-        'signed_by': peer_shared_id,  # Also serves as inviter_peer_shared_id (redundancy removed)
-        'signer_type': 'peer_shared',  # v2: ongoing invites are signed by peer_shared
-        'created_at': t_ms,
-        'address': inviter_ip,  # Network address for bootstrap
-        'port': inviter_port,  # Network port for bootstrap
-    }
-
-    # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
-    if admin_grant_id:
-        invite_event_data['admin_grant'] = admin_grant_id
-
-    # Add mode-specific fields
-    if mode == 'peer':
-        invite_event_data['user_id'] = user_id  # Target user for device linking
-
     # Sign the invite event with inviter's peer private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_invite_event = crypto.sign_event(invite_event_data, private_key)
+    _wire_shadow_invite(
+        mode=mode,
+        invite_pubkey_b64=invite_pubkey_b64,
+        invite_prekey_id=invite_prekey_id,
+        group_id=all_users_group_id,
+        channel_id=None,
+        key_id=None,
+        network_id=None,
+        inviter_peer_shared_id=None,
+        inviter_user_id=inviter_user_id,
+        target_user_id=user_id,
+        admin_grant=admin_grant_id,
+        address=inviter_ip,
+        port=inviter_port,
+    )
 
-    # Canonicalize and store the invite event (with recorded wrapper for reprojection)
-    # store.event() will automatically project the invite, restoring keys from event data
-    invite_blob = crypto.canonicalize_json(signed_invite_event)
+    invite_blob = wire_format.encode_invite_wire_event(
+        mode=mode,
+        invite_pubkey_b64=invite_pubkey_b64,
+        invite_prekey_id_b64=invite_prekey_id,
+        group_id_b64=all_users_group_id,
+        channel_id_b64=None,
+        key_id_b64=None,
+        network_id_b64=None,
+        inviter_peer_shared_id_b64=None,
+        inviter_user_id_b64=inviter_user_id,
+        target_user_id_b64=user_id,
+        admin_grant_id_b64=admin_grant_id,
+        inviter_ip=inviter_ip,
+        inviter_port=inviter_port,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
     # Create group_key_shared sealed to invite proof prekey
@@ -496,21 +559,41 @@ def create_peer_invite(
     # If signer_id matches user_id, it's a bootstrap case (self-signed by user)
     signer_type = 'user' if signer_id == user_id else 'peer_shared'
 
-    event_data = {
-        'type': 'invite',
-        'mode': 'peer',
-        'user_id': user_id,  # Which user this peer will link to
-        'invite_pubkey': crypto.b64encode(invite_pubkey),
-        'signed_by': signer_id,  # user_id for first peer, peer_shared_id for later
-        'signer_type': signer_type,  # v2: type of signer for verification
-        'created_at': t_ms
-    }
+    _wire_shadow_invite(
+        mode="peer",
+        invite_pubkey_b64=crypto.b64encode(invite_pubkey),
+        invite_prekey_id=None,
+        group_id=None,
+        channel_id=None,
+        key_id=None,
+        network_id=None,
+        inviter_peer_shared_id=None,
+        inviter_user_id=None,
+        target_user_id=user_id,
+        admin_grant=None,
+        address=None,
+        port=None,
+    )
 
-    # Sign with signer's private key
-    signed_event = crypto.sign_event(event_data, signer_private_key)
-
-    # Store the invite event
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_invite_wire_event(
+        mode="peer",
+        invite_pubkey_b64=crypto.b64encode(invite_pubkey),
+        invite_prekey_id_b64=None,
+        group_id_b64=None,
+        channel_id_b64=None,
+        key_id_b64=None,
+        network_id_b64=None,
+        inviter_peer_shared_id_b64=None,
+        inviter_user_id_b64=None,
+        target_user_id_b64=user_id,
+        admin_grant_id_b64=None,
+        inviter_ip=None,
+        inviter_port=None,
+        signed_by_b64=signer_id,
+        signer_type=signer_type,
+        created_at_ms=t_ms,
+        private_key=signer_private_key,
+    )
     invite_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"create_peer_invite() created invite(mode=peer) {invite_id[:20]}... signed_by={signer_id[:20]}...")
@@ -552,33 +635,41 @@ def create_bootstrap_user_invite(
     # Generate keypair for this user invite
     invite_private_key, invite_pubkey = crypto.generate_keypair()
 
-    # Create bootstrap user invite event
-    event_data = {
-        'type': 'invite',
-        'mode': 'user',
-        'network_id': network_id,
-        'invite_pubkey': crypto.b64encode(invite_pubkey),
-        'signed_by': network_id,  # Bootstrap: signed by network key
-        'signer_type': 'network',  # v2: bootstrap invites signed by network
-        'created_at': t_ms
-    }
+    _wire_shadow_invite(
+        mode="user",
+        invite_pubkey_b64=crypto.b64encode(invite_pubkey),
+        invite_prekey_id=None,
+        group_id=group_id,
+        channel_id=channel_id,
+        key_id=key_id,
+        network_id=network_id,
+        inviter_peer_shared_id=peer_shared_id,
+        inviter_user_id=None,
+        target_user_id=None,
+        admin_grant=None,
+        address=None,
+        port=None,
+    )
 
-    # Only include optional fields if provided (not empty string or None)
-    # Bootstrap invites may not have group/channel/key yet - they're created later
-    if group_id:
-        event_data['group_id'] = group_id
-    if channel_id:
-        event_data['channel_id'] = channel_id
-    if key_id:
-        event_data['key_id'] = key_id
-    if peer_shared_id:
-        event_data['inviter_peer_shared_id'] = peer_shared_id
-
-    # Sign with network's private key
-    signed_event = crypto.sign_event(event_data, network_private_key)
-
-    # Store the invite event
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_invite_wire_event(
+        mode="user",
+        invite_pubkey_b64=crypto.b64encode(invite_pubkey),
+        invite_prekey_id_b64=None,
+        group_id_b64=group_id,
+        channel_id_b64=channel_id,
+        key_id_b64=key_id,
+        network_id_b64=network_id,
+        inviter_peer_shared_id_b64=peer_shared_id,
+        inviter_user_id_b64=None,
+        target_user_id_b64=None,
+        admin_grant_id_b64=None,
+        inviter_ip=None,
+        inviter_port=None,
+        signed_by_b64=network_id,
+        signer_type="network",
+        created_at_ms=t_ms,
+        private_key=network_private_key,
+    )
     invite_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"create_bootstrap_user_invite() created invite(mode=user) {invite_id[:20]}... signed_by=network_id")

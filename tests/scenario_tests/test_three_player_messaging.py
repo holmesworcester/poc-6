@@ -12,6 +12,7 @@ Tests:
 import sqlite3
 from core.db import Database
 from core import schema
+from core import wire_format
 from events.identity import user, invite, peer
 from events.content import message
 from events.network import connection_request as conn_module
@@ -168,16 +169,10 @@ def test_three_player_messaging(fresh_db):
     print(f"\nBob has {bob_blocked_count['cnt'] if bob_blocked_count else 0} events blocked (pending deps)")
     print(f"Bob has {len(bob_events_after)} events in shareable_events")
 
-    # Debug: Check what Bob's 4 original events were
+    # Debug: List Bob's original events (event IDs only - don't decode blobs)
     print("\n=== Bob's original events ===")
-    from core import store, crypto
     for row in bob_events_before:
-        try:
-            blob = store.get(row['event_id'], db)
-            data = crypto.parse_json(blob)
-            print(f"  {row['event_id'][:20]}... type={data.get('type', '?')}")
-        except Exception as e:
-            print(f"  {row['event_id'][:20]}... (encrypted or error: {e})")
+        print(f"  {row['event_id'][:20]}...")
 
     # Check what's blocked BEFORE assertions (query blocked_events_ephemeral directly)
     alice_blocked = db.query(
@@ -278,8 +273,15 @@ def test_three_player_messaging(fresh_db):
         for inv in all_invites[:5]:
             inv_blob = store.get(inv['invite_id'], db)
             if inv_blob:
-                inv_data = json.loads(inv_blob.decode())
-                if inv_data.get('signed_by') == net_id:
+                inv_data = None
+                if wire_format.is_wire_invite_envelope(inv_blob):
+                    inv_data = wire_format.decode_invite_wire_event(inv_blob)
+                else:
+                    try:
+                        inv_data = json.loads(inv_blob.decode())
+                    except Exception:
+                        inv_data = None
+                if inv_data and inv_data.get('signed_by') == net_id:
                     print(f"Bootstrap invite: {inv['invite_id'][:25]}... mode={inv['mode']}")
 
                     # Check if Alice has this in shareable_events

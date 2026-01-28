@@ -20,6 +20,7 @@ from tests.utils.tick_helper import run_ticks, assert_eventually
 from core import tick
 from core import jobs
 from core import crypto
+from core import wire_format
 from core import store
 
 
@@ -456,7 +457,7 @@ def test_message_rekey_mechanism():
     # Decrypt original message to verify content
     original_plaintext, _ = crypto.unwrap_event(original_blob, alice_peer_id, db)
     assert original_plaintext, "Should be able to decrypt original message"
-    original_data = crypto.parse_json(original_plaintext)
+    original_data = wire_format.decode_message_plaintext(original_plaintext)
     assert original_data['content'] == "Secret message for rekeying"
     print(f"Step 3: Original message decrypts correctly: '{original_data['content']}'")
 
@@ -480,7 +481,7 @@ def test_message_rekey_mechanism():
     # Verify rekey event exists in store
     rekey_blob = store.get(rekey_id, unsafedb)
     assert rekey_blob, "Rekey event should exist in store"
-    rekey_data = crypto.parse_json(rekey_blob)
+    rekey_data = wire_format.decode_message_rekey_wire_event(rekey_blob)
     assert rekey_data['type'] == 'message_rekey'
     assert rekey_data['original_message_id'] == msg_id
     assert rekey_data['new_key_id'] == new_key_id
@@ -499,7 +500,7 @@ def test_message_rekey_mechanism():
     # Verify message still decrypts correctly with new key
     new_plaintext, _ = crypto.unwrap_event(new_blob, alice_peer_id, db)
     assert new_plaintext, "Should be able to decrypt rekeyed message"
-    new_data = crypto.parse_json(new_plaintext)
+    new_data = wire_format.decode_message_plaintext(new_plaintext)
     assert new_data['content'] == "Secret message for rekeying"
     print(f"Step 9: Rekeyed message decrypts correctly: '{new_data['content']}'")
 
@@ -584,7 +585,7 @@ def test_rekeyed_message_with_deterministic_encryption():
     # Decrypt to verify content
     original_plaintext, _ = crypto.unwrap_event(original_blob, alice_peer_id, db)
     assert original_plaintext
-    original_data = crypto.parse_json(original_plaintext)
+    original_data = wire_format.decode_message_plaintext(original_plaintext)
     assert original_data['content'] == "Secret message for deterministic rekey test"
 
     # Get new clean key
@@ -600,7 +601,7 @@ def test_rekeyed_message_with_deterministic_encryption():
 
     # Get the ciphertext from the first rekey
     rekey_blob_1 = store.get(rekey_id_1, unsafedb)
-    rekey_data_1 = crypto.parse_json(rekey_blob_1)
+    rekey_data_1 = wire_format.decode_message_rekey_wire_event(rekey_blob_1)
     ciphertext_1 = rekey_data_1['new_ciphertext']
     print(f"Step 4: Rekey event 1 ciphertext: {ciphertext_1[:50]}...")
 
@@ -614,7 +615,7 @@ def test_rekeyed_message_with_deterministic_encryption():
     # Verify it decrypts correctly
     plaintext_after_1, _ = crypto.unwrap_event(blob_after_rekey_1, alice_peer_id, db)
     assert plaintext_after_1
-    data_after_1 = crypto.parse_json(plaintext_after_1)
+    data_after_1 = wire_format.decode_message_plaintext(plaintext_after_1)
     assert data_after_1['content'] == "Secret message for deterministic rekey test"
     assert original_plaintext == plaintext_after_1, "Plaintext should be identical after rekey"
     print(f"Step 6: Plaintext verified identical after rekey")

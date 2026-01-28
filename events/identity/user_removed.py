@@ -9,12 +9,14 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp, Command
 from core.projection_v2.apply import register_command_handler
 from events.identity import user, peer_shared, network
 
 log = logging.getLogger(__name__)
+
 
 # V2 Projector specification
 EVENT_SPEC = {
@@ -90,23 +92,17 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
     if not validate(removed_user_id, removed_by_peer_id, removed_by_local_peer_id, db):
         raise ValueError("Not authorized to remove this user")
 
-    # Create event data
-    event_data = {
-        'type': 'user_removed',
-        'removed_user_id': removed_user_id,
-        'removed_by': removed_by_peer_id,
-        'signer_type': 'peer_shared',
-        'created_at': t_ms
-    }
+    _wire_shadow_user_removed(removed_user_id)
 
-    # Sign the event with remover's private key
     from events.identity import peer
     private_key = peer.get_private_key(removed_by_local_peer_id, removed_by_local_peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
-
-    # Store as signed plaintext (no inner encryption)
-    # store.event() creates recorded wrapper and triggers projection
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_user_removed_wire_event(
+        removed_user_id_b64=removed_user_id,
+        removed_by_b64=removed_by_peer_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
     event_id = store.event(blob, removed_by_local_peer_id, t_ms, db)
 
     # Get updated member list after removal (for immediate UI feedback)
@@ -150,6 +146,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
         log.warning(f"user_removed.project_pure() missing removed_by field")
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_user_removed(removed_user_id)
+
     # Core write: insert into removed_users table (scoped by recorded_by)
     writes = [
         WriteOp(
@@ -177,6 +175,16 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
+
+
+def _wire_shadow_user_removed(removed_user_id: str) -> None:
+    """Validate user_removed fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_user_removed_plaintext(
+        removed_user_id=crypto.b64decode(removed_user_id),
+    )
+    decoded = wire_format.decode_user_removed_plaintext(plaintext)
+    if decoded["removed_user_id"] != crypto.b64decode(removed_user_id):
+        raise ValueError("wire shadow decode removed_user_id mismatch")
 
 
 def _handle_user_removed_side_effects(
