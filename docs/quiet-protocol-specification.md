@@ -1985,28 +1985,101 @@ For files, number of windows W = max(1, ceil(total_slices / 100)) up to 4096 (w=
 
 ##### Congestion control
 
-When using a transport without congestion control, such as UDP, the requester avoids congestion collapse for each given connection by adjusting the rate of `sync` events using Additive Increase Multiplicative Decrease (AIMD) when incoming events drop below an Exponential Moving Average (EMA). 
+When using UDP (no built-in congestion control), each connection uses **adaptive windowing** based on observed round-trip time (RTT) of negentropy request/response pairs.
 
-EMA formula: 
+**Design principles:**
+
+1. **Use existing protocol signals.** Negentropy already has request/response patterns (range_request → range_matched/range_response). Measure RTT from these—no new message types or transport changes needed.
+
+2. **Self-healing by default.** The sync protocol is deterministic and convergent. Lost packets are automatically retried on the next sync round (1 second later). Congestion control optimizes throughput, not correctness.
+
+3. **Window-based flow control.** Allow up to `window` range operations in flight per connection. Grow window on success, shrink on timeout. This naturally finds the maximum sustainable throughput.
+
+**Per-connection state:**
 
 ```
-# Initial values
-rate = 10  # pkts/sec
-ema = 0    # initial drop rate
-alpha = 0.125  # EMA smoothing
-
-while syncing:
-    send_at_rate(rate)
-    drop_rate = calculate_current_drop_rate()  # e.g., lost_pkts / sent_pkts
-    ema = alpha * drop_rate + (1 - alpha) * ema  # update EMA
-    if drop_rate > ema:  # Congestion detected
-        rate = max(1, rate * 0.5)  # Multiplicative decrease
-    else:
-        rate += 1  # Additive increase
-    sleep(1 / rate)  # Adjust send interval
+window = 1                    # Max in-flight range operations
+in_flight = 0                 # Currently awaiting response
+rtt_ms = 200                  # RTT estimate (exponential moving average)
+last_send_ms = 0              # Time of oldest in-flight request
+MIN_WINDOW = 1
+MAX_WINDOW = 8
+RTT_ALPHA = 0.2               # EMA smoothing factor
 ```
 
-When sending events via QUIC/HTTP (using an [Optional Server](#Optional Servers) e.g.) we can skip this.
+**Algorithm:**
+
+```
+def can_send() -> bool:
+    return in_flight < window
+
+def on_send_range_request():
+    if in_flight == 0:
+        last_send_ms = now_ms()
+    in_flight += 1
+
+def on_receive_range_response():
+    if in_flight > 0:
+        in_flight -= 1
+
+    if in_flight == 0:
+        # All requests answered - measure RTT
+        rtt_sample = now_ms() - last_send_ms
+        rtt_ms = (1 - RTT_ALPHA) * rtt_ms + RTT_ALPHA * rtt_sample
+
+        # Success: grow window
+        window = min(window + 1, MAX_WINDOW)
+
+def on_tick():
+    if in_flight > 0 and (now_ms() - last_send_ms) > 3 * rtt_ms:
+        # Timeout: shrink window, reset in_flight
+        window = max(MIN_WINDOW, window // 2)
+        in_flight = 0
+        # Next sync round will retry automatically
+```
+
+**Behavior:**
+
+| Condition | Action | Effect |
+|-----------|--------|--------|
+| Response received | window += 1 | Grow toward max throughput |
+| Timeout (3× RTT) | window /= 2 | Back off on congestion |
+| Packet lost | (none) | Next sync round retries |
+
+Starts conservatively (window=1, essentially stop-and-wait), grows to max throughput as responses confirm delivery, backs off when responses stop arriving.
+
+**Throughput at equilibrium:**
+
+With fixed 512-byte packets:
+```
+max_throughput = window × 512 bytes / RTT
+```
+
+| RTT | Window=1 | Window=4 | Window=8 |
+|-----|----------|----------|----------|
+| 20ms | 25 KB/s | 100 KB/s | 200 KB/s |
+| 50ms | 10 KB/s | 40 KB/s | 80 KB/s |
+| 100ms | 5 KB/s | 20 KB/s | 40 KB/s |
+
+**What counts as in-flight:**
+
+- Sending a `range_request` → in_flight += 1
+- Receiving `range_matched` or `range_response` → in_flight -= 1
+- Receiving raw event blobs (bottom-level sync) does NOT decrement—the next sync round will confirm convergence via `range_matched`
+
+This means bottom-level event transfers temporarily "hold" the window, which is conservative and correct: we don't grow the window until we confirm events arrived (via hash match on next round).
+
+**Global rate limit (optional):**
+
+To prevent overwhelming local CPU or network interface when many connections are active:
+
+```
+MAX_PACKETS_PER_TICK = 100  # ~50KB per tick at 512 bytes/packet
+```
+
+Distribute budget across connections proportionally to their window sizes.
+
+When sending via QUIC/HTTP (using an [Optional Server](#Optional Servers)), congestion control can be skipped—the transport handles it.
 
 ### Broadcast
 
