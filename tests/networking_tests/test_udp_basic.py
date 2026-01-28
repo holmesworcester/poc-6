@@ -4,10 +4,16 @@ Basic UDP tests to verify the fundamentals work.
 import pytest
 import time
 import socket
-from multiprocessing import Process, Queue
+from multiprocessing import Process
+from tests.networking_tests.ipc import make_queue_pair, supports_udp_in_subprocess
+
+pytestmark = pytest.mark.skipif(
+    not supports_udp_in_subprocess(),
+    reason="UDP sockets are not permitted in subprocesses on this platform",
+)
 
 
-def udp_sender(port: int, message: bytes, result_queue: Queue):
+def udp_sender(port: int, message: bytes, result_queue):
     """Send a UDP packet."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.sendto(message, ('127.0.0.1', port))
@@ -15,7 +21,7 @@ def udp_sender(port: int, message: bytes, result_queue: Queue):
     result_queue.put({'sent': True})
 
 
-def udp_receiver(port: int, result_queue: Queue):
+def udp_receiver(port: int, result_queue):
     """Receive a UDP packet."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -38,16 +44,16 @@ class TestBasicUDP:
         port = 19100
         message = b"hello from sender"
 
-        recv_queue = Queue()
-        send_queue = Queue()
+        recv_sender, recv_queue = make_queue_pair()
+        send_sender, send_queue = make_queue_pair()
 
         # Start receiver first
-        receiver = Process(target=udp_receiver, args=(port, recv_queue))
+        receiver = Process(target=udp_receiver, args=(port, recv_sender))
         receiver.start()
         time.sleep(0.1)  # Let it bind
 
         # Send
-        sender = Process(target=udp_sender, args=(port, message, send_queue))
+        sender = Process(target=udp_sender, args=(port, message, send_sender))
         sender.start()
 
         # Wait for results
@@ -67,7 +73,7 @@ class TestTransportUDP:
 
     def test_transport_udp_roundtrip(self):
         """Transport UDP send/receive between two processes."""
-        from multiprocessing import Process, Queue
+        from multiprocessing import Process
 
         def worker(name: str, port: int, cmd_queue: Queue, result_queue: Queue):
             """Worker with transport UDP."""
@@ -92,38 +98,40 @@ class TestTransportUDP:
                     break
 
         # Create workers
-        alice_cmd, alice_result = Queue(), Queue()
-        bob_cmd, bob_result = Queue(), Queue()
+        alice_cmd_send, alice_cmd_recv = make_queue_pair()
+        alice_res_send, alice_res_recv = make_queue_pair()
+        bob_cmd_send, bob_cmd_recv = make_queue_pair()
+        bob_res_send, bob_res_recv = make_queue_pair()
 
-        alice = Process(target=worker, args=('alice', 19101, alice_cmd, alice_result))
-        bob = Process(target=worker, args=('bob', 19102, bob_cmd, bob_result))
+        alice = Process(target=worker, args=('alice', 19101, alice_cmd_recv, alice_res_send))
+        bob = Process(target=worker, args=('bob', 19102, bob_cmd_recv, bob_res_send))
 
         alice.start()
         bob.start()
 
         # Wait for both to start
-        alice_result.get(timeout=2)
-        bob_result.get(timeout=2)
+        alice_res_recv.get(timeout=2)
+        bob_res_recv.get(timeout=2)
         time.sleep(0.1)
 
         try:
             # Alice sends to Bob
-            alice_cmd.put({'action': 'send', 'data': b'hello bob', 'to_addr': ('127.0.0.1', 19102)})
-            alice_result.get(timeout=2)
+            alice_cmd_send.put({'action': 'send', 'data': b'hello bob', 'to_addr': ('127.0.0.1', 19102)})
+            alice_res_recv.get(timeout=2)
 
             time.sleep(0.1)
 
             # Bob receives
-            bob_cmd.put({'action': 'receive'})
-            recv = bob_result.get(timeout=2)
+            bob_cmd_send.put({'action': 'receive'})
+            recv = bob_res_recv.get(timeout=2)
 
             assert len(recv['received']) == 1, f"Bob should have 1 packet, got {recv}"
             assert recv['received'][0][0] == b'hello bob'
             print(f"Transport UDP works: {recv}")
 
         finally:
-            alice_cmd.put({'action': 'stop'})
-            bob_cmd.put({'action': 'stop'})
+            alice_cmd_send.put({'action': 'stop'})
+            bob_cmd_send.put({'action': 'stop'})
             alice.join(timeout=2)
             bob.join(timeout=2)
 

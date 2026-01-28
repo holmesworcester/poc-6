@@ -76,6 +76,9 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
         created_at_ms=t_ms,
         private_key=network_private_key,
     )
+
+    # Store the event - it will be blocked until invite_accepted creates trust anchor
+    # Trust anchors come from invite_accepted.project() for both creators and joiners
     network_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"network.create() created self-signed network_id={network_id}")

@@ -18,6 +18,12 @@ import tempfile
 import os
 import socket
 from tests.networking_tests.multiprocess_client import RemoteClient, tick_all
+from tests.networking_tests.ipc import supports_udp_in_subprocess
+
+pytestmark = pytest.mark.skipif(
+    not supports_udp_in_subprocess(),
+    reason="UDP sockets are not permitted in subprocesses on this platform",
+)
 
 
 def get_free_port():
