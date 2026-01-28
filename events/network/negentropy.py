@@ -483,6 +483,88 @@ def _apply_bucket_deltas(
     )
 
 
+def _apply_bucket_removals(
+    db,
+    recorded_by: str,
+    removed_events: list[tuple[str, str]],
+) -> None:
+    if not removed_events:
+        return
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    now = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    bucket_xors: dict[tuple[str, str], bytes] = {}
+    bucket_counts: dict[tuple[str, str], int] = {}
+
+    for event_id, unified_key in removed_events:
+        fingerprint = compute_fingerprint(event_id)
+        for level in LEVELS:
+            prefix_len = LEVEL_PREFIX_LEN[level]
+            prefix = unified_key[:prefix_len]
+            bucket_key = (level, prefix)
+            if bucket_key in bucket_xors:
+                bucket_xors[bucket_key] = xor_bytes(bucket_xors[bucket_key], fingerprint)
+                bucket_counts[bucket_key] += 1
+            else:
+                bucket_xors[bucket_key] = fingerprint
+                bucket_counts[bucket_key] = 1
+
+    if not bucket_xors:
+        return
+
+    chunk_size = int(os.getenv("NEGENTROPY_BUCKET_CHUNK", "400"))
+    existing: dict[tuple[str, str], tuple[bytes, int]] = {}
+    bucket_keys = list(bucket_xors.keys())
+
+    for chunk in _chunked(bucket_keys, chunk_size):
+        placeholders = ",".join("(?, ?)" for _ in chunk)
+        sql = (
+            "SELECT level, prefix, hash, event_count FROM negentropy_buckets "
+            f"WHERE recorded_by = ? AND (level, prefix) IN ({placeholders})"
+        )
+        params: list[Any] = [recorded_by]
+        for level, prefix in chunk:
+            params.extend([level, prefix])
+        rows = safedb.query(sql, tuple(params))
+        for row in rows:
+            existing[(row['level'], row['prefix'])] = (row['hash'], row['event_count'] or 0)
+
+    update_batch: list[tuple[bytes, int, int, str, str, str]] = []
+    delete_batch: list[tuple[str, str, str]] = []
+
+    for bucket_key, delta_hash in bucket_xors.items():
+        existing_hash, existing_count = existing.get(bucket_key, (None, 0))
+        if not existing_hash or existing_count <= 0:
+            continue
+        new_hash = xor_bytes(existing_hash, delta_hash)
+        new_count = existing_count - bucket_counts[bucket_key]
+        level, prefix = bucket_key
+        if new_count <= 0:
+            delete_batch.append((recorded_by, level, prefix))
+        else:
+            update_batch.append((new_hash, new_count, now, recorded_by, level, prefix))
+
+    if update_batch:
+        safedb.executemany(
+            """
+            UPDATE negentropy_buckets
+            SET hash = ?, event_count = ?, updated_at = ?
+            WHERE recorded_by = ? AND level = ? AND prefix = ?
+            """,
+            update_batch,
+        )
+
+    if delete_batch:
+        safedb.executemany(
+            """
+            DELETE FROM negentropy_buckets
+            WHERE recorded_by = ? AND level = ? AND prefix = ?
+            """,
+            delete_batch,
+        )
+
+
 def _insert_negentropy_events_returning(
     db,
     recorded_by: str,
@@ -568,6 +650,50 @@ def add_events_to_sync_batch(
         (recorded_by, event_id, unified_key, created_at)
         VALUES (?, ?, ?, ?)
     """, batch_data)
+
+
+def remove_events_from_sync_batch(
+    db,
+    recorded_by: str,
+    event_ids: list[str],
+) -> int:
+    """Remove events from the sync system (negentropy tables only).
+
+    Deletes from negentropy_events and updates bucket hashes/counts.
+    Returns the number of events removed.
+    """
+    if not event_ids:
+        return 0
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    unique_ids = list(dict.fromkeys(event_ids))
+
+    removed_rows: list[tuple[str, str]] = []
+    chunk_size = int(os.getenv("NEGENTROPY_EVENT_CHUNK", "400"))
+
+    for chunk in _chunked(unique_ids, chunk_size):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = safedb.query(
+            f"SELECT event_id, unified_key FROM negentropy_events "
+            f"WHERE recorded_by = ? AND event_id IN ({placeholders})",
+            tuple([recorded_by, *chunk]),
+        )
+        for row in rows:
+            removed_rows.append((row["event_id"], row["unified_key"]))
+
+    if not removed_rows:
+        return 0
+
+    _apply_bucket_removals(db, recorded_by, removed_rows)
+
+    for chunk in _chunked([row[0] for row in removed_rows], chunk_size):
+        placeholders = ",".join("?" for _ in chunk)
+        safedb.execute(
+            f"DELETE FROM negentropy_events WHERE recorded_by = ? AND event_id IN ({placeholders})",
+            tuple([recorded_by, *chunk]),
+        )
+
+    return len(removed_rows)
 
 
 def rebuild_buckets_for_peer(db, recorded_by: str) -> None:

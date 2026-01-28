@@ -181,6 +181,12 @@ def _handle_finalize_message_deletion(args: dict, recorded_by: str, recorded_at:
     deleted_count = cascade_delete_from_valid_events(message_id, recorded_by, db)
     log.info(f"message_deletion: cascaded deletion of {deleted_count} events from valid_events")
 
+    # Remove from negentropy sync tables (keep buckets consistent)
+    from events.network import negentropy
+    removed = negentropy.remove_events_from_sync_batch(db, recorded_by, [message_id])
+    if removed:
+        log.info(f"message_deletion: removed {removed} negentropy event(s) for {message_id[:20]}...")
+
     # Delete blob from store
     unsafedb.execute("DELETE FROM store WHERE id = ?", (message_id,))
     log.info(f"message_deletion: deleted blob {message_id[:20]}... from store")
