@@ -44,8 +44,8 @@ def create(peer_id: str, cutoff_ms: int, t_ms: int, db: Any) -> str:
 
     blob = json.dumps(event_data).encode()
 
-    # Store the event with recorded wrapper
-    purge_expired_id = store.event(blob, peer_id, t_ms, db)
+    # Store without projection (purge_expired is local-only audit data)
+    purge_expired_id = store.batch_store_events([blob], peer_id, t_ms, db)[0]
 
     log.info(f"purge_expired.create() created purge_expired_id={purge_expired_id[:20]}...")
     return purge_expired_id

@@ -14,7 +14,7 @@ Tests:
 """
 from core.db import create_safe_db, create_unsafe_db
 from events.identity import user, invite, network as network_module, peer, admin
-from core import crypto, store
+from core import crypto, store, wire_format
 from tests.utils.tick_helper import assert_eventually
 
 
@@ -168,32 +168,27 @@ def test_admin_group_workflow(fresh_db):
     rogue_invite_pubkey_b64 = crypto.b64encode(rogue_invite_public_key)
     rogue_invite_prekey_id = crypto.b64encode(crypto.hash(rogue_invite_public_key))
 
-    charlie_prekey_row = unsafedb.query_one(
-        "SELECT connection_prekey_id, public_key FROM connection_prekeys WHERE owner_peer_id = ? LIMIT 1",
-        (charlie['peer_id'],)
-    )
-
-    rogue_invite_data = {
-        'type': 'invite',
-        'invite_pubkey': rogue_invite_pubkey_b64,
-        'invite_prekey_id': rogue_invite_prekey_id,
-        'network_id': charlie_network['network_id'],
-        'group_id': all_users_group_id,
-        'channel_id': charlie_channel['channel_id'],
-        'key_id': charlie_group_key_row['key_id'],
-        'inviter_peer_shared_id': charlie['peer_shared_id'],
-        'inviter_user_id': charlie['user_id'],  # Charlie is NOT an admin!
-        'inviter_connection_prekey_public_key': crypto.b64encode(charlie_prekey_row['public_key']),
-        'inviter_connection_prekey_shared_id': charlie['peer_shared_id'],
-        'inviter_connection_prekey_id': charlie_prekey_row['connection_prekey_id'],
-        'signed_by': charlie['peer_shared_id'],
-        'created_at': t_ms + 2000
-    }
 
     charlie_private_key = peer.get_private_key(charlie['peer_id'], charlie['peer_id'], db)
-    signed_rogue_invite = crypto.sign_event(rogue_invite_data, charlie_private_key)
-
-    rogue_invite_blob = crypto.canonicalize_json(signed_rogue_invite)
+    rogue_invite_blob = wire_format.encode_invite_wire_event(
+        mode="user",
+        invite_pubkey_b64=rogue_invite_pubkey_b64,
+        invite_prekey_id_b64=rogue_invite_prekey_id,
+        group_id_b64=all_users_group_id,
+        channel_id_b64=charlie_channel['channel_id'],
+        key_id_b64=charlie_group_key_row['key_id'],
+        network_id_b64=charlie_network['network_id'],
+        inviter_peer_shared_id_b64=charlie['peer_shared_id'],
+        inviter_user_id_b64=charlie['user_id'],  # Charlie is NOT an admin!
+        target_user_id_b64=None,
+        admin_grant_id_b64=None,
+        inviter_ip=None,
+        inviter_port=None,
+        signed_by_b64=charlie['peer_shared_id'],
+        signer_type='peer_shared',
+        created_at_ms=t_ms + 2000,
+        private_key=charlie_private_key,
+    )
     rogue_invite_id = store.event(rogue_invite_blob, charlie['peer_id'], t_ms + 2000, db)
     db.commit()
 

@@ -289,7 +289,7 @@ def _prefetch_project_contexts(
         if not event_blob:
             continue
         if event_blob[:1] in (b'{', b'['):
-            continue
+            raise ValueError("JSON event blobs are no longer supported")
         if len(event_blob) < crypto.KEY_ID_SIZE:
             continue
         key_id_b64 = crypto.b64encode(event_blob[:crypto.KEY_ID_SIZE])
@@ -449,10 +449,7 @@ def _decode_event_blob(
         event_data = wire_format.decode_negentropy_wire_event(event_blob)
     else:
         if event_blob and event_blob[:1] in (b'{', b'['):
-            try:
-                event_data = crypto.parse_json(event_blob)
-            except Exception:
-                event_data = None
+            raise ValueError("JSON event blobs are no longer supported")
 
     if isinstance(event_data, dict):
         event_type = event_data.get('type')

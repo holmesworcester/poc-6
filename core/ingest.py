@@ -6,6 +6,7 @@ import json
 import logging
 
 from core import crypto
+from core import wire_format
 from events import registry
 from core.db import create_safe_db
 
@@ -192,6 +193,82 @@ def append_incoming_log(
     return total
 
 
+def _event_type_from_envelope(event_blob: bytes) -> str | None:
+    if wire_format.is_wire_message_envelope(event_blob):
+        return "message"
+    if wire_format.is_wire_channel_envelope(event_blob):
+        return "channel"
+    if wire_format.is_wire_message_update_envelope(event_blob):
+        return "message_update"
+    if wire_format.is_wire_message_deletion_envelope(event_blob):
+        return "message_deletion"
+    if wire_format.is_wire_message_reaction_envelope(event_blob):
+        return "message_reaction"
+    if wire_format.is_wire_message_reaction_deletion_envelope(event_blob):
+        return "message_reaction_deletion"
+    if wire_format.is_wire_message_attachment_envelope(event_blob):
+        return "message_attachment"
+    if wire_format.is_wire_message_rekey_envelope(event_blob):
+        return "message_rekey"
+    if wire_format.is_wire_channel_update_envelope(event_blob):
+        return "channel_update"
+    if wire_format.is_wire_group_envelope(event_blob):
+        return "group"
+    if wire_format.is_wire_group_member_envelope(event_blob):
+        return "group_member"
+    if wire_format.is_wire_group_key_envelope(event_blob):
+        return "group_key"
+    if wire_format.is_wire_group_key_shared_envelope(event_blob):
+        return "group_key_shared"
+    if wire_format.is_wire_group_prekey_envelope(event_blob):
+        return "group_prekey"
+    if wire_format.is_wire_group_prekey_shared_envelope(event_blob):
+        return "group_prekey_shared"
+    if wire_format.is_wire_connection_prekey_envelope(event_blob):
+        return "connection_prekey"
+    if wire_format.is_wire_connection_prekey_shared_envelope(event_blob):
+        return "connection_prekey_shared"
+    if wire_format.is_wire_connection_request_envelope(event_blob):
+        return "connection_request"
+    if wire_format.is_wire_connection_ack_envelope(event_blob):
+        return "connection_ack"
+    if wire_format.is_wire_file_slice(event_blob):
+        return "file_slice"
+    if wire_format.is_wire_user_envelope(event_blob):
+        return "user"
+    if wire_format.is_wire_username_update_envelope(event_blob):
+        return "username_update"
+    if wire_format.is_wire_user_removed_envelope(event_blob):
+        return "user_removed"
+    if wire_format.is_wire_peer_envelope(event_blob):
+        return "peer"
+    if wire_format.is_wire_peer_shared_envelope(event_blob):
+        return "peer_shared"
+    if wire_format.is_wire_peer_name_update_envelope(event_blob):
+        return "peer_name_update"
+    if wire_format.is_wire_peer_removed_envelope(event_blob):
+        return "peer_removed"
+    if wire_format.is_wire_network_envelope(event_blob):
+        return "network"
+    if wire_format.is_wire_network_name_update_envelope(event_blob):
+        return "network_name_update"
+    if wire_format.is_wire_admin_envelope(event_blob):
+        return "admin"
+    if wire_format.is_wire_invite_envelope(event_blob):
+        return "invite"
+    if wire_format.is_wire_invite_accepted_envelope(event_blob):
+        return "invite_accepted"
+    if wire_format.is_wire_self_address_envelope(event_blob):
+        return "self_address"
+    if wire_format.is_wire_observed_address_envelope(event_blob):
+        return "observed_address"
+    if wire_format.is_wire_network_intro_envelope(event_blob):
+        return "network_intro"
+    if wire_format.is_wire_negentropy_envelope(event_blob):
+        return "negentropy"
+    return None
+
+
 def materialize_log_batch(
     db: Any,
     start_log_id: int,
@@ -236,16 +313,11 @@ def materialize_log_batch(
         else:
             event_blob = blob
 
-        event_data = None
-        is_plaintext = False
         if event_blob[:1] in (b'{', b'['):
-            try:
-                event_data = crypto.parse_json(event_blob)
-                is_plaintext = True
-            except Exception:
-                is_plaintext = False
+            raise ValueError("JSON event blobs are no longer supported")
 
-        if is_plaintext and isinstance(event_data, dict) and event_data.get("type") == "negentropy":
+        if wire_format.is_wire_negentropy_envelope(event_blob):
+            event_data = wire_format.decode_negentropy_wire_event(event_blob)
             protocol_rows.append((log_id, recorded_by, event_data))
             protocol_log_ids.append(log_id)
             continue
@@ -253,12 +325,8 @@ def materialize_log_batch(
         event_id = crypto.b64encode(crypto.hash(event_blob))
         event_rows.append((event_id, event_blob, stored_at))
 
-        if is_plaintext:
-            event_hint = b''
-            event_type = event_data.get('type') if isinstance(event_data, dict) else None
-        else:
-            event_hint = event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b''
-            event_type = None
+        event_hint = event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b''
+        event_type = _event_type_from_envelope(event_blob)
 
         recorded_blob = json.dumps({
             'type': 'recorded',
@@ -270,12 +338,10 @@ def materialize_log_batch(
         recorded_ids.append(recorded_id)
         index_rows.append((log_id, event_id, recorded_id, recorded_by, event_hint, event_type, stored_at))
 
-        if is_plaintext:
-            plaintext_recorded_ids.append(recorded_id)
-            event_type = event_data.get('type') if isinstance(event_data, dict) else None
-            is_shareable = bool(event_type and registry.is_shareable(event_type))
+        if event_type:
+            is_shareable = registry.is_shareable(event_type)
         else:
-            is_shareable = True  # Encrypted or opaque events are assumed shareable
+            is_shareable = True  # Opaque events are assumed shareable
 
         if is_shareable:
             shareable_rows.append((event_id, recorded_by, stored_at))

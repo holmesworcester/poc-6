@@ -425,13 +425,11 @@ def _resolve_invite_pubkey(
     blob = store.get(invite_id, unsafedb)
     if not blob:
         return None
-    try:
-        if wire_format.is_wire_invite_envelope(blob):
-            invite_data = wire_format.decode_invite_wire_event(blob)
-        else:
-            invite_data = crypto.parse_json(blob)
-    except Exception:
+    if blob[:1] in (b'{', b'['):
+        raise ValueError("JSON invite blobs are no longer supported")
+    if not wire_format.is_wire_invite_envelope(blob):
         return None
+    invite_data = wire_format.decode_invite_wire_event(blob)
     invite_pubkey = invite_data.get("invite_pubkey")
     if not invite_pubkey:
         return None
@@ -448,16 +446,7 @@ def _signature_payload(
             return None
         return (bytes(wire_signed_bytes), bytes(wire_signature))
 
-    sig_b64 = event_data.get("signature")
-    if not sig_b64:
-        return None
-    event_without_sig = {k: v for k, v in event_data.items() if k != "signature"}
-    signed_bytes = crypto.canonicalize_json(event_without_sig)
-    try:
-        signature = crypto.b64decode(sig_b64)
-    except Exception:
-        return None
-    return (signed_bytes, signature)
+    return None
 
 
 def _resolve_signer(

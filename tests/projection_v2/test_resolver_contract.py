@@ -55,11 +55,13 @@ class TestResolverRejectOnInvalidSignature:
         register_event(event_type, event_spec)
 
         _, public_key = crypto.generate_keypair()
+        signed_bytes = b"test-wire"
         event_data = {
             'type': event_type,
             'signer_type': 'network',
             'network_pubkey': crypto.b64encode(public_key),
-            'signature': crypto.b64encode(b'not-a-real-signature'),
+            '_wire_signed_bytes': signed_bytes,
+            '_wire_signature': b'not-a-real-signature',
         }
 
         result = v2_resolver.resolve_event(

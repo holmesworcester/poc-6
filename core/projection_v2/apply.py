@@ -104,24 +104,12 @@ def _apply_emit_events(
     from core import store
     from core import crypto
     from core import wire_format
-    from events.identity import peer
-
     for emit in emit_events:
         peer_id = emit.peer_id or recorded_by
-
-        # Get the event module for this type to check if it needs signing
-        from events import registry
-        event_spec = registry.get_event_spec(emit.event_type)
 
         event_data = dict(emit.event_data)
         event_data['type'] = emit.event_type
 
-        # Sign if needed (most events need signing)
-        if event_spec and event_spec.get('signer'):
-            private_key = peer.get_private_key(peer_id, peer_id, db)
-            event_data = crypto.sign_event(event_data, private_key)
-
-        # Store the event
         if emit.event_type == "group_key":
             key_b64 = event_data.get("key")
             if not key_b64:
@@ -131,7 +119,7 @@ def _apply_emit_events(
                 created_at_ms=0,
             )
         else:
-            blob = crypto.canonicalize_json(event_data)
+            raise ValueError(f"emit_event unsupported without wire encoder: {emit.event_type}")
         event_id = store.event(blob, peer_id, recorded_at, db)
 
         log.debug(f"apply: emitted {emit.event_type} event {event_id[:20]}...")

@@ -8,6 +8,7 @@ Provides utilities for:
 from typing import Any
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db
 
 
@@ -37,10 +38,23 @@ def build_signed_event(
     if signed_by is not None:
         full_data['signed_by'] = signed_by
 
-    signed_event = crypto.sign_event(full_data, private_key)
-    blob = crypto.canonicalize_json(signed_event)
+    signed_bytes = b"test-wire-payload"
+    signature = crypto.sign(signed_bytes, private_key)
+    full_data["_wire_signed_bytes"] = signed_bytes
+    full_data["_wire_signature"] = signature
 
-    return blob, signed_event
+    # Build a minimal wire envelope if possible; fall back to empty blob for resolver-only tests.
+    blob = wire_format.encode_admin_wire_event(
+        user_id_b64=full_data.get("user_id", crypto.b64encode(b"\x00" * 32)),
+        network_id_b64=full_data.get("network_id", crypto.b64encode(b"\x00" * 32)),
+        signed_by_b64=full_data.get("signed_by", crypto.b64encode(b"\x00" * 32)),
+        signer_type=full_data.get("signer_type", "network"),
+        admin_grant_id_b64=full_data.get("admin_grant"),
+        created_at_ms=full_data.get("created_at", 0),
+        private_key=private_key,
+    ) if event_type == "admin" else b""
+
+    return blob, full_data
 
 
 def store_and_record_event(

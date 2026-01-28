@@ -4,6 +4,7 @@ import sqlite3
 from core.db import Database
 from core import schema
 from core import crypto
+from core import wire_format
 from events import registry
 
 
@@ -50,14 +51,11 @@ def v2_network_state(v2_db):
 
     # Create network event
     network_private_key, network_public_key = crypto.generate_keypair()
-    event_data = {
-        'type': 'network',
-        'network_pubkey': crypto.b64encode(network_public_key),
-        'signer_type': 'network',
-        'created_at': 1000
-    }
-    signed_event = crypto.sign_event(event_data, network_private_key)
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_network_wire_event(
+        network_pubkey=network_public_key,
+        created_at_ms=1000,
+        private_key=network_private_key,
+    )
 
     # Compute network_id before storing (needed for trust anchor)
     network_id = crypto.b64encode(crypto.hash(blob))

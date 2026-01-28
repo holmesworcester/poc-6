@@ -66,6 +66,7 @@ from events.group import group_member, group_key, group_key_shared, group
 from events.content import message
 from tests.utils.tick_helper import run_ticks, assert_eventually
 from core import crypto
+from core import wire_format
 from core import store
 
 
@@ -376,26 +377,29 @@ class TestInvitationRejection:
 
         # Create rogue prekey
         rogue_private_key, rogue_public_key = crypto.generate_keypair()
-        rogue_prekey_id = crypto.b64encode(crypto.hash(rogue_public_key)[:16])
+        rogue_prekey_id = crypto.b64encode(crypto.hash(rogue_public_key))
 
-        # Craft rogue invite (bypassing authorization checks)
-        rogue_invite_data = {
-            'type': 'invite',
-            'mode': 'user',
-            'invite_pubkey': crypto.b64encode(rogue_public_key),
-            'invite_prekey_id': rogue_prekey_id,
-            'group_id': all_users_group_id,
-            'inviter_user_id': charlie['user_id'],
-            'signed_by': charlie['peer_shared_id'],  # Charlie is NOT admin
-            'created_at': 20000
-        }
-
-        # Sign with Charlie's key
+        # Craft rogue invite (bypassing authorization checks) using wire format
         charlie_private_key = peer.get_private_key(charlie['peer_id'], charlie['peer_id'], db)
-        signed_rogue_invite = crypto.sign_event(rogue_invite_data, charlie_private_key)
-
-        # Store directly (bypassing invite.create())
-        rogue_blob = crypto.canonicalize_json(signed_rogue_invite)
+        rogue_blob = wire_format.encode_invite_wire_event(
+            mode="user",
+            invite_pubkey_b64=crypto.b64encode(rogue_public_key),
+            invite_prekey_id_b64=rogue_prekey_id,
+            group_id_b64=all_users_group_id,
+            channel_id_b64=channel_row["channel_id"] if channel_row else None,
+            key_id_b64=group_row["key_id"] if group_row else None,
+            network_id_b64=charlie["network_id"],
+            inviter_peer_shared_id_b64=charlie["peer_shared_id"],
+            inviter_user_id_b64=charlie["user_id"],
+            target_user_id_b64=None,
+            admin_grant_id_b64=None,
+            inviter_ip=None,
+            inviter_port=None,
+            signed_by_b64=charlie["peer_shared_id"],  # Charlie is NOT admin
+            signer_type="peer_shared",
+            created_at_ms=20000,
+            private_key=charlie_private_key,
+        )
         rogue_invite_id = store.event(rogue_blob, charlie['peer_id'], 20000, db)
         db.commit()
 

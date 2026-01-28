@@ -143,80 +143,6 @@ def b64decode(data: str) -> bytes:
     return base64.b64decode(data)
 
 
-def canonicalize_json(obj: dict[str, Any]) -> bytes:
-    """Canonicalize a JSON object to bytes for deterministic encryption."""
-    return json.dumps(obj, sort_keys=True, separators=(',', ':')).encode('utf-8')
-
-
-def sign_event(event_data: dict[str, Any], private_key: bytes) -> dict[str, Any]:
-    """Add signature to event dict. Signature is computed over all fields except itself."""
-    import logging
-    log = logging.getLogger(__name__)
-
-    event_type = event_data.get('type', 'unknown')
-    log.debug(f"crypto.sign_event() signing event type={event_type}")
-
-    canonical = canonicalize_json(event_data)
-    sig = sign(canonical, private_key)
-    result = {**event_data, 'signature': b64encode(sig)}
-
-    log.debug(f"crypto.sign_event() signed event type={event_type}, canonical_size={len(canonical)}B")
-    return result
-
-
-def verify_event(event_data: dict[str, Any], public_key: bytes) -> bool:
-    """Verify event signature. Returns False if signature missing or invalid."""
-    import logging
-    log = logging.getLogger(__name__)
-
-    event_type = event_data.get('type', 'unknown')
-    sig_b64 = event_data.get('signature')
-
-    if not sig_b64:
-        log.warning(f"crypto.verify_event() missing signature for event type={event_type}")
-        return False
-
-    # Remove signature from dict for verification
-    event_without_sig = {k: v for k, v in event_data.items() if k != 'signature'}
-    canonical = canonicalize_json(event_without_sig)
-
-    try:
-        result = verify(canonical, b64decode(sig_b64), public_key)
-        if result:
-            log.debug(f"crypto.verify_event() signature valid for event type={event_type}")
-        else:
-            log.warning(f"crypto.verify_event() signature INVALID for event type={event_type}")
-        return result
-    except Exception as e:
-        log.error(f"crypto.verify_event() verification failed for event type={event_type}: {e}")
-        return False
-
-
-def verify_signed_by_peer_shared(event_data: dict[str, Any], recorded_by: str, db: Any) -> bool:
-    """Verify event signature using peer_shared public key from event data.
-
-    Retrieves public key from peers_shared table using signed_by field and verifies signature.
-
-    Args:
-        event_data: Event data dict with signature and signed_by field
-        recorded_by: Peer ID whose perspective to use for peer_shared lookup
-        db: Database connection
-
-    Returns:
-        True if signature is valid
-        False if signature invalid OR peer_shared not projected yet OR missing fields
-    """
-    signer_peer_shared_id = event_data.get('signed_by')
-    if not signer_peer_shared_id:
-        return False
-
-    try:
-        from events.identity import peer_shared
-        public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
-        return verify_event(event_data, public_key)
-    except ValueError:
-        # peer_shared not projected yet or not found
-        return False
 
 
 def deterministic_nonce(hint: bytes, plaintext_bytes: bytes) -> bytes:
@@ -532,16 +458,8 @@ def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
 
     log.debug(f"crypto._unwrap_common({namespace_name}) called with blob size={len(wrapped_blob)}B, recorded_by={recorded_by[:20]}...")
 
-    # Check if blob is plaintext JSON (starts with '{' or '[')
     if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
-        try:
-            # Verify it's valid JSON
-            json.loads(wrapped_blob.decode('utf-8'))
-            log.debug(f"crypto._unwrap_common({namespace_name}) blob is plaintext JSON, returning as-is")
-            return (wrapped_blob, [])
-        except Exception:
-            # Not valid JSON, continue with decrypt attempt
-            pass
+        raise ValueError("JSON event blobs are no longer supported")
 
     # Extract id from blob
     try:
