@@ -140,6 +140,7 @@ class ReceiveJob(Job):
         budget_ms = self.budget_limit_ms()
         chunk_size = int(os.getenv("RECEIVE_INSERT_CHUNK", "1000"))
         batch_size = int(os.getenv("RECEIVE_BATCH", "200"))
+        unwrap_transit = os.getenv("RECEIVE_UNWRAP_TRANSIT") == "1"
 
         start = time.perf_counter()
         total_received = 0
@@ -149,7 +150,13 @@ class ReceiveJob(Job):
             batch = transport.drain_incoming(batch_size)
             if not batch:
                 break
-            queued = ingest.queue_incoming(batch, t_ms, db, chunk_size=chunk_size)
+            queued = ingest.queue_incoming(
+                batch,
+                t_ms,
+                db,
+                chunk_size=chunk_size,
+                unwrap_transit=unwrap_transit,
+            )
             total_received += len(batch)
             total_queued += queued
             if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
@@ -182,7 +189,7 @@ class SyncRespondJob(Job):
 
         while (time.perf_counter() - start) * 1000 < budget_ms:
             rows = db._conn.execute(
-                "SELECT id, recorded_by, blob "
+                "SELECT id, recorded_by, blob, transit_wrapped "
                 "FROM incoming_event_log "
                 "WHERE id > ? AND (event_type IS NULL OR event_type != 'negentropy') "
                 "ORDER BY id LIMIT ?",
@@ -192,8 +199,11 @@ class SyncRespondJob(Job):
                 break
 
             handled_log_ids: list[tuple[int]] = []
-            for log_id, recorded_by, blob in rows:
-                event_blob, _missing = crypto.unwrap_transit(blob, recorded_by, db)
+            for log_id, recorded_by, blob, transit_wrapped in rows:
+                if transit_wrapped:
+                    event_blob, _missing = crypto.unwrap_transit(blob, recorded_by, db)
+                else:
+                    event_blob = blob
                 if not event_blob or event_blob[:1] not in (b'{', b'['):
                     continue
                 try:

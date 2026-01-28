@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS incoming_event_log (
     source_ip TEXT,
     source_port INTEGER,
     event_type TEXT,               -- Optional protocol marker (e.g. negentropy)
-    blob BLOB NOT NULL
+    blob BLOB NOT NULL,
+    transit_wrapped INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_incoming_event_log_hint

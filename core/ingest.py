@@ -70,22 +70,113 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     return []
 
 
+def _unwrap_transit_with_key(blob: bytes, key_data: dict[str, Any]) -> bytes | None:
+    id_bytes = blob[:crypto.KEY_ID_SIZE]
+    encrypted_data = blob[crypto.KEY_ID_SIZE:]
+
+    try:
+        if key_data.get('type') == 'symmetric':
+            nonce = encrypted_data[:crypto.NONCE_SIZE]
+            ciphertext = encrypted_data[crypto.NONCE_SIZE:]
+            return crypto.decrypt(ciphertext, key_data['key'], nonce)
+        if key_data.get('type') == 'asymmetric':
+            return crypto.unseal(encrypted_data, key_data['private_key'])
+    except Exception:
+        return None
+    return None
+
+
 def queue_incoming(
     batch: Iterable[tuple[bytes, tuple[str, int] | None]],
     t_ms: int,
     db: Any,
     chunk_size: int = 1000,
+    unwrap_transit: bool = False,
 ) -> int:
     """Route and append incoming transport blobs to the ingest log."""
-    rows: list[tuple[bytes, str, int, str | None, int | None, str | None, bytes]] = []
-    for blob, from_addr in batch:
-        recorded_by_peers = route_blob_to_peers(blob, db)
-        if not recorded_by_peers:
-            continue
-        hint = blob[:crypto.KEY_ID_SIZE] if len(blob) >= crypto.KEY_ID_SIZE else b""
-        source_ip, source_port = (from_addr if from_addr else (None, None))
-        for peer_id in recorded_by_peers:
-            rows.append((hint, peer_id, t_ms, source_ip, source_port, None, blob))
+    rows: list[tuple[bytes, str, int, str | None, int | None, str | None, bytes, int]] = []
+
+    if not unwrap_transit:
+        for blob, from_addr in batch:
+            recorded_by_peers = route_blob_to_peers(blob, db)
+            if not recorded_by_peers:
+                continue
+            hint = blob[:crypto.KEY_ID_SIZE] if len(blob) >= crypto.KEY_ID_SIZE else b""
+            source_ip, source_port = (from_addr if from_addr else (None, None))
+            for peer_id in recorded_by_peers:
+                rows.append((hint, peer_id, t_ms, source_ip, source_port, None, blob, 1))
+    else:
+        entries: list[tuple[bytes, tuple[str, int] | None, bytes, str]] = []
+        key_ids: set[str] = set()
+
+        for blob, from_addr in batch:
+            if not blob:
+                continue
+            key_id_bytes = blob[:crypto.KEY_ID_SIZE] if len(blob) >= crypto.KEY_ID_SIZE else b""
+            if not key_id_bytes:
+                continue
+            key_id_b64 = crypto.b64encode(key_id_bytes)
+            entries.append((blob, from_addr, key_id_bytes, key_id_b64))
+            key_ids.add(key_id_b64)
+
+        if key_ids:
+            placeholders = ",".join("?" for _ in key_ids)
+            params = tuple(key_ids)
+
+            key_map: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+
+            conn_rows = db._conn.execute(
+                f"SELECT key_id, recorded_by, our_key FROM connections WHERE key_id IN ({placeholders})",
+                params,
+            ).fetchall()
+            for key_id, recorded_by, our_key in conn_rows:
+                key_data = {
+                    'id': crypto.b64decode(key_id),
+                    'key': our_key,
+                    'type': 'symmetric',
+                }
+                key_map.setdefault(key_id, []).append((recorded_by, key_data))
+
+            prekey_rows = db._conn.execute(
+                f"SELECT connection_prekey_id, owner_peer_id, private_key "
+                f"FROM connection_prekeys WHERE connection_prekey_id IN ({placeholders})",
+                params,
+            ).fetchall()
+            for key_id, owner_peer_id, private_key in prekey_rows:
+                key_data = {
+                    'id': crypto.b64decode(key_id),
+                    'private_key': private_key,
+                    'type': 'asymmetric',
+                }
+                key_map.setdefault(key_id, []).append((owner_peer_id, key_data))
+
+            peer_rows = db._conn.execute(
+                f"SELECT peer_id, private_key FROM local_peers WHERE peer_id IN ({placeholders})",
+                params,
+            ).fetchall()
+            for peer_id, private_key in peer_rows:
+                key_data = {
+                    'id': crypto.b64decode(peer_id),
+                    'private_key': private_key,
+                    'type': 'asymmetric',
+                }
+                key_map.setdefault(peer_id, []).append((peer_id, key_data))
+
+            for blob, from_addr, _key_id_bytes, key_id_b64 in entries:
+                candidates = key_map.get(key_id_b64, [])
+                if not candidates:
+                    continue
+                source_ip, source_port = (from_addr if from_addr else (None, None))
+                for recorded_by, key_data in candidates:
+                    event_blob = _unwrap_transit_with_key(blob, key_data)
+                    if not event_blob:
+                        continue
+                    hint = (
+                        b""
+                        if event_blob[:1] in (b"{", b"[")
+                        else event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b""
+                    )
+                    rows.append((hint, recorded_by, t_ms, source_ip, source_port, None, event_blob, 0))
 
     if not rows:
         return 0
@@ -94,14 +185,14 @@ def queue_incoming(
 
 
 def append_incoming_log(
-    rows: Iterable[tuple[bytes, str, int, str | None, int | None, str | None, bytes]],
+    rows: Iterable[tuple[bytes, str, int, str | None, int | None, str | None, bytes, int]],
     db: Any,
     chunk_size: int = 1000,
 ) -> int:
     """Append raw incoming blobs into incoming_event_log.
 
     Args:
-        rows: Iterable of (hint, recorded_by, received_at, source_ip, source_port, event_type, blob)
+        rows: Iterable of (hint, recorded_by, received_at, source_ip, source_port, event_type, blob, transit_wrapped)
         db: Database connection
         chunk_size: Batch size for executemany
 
@@ -112,14 +203,14 @@ def append_incoming_log(
         raise ValueError("chunk_size must be >= 1")
 
     total = 0
-    batch: list[tuple[bytes, str, int, str | None, int | None, str | None, bytes]] = []
+    batch: list[tuple[bytes, str, int, str | None, int | None, str | None, bytes, int]] = []
     for row in rows:
         batch.append(row)
         if len(batch) >= chunk_size:
             db._conn.executemany(
                 "INSERT INTO incoming_event_log "
-                "(hint, recorded_by, received_at, source_ip, source_port, event_type, blob) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(hint, recorded_by, received_at, source_ip, source_port, event_type, blob, transit_wrapped) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 batch,
             )
             total += len(batch)
@@ -128,8 +219,8 @@ def append_incoming_log(
     if batch:
         db._conn.executemany(
             "INSERT INTO incoming_event_log "
-            "(hint, recorded_by, received_at, source_ip, source_port, event_type, blob) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(hint, recorded_by, received_at, source_ip, source_port, event_type, blob, transit_wrapped) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             batch,
         )
         total += len(batch)
@@ -152,7 +243,7 @@ def materialize_log_batch(
         return ([], start_log_id, [], [], [])
 
     cursor = db._conn.execute(
-        "SELECT id, hint, recorded_by, received_at, source_ip, source_port, blob, event_type "
+        "SELECT id, hint, recorded_by, received_at, source_ip, source_port, blob, event_type, transit_wrapped "
         "FROM incoming_event_log WHERE id > ? AND (event_type IS NULL OR event_type != 'negentropy') "
         "ORDER BY id LIMIT ?",
         (start_log_id, limit),
@@ -171,12 +262,15 @@ def materialize_log_batch(
     metadata_rows: list[tuple[str, str, str | None, int | None]] = []
     protocol_log_ids: list[int] = []
 
-    for log_id, _transit_hint, recorded_by, received_at, source_ip, source_port, blob, event_type in rows:
+    for log_id, _transit_hint, recorded_by, received_at, source_ip, source_port, blob, event_type, transit_wrapped in rows:
         stored_at = received_at or t_ms
-        event_blob, _missing = crypto.unwrap_transit(blob, recorded_by, db)
-        if not event_blob:
-            log.warning("materialize_log_batch: transit unwrap failed for log_id=%s", log_id)
-            continue
+        if transit_wrapped:
+            event_blob, _missing = crypto.unwrap_transit(blob, recorded_by, db)
+            if not event_blob:
+                log.warning("materialize_log_batch: transit unwrap failed for log_id=%s", log_id)
+                continue
+        else:
+            event_blob = blob
 
         event_data = None
         is_plaintext = False

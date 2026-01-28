@@ -258,7 +258,11 @@ def main() -> None:
     parser.add_argument("--message-bytes", type=int, default=64)
     parser.add_argument("--max-rounds", type=int, default=200)
     parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--unwrap-receive", action="store_true")
     args = parser.parse_args()
+
+    if args.unwrap_receive:
+        os.environ["RECEIVE_UNWRAP_TRANSIT"] = "1"
 
     result = bench_mode(
         args.message_count,
