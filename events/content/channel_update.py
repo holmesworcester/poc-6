@@ -13,12 +13,15 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.content import channel
-from events.identity import invite as invite_module
+from events.group import group
+from events.identity import invite as invite_module, peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 EVENT_SPEC = {
     'encrypted': True,
@@ -63,6 +66,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if new_disappearing_time_ms is not None and new_disappearing_time_ms < 0:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_channel_update(channel_id, group_id, updated_by, new_channel_name, new_disappearing_time_ms)
+
     channel_row = ctx.deps.get('channel')
     if not channel_row or channel_row.get('group_id') != group_id:
         return ProjectorResult(writes=tuple(), valid_event=False)
@@ -92,6 +97,26 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_channel_update(
+    channel_id: str,
+    group_id: str,
+    updated_by: str,
+    new_channel_name: str | None,
+    new_disappearing_time_ms: int | None,
+) -> None:
+    """Validate channel_update fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_channel_update_plaintext(
+        channel_id=crypto.b64decode(channel_id),
+        group_id=crypto.b64decode(group_id),
+        updated_by=crypto.b64decode(updated_by),
+        new_channel_name=new_channel_name,
+        new_disappearing_time_ms=new_disappearing_time_ms,
+    )
+    decoded = wire_format.decode_channel_update_plaintext(plaintext)
+    if decoded["channel_id"] != crypto.b64decode(channel_id):
+        raise ValueError("wire shadow decode channel_id mismatch")
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -162,20 +187,23 @@ def create(
     # Calculate global_count (max existing + 1)
     global_count = channel.get_next_update_count(channel_id, peer_id, db)
 
-    # Build update event
-    event_data = {
-        'type': 'channel_update',
-        'channel_id': channel_id,
-        'group_id': group_id,
-        'updated_by': peer_shared_id,
-        'signer_type': 'peer_shared',
-        'created_at': t_ms,
-        'global_count': global_count,
-        'new_channel_name': new_channel_name,
-        'new_disappearing_time_ms': new_disappearing_time_ms,
-    }
+    _wire_shadow_channel_update(channel_id, group_id, peer_shared_id, new_channel_name, new_disappearing_time_ms)
 
-    event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(group_id, peer_id, db)
+    blob = wire_format.encode_channel_update_wire_event(
+        channel_id_b64=channel_id,
+        group_id_b64=group_id,
+        updated_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        new_channel_name=new_channel_name,
+        new_disappearing_time_ms=new_disappearing_time_ms,
+        global_count=global_count,
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(
         f"channel_update.create() created update_id={event_id} for channel_id={channel_id}, "
@@ -240,5 +268,3 @@ def validate(update_id: str, recorded_by: str, db: Any) -> bool:
         return False
 
     return True
-
-

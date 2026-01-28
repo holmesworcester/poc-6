@@ -6,14 +6,15 @@ SHAREABLE = False  # Local-only - contains private key material
 PROJECTION_TABLE = None
 
 from typing import Any
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 # Group prekeys expire after 30 days (in milliseconds)
 GROUP_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -42,6 +43,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not public_key_b64 or not private_key_b64:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_group_prekey(public_key_b64, private_key_b64)
 
     # Decode keys from base64 to bytes
     public_key = crypto.b64decode(public_key_b64)
@@ -128,14 +131,11 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
 
     # Create DETERMINISTIC event blob - only type and keys
     # This ensures same key material = same prekey_id on all peers
-    event_data = {
-        'type': 'group_prekey',
-        'public_key': crypto.b64encode(prekey_public),
-        'private_key': crypto.b64encode(prekey_private)
-    }
-
-    # Use sort_keys=True for canonical ordering
-    blob = json.dumps(event_data, sort_keys=True).encode()
+    blob = wire_format.encode_group_prekey_wire_event(
+        public_key=prekey_public,
+        private_key=prekey_private,
+        created_at_ms=0,
+    )
 
     # Store the blob to get prekey_id
     prekey_id = store.event(blob, peer_id, t_ms, db)
@@ -164,20 +164,28 @@ def create_from_material(public_key: bytes, private_key: bytes, peer_id: str, t_
 
     # Create DETERMINISTIC event blob - only type and keys
     # This ensures same key material = same prekey_id on all peers
-    event_data = {
-        'type': 'group_prekey',
-        'public_key': crypto.b64encode(public_key),
-        'private_key': crypto.b64encode(private_key)
-    }
-
-    # Use sort_keys=True for canonical ordering
-    blob = json.dumps(event_data, sort_keys=True).encode()
+    blob = wire_format.encode_group_prekey_wire_event(
+        public_key=public_key,
+        private_key=private_key,
+        created_at_ms=0,
+    )
 
     # Store event - t_ms is used for recorded_at metadata, not in the blob itself
     prekey_id = store.event(blob, peer_id, t_ms, db)
     log.info(f"group_prekey.create_from_material() created prekey_id={prekey_id}")
 
     return prekey_id
+
+
+def _wire_shadow_group_prekey(public_key_b64: str, private_key_b64: str) -> None:
+    """Validate group_prekey fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_group_prekey_plaintext(
+        public_key=crypto.b64decode(public_key_b64),
+        private_key=crypto.b64decode(private_key_b64),
+    )
+    decoded = wire_format.decode_group_prekey_plaintext(plaintext)
+    if decoded["public_key"] != crypto.b64decode(public_key_b64):
+        raise ValueError("wire shadow decode public_key mismatch")
 
 
 def get_group_prekey_for_peer(peer_shared_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:

@@ -21,10 +21,12 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 # Connection TTL (5 minutes default)
 CONNECTION_TTL_MS = 300_000
@@ -67,23 +69,18 @@ def create(
     # Generate fresh symmetric key for the ack
     symmetric_key = crypto.generate_secret()
 
-    # Build connection ack event
-    event_data = {
-        'type': 'connection_ack',
-        'for_request_id': for_request_id,
-        'key': crypto.b64encode(symmetric_key),
-        'signed_by': from_peer_shared_id,
-        'signer_type': 'peer_shared',  # Acks are always peer_shared signed
-        'created_at': t_ms,
-        'ttl_ms': CONNECTION_TTL_MS,
-    }
-
     # Sign with peer's private key
     private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
 
-    # Store the event
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_connection_ack_wire_event(
+        for_request_id_b64=for_request_id,
+        key=symmetric_key,
+        signed_by_b64=from_peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        ttl_ms=CONNECTION_TTL_MS,
+        private_key=private_key,
+    )
     unsafedb = create_unsafe_db(db)
     ack_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 
@@ -117,6 +114,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
         log.warning(f"connection_ack.project_pure: missing key in {event_id[:20]}...")
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_connection_ack(for_request_id, key_b64)
+
     their_key = crypto.b64decode(key_b64)
 
     log.info(f"connection_ack.project_pure: updating connection {for_request_id[:20]}... with ack {event_id[:20]}...")
@@ -140,6 +139,17 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_connection_ack(for_request_id: str, key_b64: str) -> None:
+    """Validate connection_ack fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_connection_ack_plaintext(
+        for_request_id=crypto.b64decode(for_request_id),
+        key=crypto.b64decode(key_b64),
+    )
+    decoded = wire_format.decode_connection_ack_plaintext(plaintext)
+    if decoded["for_request_id"] != crypto.b64decode(for_request_id):
+        raise ValueError("wire shadow decode for_request_id mismatch")
 
 
 def send_ack_for_request(

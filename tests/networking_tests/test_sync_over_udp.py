@@ -5,10 +5,17 @@ These tests verify that events can be synced between separate client databases
 via actual UDP packets on localhost.
 """
 import time
+import pytest
 from events.identity import user
 from core import transport
 from tests.networking_tests.conftest import (
     Client, UDPTransport, tick_all, assert_eventually_multi
+)
+from tests.networking_tests.ipc import supports_udp_socket
+
+pytestmark = pytest.mark.skipif(
+    not supports_udp_socket(),
+    reason="UDP sockets are not permitted on this platform",
 )
 
 

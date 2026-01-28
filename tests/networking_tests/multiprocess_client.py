@@ -11,14 +11,15 @@ Communication with the test is via multiprocessing Queues.
 import os
 import sqlite3
 import logging
-from multiprocessing import Process, Queue
+from multiprocessing import Process
 from typing import Any, Optional
 from dataclasses import dataclass, field
+from tests.networking_tests.ipc import make_queue_pair
 
 log = logging.getLogger(__name__)
 
 
-def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port: int, name: str):
+def client_worker(cmd_queue: Any, result_queue: Any, db_path: str, udp_port: int, name: str):
     """Worker function that runs in a separate process.
 
     Has its own fresh imports, so no shared state with other processes.
@@ -260,8 +261,8 @@ class RemoteClient:
     udp_port: int
 
     _process: Optional[Process] = field(default=None, repr=False)
-    _cmd_queue: Optional[Queue] = field(default=None, repr=False)
-    _result_queue: Optional[Queue] = field(default=None, repr=False)
+    _cmd_queue: Optional[Any] = field(default=None, repr=False)
+    _result_queue: Optional[Any] = field(default=None, repr=False)
 
     # Cached state from last operation
     peer_id: Optional[str] = None
@@ -276,11 +277,13 @@ class RemoteClient:
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
 
-        self._cmd_queue = Queue()
-        self._result_queue = Queue()
+        cmd_send, cmd_recv = make_queue_pair()
+        result_send, result_recv = make_queue_pair()
+        self._cmd_queue = cmd_send
+        self._result_queue = result_recv
         self._process = Process(
             target=client_worker,
-            args=(self._cmd_queue, self._result_queue, self.db_path, self.udp_port, self.name)
+            args=(cmd_recv, result_send, self.db_path, self.udp_port, self.name)
         )
         self._process.start()
 

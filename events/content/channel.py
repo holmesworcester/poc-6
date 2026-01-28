@@ -7,16 +7,17 @@ SHAREABLE = True  # Channels sync to all members
 PROJECTION_TABLE = ('channels', 'channel_id')
 
 from typing import Any
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group_key, group as group_module, group_member
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - signed by peer_shared, encrypted
@@ -63,6 +64,14 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not name or not group_id or not signed_by or created_at is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_channel(
+        group_id=group_id,
+        name=name,
+        disappearing_time_ms=disappearing_time_ms,
+        is_main=is_main,
+        admin_grant=admin_grant,
+    )
+
     # Verify group exists
     group_row = ctx.deps.get('group')
     if not group_row or not group_row.get('group_id'):
@@ -100,6 +109,32 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_channel(
+    group_id: str,
+    name: str,
+    disappearing_time_ms: int,
+    is_main: int,
+    admin_grant: str | None,
+) -> None:
+    """Validate channel fields against the fixed-size wire payload layout."""
+    group_id_bytes = crypto.b64decode(group_id)
+    admin_grant_bytes = crypto.b64decode(admin_grant) if admin_grant else None
+    plaintext = wire_format.encode_channel_plaintext(
+        group_id=group_id_bytes,
+        name=name,
+        disappearing_time_ms=disappearing_time_ms,
+        is_main=is_main,
+        admin_grant_id=admin_grant_bytes,
+    )
+    decoded = wire_format.decode_channel_plaintext(plaintext)
+    if decoded["name"] != name:
+        raise ValueError("wire shadow decode name mismatch")
+    if decoded["disappearing_time_ms"] != disappearing_time_ms:
+        raise ValueError("wire shadow decode disappearing_time_ms mismatch")
+    if decoded["is_main"] != (1 if is_main else 0):
+        raise ValueError("wire shadow decode is_main mismatch")
 
 
 def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
@@ -306,32 +341,32 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
         log.info(f"channel.create() creating PUBLIC channel name='{name}', group_id={group_id}, peer_id={peer_id}, is_main={is_main}")
 
-    # Create event dict
-    event_data = {
-        'type': 'channel',
-        'name': name,
-        'group_id': group_id,
-        'signed_by': peer_shared_id,  # References shareable peer identity
-        'signer_type': 'peer_shared',  # Required for v2 resolver
-        'created_at': t_ms,
-        'disappearing_time_ms': disappearing_time_ms,  # Store disappearing time
-        'is_main': 1 if is_main else 0  # Store is_main flag
-    }
-
-    # Include admin_grant for projection-time verification (if available)
-    if admin_grant_id:
-        event_data['admin_grant'] = admin_grant_id
+    _wire_shadow_channel(
+        group_id=group_id,
+        name=name,
+        disappearing_time_ms=disappearing_time_ms,
+        is_main=1 if is_main else 0,
+        admin_grant=admin_grant_id,
+    )
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
     key_data = group_key.get_key(key_id, peer_id, db)
 
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    blob = wire_format.encode_channel_wire_event(
+        group_id_b64=group_id,
+        name=name,
+        disappearing_time_ms=disappearing_time_ms,
+        is_main=1 if is_main else 0,
+        admin_grant_b64=admin_grant_id,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
 
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)

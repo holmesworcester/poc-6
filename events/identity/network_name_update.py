@@ -9,7 +9,9 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group
+from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -46,6 +48,18 @@ EVENT_SPEC = {
 }
 
 log = logging.getLogger(__name__)
+
+
+
+def _wire_shadow_network_name_update(network_id: str, name: str) -> None:
+    """Validate network_name_update fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_network_name_update_plaintext(
+        network_id=crypto.b64decode(network_id),
+        name=name,
+    )
+    decoded = wire_format.decode_network_name_update_plaintext(plaintext)
+    if decoded["name"] != name:
+        raise ValueError("wire shadow decode name mismatch")
 
 
 def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: int,
@@ -110,8 +124,20 @@ def create(network_id: str, name: str, peer_id: str, peer_shared_id: str, t_ms: 
         'signer_type': 'peer_shared',
         'created_at': t_ms
     }
+    _wire_shadow_network_name_update(network_id, name)
 
-    network_name_update_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    blob = wire_format.encode_network_name_update_wire_event(
+        network_id_b64=network_id,
+        name=name,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        global_count=0,
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    network_name_update_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"network_name_update.create() created network_name_update_id={network_name_update_id[:20]}...")
     return network_name_update_id
@@ -131,6 +157,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not network_id or not name:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_network_name_update(network_id, name)
 
     existing = ctx.deps.get('existing_name')
     writes: list[WriteOp] = []
@@ -202,8 +230,12 @@ def validate(event_id: str, recorded_by: str, db: Any) -> str | None:
         return None
 
     try:
-        # Parse the event
-        event_data = crypto.parse_json(blob)
+        if not wire_format.is_wire_network_name_update_envelope(blob):
+            log.warning(f"network_name_update.validate() non-wire event blob for {event_id[:20]}...")
+            return None
+        event_data, missing = wire_format.decode_network_name_update_wire_event(blob, recorded_by, db)
+        if not event_data:
+            return 'BLOCKED' if missing else None
     except Exception as e:
         log.warning(f"network_name_update.validate() failed to parse event: {e}")
         return None

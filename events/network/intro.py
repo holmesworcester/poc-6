@@ -20,16 +20,27 @@ PROJECTION_TABLE = None
 INTRO_TTL_MS = 30_000
 
 from typing import Any, Optional, List
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 from events.identity import peer_shared
 
 log = logging.getLogger(__name__)
 
+
+
+def _wire_shadow_network_intro(peer1_id: str, peer2_id: str) -> None:
+    """Validate network_intro fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_network_intro_plaintext(
+        peer1_id=crypto.b64decode(peer1_id),
+        peer2_id=crypto.b64decode(peer2_id),
+    )
+    decoded = wire_format.decode_network_intro_plaintext(plaintext)
+    if decoded["peer1_id"] != crypto.b64decode(peer1_id):
+        raise ValueError("wire shadow decode peer1_id mismatch")
 # v2 event specification - signed by peer_shared, no deps
 EVENT_SPEC = {
     'encrypted': False,
@@ -61,6 +72,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not all([signed_by, peer1_id, peer2_id, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_network_intro(peer1_id, peer2_id)
 
     if is_stale_intro(created_at, ctx.recorded_at):
         return ProjectorResult(writes=tuple(), valid_event=True)
@@ -117,25 +130,19 @@ def create(
         f"{peer1_id[:20]}... and {peer2_id[:20]}..."
     )
 
-    # Create event data - use peer_shared_id as signed_by (consistent with verification)
-    event_data = {
-        'type': 'network_intro',
-        'signed_by': initiator_peer_shared_id,
-        'signer_type': 'peer_shared',
-        'peer1_id': peer1_id,
-        'peer2_id': peer2_id,
-        'created_at': t_ms
-    }
-
     # Sign with initiator's private key
     from events.identity import peer
     private_key = peer.get_private_key(initiator_peer_id, initiator_peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
+    _wire_shadow_network_intro(peer1_id, peer2_id)
 
-    # Canonicalize to get deterministic blob
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Store event with recorded wrapper
+    blob = wire_format.encode_network_intro_wire_event(
+        peer1_id_b64=peer1_id,
+        peer2_id_b64=peer2_id,
+        signed_by_b64=initiator_peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
     intro_id = store.event(blob, initiator_peer_id, t_ms, db)
 
     log.info(f"intro.create() created intro_id={intro_id[:20]}...")
