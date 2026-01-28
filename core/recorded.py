@@ -25,6 +25,7 @@ from typing import Any
 import os
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from events import registry
 from core import store
@@ -35,6 +36,156 @@ from core.projection_v2 import resolver as v2_resolver
 from core.projection_v2.apply import apply_writes
 
 log = logging.getLogger(__name__)
+
+
+def _verify_signature_task(task: tuple[str, bytes, bytes, bytes]) -> tuple[str, bool]:
+    ref_id, signed_bytes, signature, public_key = task
+    try:
+        return ref_id, crypto.verify(signed_bytes, signature, public_key)
+    except Exception:
+        return ref_id, False
+
+
+def _verify_signatures_parallel(
+    tasks: list[tuple[str, bytes, bytes, bytes]]
+) -> dict[str, bool]:
+    if not tasks:
+        return {}
+    workers = int(os.getenv("SIGNATURE_VERIFY_THREADS", "0"))
+    if workers <= 0:
+        workers = min(8, os.cpu_count() or 4)
+    if workers <= 1 or len(tasks) < 2:
+        return {ref_id: ok for ref_id, ok in map(_verify_signature_task, tasks)}
+
+    results: dict[str, bool] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for ref_id, ok in executor.map(_verify_signature_task, tasks, chunksize=200):
+            results[ref_id] = ok
+    return results
+
+
+def _pre_projection_gate(
+    ctx: dict[str, Any],
+    db: Any,
+    skip_negentropy: bool,
+) -> tuple[bool, list[str | None]]:
+    from core import queues
+
+    recorded_id = ctx.get("recorded_id")
+    ref_id = ctx.get("ref_id")
+    recorded_by = ctx.get("recorded_by")
+    recorded_at = ctx.get("recorded_at", 0)
+    event_data = ctx.get("event_data")
+    event_type = ctx.get("event_type")
+    missing_key_ids = ctx.get("missing_key_ids") or []
+
+    if not recorded_id or not ref_id or not recorded_by:
+        return False, [None, None]
+
+    unsafedb = create_unsafe_db(db)
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Check if event is pre-deleted
+    if event_type:
+        event_spec_early = registry.get_event_spec(event_type)
+        if event_spec_early and event_spec_early.get('skip_if_deleted'):
+            deleted_check = safedb.query_one(
+                "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (ref_id, recorded_by)
+            )
+            if deleted_check:
+                safedb.execute(
+                    "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
+                    (ref_id, recorded_by)
+                )
+                unsafedb.execute("DELETE FROM store WHERE id = ?", (ref_id,))
+                return False, [None, recorded_id]
+
+    should_mark_shareable = False
+    if event_type:
+        should_mark_shareable = registry.is_shareable(event_type)
+    elif missing_key_ids:
+        should_mark_shareable = True
+
+    if should_mark_shareable:
+        from events.network import negentropy
+        negentropy.add_shareable_event(
+            ref_id,
+            recorded_by,
+            created_at=None,
+            recorded_at=recorded_at,
+            db=db,
+            skip_negentropy=skip_negentropy
+        )
+
+    if missing_key_ids:
+        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
+        return False, [None, recorded_id]
+
+    if not event_data:
+        return False, [None, recorded_id]
+
+    return True, [None, recorded_id]
+
+
+def _apply_projection(
+    ctx: dict[str, Any],
+    resolve_result: Any,
+    project_pure_fn: Any,
+    db: Any,
+    _recursion_depth: int,
+    skip_negentropy: bool,
+) -> list[str | None]:
+    from core import queues
+
+    recorded_id = ctx.get("recorded_id")
+    ref_id = ctx.get("ref_id")
+    recorded_by = ctx.get("recorded_by")
+    recorded_at = ctx.get("recorded_at", 0)
+    event_data = ctx.get("event_data")
+    event_type = ctx.get("event_type")
+
+    if not recorded_id or not ref_id or not recorded_by:
+        return [None, None]
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    try:
+        projector_result = project_pure_fn(resolve_result.ctx)
+    except Exception as e:
+        log.error(f"[PROJECTION_FAILED] project_pure raised for {ref_id[:20]}...: {e}")
+        return [None, recorded_id]
+
+    try:
+        apply_writes(projector_result, recorded_by, recorded_at, db)
+    except Exception as e:
+        log.error(f"[PROJECTION_FAILED] apply_writes raised for {ref_id[:20]}...: {e}")
+        return [None, recorded_id]
+
+    if not projector_result.valid_event:
+        log.warning(
+            f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid"
+        )
+        return [None, recorded_id]
+
+    safedb.execute(
+        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
+        (ref_id, recorded_by)
+    )
+
+    if event_data and event_data.get('created_at') is not None and event_type:
+        safedb.execute(
+            """INSERT OR IGNORE INTO projected_events (event_id, event_type, created_at, recorded_by)
+               VALUES (?, ?, ?, ?)""",
+            (ref_id, event_type, event_data['created_at'], recorded_by)
+        )
+
+    unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
+    if unblocked_ids:
+        project_ids(unblocked_ids, db, _recursion_depth + 1, skip_negentropy=skip_negentropy)
+        _cleanup_successfully_projected_events(unblocked_ids, recorded_by, db)
+
+    return [ref_id, recorded_id]
 
 
 def _chunked(items: list[str], size: int) -> list[list[str]]:
@@ -364,148 +515,68 @@ def _project_with_context(
     skip_negentropy: bool,
     dep_cache: dict[str, Any] | None,
 ) -> list[str | None]:
-    from core import queues
+    continue_projection, result = _pre_projection_gate(ctx, db, skip_negentropy)
+    if not continue_projection:
+        return result
 
     recorded_id = ctx.get("recorded_id")
     ref_id = ctx.get("ref_id")
     recorded_by = ctx.get("recorded_by")
     recorded_at = ctx.get("recorded_at", 0)
     event_data = ctx.get("event_data")
-    event_type = ctx.get("event_type")
-    missing_key_ids = ctx.get("missing_key_ids") or []
-
-    if not recorded_id or not ref_id or not recorded_by:
-        return [None, None]
-
-    unsafedb = create_unsafe_db(db)
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Check if event is pre-deleted
-    if event_type:
-        event_spec_early = registry.get_event_spec(event_type)
-        if event_spec_early and event_spec_early.get('skip_if_deleted'):
-            deleted_check = safedb.query_one(
-                "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
-                (ref_id, recorded_by)
-            )
-            if deleted_check:
-                safedb.execute(
-                    "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-                    (ref_id, recorded_by)
-                )
-                unsafedb.execute("DELETE FROM store WHERE id = ?", (ref_id,))
-                return [None, recorded_id]
-
-    should_mark_shareable = False
-    if event_type:
-        should_mark_shareable = registry.is_shareable(event_type)
-    elif missing_key_ids:
-        should_mark_shareable = True
-
-    if should_mark_shareable:
-        from events.network import negentropy
-        negentropy.add_shareable_event(
-            ref_id,
-            recorded_by,
-            created_at=None,
-            recorded_at=recorded_at,
-            db=db,
-            skip_negentropy=skip_negentropy
-        )
-
-    if missing_key_ids:
-        queues.blocked.add(recorded_id, recorded_by, missing_key_ids, safedb)
-        return [None, recorded_id]
-
-    if not event_data:
-        return [None, recorded_id]
-
-    event_type = event_data.get('type')
-    projected_id = None
+    event_type = event_data.get('type') if isinstance(event_data, dict) else None
 
     project_pure_fn = registry.get_project_pure_fn(event_type) if event_type else None
     event_spec = registry.get_event_spec(event_type) if event_type else None
 
-    if event_spec and project_pure_fn:
-        resolve_result = v2_resolver.resolve_event(
-            ref_id=ref_id,
-            event_type=event_type,
-            event_data=event_data,
-            recorded_by=recorded_by,
-            recorded_at=recorded_at,
-            db=db,
-            dep_cache=dep_cache,
+    if not (event_spec and project_pure_fn):
+        return [None, recorded_id]
+
+    resolve_result = v2_resolver.resolve_event(
+        ref_id=ref_id,
+        event_type=event_type,
+        event_data=event_data,
+        recorded_by=recorded_by,
+        recorded_at=recorded_at,
+        db=db,
+        dep_cache=dep_cache,
+    )
+
+    if resolve_result.status == 'block':
+        missing_deps = list(resolve_result.missing)
+
+        requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+        log.warning(
+            f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... "
+            f"requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: "
+            f"{[d[:20] for d in missing_deps]}"
         )
 
-        if resolve_result.status == 'block':
-            missing_deps = list(resolve_result.missing)
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        from core import queues
+        queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
+        return [None, recorded_id]
 
-            requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
-            log.warning(
-                f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... "
-                f"requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: "
-                f"{[d[:20] for d in missing_deps]}"
-            )
-
-            queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
-            return [None, recorded_id]
-
-        if resolve_result.status == 'reject':
-            log.warning(
-                f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... rejected: {resolve_result.error}"
-            )
-            return [None, recorded_id]
-
-        if resolve_result.status != 'ok' or resolve_result.ctx is None:
-            log.error(
-                f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... resolve returned {resolve_result.status}"
-            )
-            return [None, recorded_id]
-
-        try:
-            projector_result = project_pure_fn(resolve_result.ctx)
-        except Exception as e:
-            log.error(f"[PROJECTION_FAILED] project_pure raised for {ref_id[:20]}...: {e}")
-            return [None, recorded_id]
-
-        try:
-            apply_writes(projector_result, recorded_by, recorded_at, db)
-        except Exception as e:
-            log.error(f"[PROJECTION_FAILED] apply_writes raised for {ref_id[:20]}...: {e}")
-            return [None, recorded_id]
-
-        if not projector_result.valid_event:
-            log.warning(
-                f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid"
-            )
-            return [None, recorded_id]
-
-        projected_id = ref_id
-
-    if projected_id is None:
+    if resolve_result.status == 'reject':
         log.warning(
-            f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... failed projection - NOT marking as valid"
+            f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... rejected: {resolve_result.error}"
         )
         return [None, recorded_id]
 
-    safedb.execute(
-        "INSERT OR IGNORE INTO valid_events (event_id, recorded_by) VALUES (?, ?)",
-        (ref_id, recorded_by)
-    )
-
-    if event_data and event_data.get('created_at') is not None and event_type:
-        safedb.execute(
-            """INSERT OR IGNORE INTO projected_events (event_id, event_type, created_at, recorded_by)
-               VALUES (?, ?, ?, ?)""",
-            (ref_id, event_type, event_data['created_at'], recorded_by)
+    if resolve_result.status != 'ok' or resolve_result.ctx is None:
+        log.error(
+            f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... resolve returned {resolve_result.status}"
         )
+        return [None, recorded_id]
 
-    unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
-    if unblocked_ids:
-        project_ids(unblocked_ids, db, _recursion_depth + 1)
-        _cleanup_successfully_projected_events(unblocked_ids, recorded_by, db)
-
-    return [projected_id, recorded_id]
+    return _apply_projection(
+        ctx,
+        resolve_result,
+        project_pure_fn,
+        db,
+        _recursion_depth,
+        skip_negentropy=skip_negentropy,
+    )
 
 def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
                 skip_negentropy: bool = False) -> list[list[str | None]]:
@@ -520,23 +591,96 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
     contexts, fallback_ids = _prefetch_project_contexts(recorded_ids, db)
 
     dep_cache = v2_resolver.prefetch_dependencies(contexts, db)
-    projected_ids = []
+    verify_queue: list[tuple[str, bytes, bytes, bytes]] = []
+    pending: list[tuple[dict[str, Any], Any, Any]] = []
+    projected_ids: list[list[str | None]] = []
+
     for ctx in contexts:
         try:
-            result = _project_with_context(
-                ctx,
-                db,
-                _recursion_depth,
-                skip_negentropy=skip_negentropy,
+            continue_projection, result = _pre_projection_gate(ctx, db, skip_negentropy)
+            if not continue_projection:
+                projected_ids.append(result)
+                continue
+
+            recorded_id = ctx.get("recorded_id")
+            ref_id = ctx.get("ref_id")
+            recorded_by = ctx.get("recorded_by")
+            recorded_at = ctx.get("recorded_at", 0)
+            event_data = ctx.get("event_data")
+            event_type = event_data.get('type') if isinstance(event_data, dict) else None
+
+            project_pure_fn = registry.get_project_pure_fn(event_type) if event_type else None
+            event_spec = registry.get_event_spec(event_type) if event_type else None
+
+            if not (event_spec and project_pure_fn):
+                projected_ids.append([None, recorded_id])
+                continue
+
+            resolve_result = v2_resolver.resolve_event(
+                ref_id=ref_id,
+                event_type=event_type,
+                event_data=event_data,
+                recorded_by=recorded_by,
+                recorded_at=recorded_at,
+                db=db,
                 dep_cache=dep_cache,
+                verify_queue=verify_queue,
             )
-            projected_ids.append(result)
+
+            if resolve_result.status == 'block':
+                missing_deps = list(resolve_result.missing)
+                requester_peer_shared_id = event_data.get('peer_shared_id', 'N/A')
+                log.warning(
+                    f"Blocking {event_type} event {ref_id[:20]}... recorded_by={recorded_by[:20]}... "
+                    f"requester_peer_shared={requester_peer_shared_id[:20]}... missing deps: "
+                    f"{[d[:20] for d in missing_deps]}"
+                )
+                safedb = create_safe_db(db, recorded_by=recorded_by)
+                from core import queues
+                queues.blocked.add(recorded_id, recorded_by, missing_deps, safedb)
+                projected_ids.append([None, recorded_id])
+                continue
+
+            if resolve_result.status == 'reject':
+                log.warning(
+                    f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... rejected: {resolve_result.error}"
+                )
+                projected_ids.append([None, recorded_id])
+                continue
+
+            if resolve_result.status != 'ok' or resolve_result.ctx is None:
+                log.error(
+                    f"[PROJECTION_FAILED] Event {event_type} {ref_id[:20]}... resolve returned {resolve_result.status}"
+                )
+                projected_ids.append([None, recorded_id])
+                continue
+
+            pending.append((ctx, resolve_result, project_pure_fn))
         except Exception as e:
             recorded_id = ctx.get("recorded_id", "")
             log.error(f"[PROJECT_IDS_EXCEPTION] ❌ EXCEPTION projecting recorded_id={recorded_id[:20]}... depth={_recursion_depth}: {str(e)[:200]}")
             import traceback
             traceback.print_exc()
             raise  # Re-raise to fail immediately so we can see the error
+
+    signature_results = _verify_signatures_parallel(verify_queue)
+    for ctx, resolve_result, project_pure_fn in pending:
+        ref_id = ctx.get("ref_id")
+        recorded_id = ctx.get("recorded_id")
+        if ref_id in signature_results and not signature_results.get(ref_id):
+            log.warning(f"[PROJECTION_FAILED] Event signature invalid for {ref_id[:20]}...")
+            projected_ids.append([None, recorded_id])
+            continue
+        projected_ids.append(
+            _apply_projection(
+                ctx,
+                resolve_result,
+                project_pure_fn,
+                db,
+                _recursion_depth,
+                skip_negentropy=skip_negentropy,
+            )
+        )
 
     for recorded_id in fallback_ids:
         projected_ids.append(project(recorded_id, db, _recursion_depth, skip_negentropy=skip_negentropy))

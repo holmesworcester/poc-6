@@ -299,8 +299,29 @@ def prefetch_dependencies(
         if signer_type_field and signer_id_field:
             signer_type = event_data.get(signer_type_field)
             signer_id = event_data.get(signer_id_field)
-            if isinstance(signer_id, str) and signer_type in ("peer_shared", "network", "user"):
-                valid_requests.setdefault(recorded_by, set()).add(signer_id)
+            if isinstance(signer_id, str):
+                if signer_type in ("peer_shared", "network", "user"):
+                    valid_requests.setdefault(recorded_by, set()).add(signer_id)
+
+                signer_table: tuple[str, str] | None = None
+                if signer_type == "peer_shared":
+                    signer_table = ("peers_shared", "peer_shared_id")
+                elif signer_type == "network":
+                    if not _field_looks_like_pubkey(signer_id_field):
+                        signer_table = ("networks", "network_id")
+                elif signer_type == "user":
+                    signer_table = ("users", "user_id")
+                elif signer_type == "invite":
+                    signer_table = ("invites", "invite_id")
+
+                if signer_table:
+                    table, key_field = signer_table
+                    dep_requests.setdefault((table, key_field, recorded_by), set()).add(signer_id)
+                    if signer_type == "invite":
+                        dep_requests.setdefault(
+                            ("invite_accepteds", "invite_id", recorded_by),
+                            set()
+                        ).add(signer_id)
 
     chunk_size = int(os.getenv("PROJECT_DEP_CHUNK", "400"))
 
@@ -372,21 +393,34 @@ def _resolve_invite_pubkey(
     recorded_by: str,
     safedb: Any,
     unsafedb: Any,
+    dep_cache: dict[str, Any] | None = None,
 ) -> bytes | None:
-    # Check invites table (for inviter)
-    row = safedb.query_one(
-        "SELECT invite_pubkey FROM invites WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
-        (invite_id, recorded_by),
+    row = _fetch_dep_row(
+        "invites",
+        ["invite_pubkey"],
+        "invite_id",
+        invite_id,
+        recorded_by,
+        safedb,
+        unsafedb,
+        dep_cache=dep_cache,
     )
     if row and row.get("invite_pubkey"):
         return crypto.b64decode(row["invite_pubkey"])
-    # Check invite_accepteds table (for joiner)
-    row = safedb.query_one(
-        "SELECT invite_pubkey FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ? LIMIT 1",
-        (invite_id, recorded_by),
+
+    row = _fetch_dep_row(
+        "invite_accepteds",
+        ["invite_pubkey"],
+        "invite_id",
+        invite_id,
+        recorded_by,
+        safedb,
+        unsafedb,
+        dep_cache=dep_cache,
     )
     if row and row.get("invite_pubkey"):
         return crypto.b64decode(row["invite_pubkey"])
+
     # Fallback: check blob store
     blob = store.get(invite_id, unsafedb)
     if not blob:
@@ -404,6 +438,28 @@ def _resolve_invite_pubkey(
     return crypto.b64decode(invite_pubkey)
 
 
+def _signature_payload(
+    event_data: dict[str, Any],
+) -> tuple[bytes, bytes] | None:
+    wire_signature = event_data.get("_wire_signature") if isinstance(event_data, dict) else None
+    wire_signed_bytes = event_data.get("_wire_signed_bytes") if isinstance(event_data, dict) else None
+    if wire_signature is not None or wire_signed_bytes is not None:
+        if not isinstance(wire_signature, (bytes, bytearray)) or not isinstance(wire_signed_bytes, (bytes, bytearray)):
+            return None
+        return (bytes(wire_signed_bytes), bytes(wire_signature))
+
+    sig_b64 = event_data.get("signature")
+    if not sig_b64:
+        return None
+    event_without_sig = {k: v for k, v in event_data.items() if k != "signature"}
+    signed_bytes = crypto.canonicalize_json(event_without_sig)
+    try:
+        signature = crypto.b64decode(sig_b64)
+    except Exception:
+        return None
+    return (signed_bytes, signature)
+
+
 def _resolve_signer(
     event_spec: dict[str, Any],
     ref_id: str,
@@ -414,6 +470,8 @@ def _resolve_signer(
     db: Any,
     safedb: Any,
     unsafedb: Any,
+    dep_cache: dict[str, Any] | None = None,
+    verify_queue: list[tuple[str, bytes, bytes, bytes]] | None = None,
 ) -> tuple[str, dict[str, Any] | None, list[str], str | None]:
     signer_spec = event_spec.get("signer")
     if not signer_spec:
@@ -434,19 +492,22 @@ def _resolve_signer(
     public_key: bytes | None = None
 
     if signer_type == "peer_shared":
-        if not _is_event_valid(signer_id, recorded_by, safedb):
+        if not _is_event_valid(signer_id, recorded_by, safedb, dep_cache=dep_cache):
             return "block", None, [signer_id], None
-        from events.identity import peer_shared
-
-        try:
-            public_key = peer_shared.get_public_key(signer_id, recorded_by, db)
-        except ValueError:
-            return "reject", None, [], "peer_shared signer not available"
-        signer_user_row = safedb.query_one(
-            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
-            (signer_id, recorded_by),
+        row = _fetch_dep_row(
+            "peers_shared",
+            ["public_key", "user_id"],
+            "peer_shared_id",
+            signer_id,
+            recorded_by,
+            safedb,
+            unsafedb,
+            dep_cache=dep_cache,
         )
-        signer_user_id = signer_user_row.get("user_id") if signer_user_row else None
+        if not row or not row.get("public_key"):
+            return "reject", None, [], "peer_shared signer not available"
+        public_key = crypto.b64decode(row["public_key"])
+        signer_user_id = row.get("user_id")
         signer_is_admin = None
         if signer_user_id:
             network_row = safedb.query_one(
@@ -463,7 +524,13 @@ def _resolve_signer(
         # For invite signer, don't require the invite event in valid_events.
         # Joiners have invite_accepted (not invite), so we just try to resolve the pubkey
         # from invites table, invite_accepteds table, or blob store.
-        public_key = _resolve_invite_pubkey(signer_id, recorded_by, safedb, unsafedb)
+        public_key = _resolve_invite_pubkey(
+            signer_id,
+            recorded_by,
+            safedb,
+            unsafedb,
+            dep_cache=dep_cache,
+        )
         if not public_key:
             return "reject", None, [], "invite signer not available"
     elif signer_type == "network":
@@ -473,23 +540,36 @@ def _resolve_signer(
             except Exception:
                 return "reject", None, [], "invalid network pubkey"
         else:
-            if not _is_event_valid(signer_id, recorded_by, safedb):
+            if not _is_event_valid(signer_id, recorded_by, safedb, dep_cache=dep_cache):
                 return "block", None, [signer_id], None
-            from events.identity import network
-
-            try:
-                public_key = network.get_public_key(signer_id, recorded_by, db)
-            except ValueError:
+            row = _fetch_dep_row(
+                "networks",
+                ["network_pubkey"],
+                "network_id",
+                signer_id,
+                recorded_by,
+                safedb,
+                unsafedb,
+                dep_cache=dep_cache,
+            )
+            if not row or not row.get("network_pubkey"):
                 # Network is valid (trust anchor) but not projected yet - block until it projects
                 return "block", None, [signer_id], None
+            public_key = crypto.b64decode(row["network_pubkey"])
     elif signer_type == "user":
         # User signer - used by first peer invite (signed by user_id during bootstrap)
-        if not _is_event_valid(signer_id, recorded_by, safedb):
+        if not _is_event_valid(signer_id, recorded_by, safedb, dep_cache=dep_cache):
             return "block", None, [signer_id], None
         # Get user's public key from users table
-        user_row = safedb.query_one(
-            "SELECT user_pubkey FROM users WHERE user_id = ? AND recorded_by = ?",
-            (signer_id, recorded_by),
+        user_row = _fetch_dep_row(
+            "users",
+            ["user_pubkey"],
+            "user_id",
+            signer_id,
+            recorded_by,
+            safedb,
+            unsafedb,
+            dep_cache=dep_cache,
         )
         if not user_row or not user_row.get("user_pubkey"):
             return "reject", None, [], "user signer not available"
@@ -502,16 +582,6 @@ def _resolve_signer(
 
     if not public_key:
         return "reject", None, [], "signer public key missing"
-    wire_signature = event_data.get("_wire_signature") if isinstance(event_data, dict) else None
-    wire_signed_bytes = event_data.get("_wire_signed_bytes") if isinstance(event_data, dict) else None
-    if wire_signature is not None or wire_signed_bytes is not None:
-        if not isinstance(wire_signature, (bytes, bytearray)) or not isinstance(wire_signed_bytes, (bytes, bytearray)):
-            return "reject", None, [], "invalid wire signature"
-        if not crypto.verify(bytes(wire_signed_bytes), bytes(wire_signature), public_key):
-            return "reject", None, [], "invalid signature"
-    else:
-        if not crypto.verify_event(event_data, public_key):
-            return "reject", None, [], "invalid signature"
 
     signer_info = {
         "type": signer_type,
@@ -521,6 +591,18 @@ def _resolve_signer(
     if signer_type == "peer_shared":
         signer_info["user_id"] = signer_user_id
         signer_info["is_admin"] = signer_is_admin
+
+    payload = _signature_payload(event_data)
+    if not payload:
+        return "reject", None, [], "missing signature"
+    signed_bytes, signature = payload
+
+    if verify_queue is not None:
+        verify_queue.append((ref_id, signed_bytes, signature, public_key))
+        return "ok", signer_info, [], None
+
+    if not crypto.verify(signed_bytes, signature, public_key):
+        return "reject", None, [], "invalid signature"
     return "ok", signer_info, [], None
 
 
@@ -580,6 +662,7 @@ def resolve_event(
     recorded_at: int,
     db: Any,
     dep_cache: dict[str, Any] | None = None,
+    verify_queue: list[tuple[str, bytes, bytes, bytes]] | None = None,
 ) -> ResolveResult:
     """Verify signatures and resolve dependencies for a single event."""
     if not isinstance(event_data, dict):
@@ -674,6 +757,8 @@ def resolve_event(
         db,
         safedb,
         unsafedb,
+        dep_cache=dep_cache,
+        verify_queue=verify_queue,
     )
     if signer_status == "block":
         return ResolveResult(status="block", ctx=None, missing=tuple(signer_missing))
