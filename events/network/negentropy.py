@@ -2,7 +2,7 @@
 Negentropy-style deterministic sync protocol - HASH-ONLY BUCKETS variant.
 
 This variant uses pure hash-based bucketing - the unified key is derived
-entirely from the event_id, with no timestamp dependency. This ensures
+entirely from the event_id (hash bytes), with no timestamp dependency. This ensures
 that all peers compute identical keys for the same events, enabling
 accurate root hash comparison for sync detection.
 
@@ -19,7 +19,7 @@ Bucket hierarchy (by hash prefix):
 - prefix_4: first 4 hex chars (65536 buckets)
 - prefix_6 through prefix_6: progressively finer hash buckets
 
-The unified key is: BLAKE2b(event_id)[:8] as 16 hex chars
+The unified key is: event_id_bytes[:8] as 16 hex chars
 This provides uniform distribution across all bucket levels.
 
 Trade-offs vs time-based bucketing:
@@ -171,9 +171,8 @@ class EventsMessage:
 def compute_unified_key(event_id: str, created_at: int = 0) -> str:
     """Compute the unified hash key for an event.
 
-    The unified key is derived purely from the event_id using BLAKE2b hash.
-    This ensures that all peers compute the same key for the same event,
-    regardless of when they received it or what timestamp metadata they have.
+    The unified key is derived from the event_id hash bytes.
+    This avoids re-hashing event_ids and remains peer-consistent.
 
     Args:
         event_id: The event identifier
@@ -182,8 +181,15 @@ def compute_unified_key(event_id: str, created_at: int = 0) -> str:
     Returns:
         16 character hex string (64 bits of hash)
     """
-    # Hash the event_id to get uniform distribution
-    # Use 8 bytes (64 bits) = 16 hex chars
+    # Use the event_id hash bytes directly when possible
+    try:
+        raw = crypto.b64decode(event_id)
+        if len(raw) >= 8:
+            return raw[:8].hex()
+    except Exception:
+        pass
+
+    # Fallback for non-standard test IDs
     h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
     return h.hex()  # 16 hex chars
 
@@ -230,12 +236,16 @@ ZERO_HASH = b'\x00' * 16
 def compute_fingerprint(event_id: str) -> bytes:
     """Compute fingerprint for an event.
 
-    Returns a 16-byte BLAKE2b hash of the event_id.
-    This is O(1) and works with any event_id format.
-
-    Note: While production event_ids are already hashes, this handles
-    arbitrary formats (like test strings "event_0") consistently.
+    Uses event_id hash bytes directly when available to avoid re-hashing.
+    Falls back to BLAKE2b for non-standard test IDs.
     """
+    try:
+        raw = crypto.b64decode(event_id)
+        if len(raw) >= 16:
+            return raw[:16]
+    except Exception:
+        pass
+
     return hashlib.blake2b(event_id.encode('utf-8'), digest_size=16).digest()
 
 
