@@ -117,6 +117,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
     removed_peer_shared_id = event_data.get('removed_peer_shared_id')
     removed_at = event_data.get('created_at')
     signed_by = event_data.get('removed_by')
+    signer = ctx.signer or {}
+    signer_user_id = signer.get('user_id')
+    signer_is_admin = signer.get('is_admin')
 
     if not removed_peer_shared_id:
         log.warning(f"peer_removed.project_pure() missing removed_peer_shared_id")
@@ -127,6 +130,18 @@ def project_pure(ctx: Any) -> ProjectorResult:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     _wire_shadow_peer_removed(removed_peer_shared_id)
+
+    if not signer_user_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    removed_peer_row = ctx.deps.get('removed_peer') or {}
+    removed_peer_user_id = removed_peer_row.get('user_id')
+
+    # Authorization: self/linked peer removal or admin
+    if removed_peer_user_id and removed_peer_user_id == signer_user_id:
+        pass
+    elif not signer_is_admin:
+        return ProjectorResult(writes=tuple(), valid_event=False)
 
     # Core write: insert into removed_peers table
     # Note: removed_peers is device-wide (no recorded_by column)

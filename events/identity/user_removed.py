@@ -137,6 +137,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
     removed_user_id = event_data.get('removed_user_id')
     removed_at = event_data.get('created_at')
     signed_by = event_data.get('removed_by')
+    signer = ctx.signer or {}
+    signer_user_id = signer.get('user_id')
+    signer_is_admin = signer.get('is_admin')
 
     if not removed_user_id:
         log.warning(f"user_removed.project_pure() missing removed_user_id")
@@ -147,6 +150,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     _wire_shadow_user_removed(removed_user_id)
+
+    if not signer_user_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
+    # Authorization: self-removal or admin removal
+    if signer_user_id != removed_user_id and not signer_is_admin:
+        return ProjectorResult(writes=tuple(), valid_event=False)
 
     # Core write: insert into removed_users table (scoped by recorded_by)
     writes = [

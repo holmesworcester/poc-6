@@ -15,7 +15,10 @@ PROJECTION_TABLE = ('message_deletions', 'deletion_id')
 # v2 event specification
 EVENT_SPEC = {
     'encrypted': True,  # Group-wrapped via store.publish
-    'signer': None,  # Signature verified in project_pure() via crypto.verify_signed_by_peer_shared
+    'signer': {
+        'id_field': 'signed_by',
+        'type_field': 'signer_type',
+    },
     'requires': {},  # No strict requirements - can be a pre-block for message
     'optional': {
         'message': {
@@ -62,23 +65,92 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     _wire_shadow_message_deletion(message_id)
 
+    signer = ctx.signer or {}
+    signer_user_id = signer.get('user_id')
+    signer_is_admin = signer.get('is_admin')
+
     # Get message from deps (optional - may be a pre-block)
     message_row = ctx.deps.get('message')
-
-    # If message exists, validate authorization
-    if message_row:
+    is_author = False
+    if message_row and signer_user_id:
         message_author_id = message_row.get('author_id')
-        # Check if deleter is the author
-        is_author = (deleted_by == message_author_id)
-        # For admin check, we need to defer to command since it requires DB lookup
-        # For now, pass validation info to command
-    else:
-        is_author = False  # Can't verify without message
+        is_author = (signer_user_id == message_author_id)
 
+    if message_row:
+        if not is_author and not signer_is_admin:
+            return ProjectorResult(writes=tuple(), valid_event=False)
+
+        writes = [
+            WriteOp(
+                op='insert',
+                table='message_deletions',
+                values={
+                    'deletion_id': ctx.event_id,
+                    'message_id': message_id,
+                    'deleted_by': deleted_by,
+                    'created_at': created_at,
+                    'recorded_by': ctx.recorded_by,
+                    'recorded_at': ctx.recorded_at,
+                },
+            ),
+            WriteOp(
+                op='insert',
+                table='deleted_events',
+                values={
+                    'event_id': message_id,
+                    'recorded_by': ctx.recorded_by,
+                    'deleted_at': ctx.recorded_at,
+                },
+            ),
+            WriteOp(
+                op='delete',
+                table='messages',
+                values={},
+                where={
+                    'message_id': message_id,
+                    'recorded_by': ctx.recorded_by,
+                },
+            ),
+            WriteOp(
+                op='delete',
+                table='shareable_events',
+                values={},
+                where={
+                    'event_id': message_id,
+                    'can_share_peer_id': ctx.recorded_by,
+                },
+            ),
+            WriteOp(
+                op='delete',
+                table='pending_message_deletions',
+                values={},
+                where={
+                    'message_id': message_id,
+                    'recorded_by': ctx.recorded_by,
+                },
+            ),
+        ]
+
+        # Command to handle cascade delete, blob removal, and key marking
+        commands = (
+            Command(
+                command_type='finalize_message_deletion',
+                args={
+                    'message_id': message_id,
+                    'deleted_by': deleted_by,
+                    'is_author': is_author,
+                    'has_message': True,
+                }
+            ),
+        )
+
+        return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
+
+    # Message not projected yet: record pending deletion for future validation
     writes = [
         WriteOp(
             op='insert',
-            table='message_deletions',
+            table='pending_message_deletions',
             values={
                 'deletion_id': ctx.event_id,
                 'message_id': message_id,
@@ -88,49 +160,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'recorded_at': ctx.recorded_at,
             },
         ),
-        WriteOp(
-            op='insert',
-            table='deleted_events',
-            values={
-                'event_id': message_id,
-                'recorded_by': ctx.recorded_by,
-                'deleted_at': ctx.recorded_at,
-            },
-        ),
-        WriteOp(
-            op='delete',
-            table='messages',
-            values={},
-            where={
-                'message_id': message_id,
-                'recorded_by': ctx.recorded_by,
-            },
-        ),
-        WriteOp(
-            op='delete',
-            table='shareable_events',
-            values={},
-            where={
-                'event_id': message_id,
-                'can_share_peer_id': ctx.recorded_by,
-            },
-        ),
     ]
 
-    # Command to handle cascade delete, blob removal, and key marking
-    commands = (
-        Command(
-            command_type='finalize_message_deletion',
-            args={
-                'message_id': message_id,
-                'deleted_by': deleted_by,
-                'is_author': is_author,
-                'has_message': message_row is not None,
-            }
-        ),
-    )
-
-    return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
+    return ProjectorResult(writes=tuple(writes), valid_event=True)
 
 
 def _handle_finalize_message_deletion(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:

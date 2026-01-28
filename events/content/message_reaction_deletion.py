@@ -24,7 +24,14 @@ EVENT_SPEC = {
         'id_field': 'deleted_by',
         'type_field': 'signer_type',
     },
-    'requires': {},
+    'requires': {
+        'reaction': {
+            'source': 'table',
+            'table': 'message_reactions',
+            'key': 'reaction_id',
+            'fields': ['reaction_id', 'reactor_id'],
+        },
+    },
     'optional': {},
     'cascade_on_delete': [],
 }
@@ -43,6 +50,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     _wire_shadow_message_reaction_deletion(reaction_id)
 
+    reaction_row = ctx.deps.get('reaction') or {}
+    signer = ctx.signer or {}
+    signer_user_id = signer.get('user_id')
+    reactor_id = reaction_row.get('reactor_id')
+    if not signer_user_id or not reactor_id or signer_user_id != reactor_id:
+        return ProjectorResult(writes=tuple(), valid_event=False)
+
     writes = (
         WriteOp(
             op='delete',
@@ -50,6 +64,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
             values={},
             where={
                 'reaction_id': reaction_id,
+                'recorded_by': ctx.recorded_by,
             },
         ),
         WriteOp(
