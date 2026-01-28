@@ -69,6 +69,13 @@ def test_deleted_message_blob_is_purged(fresh_db):
     )
     assert shareable_after is None, "Message should not be shareable after deletion"
 
+    # Verify message is NOT in negentropy_events
+    negentropy_after = safedb.query_one(
+        "SELECT 1 FROM negentropy_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, alice['peer_id'])
+    )
+    assert negentropy_after is None, "Deleted message should be removed from negentropy_events"
+
     # Verify it's in deleted_events (permanent block)
     deleted_check = safedb.query_one(
         "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
@@ -159,6 +166,13 @@ def test_deleted_message_arriving_via_sync_is_immediately_purged(fresh_db):
         (message_id, alice['peer_id'])
     )
     assert shareable is None, "Deleted message should NEVER be added to shareable_events"
+
+    # The message should NOT be in negentropy_events
+    negentropy = safedb.query_one(
+        "SELECT 1 FROM negentropy_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, alice['peer_id'])
+    )
+    assert negentropy is None, "Deleted message should NEVER be added to negentropy_events"
 
 
 def test_multi_peer_deleted_message_not_resynced(fresh_db):
@@ -263,6 +277,12 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     )
     assert bob_shareable is None, "Message should not be shareable by Bob"
 
+    bob_negentropy = bob_safedb.query_one(
+        "SELECT 1 FROM negentropy_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, bob['peer_id'])
+    )
+    assert bob_negentropy is None, "Message should not be in negentropy_events for Bob"
+
     bob_deleted = bob_safedb.query_one(
         "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
         (message_id, bob['peer_id'])
@@ -305,6 +325,12 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
         (message_id, bob['peer_id'])
     )
     assert bob_shareable_resync is None, "Re-synced deleted message should not be shareable"
+
+    bob_negentropy_resync = bob_safedb.query_one(
+        "SELECT 1 FROM negentropy_events WHERE event_id = ? AND recorded_by = ?",
+        (message_id, bob['peer_id'])
+    )
+    assert bob_negentropy_resync is None, "Re-synced deleted message should not re-enter negentropy_events"
 
 
 if __name__ == "__main__":

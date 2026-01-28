@@ -98,6 +98,8 @@ def _pre_projection_gate(
                     "DELETE FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
                     (ref_id, recorded_by)
                 )
+                from events.network import negentropy
+                negentropy.remove_events_from_sync_batch(db, recorded_by, [ref_id])
                 unsafedb.execute("DELETE FROM store WHERE id = ?", (ref_id,))
                 return False, [None, recorded_id]
 
