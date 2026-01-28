@@ -1,4 +1,4 @@
-"""Fast-path ingest helpers for raw transport blobs."""
+"""Fast-path ingest helpers for transport blobs."""
 from __future__ import annotations
 
 from typing import Any, Iterable
@@ -71,6 +71,8 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
 
 
 def _unwrap_transit_with_key(blob: bytes, key_data: dict[str, Any]) -> bytes | None:
+    if not key_data:
+        return None
     id_bytes = blob[:crypto.KEY_ID_SIZE]
     encrypted_data = blob[crypto.KEY_ID_SIZE:]
 
@@ -93,7 +95,11 @@ def queue_incoming(
     chunk_size: int = 1000,
     unwrap_transit: bool = False,
 ) -> int:
-    """Route and append incoming transport blobs to the ingest log."""
+    """Route and append incoming blobs to the ingest log.
+
+    When unwrap_transit is True, we batch-resolve key hints and store unwrapped
+    event blobs with transit_wrapped=0.
+    """
     rows: list[tuple[bytes, str, int, str | None, int | None, str | None, bytes, int]] = []
 
     if not unwrap_transit:
@@ -189,7 +195,7 @@ def append_incoming_log(
     db: Any,
     chunk_size: int = 1000,
 ) -> int:
-    """Append raw incoming blobs into incoming_event_log.
+    """Append incoming blobs into incoming_event_log.
 
     Args:
         rows: Iterable of (hint, recorded_by, received_at, source_ip, source_port, event_type, blob, transit_wrapped)

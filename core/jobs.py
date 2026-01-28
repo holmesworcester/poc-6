@@ -126,7 +126,7 @@ class ReceiveJob(Job):
     This job:
     1. Transfers packets (loopback for testing, UDP for production)
     2. Drains batch from transport.drain_incoming()
-    3. Optionally unwraps transit in batch, then appends to incoming_event_log
+    3. Unwraps transit in batch (default), then appends to incoming_event_log
     """
 
     def __init__(self):
