@@ -43,28 +43,17 @@ class TestResolverBlockOnMissingDeps:
 class TestResolverRejectOnInvalidSignature:
     """Resolver should reject when signature verification fails."""
 
-    def test_reject_invalid_signature(self, v2_db, register_event):
-        event_type = 'test_bad_sig'
-        event_spec = {
-            'requires': {},
-            'signer': {
-                'id_field': 'network_pubkey',
-                'type_field': 'signer_type',
-            },
-        }
-        register_event(event_type, event_spec)
-
-        _, public_key = crypto.generate_keypair()
-        signed_bytes = b"test-wire"
-        event_data = {
+    def _make_event_data(self, event_type, public_key, signed_bytes, signature):
+        return {
             'type': event_type,
             'signer_type': 'network',
             'network_pubkey': crypto.b64encode(public_key),
             '_wire_signed_bytes': signed_bytes,
-            '_wire_signature': b'not-a-real-signature',
+            '_wire_signature': signature,
         }
 
-        result = v2_resolver.resolve_event(
+    def _resolve(self, v2_db, event_type, event_data):
+        return v2_resolver.resolve_event(
             ref_id='evt_bad_sig',
             event_type=event_type,
             event_data=event_data,
@@ -72,6 +61,139 @@ class TestResolverRejectOnInvalidSignature:
             recorded_at=1000,
             db=v2_db,
         )
+
+    def test_reject_signature_too_short(self, v2_db, register_event):
+        """Signature shorter than 64 bytes should be rejected."""
+        event_type = 'test_bad_sig_short'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        _, public_key = crypto.generate_keypair()
+        event_data = self._make_event_data(
+            event_type, public_key, b"test-wire", b'too-short'
+        )
+        result = self._resolve(v2_db, event_type, event_data)
+
+        assert result.status == 'reject'
+        assert result.error and 'invalid signature' in result.error
+
+    def test_reject_signature_too_long(self, v2_db, register_event):
+        """Signature longer than 64 bytes should be rejected."""
+        event_type = 'test_bad_sig_long'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        _, public_key = crypto.generate_keypair()
+        event_data = self._make_event_data(
+            event_type, public_key, b"test-wire", b'x' * 65
+        )
+        result = self._resolve(v2_db, event_type, event_data)
+
+        assert result.status == 'reject'
+        assert result.error and 'invalid signature' in result.error
+
+    def test_reject_signature_wrong_content(self, v2_db, register_event):
+        """64-byte signature with wrong content should be rejected."""
+        event_type = 'test_bad_sig_wrong'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        _, public_key = crypto.generate_keypair()
+        event_data = self._make_event_data(
+            event_type, public_key, b"test-wire", b'\x00' * 64
+        )
+        result = self._resolve(v2_db, event_type, event_data)
+
+        assert result.status == 'reject'
+        assert result.error and 'invalid signature' in result.error
+
+    def test_reject_signature_wrong_key(self, v2_db, register_event):
+        """Valid signature but wrong public key should be rejected."""
+        event_type = 'test_bad_sig_key'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        private_key, _ = crypto.generate_keypair()
+        _, wrong_public_key = crypto.generate_keypair()
+        signed_bytes = b"test-wire"
+        real_signature = crypto.sign(signed_bytes, private_key)
+
+        event_data = self._make_event_data(
+            event_type, wrong_public_key, signed_bytes, real_signature
+        )
+        result = self._resolve(v2_db, event_type, event_data)
+
+        assert result.status == 'reject'
+        assert result.error and 'invalid signature' in result.error
+
+    def test_reject_empty_signature(self, v2_db, register_event):
+        """Empty signature should be rejected."""
+        event_type = 'test_bad_sig_empty'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        _, public_key = crypto.generate_keypair()
+        event_data = self._make_event_data(
+            event_type, public_key, b"test-wire", b''
+        )
+        result = self._resolve(v2_db, event_type, event_data)
+
+        assert result.status == 'reject'
+        assert result.error and 'invalid signature' in result.error
+
+    def test_reject_public_key_too_short(self, v2_db, register_event):
+        """Public key shorter than 32 bytes should be rejected."""
+        event_type = 'test_bad_pubkey_short'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        event_data = {
+            'type': event_type,
+            'signer_type': 'network',
+            'network_pubkey': crypto.b64encode(b'short-key'),
+            '_wire_signed_bytes': b"test-wire",
+            '_wire_signature': b'\x00' * 64,
+        }
+        result = self._resolve(v2_db, event_type, event_data)
+
+        assert result.status == 'reject'
+        assert result.error and 'invalid signature' in result.error
+
+    def test_reject_public_key_too_long(self, v2_db, register_event):
+        """Public key longer than 32 bytes should be rejected."""
+        event_type = 'test_bad_pubkey_long'
+        event_spec = {
+            'requires': {},
+            'signer': {'id_field': 'network_pubkey', 'type_field': 'signer_type'},
+        }
+        register_event(event_type, event_spec)
+
+        event_data = {
+            'type': event_type,
+            'signer_type': 'network',
+            'network_pubkey': crypto.b64encode(b'x' * 33),
+            '_wire_signed_bytes': b"test-wire",
+            '_wire_signature': b'\x00' * 64,
+        }
+        result = self._resolve(v2_db, event_type, event_data)
 
         assert result.status == 'reject'
         assert result.error and 'invalid signature' in result.error
