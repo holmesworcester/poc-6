@@ -273,7 +273,7 @@ def test_three_player_api(api_setup, test_client):
         assert "Hello from Alice via API!" in bob_contents, "Bob should see Alice's message"
         assert "Hello from Bob via API!" in bob_contents, f"Bob should see his own message, got: {bob_contents}"
 
-    tick_helper.assert_eventually(all_messages_synced, db=db, start_t_ms=7000)
+    tick_helper.assert_eventually(all_messages_synced, db=db, start_t_ms=None)
     print("Message sync completed")
 
     # === Test API: List messages ===

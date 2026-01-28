@@ -51,7 +51,7 @@ def test_sync_perf_1k(fresh_db):
         assert count >= num_messages, f"Bob has {count}/{num_messages} messages"
 
     print("Syncing...")
-    assert_eventually(bob_has_all_messages, db=db, start_t_ms=20000, max_rounds=100)
+    assert_eventually(bob_has_all_messages, db=db, start_t_ms=None, max_rounds=100)
 
     # Verify message content matches
     alice_ids = {r['message_id'] for r in db.query(

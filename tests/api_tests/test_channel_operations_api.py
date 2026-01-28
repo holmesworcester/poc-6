@@ -242,7 +242,7 @@ def test_new_channel_visible_to_other_users(api_setup, test_client):
         channel_names = [ch["name"] for ch in channels]
         assert "announcements" in channel_names, f"Bob only sees: {channel_names}"
 
-    tick_helper.assert_eventually(bob_sees_announcements, db=db, start_t_ms=6000)
+    tick_helper.assert_eventually(bob_sees_announcements, db=db, start_t_ms=None)
 
     print("✓ New channel visible to other users after sync")
 

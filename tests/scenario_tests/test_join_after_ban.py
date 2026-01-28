@@ -56,7 +56,7 @@ def test_new_user_joins_after_ban(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=5000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Bob sends a message
     bob_msg = message.create(
@@ -157,7 +157,7 @@ def test_three_users_join_sequentially(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Alice creates invite for Charlie (after Bob has joined)
     _, invite2_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
@@ -202,7 +202,7 @@ def test_user_joins_after_two_bans(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
     # Charlie joins
     _, invite2_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)

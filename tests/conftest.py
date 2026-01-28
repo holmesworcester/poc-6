@@ -10,6 +10,7 @@ from core.db import Database
 from core import schema
 from core import tick
 from core import jobs
+from tests.utils import tick_helper
 
 # Disable all logging during tests for performance
 # Use pytest -o log_cli=true to re-enable if needed for debugging
@@ -47,6 +48,9 @@ def reset_global_state():
 
     # Reset job frequency multiplier
     jobs.reset_frequency_multiplier()
+
+    # Reset monotonic test clock
+    tick_helper.reset_test_clock()
 
     # Reset tick job state (database-backed, needs a temp db)
     # Note: Each test creates its own DB, but we need to reset the

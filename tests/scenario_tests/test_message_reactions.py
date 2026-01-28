@@ -41,7 +41,7 @@ def test_message_reactions_basic_two_peer(fresh_db):
         )
         assert len(bob_channels) == 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Create message
     msg_result = message.create(
@@ -82,7 +82,7 @@ def test_message_reactions_single_emoji(fresh_db):
         )
         assert len(bob_channels) == 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Create message
     msg_result = message.create(
@@ -152,7 +152,7 @@ def test_message_reactions_multiple_emoji(fresh_db):
         )
         assert len(bob_channels) == 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Create message
     msg_result = message.create(
@@ -238,7 +238,7 @@ def test_message_reactions_removal(fresh_db):
         )
         assert len(bob_channels) == 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Create message
     msg_result = message.create(
@@ -329,7 +329,7 @@ def test_message_reactions_cascade_deletion(fresh_db):
         )
         assert len(bob_channels) == 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Create message
     msg_result = message.create(

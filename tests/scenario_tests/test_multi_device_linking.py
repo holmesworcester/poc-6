@@ -328,7 +328,7 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
         assert "Message 1 from phone" in laptop_contents
         assert "Message 2 from phone" in laptop_contents
 
-    assert_eventually(laptop_sees_messages, db=db, start_t_ms=4000)
+    assert_eventually(laptop_sees_messages, db=db, start_t_ms=None)
 
     # Verify device name is now available
     laptop_device_name = peer_shared.get_device_name(alice_laptop['peer_shared_id'], alice_laptop['peer_id'], db)
@@ -417,7 +417,7 @@ def test_three_devices_all_linked(fresh_db):
         assert laptop_device_name == 'Laptop', f"Laptop device name should be 'Laptop', got '{laptop_device_name}'"
         assert tablet_device_name == 'Tablet', f"Tablet device name should be 'Tablet', got '{tablet_device_name}'"
 
-    final_t_ms = assert_eventually(all_device_names_synced, db=db, start_t_ms=6000)
+    final_t_ms = assert_eventually(all_device_names_synced, db=db, start_t_ms=None)
     print(f"✅ All device names stored correctly: Phone, Laptop, Tablet")
 
     # Verify connections between all three devices

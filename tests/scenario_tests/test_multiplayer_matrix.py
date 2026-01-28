@@ -689,7 +689,7 @@ class TestAdminGrantChain:
             grant = admin.my_grant(bob['user_id'], alice['network_id'], bob['peer_id'], db)
             assert grant is not None, "Bob should have admin_grant"
 
-        assert_eventually(bob_has_admin_grant, db=db, start_t_ms=11000,
+        assert_eventually(bob_has_admin_grant, db=db, start_t_ms=None,
                           msg="Bob should receive admin_grant")
 
         # Get the actual grant ID (assert_eventually returns timestamp, not the value)
@@ -709,7 +709,7 @@ class TestAdminGrantChain:
             )
             assert charlie_user is not None, "Alice should see Charlie's user"
 
-        t_ms = assert_eventually(alice_sees_charlie, db=db, start_t_ms=17000,
+        t_ms = assert_eventually(alice_sees_charlie, db=db, start_t_ms=None,
                                   msg="Alice should see Charlie after sync")
 
         # Bob grants admin to Charlie

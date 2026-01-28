@@ -245,12 +245,12 @@ def materialize_log_batch(
             by_peer.setdefault(recorded_by, []).append(
                 (event_id, recorded_by, source_ip, source_port)
             )
-        for recorded_by, rows in by_peer.items():
+        for recorded_by, peer_rows in by_peer.items():
             safedb = create_safe_db(db, recorded_by=recorded_by)
             safedb.executemany(
                 "INSERT OR REPLACE INTO packet_metadata "
                 "(event_id, recorded_by, from_addr_ip, from_addr_port) VALUES (?, ?, ?, ?)",
-                rows,
+                peer_rows,
             )
 
     if protocol_log_ids:

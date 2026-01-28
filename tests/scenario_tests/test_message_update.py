@@ -78,7 +78,7 @@ def test_cannot_edit_others_message(fresh_db):
         msgs = message.list(channel_id, bob['peer_id'], db)
         assert any(m['content'] == "alice's message" for m in msgs)
 
-    assert_eventually(bob_sees_message, db=db, start_t_ms=5000)
+    assert_eventually(bob_sees_message, db=db, start_t_ms=None)
 
     # Bob tries to edit alice's message - should fail
     with pytest.raises(ValueError, match="Only the message author"):
@@ -181,7 +181,7 @@ def test_edit_syncs_to_other_peer(fresh_db):
         channels = db.query_all("SELECT channel_id FROM channels WHERE recorded_by = ?", (bob['peer_id'],))
         assert len(channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Alice sends a message
     msg_result = message.create(

@@ -41,7 +41,7 @@ def test_admin_group_workflow(fresh_db):
         )
         assert len(bob_channels) >= 1
 
-    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
     # Verify Alice is admin (network creator)
     assert admin.is_user_admin(alice['user_id'], alice['network_id'], alice['peer_id'], db), \

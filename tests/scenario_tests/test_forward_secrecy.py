@@ -194,7 +194,7 @@ def test_forward_secrecy_multi_peer(fresh_db_with_alice):
         )
         assert bob_msg_check is not None, "Bob should see the message"
 
-    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=4000)
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=None)
     print("✓ Bob sees Alice's message")
 
     # Alice deletes the message
