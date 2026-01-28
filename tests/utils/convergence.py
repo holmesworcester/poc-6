@@ -467,11 +467,10 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
             pass
         recorded.project(event_id, db)
 
-    # NOTE: We don't do additional blocked.process() passes here because:
-    # 1. Events blocked on encryption keys will keep getting re-blocked even if deps are valid
-    # 2. The blocking mechanism conflates data deps (event references) with encryption deps (key access)
-    # 3. notify_event_valid() during projection should handle the reactive unblocking
-    # The remaining blocked events are legitimately blocked on keys they can't decrypt.
+    # Flush blocked events queue - since we removed recursive projection from
+    # notify_event_valid(), we need to explicitly process events that became ready
+    from core import queues
+    queues.blocked.flush(db)
 
     # Cleanup: Remove blocked events that successfully projected (deps_remaining=0 AND in valid_events)
     # Only delete if the event actually made it into valid_events after re-projection
@@ -567,10 +566,15 @@ def _replay_events(event_ids: list[str], db: Any) -> None:
 def _project_with_repetitions(event_ids: list[str], repetitions: list[int], db: Any) -> None:
     """Project recorded events with repetitions."""
     from core import recorded
+    from core import queues
 
     for event_id, count in zip(event_ids, repetitions):
         for _ in range(count):
             recorded.project(event_id, db)
+
+    # Flush blocked events queue - since we removed recursive projection from
+    # notify_event_valid(), we need to explicitly process events that became ready
+    queues.blocked.flush(db)
 
     db.commit()
 

@@ -547,6 +547,55 @@ class IntroProcessJob(Job):
         return {'processed': processed_count}
 
 
+class UnblockJob(Job):
+    """Process blocked events queue and project events whose deps are satisfied.
+
+    This job runs frequently (every 10ms) to ensure blocked events are projected
+    promptly when their dependencies become available. It replaces recursive
+    unblocking during projection, which could cause exponential cascades.
+
+    The job is cheap when there's nothing to do (just a query for deps_remaining=0).
+    """
+
+    def __init__(self):
+        super().__init__('unblock', every_ms=10, budget_ms=5)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from core import recorded
+        from core.db import create_safe_db, create_unsafe_db
+
+        unsafedb = create_unsafe_db(db)
+        total_unblocked = 0
+
+        # Get all local peers
+        local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+        for peer_row in local_peers:
+            peer_id = peer_row['peer_id']
+            safedb = create_safe_db(db, recorded_by=peer_id)
+
+            # Find events with all deps satisfied (deps_remaining = 0)
+            ready_events = safedb.query("""
+                SELECT recorded_id FROM blocked_events_ephemeral
+                WHERE deps_remaining = 0 AND recorded_by = ?
+            """, (peer_id,))
+
+            if not ready_events:
+                continue
+
+            ready_ids = [row['recorded_id'] for row in ready_events]
+
+            # Project them non-recursively (skip_negentropy=True since we batch)
+            recorded.project_ids(ready_ids, db, _recursion_depth=0, skip_negentropy=True)
+
+            # Clean up successfully projected events
+            recorded._cleanup_successfully_projected_events(ready_ids, peer_id, db)
+
+            total_unblocked += len(ready_ids)
+
+        return {'unblocked': total_unblocked}
+
+
 class NegentropySyncJob(Job):
     """Send negentropy sync messages to all established connections."""
 
@@ -622,6 +671,7 @@ JOBS = [
         exclude_env="HIGH_PRIORITY_TYPES",
         default_types=HIGH_PRIORITY_DEFAULT_TYPES,
     ),
+    UnblockJob(),
     NegentropySyncJob(),
     ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),

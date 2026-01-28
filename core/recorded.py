@@ -180,6 +180,13 @@ def _apply_projection(
             (ref_id, event_type, event_data['created_at'], recorded_by)
         )
 
+    # Notify the blocked queue that this event is now valid.
+    # This decrements deps_remaining for any events waiting on this one
+    # and returns the list of newly unblocked events (deps_remaining just hit 0).
+    #
+    # NOTE: The exponential cascade bug was fixed in queues.blocked.notify_event_valid()
+    # by only returning NEWLY unblocked events, not ALL events with deps_remaining=0.
+    # See the comment in queues.py for details.
     unblocked_ids = queues.blocked.notify_event_valid(ref_id, recorded_by, safedb)
     if unblocked_ids:
         project_ids(unblocked_ids, db, _recursion_depth + 1, skip_negentropy=skip_negentropy)

@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS blocked_events_ephemeral (
 CREATE INDEX IF NOT EXISTS idx_blocked_events_ephemeral_peer
     ON blocked_events_ephemeral(recorded_by);
 
+-- Index for finding ready events (deps_remaining=0) efficiently
+-- Used by UnblockJob to quickly find events to process
+CREATE INDEX IF NOT EXISTS idx_blocked_events_ready
+    ON blocked_events_ephemeral(recorded_by, deps_remaining);
+
 -- Dependency tracking for Kahn's algorithm - EPHEMERAL
 CREATE TABLE IF NOT EXISTS blocked_event_deps_ephemeral (
     recorded_id TEXT NOT NULL,

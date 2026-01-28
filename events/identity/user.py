@@ -426,6 +426,11 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
 
     # NOTE: peer_name_update for device_name is created by peer_shared.join() above
 
+    # Flush blocked events queue to ensure admin_grant and other events are projected
+    # before we check admin status in channel.create()
+    from core import queues
+    queues.blocked.flush(db)
+
     # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence
     channel_id = channel.create(
@@ -765,6 +770,11 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         log.info(f"join() stored pending username for user {user_id[:20]}...")
 
     # NOTE: peer_name_update for device_name is created by peer_shared.join() above
+
+    # Flush blocked events queue to ensure all events are projected
+    # before we return (so caller can use peer_self, etc.)
+    from core import queues
+    queues.blocked.flush(db)
 
     return {
         'peer_id': peer_id,

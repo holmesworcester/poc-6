@@ -85,6 +85,7 @@ SYNC_ONLY_JOBS = {
     'sync_update',
     'high_priority_project',
     'low_priority_project',
+    'unblock',  # Process blocked events queue
     'negentropy_sync',
     'connection_send',
 }

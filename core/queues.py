@@ -470,6 +470,66 @@ class blocked:
         return unblocked
 
     @staticmethod
+    def flush(db: Any) -> int:
+        """Process all blocked events with deps_remaining=0.
+
+        This is used during synchronous operations (like bootstrap) where we need
+        blocked events to be projected immediately rather than waiting for the
+        UnblockJob to run.
+
+        Args:
+            db: Database connection
+
+        Returns:
+            Total number of events unblocked and projected
+        """
+        from core import recorded as recorded_module
+        from core.db import create_safe_db, create_unsafe_db
+
+        unsafedb = create_unsafe_db(db)
+        total_unblocked = 0
+        max_iterations = 100  # Prevent infinite loops
+
+        for iteration in range(max_iterations):
+            # Get all local peers
+            local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+            unblocked_this_round = 0
+
+            for peer_row in local_peers:
+                peer_id = peer_row['peer_id']
+                safedb = create_safe_db(db, recorded_by=peer_id)
+
+                # Find events with all deps satisfied (deps_remaining = 0)
+                ready_events = safedb.query("""
+                    SELECT recorded_id FROM blocked_events_ephemeral
+                    WHERE deps_remaining = 0 AND recorded_by = ?
+                """, (peer_id,))
+
+                if not ready_events:
+                    continue
+
+                ready_ids = [row['recorded_id'] for row in ready_events]
+
+                # Project them (this may unblock more events via notify_event_valid)
+                recorded_module.project_ids(ready_ids, db, _recursion_depth=0, skip_negentropy=True)
+
+                # Clean up successfully projected events
+                recorded_module._cleanup_successfully_projected_events(ready_ids, peer_id, db)
+
+                unblocked_this_round += len(ready_ids)
+
+            total_unblocked += unblocked_this_round
+
+            # If nothing was unblocked this round, we're done
+            if unblocked_this_round == 0:
+                break
+
+        if total_unblocked > 0:
+            log.info(f"queues.blocked.flush() processed {total_unblocked} events in {iteration + 1} iterations")
+
+        return total_unblocked
+
+    @staticmethod
     def assert_deps_consistency(recorded_by: str, safedb: SafeDB) -> None:
         """INVARIANT TEST: Verify deps_remaining always equals actual count in deps table.
 
