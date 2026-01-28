@@ -58,12 +58,16 @@ def sign(message: bytes, private_key: bytes) -> bytes:
 
 
 def verify(message: bytes, signature: bytes, public_key: bytes) -> bool:
-    """Verify an Ed25519 signature."""
+    """Verify an Ed25519 signature.
+
+    Returns False for any malformed input (wrong lengths, invalid keys, etc.)
+    rather than raising exceptions. This is important for handling untrusted input.
+    """
     try:
         verify_key = nacl.signing.VerifyKey(public_key)
         verify_key.verify(message, signature)
         return True
-    except nacl.exceptions.BadSignatureError:
+    except (nacl.exceptions.BadSignatureError, nacl.exceptions.ValueError, ValueError, TypeError):
         return False
 
 
