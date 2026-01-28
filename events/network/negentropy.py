@@ -215,6 +215,11 @@ def _cc_reset(recorded_by: str, connection_id: str) -> None:
         del _cc_state[key]
 
 
+def _cc_reset_all() -> None:
+    """Reset all CC state. For testing only."""
+    _cc_state.clear()
+
+
 class RangeStatus(Enum):
     PENDING = 'pending'          # Waiting for their response
     MATCHED = 'matched'          # Hashes match, range synced
