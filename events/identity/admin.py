@@ -14,6 +14,7 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -48,6 +49,19 @@ EVENT_SPEC = {
 log = logging.getLogger(__name__)
 
 
+
+def _wire_shadow_admin(user_id: str, network_id: str, admin_grant: str | None) -> None:
+    """Validate admin fields against the fixed-size wire payload layout."""
+    admin_grant_bytes = crypto.b64decode(admin_grant) if admin_grant else None
+    plaintext = wire_format.encode_admin_plaintext(
+        user_id=crypto.b64decode(user_id),
+        network_id=crypto.b64decode(network_id),
+        admin_grant_id=admin_grant_bytes,
+    )
+    decoded = wire_format.decode_admin_plaintext(plaintext)
+    if decoded["user_id"] != crypto.b64decode(user_id):
+        raise ValueError("wire shadow decode user_id mismatch")
+
 def create(
     user_id: str,
     network_id: str,
@@ -73,25 +87,17 @@ def create(
     Returns:
         admin_id: The ID of the created admin event
     """
-    event_data = {
-        'type': 'admin',
-        'user_id': user_id,
-        'network_id': network_id,
-        'signed_by': signed_by,
-        'signer_type': 'network' if signed_by == network_id else 'peer_shared',
-        'created_at': t_ms,
-    }
+    _wire_shadow_admin(user_id, network_id, admin_grant)
 
-    if admin_grant:
-        event_data['admin_grant'] = admin_grant
-
-    # Sign the event
-    signed_event = crypto.sign_event(event_data, signer_private_key)
-
-    # Store as signed plaintext (no encryption)
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Store event with recorded wrapper and projection
+    blob = wire_format.encode_admin_wire_event(
+        user_id_b64=user_id,
+        network_id_b64=network_id,
+        signed_by_b64=signed_by,
+        signer_type='network' if signed_by == network_id else 'peer_shared',
+        admin_grant_id_b64=admin_grant,
+        created_at_ms=t_ms,
+        private_key=signer_private_key,
+    )
     admin_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"admin.create() created admin grant: admin_id={admin_id[:20]}..., "
@@ -115,6 +121,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not signed_by or not network_id or not user_id:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_admin(user_id, network_id, admin_grant)
 
     signer = ctx.signer or {}
     signer_type = signer.get('type')

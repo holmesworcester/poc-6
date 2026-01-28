@@ -6,15 +6,16 @@ SHAREABLE = True  # Public identity syncs across network
 PROJECTION_TABLE = ('peers_shared', 'peer_shared_id')
 
 from typing import Any
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - peer_shared uses legacy NO_DEPS_TYPES behavior
@@ -69,6 +70,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     invite_id = event_data.get('invite_id')
     signed_by = event_data.get('signed_by')
     user_id = None
+
+    _wire_shadow_peer_shared(public_key_b64, owner_peer_id, invite_id)
 
     if invite_id and signed_by == invite_id:
         # Invite-based - get user_id from invite
@@ -154,18 +157,31 @@ def create(peer_id: str, t_ms: int, db: Any,
         'created_at': t_ms
     }
 
-    # Sign with invite key (links peer_shared to user via invite)
-    signed_event = crypto.sign_event(event_data, invite_private_key)
-    log.info(f"peer_shared.create() signed with invite key (signed_by={invite_id[:20]}...)")
+    _wire_shadow_peer_shared(event_data['public_key'], peer_id, invite_id)
 
-    # Canonicalize to get deterministic blob
-    blob = crypto.canonicalize_json(signed_event)
-
-    # Store event with recorded wrapper and projection
+    blob = wire_format.encode_peer_shared_wire_event(
+        public_key_b64=event_data['public_key'],
+        peer_id_b64=peer_id,
+        invite_id_b64=invite_id,
+        created_at_ms=t_ms,
+        private_key=invite_private_key,
+    )
     peer_shared_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"peer_shared.create() created peer_shared_id={peer_shared_id}")
     return peer_shared_id
+
+
+def _wire_shadow_peer_shared(public_key_b64: str, peer_id: str, invite_id: str | None) -> None:
+    """Validate peer_shared fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_peer_shared_plaintext(
+        public_key=crypto.b64decode(public_key_b64),
+        peer_id=crypto.b64decode(peer_id),
+        invite_id=crypto.b64decode(invite_id) if invite_id else None,
+    )
+    decoded = wire_format.decode_peer_shared_plaintext(plaintext)
+    if decoded["peer_id"] != crypto.b64decode(peer_id):
+        raise ValueError("wire shadow decode peer_id mismatch")
 
 
 def get_public_key(peer_shared_id: str, recorded_by: str, db: Any) -> bytes:
@@ -203,7 +219,10 @@ def get_public_key_from_store(peer_shared_id: str, db: Any) -> bytes | None:
         return None
 
     try:
-        event_data = crypto.parse_json(blob)
+        if not wire_format.is_wire_peer_shared_envelope(blob):
+            log.warning(f"get_public_key_from_store() expected wire peer_shared event: {peer_shared_id[:20]}...")
+            return None
+        event_data = wire_format.decode_peer_shared_wire_event(blob)
         if event_data.get('type') != 'peer_shared':
             log.warning(f"get_public_key_from_store() not a peer_shared event: {peer_shared_id[:20]}...")
             return None
@@ -234,7 +253,9 @@ def get_peer_id_for_signing(peer_shared_id: str, recorded_by: str, db: Any) -> s
     if not blob:
         raise ValueError(f"peer_shared not found: {peer_shared_id}")
 
-    event_data = crypto.parse_json(blob)
+    if not wire_format.is_wire_peer_shared_envelope(blob):
+        raise ValueError(f"peer_shared event not in wire format: {peer_shared_id}")
+    event_data = wire_format.decode_peer_shared_wire_event(blob)
     peer_id = event_data.get('peer_id')
     if not peer_id:
         raise ValueError(f"peer_id not found in peer_shared event: {peer_shared_id}")

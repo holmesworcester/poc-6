@@ -21,10 +21,12 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - unsigned, not encrypted
@@ -50,6 +52,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not all([file_id, slice_number is not None, nonce_b64, ciphertext_b64, poly_tag_b64]):
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_file_slice(file_id, slice_number, nonce_b64, ciphertext_b64, poly_tag_b64)
 
     # Decode from base64
     nonce = crypto.b64decode(nonce_b64)
@@ -85,6 +89,26 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     return ProjectorResult(writes=writes, valid_event=True)
 
+
+def _wire_shadow_file_slice(
+    file_id: str,
+    slice_number: int,
+    nonce_b64: str,
+    ciphertext_b64: str,
+    poly_tag_b64: str,
+) -> None:
+    """Validate file_slice fields against the fixed-size wire layout."""
+    plaintext = wire_format.encode_file_slice_wire_event(
+        file_id=crypto.b64decode(file_id),
+        slice_number=slice_number,
+        nonce=crypto.b64decode(nonce_b64),
+        ciphertext=crypto.b64decode(ciphertext_b64),
+        poly_tag=crypto.b64decode(poly_tag_b64),
+    )
+    decoded = wire_format.decode_file_slice_wire_event(plaintext)
+    if decoded["file_id"] != file_id:
+        raise ValueError("wire shadow decode file_id mismatch")
+
 # Disable per-slice logging during batch operations
 _batch_mode = False
 
@@ -114,23 +138,14 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
         log.info(f"file_slice.create() file_id={file_id}, slice_number={slice_number}, "
                  f"ciphertext_size={len(ciphertext)}B")
 
-    # Build event structure (NO signatures, NO wrapping)
-    # Integrity verified via root_hash in message_attachment
-    event_data = {
-        'type': 'file_slice',
-        'file_id': file_id,
-        'slice_number': slice_number,
-        'nonce': crypto.b64encode(nonce),
-        'ciphertext': crypto.b64encode(ciphertext),
-        'poly_tag': crypto.b64encode(poly_tag),
-        'created_at': t_ms
-    }
-
-    # Canonicalize (no signing, no encryption)
-    canonical = crypto.canonicalize_json(event_data)
-
-    # Store as plain event (no wrapping at all)
-    slice_event_id = store.event(canonical, peer_id, t_ms, db)
+    blob = wire_format.encode_file_slice_wire_event(
+        file_id=crypto.b64decode(file_id),
+        slice_number=slice_number,
+        nonce=nonce,
+        ciphertext=ciphertext,
+        poly_tag=poly_tag,
+    )
+    slice_event_id = store.event(blob, peer_id, t_ms, db)
 
     if not _batch_mode:
         log.info(f"file_slice.create() created slice_event_id={slice_event_id[:20]}...")
@@ -166,17 +181,14 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
     # Build all event blobs upfront (no signing - integrity via root_hash)
     event_blobs = []
     for slice_number, slice_nonce, ciphertext, poly_tag in slices_data:
-        event_data = {
-            'type': 'file_slice',
-            'file_id': file_id,
-            'slice_number': slice_number,
-            'nonce': crypto.b64encode(slice_nonce),
-            'ciphertext': crypto.b64encode(ciphertext),
-            'poly_tag': crypto.b64encode(poly_tag),
-            'created_at': t_ms
-        }
-        canonical = crypto.canonicalize_json(event_data)
-        event_blobs.append(canonical)
+        blob = wire_format.encode_file_slice_wire_event(
+            file_id=crypto.b64decode(file_id),
+            slice_number=slice_number,
+            nonce=slice_nonce,
+            ciphertext=ciphertext,
+            poly_tag=poly_tag,
+        )
+        event_blobs.append(blob)
 
     # Store all events in bulk AND project them directly (skipping recorded.project overhead)
     old_store_batch = store._batch_mode

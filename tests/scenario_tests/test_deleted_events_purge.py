@@ -11,7 +11,7 @@ This ensures deleted content is truly gone and cannot be recovered via sync.
 """
 import sqlite3
 from core.db import Database, create_safe_db, create_unsafe_db
-from core import schema, store, crypto, recorded
+from core import schema, store, crypto, recorded, wire_format
 from events.identity import user, invite, peer as peer_module
 from events.content import message, channel
 from events.content import message_deletion
@@ -99,26 +99,20 @@ def test_deleted_message_arriving_via_sync_is_immediately_purged(fresh_db):
     channel_id = general_channel['channel_id']
     group_id = general_channel['group_id']
 
-    # Create message event data
-    message_event = {
-        'type': 'message',
-        'channel_id': channel_id,
-        'author_id': alice['user_id'],
-        'signed_by': identity['peer_shared_id'],
-        'signer_type': 'peer_shared',
-        'content': "Message that will arrive after deletion",
-        'created_at': 2000,
-    }
-
-    # Sign the message
     private_key = peer_module.get_private_key(alice['peer_id'], alice['peer_id'], db)
-    signed_message = crypto.sign_event(message_event, private_key)
-
-    # Encrypt and store (but don't project yet)
     from events.group import group
     key_data = group.pick_key(group_id, alice['peer_id'], db)
-    canonical = crypto.canonicalize_json(signed_message)
-    blob = crypto.wrap(canonical, key_data, db)
+    blob = wire_format.encode_message_wire_event(
+        channel_id_b64=channel_id,
+        author_id_b64=alice['user_id'],
+        signed_by_b64=identity['peer_shared_id'],
+        signer_type="peer_shared",
+        content="Message that will arrive after deletion",
+        created_at_ms=2000,
+        ttl_ms=0,
+        key_data=key_data,
+        private_key=private_key,
+    )
 
     unsafedb = create_unsafe_db(db)
     message_id = store.blob(blob, 2000, return_dupes=True, unsafedb=unsafedb)

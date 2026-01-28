@@ -7,10 +7,10 @@ SHAREABLE = True  # Groups sync for access control
 PROJECTION_TABLE = ('groups', 'group_id')
 
 from typing import Any
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group_key
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
@@ -44,6 +44,7 @@ EVENT_SPEC = {
 }
 
 log = logging.getLogger(__name__)
+
 
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
@@ -82,34 +83,26 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
 
     signer_type = 'network' if signer_id and network_id and signer_id == network_id else 'peer_shared'
 
-    # Create event dict
-    event_data = {
-        'type': 'group',
-        'name': name,
-        'signed_by': actual_signer_id,  # Network ID or peer_shared_id
-        'signer_type': signer_type,
-        'created_at': t_ms,
-        'key_id': key_id,  # Store key_id in event for later retrieval
-        'is_main': 1 if is_main else 0  # Store is_main flag
-    }
-
-    # Add network_id for dependency ordering (ensures network projects before group)
-    if network_id:
-        event_data['network_id'] = network_id
-
     # Sign the event - use provided key or peer's private key
     if signer_private_key:
         private_key = signer_private_key
     else:
         private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
 
     # Get key_data for encryption
     key_data = group_key.get_key(key_id, peer_id, db)
 
-    # Wrap (canonicalize + encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    blob = wire_format.encode_group_wire_event(
+        name=name,
+        key_id_b64=key_id,
+        is_main=is_main,
+        network_id_b64=network_id,
+        signed_by_b64=actual_signer_id,
+        signer_type=signer_type,
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
 
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
@@ -135,6 +128,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     is_main = event_data.get('is_main', 0)
     network_id = event_data.get('network_id') or ''
+
+    _wire_shadow_group(name, key_id, is_main, network_id)
 
     values = {
         'group_id': ctx.event_id,
@@ -169,6 +164,19 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True, commands=commands)
+
+
+def _wire_shadow_group(name: str, key_id: str, is_main: int, network_id: str | None) -> None:
+    """Validate group fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_group_plaintext(
+        name=name,
+        key_id=crypto.b64decode(key_id),
+        is_main=is_main,
+        network_id=crypto.b64decode(network_id) if network_id else None,
+    )
+    decoded = wire_format.decode_group_plaintext(plaintext)
+    if decoded["key_id"] != crypto.b64decode(key_id):
+        raise ValueError("wire shadow decode key_id mismatch")
 
 
 def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:

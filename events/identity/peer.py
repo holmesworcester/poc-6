@@ -5,14 +5,15 @@ from typing import Any
 EVENT_TYPE = 'peer'
 SHAREABLE = False  # Local-only - contains private key material
 PROJECTION_TABLE = None  # No projection table (stored in peers table)
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - no signer, no deps (local-only unsigned event)
@@ -38,6 +39,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not public_key or not private_key_b64 or created_at is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_peer(public_key, private_key_b64)
 
     # Decode private key from base64 to bytes for storage
     private_key = crypto.b64decode(private_key_b64)
@@ -81,7 +84,13 @@ def create(t_ms: int, db: Any) -> str:
         'created_at': t_ms
     }
 
-    blob = json.dumps(event_data).encode()
+    _wire_shadow_peer(event_data['public_key'], event_data['private_key'])
+
+    blob = wire_format.encode_peer_wire_event(
+        public_key=public_key,
+        private_key=private_key,
+        created_at_ms=t_ms,
+    )
 
     # First store the blob to get the peer_id
     peer_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
@@ -93,6 +102,17 @@ def create(t_ms: int, db: Any) -> str:
     recorded.project(recorded_id, db)
 
     return peer_id
+
+
+def _wire_shadow_peer(public_key_b64: str, private_key_b64: str) -> None:
+    """Validate peer fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_peer_plaintext(
+        public_key=crypto.b64decode(public_key_b64),
+        private_key=crypto.b64decode(private_key_b64),
+    )
+    decoded = wire_format.decode_peer_plaintext(plaintext)
+    if decoded["public_key"] != crypto.b64decode(public_key_b64):
+        raise ValueError("wire shadow decode public_key mismatch")
 
 
 def get_private_key(peer_id: str, recorded_by: str, db: Any) -> bytes:

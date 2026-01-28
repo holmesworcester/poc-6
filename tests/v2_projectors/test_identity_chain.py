@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 from core.db import Database, create_safe_db, create_unsafe_db
-from core import schema, store, crypto
+from core import schema, store, crypto, wire_format
 from core import recorded
 from events.identity import peer
 
@@ -86,14 +86,11 @@ class TestNetworkProjector:
 
         # Create a mock network event (as if Alice created it)
         network_private_key, network_public_key = crypto.generate_keypair()
-        network_event_data = {
-            'type': 'network',
-            'network_pubkey': crypto.b64encode(network_public_key),
-            'signer_type': 'network',
-            'created_at': 500
-        }
-        signed_network = crypto.sign_event(network_event_data, network_private_key)
-        network_blob = crypto.canonicalize_json(signed_network)
+        network_blob = wire_format.encode_network_wire_event(
+            network_pubkey=network_public_key,
+            created_at_ms=500,
+            private_key=network_private_key,
+        )
         network_id = crypto.b64encode(crypto.hash(network_blob))
 
         # Store network blob
@@ -157,27 +154,15 @@ class TestInviteProjector:
         db.commit()
 
         alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-        unsafedb = create_unsafe_db(db)
 
-        # Find all invites for Alice
-        invites = alice_safedb.query_all(
-            "SELECT invite_id FROM invites WHERE recorded_by = ?",
-            (alice['peer_id'],)
+        # Find bootstrap invite by querying invites table
+        # Bootstrap invites have inviter_id == network_id (signed by network)
+        bootstrap_invite = alice_safedb.query_one(
+            "SELECT invite_id FROM invites WHERE inviter_id = ? AND recorded_by = ?",
+            (alice['network_id'], alice['peer_id'])
         )
-        assert len(invites) >= 1, "Should have at least one invite"
-
-        # Find bootstrap invite by checking blob's signed_by field
-        bootstrap_invite_id = None
-        for inv in invites:
-            blob = store.get(inv['invite_id'], unsafedb)
-            if blob:
-                data = crypto.parse_json(blob)
-                # Bootstrap invites are signed by network (signer_type='network')
-                if data.get('signer_type') == 'network':
-                    bootstrap_invite_id = inv['invite_id']
-                    break
-
-        assert bootstrap_invite_id is not None, "Bootstrap invite should exist"
+        assert bootstrap_invite is not None, "Bootstrap invite should exist (signed by network)"
+        bootstrap_invite_id = bootstrap_invite['invite_id']
 
         # Verify it's valid
         valid = alice_safedb.query_one(
@@ -340,32 +325,39 @@ class TestIdentityChainCascade:
         bob_safedb = create_safe_db(db, recorded_by=bob_peer_id)
         unsafedb = create_unsafe_db(db)
 
-        # Create mock network
+        # Create mock network using wire format
         network_private_key, network_public_key = crypto.generate_keypair()
-        network_event_data = {
-            'type': 'network',
-            'network_pubkey': crypto.b64encode(network_public_key),
-            'signer_type': 'network',
-            'created_at': 500
-        }
-        signed_network = crypto.sign_event(network_event_data, network_private_key)
-        network_blob = crypto.canonicalize_json(signed_network)
+        network_blob = wire_format.encode_network_wire_event(
+            network_pubkey=network_public_key,
+            created_at_ms=500,
+            private_key=network_private_key,
+        )
         network_id = crypto.b64encode(crypto.hash(network_blob))
         store.blob(network_blob, 500, True, unsafedb)
 
-        # Create mock bootstrap invite (signed by network)
+        # Create mock bootstrap invite (signed by network) using wire format
         invite_private_key, invite_public_key = crypto.generate_keypair()
-        invite_event_data = {
-            'type': 'invite',
-            'invite_pubkey': crypto.b64encode(invite_public_key),
-            'group_id': 'mock_group',
-            'mode': 'user',
-            'signed_by': network_id,
-            'signer_type': 'network',
-            'created_at': 600
-        }
-        signed_invite = crypto.sign_event(invite_event_data, network_private_key)
-        invite_blob = crypto.canonicalize_json(signed_invite)
+        # Generate a mock group_id (16 bytes)
+        mock_group_id = crypto.b64encode(crypto.hash(b'mock_group'))
+        invite_blob = wire_format.encode_invite_wire_event(
+            mode='user',
+            invite_pubkey_b64=crypto.b64encode(invite_public_key),
+            invite_prekey_id_b64=None,
+            group_id_b64=mock_group_id,
+            channel_id_b64=None,
+            key_id_b64=None,
+            network_id_b64=None,
+            inviter_peer_shared_id_b64=None,
+            inviter_user_id_b64=None,
+            target_user_id_b64=None,
+            admin_grant_id_b64=None,
+            inviter_ip=None,
+            inviter_port=None,
+            signed_by_b64=network_id,
+            signer_type='network',
+            created_at_ms=600,
+            private_key=network_private_key,
+        )
         invite_id = crypto.b64encode(crypto.hash(invite_blob))
         store.blob(invite_blob, 600, True, unsafedb)
 

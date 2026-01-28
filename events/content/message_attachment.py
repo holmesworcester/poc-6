@@ -33,6 +33,7 @@ import logging
 from PIL import Image
 from core import crypto
 from core import store
+from core import wire_format
 from core.projection_v2.types import ProjectorResult, WriteOp
 from events.identity import peer_shared, peer
 from events.group import group
@@ -40,6 +41,7 @@ from events.content import file_slice, message
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
+
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
@@ -68,6 +70,18 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 nonce_prefix_b64, enc_key_b64, root_hash_b64, total_slices is not None]):
         log.warning(f"message_attachment.project_pure() missing required fields")
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_message_attachment(
+        message_id=message_id,
+        file_id=file_id,
+        blob_bytes=blob_bytes,
+        total_slices=total_slices,
+        nonce_prefix_b64=nonce_prefix_b64,
+        enc_key_b64=enc_key_b64,
+        root_hash_b64=root_hash_b64,
+        filename=filename,
+        mime_type=mime_type,
+    )
 
     # Validate message exists and attachment creator matches message creator
     message_row = ctx.deps.get('message')
@@ -117,6 +131,35 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True, commands=())
+
+
+def _wire_shadow_message_attachment(
+    *,
+    message_id: str,
+    file_id: str,
+    blob_bytes: int,
+    total_slices: int,
+    nonce_prefix_b64: str,
+    enc_key_b64: str,
+    root_hash_b64: str,
+    filename: str | None,
+    mime_type: str | None,
+) -> None:
+    """Validate message_attachment fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_message_attachment_plaintext(
+        message_id=crypto.b64decode(message_id),
+        file_id=crypto.b64decode(file_id),
+        blob_bytes=blob_bytes,
+        total_slices=total_slices,
+        nonce_prefix=crypto.b64decode(nonce_prefix_b64),
+        enc_key=crypto.b64decode(enc_key_b64),
+        root_hash=crypto.b64decode(root_hash_b64),
+        filename=filename,
+        mime_type=mime_type,
+    )
+    decoded = wire_format.decode_message_attachment_plaintext(plaintext)
+    if decoded["file_id"] != crypto.b64decode(file_id):
+        raise ValueError("wire shadow decode file_id mismatch")
 
 
 SLICE_SIZE = 450  # bytes - matches ideal protocol design
@@ -182,6 +225,8 @@ def create(peer_id: str, message_id: str, file_data: bytes,
 
     for slice_number in range(0, len(file_data), SLICE_SIZE):
         plaintext_slice = file_data[slice_number:slice_number + SLICE_SIZE]
+        if len(plaintext_slice) < SLICE_SIZE:
+            plaintext_slice = plaintext_slice.ljust(SLICE_SIZE, b"\x00")
 
         # Derive nonce for this slice
         slice_nonce = crypto.derive_slice_nonce(nonce_prefix, slice_number)
@@ -217,23 +262,25 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     # Step 6: Compute root_hash
     root_hash = crypto.compute_root_hash(slice_ciphertexts)
 
-    # Step 7: Build event structure with all file descriptor fields
-    event_data = {
-        'type': 'message_attachment',
-        'message_id': message_id,
-        'file_id': file_id,
-        'filename': filename,
-        'mime_type': mime_type,
-        'blob_bytes': len(file_data),
-        'nonce_prefix': crypto.b64encode(nonce_prefix),
-        'enc_key': crypto.b64encode(enc_key),
-        'root_hash': crypto.b64encode(root_hash),
-        'total_slices': slice_count,
-        'signed_by': peer_shared_id,
-        'created_at': t_ms
-    }
-
-    attachment_event_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(group_id, peer_id, db)
+    blob = wire_format.encode_message_attachment_wire_event(
+        message_id_b64=message_id,
+        file_id_b64=file_id,
+        blob_bytes=len(file_data),
+        total_slices=slice_count,
+        nonce_prefix_b64=crypto.b64encode(nonce_prefix),
+        enc_key_b64=crypto.b64encode(enc_key),
+        root_hash_b64=crypto.b64encode(root_hash),
+        filename=filename,
+        mime_type=mime_type,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    attachment_event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_attachment.create() created attachment_event_id={attachment_event_id[:20]}...")
 
@@ -347,6 +394,8 @@ def create_from_file(peer_id: str, message_id: str, file_path: str,
                 slice_nonce = crypto.derive_slice_nonce(nonce_prefix, slice_offset)
 
                 # Encrypt slice
+                if len(plaintext_slice) < SLICE_SIZE:
+                    plaintext_slice = plaintext_slice.ljust(SLICE_SIZE, b"\x00")
                 ciphertext, poly_tag = crypto.encrypt_file_slice(plaintext_slice, enc_key, slice_nonce)
 
                 # Update incremental hashes
@@ -431,32 +480,28 @@ def create_from_file(peer_id: str, message_id: str, file_path: str,
             pass
 
     # ===== Create message_attachment event =====
-    event_data = {
-        'type': 'message_attachment',
-        'message_id': message_id,
-        'file_id': file_id,
-        'filename': filename,
-        'mime_type': mime_type,
-        # File descriptor fields
-        'blob_bytes': file_size,
-        'nonce_prefix': crypto.b64encode(nonce_prefix),
-        'enc_key': crypto.b64encode(enc_key),
-        'root_hash': crypto.b64encode(root_hash),
-        'total_slices': slice_count,
-        'signed_by': peer_shared_id,
-        'created_at': t_ms
-    }
-
     # Sign the event
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
 
     # Get group key for encryption
     key_data = group.pick_key(group_id, peer_id, db)
 
-    # Wrap (canonicalize + group encrypt)
-    canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    blob = wire_format.encode_message_attachment_wire_event(
+        message_id_b64=message_id,
+        file_id_b64=file_id,
+        blob_bytes=file_size,
+        total_slices=slice_count,
+        nonce_prefix_b64=crypto.b64encode(nonce_prefix),
+        enc_key_b64=crypto.b64encode(enc_key),
+        root_hash_b64=crypto.b64encode(root_hash),
+        filename=filename,
+        mime_type=mime_type,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
 
     # Store event
     attachment_event_id = store.event(blob, peer_id, t_ms, db)
@@ -1040,6 +1085,7 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
                     log.error(f"get_file_data() FAST PATH root_hash mismatch!")
                     return None
 
+                plaintext_full = plaintext_full[:attachment_row['blob_bytes']]
                 log.info(f"get_file_data() FAST PATH success: {file_id[:20]}..., size={len(plaintext_full)}B")
                 return plaintext_full
 
@@ -1090,6 +1136,7 @@ def get_file_data(file_id: str, recorded_by: str, db: Any) -> bytes | None:
         log.error(f"message_attachment.get_file_data() root_hash mismatch!")
         return None
 
+    plaintext_full = plaintext_full[:attachment_row['blob_bytes']]
     log.info(f"message_attachment.get_file_data() successfully retrieved {file_id[:20]}..., "
              f"size={len(plaintext_full)}B")
     return plaintext_full
@@ -1186,6 +1233,8 @@ def get_file_download_progress(file_id: str, recorded_by: str, db: Any,
     )
     slices_received = slice_rows[0]['count'] if slice_rows else 0
     bytes_received = slice_rows[0]['bytes_received'] if slice_rows and slice_rows[0]['bytes_received'] else 0
+    if bytes_received > size_bytes:
+        bytes_received = size_bytes
 
     # Calculate percentage
     if total_slices > 0:

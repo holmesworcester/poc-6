@@ -15,15 +15,27 @@ SHAREABLE = True  # Address observations sync for peer discovery
 PROJECTION_TABLE = None
 
 from typing import Any, Optional
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+
+
+def _wire_shadow_observed_address(observed_peer_id: str, ip: str, port: int) -> None:
+    """Validate observed_address fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_observed_address_plaintext(
+        observed_peer_id=crypto.b64decode(observed_peer_id),
+        ip=ip,
+        port=port,
+    )
+    decoded = wire_format.decode_observed_address_plaintext(plaintext)
+    if decoded["ip"] != ip or decoded["port"] != port:
+        raise ValueError("wire shadow decode observed_address mismatch")
 
 # v2 event specification - signed by peer_shared, no deps
 EVENT_SPEC = {
@@ -53,6 +65,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     if not all([observed_peer_id, signed_by, ip, port is not None, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_observed_address(observed_peer_id, ip, port)
 
     writes = (
         WriteOp(
@@ -102,24 +116,20 @@ def create(
         f"{observed_peer_id[:20]}... at {ip}:{port}"
     )
 
-    # Create event data with signed_by field
-    event_data = {
-        'type': 'observed_address',
-        'observed_peer_id': observed_peer_id,
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',  # Required for v2 resolver
-        'ip': ip,
-        'port': port,
-        'created_at': t_ms
-    }
-
     # Sign the event
     from events.identity import peer
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    signed_event = crypto.sign_event(event_data, private_key)
+    _wire_shadow_observed_address(observed_peer_id, ip, port)
 
-    # Store as signed plaintext (no encryption - addresses are public info)
-    blob = crypto.canonicalize_json(signed_event)
+    blob = wire_format.encode_observed_address_wire_event(
+        observed_peer_id_b64=observed_peer_id,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        ip=ip,
+        port=port,
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
     address_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"observed_address.create() created address_id={address_id[:20]}...")

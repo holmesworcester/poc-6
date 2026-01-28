@@ -6,10 +6,10 @@ SHAREABLE = False  # Local-only - contains symmetric key material
 PROJECTION_TABLE = None
 
 from typing import Any
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
@@ -23,6 +23,7 @@ EVENT_SPEC = {
 log = logging.getLogger(__name__)
 
 
+
 def create(peer_id: str, t_ms: int, db: Any) -> str:
     """Create a group key for network content encryption, owned by peer_id."""
     log.info(f"group_key.create() creating new group key for peer_id={peer_id}, t_ms={t_ms}")
@@ -32,13 +33,12 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
 
     # Create DETERMINISTIC event blob - only type and key
     # This ensures same key material = same key_id on all peers
-    event_data = {
-        'type': 'group_key',
-        'key': crypto.b64encode(key)
-    }
+    _wire_shadow_group_key(crypto.b64encode(key))
 
-    # Use sort_keys=True for canonical ordering
-    blob = crypto.canonicalize_json(event_data)
+    blob = wire_format.encode_group_key_wire_event(
+        key=key,
+        created_at_ms=0,
+    )
 
     # Store event with recorded wrapper and projection
     # t_ms is used for recorded_at metadata, not in the blob itself
@@ -67,13 +67,12 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
 
     # Create DETERMINISTIC event blob - only type and key
     # This ensures same key material = same key_id on all peers
-    event_data = {
-        'type': 'group_key',
-        'key': crypto.b64encode(key_material)
-    }
+    _wire_shadow_group_key(crypto.b64encode(key_material))
 
-    # Use sort_keys=True for canonical ordering
-    blob = crypto.canonicalize_json(event_data)
+    blob = wire_format.encode_group_key_wire_event(
+        key=key_material,
+        created_at_ms=0,
+    )
     key_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group_key.create_with_material() created key_id={key_id}")
@@ -90,6 +89,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     key_b64 = event_data.get('key')
     if not key_b64:
         return ProjectorResult(writes=tuple(), valid_event=False)
+
+    _wire_shadow_group_key(key_b64)
 
     try:
         key_bytes = crypto.b64decode(key_b64)
@@ -109,6 +110,14 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_group_key(key_b64: str) -> None:
+    """Validate group_key fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_group_key_plaintext(key=crypto.b64decode(key_b64))
+    decoded = wire_format.decode_group_key_plaintext(plaintext)
+    if decoded["key"] != crypto.b64decode(key_b64):
+        raise ValueError("wire shadow decode key mismatch")
 
 
 def get_key(key_id: str, recorded_by: str, db: Any) -> dict[str, Any]:

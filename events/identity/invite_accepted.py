@@ -7,15 +7,16 @@ PROJECTION_TABLE = None
 
 from typing import Any
 import base64
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp, Command
 from core.projection_v2.apply import register_command_handler
 
 log = logging.getLogger(__name__)
+
 
 
 # v2 event specification - local-only, unsigned (captures out-of-band invite data)
@@ -109,7 +110,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     # Command to handle network bootstrap (project network if in store, store inviter blob)
     commands = ()
     inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
-    if network_id or inviter_peer_shared_blob_b64:
+    inviter_peer_shared_blob_id = invite_link_data.get('inviter_peer_shared_blob_id')
+    if network_id or inviter_peer_shared_blob_b64 or inviter_peer_shared_blob_id:
         commands = (
             Command(
                 command_type='handle_invite_accepted_bootstrap',
@@ -117,6 +119,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
                     'network_id': network_id,
                     'inviter_peer_shared_id': inviter_peer_shared_id,
                     'inviter_peer_shared_blob_b64': inviter_peer_shared_blob_b64,
+                    'inviter_peer_shared_blob_id': inviter_peer_shared_blob_id,
                 }
             ),
         )
@@ -153,16 +156,51 @@ def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
     """
     log.info(f"invite_accepted.create() for invite={invite_link_data['invite_id']}, peer={peer_id}")
 
-    event_data = {
-        'type': 'invite_accepted',
-        'invite_link_data': invite_link_data,
-        'signed_by': peer_id,
-        'created_at': t_ms
-    }
+    invite_id = invite_link_data.get('invite_id')
+    invite_private_key_b64 = invite_link_data.get('invite_private_key')
+    if not invite_id or not invite_private_key_b64:
+        raise ValueError("invite_id and invite_private_key required for wire invite_accepted")
 
-    blob = json.dumps(event_data).encode()
+    invite_prekey_id = invite_link_data.get('invite_prekey_id')
+    inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
+    network_id = invite_link_data.get('network_id')
+    channel_id = invite_link_data.get('channel_id')
+    key_id = invite_link_data.get('key_id')
+    inviter_connection_prekey_public_key = invite_link_data.get('inviter_connection_prekey_public_key')
+    inviter_connection_prekey_shared_id = invite_link_data.get('inviter_connection_prekey_shared_id')
+    inviter_connection_prekey_id = invite_link_data.get('inviter_connection_prekey_id')
+    inviter_ip = invite_link_data.get('ip')
+    inviter_port = invite_link_data.get('port')
+    link_user_id = invite_link_data.get('user_id')
 
-    # Store with recorded wrapper and projection
+    inviter_peer_shared_blob_id = invite_link_data.get('inviter_peer_shared_blob_id')
+    inviter_peer_shared_blob_b64 = invite_link_data.get('inviter_peer_shared_blob')
+    if not inviter_peer_shared_blob_id and inviter_peer_shared_blob_b64:
+        padding = 4 - len(inviter_peer_shared_blob_b64) % 4
+        if padding != 4:
+            inviter_peer_shared_blob_b64 += '=' * padding
+        inviter_peer_shared_blob = base64.urlsafe_b64decode(inviter_peer_shared_blob_b64)
+        unsafedb = create_unsafe_db(db)
+        inviter_peer_shared_blob_id = store.blob(inviter_peer_shared_blob, t_ms, True, unsafedb)
+
+    blob = wire_format.encode_invite_accepted_wire_event(
+        invite_id_b64=invite_id,
+        invite_prekey_id_b64=invite_prekey_id,
+        invite_private_key=crypto.b64decode(invite_private_key_b64),
+        inviter_peer_shared_id_b64=inviter_peer_shared_id,
+        network_id_b64=network_id,
+        channel_id_b64=channel_id,
+        key_id_b64=key_id,
+        inviter_connection_prekey_public_key_b64=inviter_connection_prekey_public_key,
+        inviter_connection_prekey_shared_id_b64=inviter_connection_prekey_shared_id,
+        inviter_connection_prekey_id_b64=inviter_connection_prekey_id,
+        inviter_ip=inviter_ip,
+        inviter_port=inviter_port,
+        link_user_id_b64=link_user_id,
+        inviter_peer_shared_blob_id_b64=inviter_peer_shared_blob_id,
+        created_at_ms=t_ms,
+        signed_by_b64=peer_id,
+    )
     invite_accepted_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"invite_accepted.create() created invite_accepted_id={invite_accepted_id}")
@@ -188,6 +226,7 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
     network_id = args.get('network_id')
     inviter_peer_shared_id = args.get('inviter_peer_shared_id')
     inviter_peer_shared_blob_b64 = args.get('inviter_peer_shared_blob_b64')
+    inviter_peer_shared_blob_id = args.get('inviter_peer_shared_blob_id')
 
     # Project network if blob is in store and not already projected
     if network_id:
@@ -200,7 +239,11 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
             if not already_projected:
                 # Use v2 projection path instead of legacy project()
                 try:
-                    network_data = crypto.parse_json(network_blob)
+                    if not wire_format.is_wire_network_envelope(network_blob):
+                        log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] expected wire network event: {network_id[:20]}...")
+                        network_data = None
+                    else:
+                        network_data = wire_format.decode_network_wire_event(network_blob)
                 except Exception as e:
                     log.warning(f"[INVITE_ACCEPTED_BOOTSTRAP] failed to parse network blob: {e}")
                     network_data = None
@@ -242,7 +285,21 @@ def _handle_invite_accepted_bootstrap(args: dict, recorded_by: str, recorded_at:
                 log.debug(f"[INVITE_ACCEPTED_BOOTSTRAP] network already projected {network_id[:20]}...")
 
     # Store inviter's peer_shared blob from link data (for sync)
-    if inviter_peer_shared_blob_b64 and inviter_peer_shared_id:
+    if inviter_peer_shared_blob_id and inviter_peer_shared_id:
+        inviter_blob = store.get(inviter_peer_shared_blob_id, unsafedb)
+        if not inviter_blob:
+            log.warning("[INVITE_ACCEPTED_BOOTSTRAP] inviter peer_shared blob_id not found")
+        else:
+            if inviter_peer_shared_blob_id != inviter_peer_shared_id:
+                log.warning(
+                    f"[INVITE_ACCEPTED_BOOTSTRAP] inviter peer_shared blob id mismatch: "
+                    f"{inviter_peer_shared_blob_id} != {inviter_peer_shared_id}"
+                )
+            ps_recorded_id = recorded_module.create(
+                inviter_peer_shared_blob_id, recorded_by, recorded_at, db, return_dupes=False
+            )
+            log.warning("[INVITE_ACCEPTED_BOOTSTRAP] created recorded wrapper for inviter peer_shared")
+    elif inviter_peer_shared_blob_b64 and inviter_peer_shared_id:
         padding = 4 - len(inviter_peer_shared_blob_b64) % 4
         if padding != 4:
             inviter_peer_shared_blob_b64 += '=' * padding

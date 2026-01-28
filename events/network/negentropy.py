@@ -36,7 +36,6 @@ Protocol flow:
 """
 
 import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -47,12 +46,14 @@ from enum import Enum
 
 from core.db import create_safe_db
 from core import crypto
+from core import wire_format
 from core import store
 from core.projection_v2.types import ProjectorResult, Command
 from core.projection_v2.apply import register_command_handler
 from events.network import sync_window
 
 log = logging.getLogger(__name__)
+
 
 # Registry metadata
 EVENT_TYPE = 'negentropy'
@@ -892,7 +893,8 @@ def handle_range_request(
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
         # At finest level OR bucket has few enough events to send directly
-        if level == 'prefix_6' or event_count <= EVENTS_THRESHOLD:
+        max_events = wire_format.NEGENTROPY_EVENT_ID_MAX
+        if level == 'prefix_6' or event_count <= max_events:
             safedb.execute("""
                 UPDATE negentropy_sync_state
                 SET status = 'events_sent', updated_at = ?
@@ -900,6 +902,11 @@ def handle_range_request(
             """, (t_ms, recorded_by, connection_id, range_id))
 
             event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
+            if len(event_ids) > max_events:
+                log.warning(
+                    f"negentropy: truncating {len(event_ids)} event_ids to {max_events} for wire payload"
+                )
+                event_ids = event_ids[:max_events]
 
             # Send actual event blobs - they'll dedupe on their side
             if event_ids:
@@ -1158,13 +1165,12 @@ def sync_connection(
     for msg in msgs:
         # Wrap in negentropy envelope for ephemeral detection
         # Include reply_key_id so receiver knows which key_id to use
-        envelope = {
-            'type': 'negentropy',
-            'connection_id': conn.key_id,
-            'reply_connection_id': conn.their_key_id,  # Receiver's key_id
-            'data': msg,
-        }
-        blob = crypto.canonicalize_json(envelope)
+        blob = wire_format.encode_negentropy_wire_event(
+            connection_id_b64=conn.key_id,
+            reply_connection_id_b64=conn.their_key_id,
+            msg=msg,
+            created_at_ms=t_ms,
+        )
         if conn_module.send(recorded_by, conn.key_id, blob, t_ms, db):
             sent += 1
     return sent
@@ -1203,13 +1209,12 @@ def handle_incoming(
     for response in responses:
         # Wrap response in envelope
         # Include reply_connection_id so receiver knows which connection_id to use
-        response_envelope = {
-            'type': 'negentropy',
-            'connection_id': connection_id,
-            'reply_connection_id': sender_connection_id,  # Original sender's connection_id
-            'data': response,
-        }
-        blob = crypto.canonicalize_json(response_envelope)
+        blob = wire_format.encode_negentropy_wire_event(
+            connection_id_b64=connection_id,
+            reply_connection_id_b64=sender_connection_id,
+            msg=response,
+            created_at_ms=t_ms,
+        )
         if conn_module.send(recorded_by, connection_id, blob, t_ms, db):
             sent += 1
     return sent

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core import crypto, store
+from core import crypto, store, wire_format
 from core.db import SUBJECTIVE_TABLES, create_safe_db, create_unsafe_db
 from events import registry
 from .types import ProjectionContext, ResolveResult
@@ -244,7 +244,10 @@ def _resolve_invite_pubkey(
     if not blob:
         return None
     try:
-        invite_data = crypto.parse_json(blob)
+        if wire_format.is_wire_invite_envelope(blob):
+            invite_data = wire_format.decode_invite_wire_event(blob)
+        else:
+            invite_data = crypto.parse_json(blob)
     except Exception:
         return None
     invite_pubkey = invite_data.get("invite_pubkey")
@@ -351,8 +354,16 @@ def _resolve_signer(
 
     if not public_key:
         return "reject", None, [], "signer public key missing"
-    if not crypto.verify_event(event_data, public_key):
-        return "reject", None, [], "invalid signature"
+    wire_signature = event_data.get("_wire_signature") if isinstance(event_data, dict) else None
+    wire_signed_bytes = event_data.get("_wire_signed_bytes") if isinstance(event_data, dict) else None
+    if wire_signature is not None or wire_signed_bytes is not None:
+        if not isinstance(wire_signature, (bytes, bytearray)) or not isinstance(wire_signed_bytes, (bytes, bytearray)):
+            return "reject", None, [], "invalid wire signature"
+        if not crypto.verify(bytes(wire_signed_bytes), bytes(wire_signature), public_key):
+            return "reject", None, [], "invalid signature"
+    else:
+        if not crypto.verify_event(event_data, public_key):
+            return "reject", None, [], "invalid signature"
 
     signer_info = {
         "type": signer_type,

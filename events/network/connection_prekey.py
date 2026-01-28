@@ -9,14 +9,15 @@ SHAREABLE = False  # Local-only - contains private key material
 PROJECTION_TABLE = None
 
 from typing import Any
-import json
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from core.db import create_unsafe_db, create_safe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 # Transit prekeys expire after 30 days (in milliseconds)
 TRANSIT_PREKEY_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -44,6 +45,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not all([public_key_b64, private_key_b64, owner_peer_id, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_connection_prekey(public_key_b64, private_key_b64, owner_peer_id)
+
     # Decode keys from base64 to bytes
     public_key = crypto.b64decode(public_key_b64)
     private_key = crypto.b64decode(private_key_b64)
@@ -67,6 +70,17 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_connection_prekey(public_key_b64: str, private_key_b64: str, owner_peer_id: str) -> None:
+    """Validate connection_prekey fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_connection_prekey_plaintext(
+        public_key=crypto.b64decode(public_key_b64),
+        private_key=crypto.b64decode(private_key_b64),
+    )
+    decoded = wire_format.decode_connection_prekey_plaintext(plaintext)
+    if decoded["public_key"] != crypto.b64decode(public_key_b64):
+        raise ValueError("wire shadow decode public_key mismatch")
 
 
 # Prekey replenishment configuration
@@ -124,16 +138,18 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Generate Ed25519 keypair for prekey
     prekey_private, prekey_public = crypto.generate_keypair()
 
-    # Create event blob (plaintext JSON, no encryption for local-only)
-    event_data = {
-        'type': 'connection_prekey',
-        'public_key': crypto.b64encode(prekey_public),
-        'private_key': crypto.b64encode(prekey_private),
-        'signed_by': peer_id,  # Local peer who created this prekey
-        'created_at': t_ms
-    }
+    _wire_shadow_connection_prekey(
+        crypto.b64encode(prekey_public),
+        crypto.b64encode(prekey_private),
+        peer_id,
+    )
 
-    blob = json.dumps(event_data).encode()
+    blob = wire_format.encode_connection_prekey_wire_event(
+        public_key=prekey_public,
+        private_key=prekey_private,
+        signed_by_b64=peer_id,
+        created_at_ms=t_ms,
+    )
 
     unsafedb = create_unsafe_db(db)
 
@@ -174,16 +190,18 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
     """
     log.info(f"connection_prekey.create_with_material() creating prekey for peer_id={peer_id}, t_ms={t_ms}")
 
-    # Create event blob (plaintext JSON, no encryption for local-only)
-    event_data = {
-        'type': 'connection_prekey',
-        'public_key': crypto.b64encode(public_key),
-        'private_key': crypto.b64encode(private_key),
-        'signed_by': peer_id,  # Local peer who created this prekey
-        'created_at': t_ms
-    }
+    _wire_shadow_connection_prekey(
+        crypto.b64encode(public_key),
+        crypto.b64encode(private_key),
+        peer_id,
+    )
 
-    blob = json.dumps(event_data).encode()
+    blob = wire_format.encode_connection_prekey_wire_event(
+        public_key=public_key,
+        private_key=private_key,
+        signed_by_b64=peer_id,
+        created_at_ms=t_ms,
+    )
 
     unsafedb = create_unsafe_db(db)
 

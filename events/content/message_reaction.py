@@ -9,12 +9,15 @@ import logging
 from core import crypto
 from core import store
 from core import global_counter
+from core import wire_format
 from events.content import message
-from events.identity import peer_shared
+from events.group import group
+from events.identity import peer_shared, peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 # Event type declarations for auto-discovery
 EVENT_TYPE = 'message_reaction'
@@ -63,6 +66,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not all([message_id, reactor_id, signed_by, emoji, created_at is not None, global_count is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_message_reaction(message_id, reactor_id, emoji)
+
     if ctx.deps.get('deletion'):
         return ProjectorResult(writes=tuple(), valid_event=False)
 
@@ -85,6 +90,18 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_message_reaction(message_id: str, reactor_id: str, emoji: str) -> None:
+    """Validate message_reaction fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_message_reaction_plaintext(
+        message_id=crypto.b64decode(message_id),
+        reactor_id=crypto.b64decode(reactor_id),
+        emoji=emoji,
+    )
+    decoded = wire_format.decode_message_reaction_plaintext(plaintext)
+    if decoded["emoji"] != emoji:
+        raise ValueError("wire shadow decode emoji mismatch")
 
 
 def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str:
@@ -126,19 +143,20 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     # Get global count from framework (Lamport clock)
     global_count = global_counter.get_next_global_count(peer_id, db)
 
-    # Create reaction event with global_count for deterministic ordering
-    event_data = {
-        'type': 'message_reaction',
-        'message_id': message_id,
-        'reactor_id': reactor_user_id,
-        'signed_by': reactor_peer_shared_id,
-        'signer_type': 'peer_shared',
-        'emoji': emoji,
-        'created_at': t_ms,
-        'global_count': global_count
-    }
-
-    reaction_id = store.publish(event_data, message_group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(message_group_id, peer_id, db)
+    blob = wire_format.encode_message_reaction_wire_event(
+        message_id_b64=message_id,
+        reactor_id_b64=reactor_user_id,
+        signed_by_b64=reactor_peer_shared_id,
+        signer_type="peer_shared",
+        emoji=emoji,
+        global_count=global_count,
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    reaction_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_reaction.create() created reaction_id={reaction_id[:20]}...")
     return reaction_id
@@ -203,16 +221,17 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
 
     message_group_id = message_row['group_id']
 
-    # Create deletion event
-    event_data = {
-        'type': 'message_reaction_deletion',
-        'reaction_id': reaction_id,
-        'deleted_by': remover_peer_shared_id,
-        'signer_type': 'peer_shared',
-        'created_at': t_ms
-    }
-
-    deletion_id = store.publish(event_data, message_group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(message_group_id, peer_id, db)
+    blob = wire_format.encode_message_reaction_deletion_wire_event(
+        reaction_id_b64=reaction_id,
+        signed_by_b64=remover_peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    deletion_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"message_reaction.remove() created deletion_id={deletion_id[:20]}...")
     return deletion_id
@@ -240,14 +259,16 @@ def project_deletion(event_id: str, recorded_by: str, recorded_at: int, db: Any)
         log.warning(f"message_reaction.project_deletion() blob not found for deletion_id={event_id}")
         return
 
-    # Unwrap (decrypt)
-    plaintext, missing_key_ids = crypto.unwrap_event(blob, recorded_by, db)
-    if not plaintext or missing_key_ids:
-        log.info(f"message_reaction.project_deletion() cannot decrypt deletion {event_id[:20]}... - missing key")
+    if not wire_format.is_wire_message_reaction_deletion_envelope(blob):
+        log.warning(f"message_reaction.project_deletion() non-wire deletion blob for {event_id[:20]}...")
         return
 
-    # Parse event
-    event_data = crypto.parse_json(plaintext)
+    event_data, missing_key_ids = wire_format.decode_message_reaction_deletion_wire_event(
+        blob, recorded_by, db
+    )
+    if not event_data or missing_key_ids:
+        log.info(f"message_reaction.project_deletion() cannot decrypt deletion {event_id[:20]}... - missing key")
+        return
 
     # Verify signature before trusting event data
     # message_reaction_deletion uses 'deleted_by' as the signer field (not 'signed_by')
@@ -259,7 +280,9 @@ def project_deletion(event_id: str, recorded_by: str, recorded_at: int, db: Any)
     from events.identity import peer_shared
     try:
         public_key = peer_shared.get_public_key(signer_peer_shared_id, recorded_by, db)
-        if not crypto.verify_event(event_data, public_key):
+        signed_bytes = event_data.get("_wire_signed_bytes")
+        signature = event_data.get("_wire_signature")
+        if not signed_bytes or not signature or not crypto.verify(signed_bytes, signature, public_key):
             log.warning(f"message_reaction.project_deletion() signature verification failed for {event_id[:20]}...")
             return
     except ValueError:

@@ -9,13 +9,15 @@ from typing import Any
 import logging
 from core import crypto
 from core import store
+from core import wire_format
 from events.group import group
-from events.identity import peer_shared, network
+from events.identity import peer_shared, network, peer
 from core.db import create_safe_db, create_unsafe_db
 from core import queues
 from core.projection_v2.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
 
 # v2 event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
@@ -91,6 +93,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not all([group_id, user_id, added_by, signed_by, admin_grant, created_at is not None]):
         return ProjectorResult(writes=tuple(), valid_event=False)
 
+    _wire_shadow_group_member(group_id, user_id, added_by, admin_grant)
+
     if added_by != signed_by:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
@@ -119,6 +123,24 @@ def project_pure(ctx: Any) -> ProjectorResult:
     )
 
     return ProjectorResult(writes=writes, valid_event=True)
+
+
+def _wire_shadow_group_member(
+    group_id: str,
+    user_id: str,
+    added_by: str,
+    admin_grant: str | None,
+) -> None:
+    """Validate group_member fields against the fixed-size wire payload layout."""
+    plaintext = wire_format.encode_group_member_plaintext(
+        group_id=crypto.b64decode(group_id),
+        user_id=crypto.b64decode(user_id),
+        added_by=crypto.b64decode(added_by),
+        admin_grant_id=crypto.b64decode(admin_grant) if admin_grant else None,
+    )
+    decoded = wire_format.decode_group_member_plaintext(plaintext)
+    if decoded["group_id"] != crypto.b64decode(group_id):
+        raise ValueError("wire shadow decode group_id mismatch")
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
@@ -176,22 +198,22 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     else:
         log.warning(f"group_member.create() NO admin_grant found - event may fail projection on receivers!")
 
-    # Create event data
-    event_data = {
-        'type': 'group_member',
-        'group_id': group_id,
-        'user_id': user_id,
-        'added_by': peer_shared_id,
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',
-        'created_at': t_ms
-    }
+    _wire_shadow_group_member(group_id, user_id, peer_shared_id, admin_grant_id)
 
-    # Include explicit admin_grant dependency
-    if admin_grant_id:
-        event_data['admin_grant'] = admin_grant_id
-
-    member_id = store.publish(event_data, group_id, peer_id, t_ms, db)
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+    key_data = group.pick_key(group_id, peer_id, db)
+    blob = wire_format.encode_group_member_wire_event(
+        group_id_b64=group_id,
+        user_id_b64=user_id,
+        added_by_b64=peer_shared_id,
+        admin_grant_b64=admin_grant_id,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        key_data=key_data,
+        private_key=private_key,
+    )
+    member_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group_member.create() created member_id={member_id}")
 

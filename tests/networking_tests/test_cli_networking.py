@@ -12,6 +12,12 @@ import time
 import socket
 import re
 import sys
+from tests.networking_tests.ipc import supports_udp_in_subprocess
+
+pytestmark = pytest.mark.skipif(
+    not supports_udp_in_subprocess(),
+    reason="UDP sockets are not permitted in subprocesses on this platform",
+)
 
 
 def get_free_port():
