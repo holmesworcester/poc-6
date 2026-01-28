@@ -79,7 +79,7 @@ def tick(t_ms: int, db: Any) -> None:
 
 
 # Jobs that are safe to run during sync-only mode (don't create new events)
-SYNC_ONLY_JOBS = {'sync_receive', 'negentropy_sync', 'connection_send'}
+SYNC_ONLY_JOBS = {'receive', 'negentropy_sync', 'connection_send'}
 
 
 def tick_sync_only(t_ms: int, db: Any) -> None:
@@ -102,6 +102,9 @@ def tick_sync_only(t_ms: int, db: Any) -> None:
         t_ms: Current time in milliseconds
         db: Database connection
     """
+    from core import transport
+    transport.set_simulator_time(t_ms)
+
     unsafedb = create_unsafe_db(db)
 
     for job in jobs.JOBS:

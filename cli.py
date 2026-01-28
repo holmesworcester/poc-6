@@ -381,10 +381,16 @@ class CLISession:
             user_name = 'unknown'
             network_id = None
             if user_id:
-                user_info = user_module.get(user_id, peer_id, self.db)
-                if user_info:
-                    user_name = user_info.get('name', 'unknown')
-                    network_id = user_info.get('network_id')
+                display_name = user_module.get_display_name(user_id, peer_id, self.db)
+                if display_name:
+                    user_name = display_name
+
+                if peer_shared_id:
+                    network_info = network_module.get_for_peer(peer_shared_id, peer_id, self.db)
+                    if network_info:
+                        network_id = network_info.get('network_id')
+                if not network_id:
+                    network_id = network_module.get_network_id(peer_id, self.db)
 
             # Create account context (works even with None peer_shared_id during bootstrap)
             account = AccountContext(
@@ -2929,7 +2935,7 @@ def run_sync_daemon(session: CLISession):
     try:
         while True:
             t_ms = int(time.time() * 1000)
-            tick_module.tick(t_ms=t_ms, db=session.db)
+            tick_module.tick_sync_only(t_ms=t_ms, db=session.db)
             session.db.commit()
             time.sleep(0.1)  # 100ms tick interval
     except KeyboardInterrupt:
@@ -2954,6 +2960,7 @@ def main():
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress all but critical logs")
     parser.add_argument("--disk", action="store_true", help="Use file-based SQLite for realistic I/O perf")
     parser.add_argument("--db-path", type=str, default=None, help="Path to database file (implies --disk)")
+    parser.add_argument("--db", dest="db_path", type=str, default=None, help="Alias for --db-path")
 
     # Networking options
     parser.add_argument("--listen", type=str, help="UDP listen address (host:port)")
@@ -2974,6 +2981,10 @@ def main():
         host, port = args.listen.rsplit(':', 1)
         transport.start_udp(host, int(port))
         print(f"Listening on {host}:{port}", flush=True)
+
+    # Default to loopback transport when nothing else is configured.
+    if transport.get_mode() == transport.TransportMode.NONE:
+        transport.enable_loopback()
 
     # Register peer addresses
     if args.peer:
