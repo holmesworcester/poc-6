@@ -126,7 +126,7 @@ class ReceiveJob(Job):
     This job:
     1. Transfers packets (loopback for testing, UDP for production)
     2. Drains batch from transport.drain_incoming()
-    3. Routes by transit key hint + appends to incoming_event_log
+    3. Optionally unwraps transit in batch, then appends to incoming_event_log
     """
 
     def __init__(self):
@@ -140,7 +140,7 @@ class ReceiveJob(Job):
         budget_ms = self.budget_limit_ms()
         chunk_size = int(os.getenv("RECEIVE_INSERT_CHUNK", "1000"))
         batch_size = int(os.getenv("RECEIVE_BATCH", "200"))
-        unwrap_transit = os.getenv("RECEIVE_UNWRAP_TRANSIT") == "1"
+        unwrap_transit = os.getenv("RECEIVE_UNWRAP_TRANSIT", "1") == "1"
 
         start = time.perf_counter()
         total_received = 0
