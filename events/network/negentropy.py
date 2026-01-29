@@ -75,10 +75,12 @@ LEVEL_ROOT = 0
 LEVEL_PREFIX_2 = 1
 LEVEL_PREFIX_4 = 2
 LEVEL_PREFIX_6 = 3
+LEVEL_PREFIX_8 = 4
+LEVEL_PREFIX_10 = 5
 
 # Negentropy wire format sizes
 RANGE_ID_SIZE = 8
-PREFIX_BYTES = 3
+PREFIX_BYTES = 5  # 5 bytes = 10 hex chars for prefix_10
 EVENT_ID_MAX = 15
 
 # v2 event specification - minimal, as this is a sync protocol message
@@ -442,18 +444,28 @@ def _handle_negentropy_sync(args: dict, recorded_by: str, recorded_at: int, db: 
 register_command_handler('handle_negentropy_sync', _handle_negentropy_sync)
 
 
-# Hierarchy levels - reduced to 4 levels for efficiency
-# root (0) -> prefix_2 -> prefix_4 -> prefix_6
-# prefix_6 (24 bits) = 16.7M possible buckets, enough for 100GB+ files
-# With EVENTS_THRESHOLD=100, this handles up to 1.67 billion events
-LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
+# Hierarchy levels - time prefix (6 chars) + hash suffix (up to 4 chars)
+# root (0) -> prefix_2 -> prefix_4 -> prefix_6 -> prefix_8 -> prefix_10
+#
+# For file slices with same created_at (same time prefix):
+# - prefix_6: all in 1 bucket (time only)
+# - prefix_8: 256 sub-buckets by hash
+# - prefix_10: 65,536 sub-buckets by hash
+#
+# For 1GB file (2.4M slices):
+# - prefix_6: 1 bucket × 2.4M events (too many!)
+# - prefix_8: 256 buckets × ~9,400 events each
+# - prefix_10: 65,536 buckets × ~37 events each (under threshold)
+LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
 
 # Hex characters per level
 LEVEL_PREFIX_LEN = {
     'root': 0,
-    'prefix_2': 2,   # 256 buckets
-    'prefix_4': 4,   # 65,536 buckets
-    'prefix_6': 6,   # 16,777,216 buckets
+    'prefix_2': 2,     # 256 buckets (coarse time)
+    'prefix_4': 4,     # 65,536 buckets (medium time)
+    'prefix_6': 6,     # 16.7M buckets (fine time, ~4.4 min)
+    'prefix_8': 8,     # time + 2 hash chars (256 sub-buckets per time)
+    'prefix_10': 10,   # time + 4 hash chars (65,536 sub-buckets per time)
 }
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down

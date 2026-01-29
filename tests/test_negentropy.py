@@ -60,8 +60,8 @@ class TestPrefixLevels:
     """Test prefix hierarchy."""
 
     def test_levels_defined(self):
-        """All expected levels exist (reduced to 4 for efficiency)."""
-        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
+        """All expected levels exist (6 levels for large file support)."""
+        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
         assert negentropy.LEVELS == expected
 
     def test_get_prefix_for_level(self):
@@ -74,16 +74,22 @@ class TestPrefixLevels:
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_2') == unified_key[:2]
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_4') == unified_key[:4]
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_6') == unified_key[:6]
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_8') == unified_key[:8]
+        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_10') == unified_key[:10]
 
     def test_get_child_level(self):
         """Child level is next in hierarchy."""
         assert negentropy.get_child_level('root') == 'prefix_2'
         assert negentropy.get_child_level('prefix_2') == 'prefix_4'
         assert negentropy.get_child_level('prefix_4') == 'prefix_6'
-        assert negentropy.get_child_level('prefix_6') is None  # Finest level
+        assert negentropy.get_child_level('prefix_6') == 'prefix_8'
+        assert negentropy.get_child_level('prefix_8') == 'prefix_10'
+        assert negentropy.get_child_level('prefix_10') is None  # Finest level
 
     def test_get_parent_level(self):
         """Parent level is previous in hierarchy."""
+        assert negentropy.get_parent_level('prefix_10') == 'prefix_8'
+        assert negentropy.get_parent_level('prefix_8') == 'prefix_6'
         assert negentropy.get_parent_level('prefix_6') == 'prefix_4'
         assert negentropy.get_parent_level('prefix_2') == 'root'
         assert negentropy.get_parent_level('root') is None  # Coarsest level
