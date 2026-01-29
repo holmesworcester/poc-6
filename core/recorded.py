@@ -440,7 +440,7 @@ def _decode_recorded_context(
 
     recorded_blob = store.get(recorded_id, unsafedb)
     if not recorded_blob:
-        log.warning(f"recorded.project(): blob not found for recorded_id={recorded_id[:30]}...")
+        log.debug(f"recorded.project(): blob not found for recorded_id={recorded_id[:30]}...")
         return None
 
     recorded_event = crypto.parse_json(recorded_blob)
