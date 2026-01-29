@@ -540,6 +540,10 @@ LEVEL_PREFIX_LEN = {
 # Larger values reduce round trips but increase message size
 EVENTS_THRESHOLD = 100
 
+# Maximum active ranges per connection before forcing event send
+# Prevents range explosion for edge cases with pathological distributions
+MAX_RANGES = 1000
+
 
 # ============================================================================
 # Congestion Control State
@@ -1669,7 +1673,7 @@ def handle_range_request(
         our_hash = recompute_bucket_hash(db, recorded_by, level, prefix)
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
-    log.info(f"negentropy.handle_range_request: level={level} prefix={prefix} lo={lo_key} hi={hi_key} count={event_count} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'}")
+    log.debug(f"negentropy.handle_range_request: level={level} prefix={prefix} lo={lo_key} hi={hi_key} count={event_count}")
 
     # Record the range
     safedb.execute("""
@@ -1720,7 +1724,7 @@ def handle_range_request(
         # Send actual event blobs - they'll dedupe on their side
         if event_ids:
             sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-            log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events)")
+            log.debug(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events)")
 
         # Limit event_ids in wire message (blobs already sent)
         wire_event_ids = event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids
@@ -1737,6 +1741,38 @@ def handle_range_request(
 
     elif level == 'prefix_6' or level == 'adaptive':
         # At prefix_6 or adaptive with many events: use adaptive binary split
+
+        # Check MAX_RANGES cap to prevent runaway splitting
+        active_ranges = safedb.query_one("""
+            SELECT COUNT(*) as c FROM negentropy_sync_state
+            WHERE recorded_by = ? AND connection_id = ? AND status IN ('pending', 'diverged')
+        """, (recorded_by, connection_id))
+
+        if active_ranges['c'] >= MAX_RANGES:
+            # Hit range cap - send events directly instead of splitting further
+            log.debug(f"negentropy: MAX_RANGES cap hit ({active_ranges['c']}), sending {event_count} events directly")
+            if level == 'adaptive':
+                event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
+            else:
+                event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
+            if event_ids:
+                _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+            safedb.execute("""
+                UPDATE negentropy_sync_state
+                SET status = 'events_sent', updated_at = ?
+                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+            """, (t_ms, recorded_by, connection_id, range_id))
+            responses.append({
+                'type': 'range_events',
+                'range_id': range_id,
+                'prefix': prefix,
+                'event_ids': event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids,
+                'our_hash': our_hash.hex() if our_hash else '',
+                'root_hash': root_hash.hex() if root_hash else '',
+                'total_events': total_events,
+            })
+            return responses
+
         safedb.execute("""
             UPDATE negentropy_sync_state
             SET status = 'diverged', updated_at = ?
@@ -1750,7 +1786,7 @@ def handle_range_request(
             event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
             if event_ids:
                 sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-                log.info(f"negentropy: sent {sent} blobs (no split point)")
+                log.debug(f"negentropy: sent {sent} blobs (no split point)")
             return responses
 
         # Create two child ranges: [lo, split) and [split, hi)
@@ -1893,6 +1929,8 @@ def _send_event_blobs(
 ) -> int:
     """Send actual event blobs over the connection.
 
+    Uses bulk fetch and batch send for efficiency.
+
     Args:
         db: Database connection
         recorded_by: Local peer ID
@@ -1905,17 +1943,23 @@ def _send_event_blobs(
     """
     from events.network import connection_request as conn_module
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    sent = 0
+    if not event_ids:
+        return 0
 
+    # Bulk fetch blobs from store (device table - use db directly, not safedb)
+    placeholders = ",".join("?" for _ in event_ids)
+    rows = db.query_all(
+        f"SELECT id, blob FROM store WHERE id IN ({placeholders})",
+        tuple(event_ids)
+    )
+    blobs_by_id = {row['id']: row['blob'] for row in rows}
+
+    # Send all blobs
+    sent = 0
     for event_id in event_ids:
-        try:
-            event_blob = safedb.get_shareable_blob(event_id)
-            if conn_module.send(recorded_by, connection_id, event_blob, t_ms, db):
-                sent += 1
-                log.debug(f"negentropy: sent blob for {event_id[:20]}...")
-        except Exception as e:
-            log.warning(f"negentropy: failed to send blob for {event_id[:20]}...: {e}")
+        blob = blobs_by_id.get(event_id)
+        if blob and conn_module.send(recorded_by, connection_id, blob, t_ms, db):
+            sent += 1
 
     return sent
 
@@ -2063,7 +2107,7 @@ def handle_incoming(
 
     # Unwrap the inner message
     msg = envelope.get('data', envelope)
-    log.info(f"negentropy.handle_incoming: peer={recorded_by[:20]}... conn={connection_id[:20]}... msg_type={msg.get('type')}")
+    log.debug(f"negentropy.handle_incoming: peer={recorded_by[:20]}... conn={connection_id[:20]}... msg_type={msg.get('type')}")
 
     # Extract sender's connection_id for reply_connection_id in responses
     sender_connection_id = envelope.get('connection_id')
