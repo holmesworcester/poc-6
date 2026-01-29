@@ -1709,6 +1709,37 @@ def handle_range_request(
             'total_events': total_events,
         })
 
+    elif not their_hash and our_hash:
+        # Fast path: peer has no events in this range, we have some
+        # Skip negotiation and send all events directly (they need everything)
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'events_sent', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
+
+        if level == 'adaptive':
+            event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
+        else:
+            event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
+
+        # Send event blobs directly - no point negotiating
+        if event_ids:
+            sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+            log.debug(f"negentropy: fast path - peer has no events, sent {sent} blobs directly")
+
+        wire_event_ids = event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids
+
+        responses.append({
+            'type': 'range_events',
+            'range_id': range_id,
+            'prefix': prefix,
+            'event_ids': wire_event_ids,
+            'our_hash': our_hash.hex() if our_hash else '',
+            'root_hash': root_hash.hex() if root_hash else '',
+            'total_events': total_events,
+        })
+
     elif event_count <= EVENTS_THRESHOLD:
         # Bucket/range has few enough events - send blobs directly
         safedb.execute("""
@@ -1955,14 +1986,12 @@ def _send_event_blobs(
     )
     blobs_by_id = {row['id']: row['blob'] for row in rows}
 
-    # Send all blobs
-    sent = 0
-    for event_id in event_ids:
-        blob = blobs_by_id.get(event_id)
-        if blob and conn_module.send(recorded_by, connection_id, blob, t_ms, db):
-            sent += 1
+    # Collect blobs in order
+    blobs = [blobs_by_id.get(event_id) for event_id in event_ids]
+    blobs = [b for b in blobs if b]  # Filter out missing blobs
 
-    return sent
+    # Batch send - single connection lookup for all blobs
+    return conn_module.send_batch(recorded_by, connection_id, blobs, t_ms, db)
 
 
 def handle_range_events(

@@ -1465,6 +1465,78 @@ def send(recorded_by: str, key_id: str, blob: bytes, t_ms: int, db: Any) -> bool
     return True
 
 
+def send_batch(recorded_by: str, key_id: str, blobs: list[bytes], t_ms: int, db: Any) -> int:
+    """Send multiple blobs on an established connection efficiently.
+
+    Caches connection lookup and address resolution for the batch.
+    Much faster than calling send() repeatedly for large batches.
+
+    Args:
+        recorded_by: Local peer ID
+        key_id: Our key_id for this connection
+        blobs: List of raw blobs to send (event data)
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        Number of blobs sent
+    """
+    if not blobs:
+        return 0
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Single connection lookup for entire batch
+    conn = safedb.query_one("""
+        SELECT their_key_id, their_key, peer_shared_id, from_addr_ip, from_addr_port
+        FROM connections
+        WHERE key_id = ? AND recorded_by = ?
+    """, (key_id, recorded_by))
+
+    if not conn:
+        log.warning(f"connection_request.send_batch: no connection {key_id[:20]}...")
+        return 0
+
+    their_key_id = conn['their_key_id']
+    their_key = conn['their_key']
+    to_peer_shared_id = conn['peer_shared_id']
+
+    if not their_key or not their_key_id:
+        log.debug(f"connection_request.send_batch: connection {key_id[:20]}... not ready")
+        return 0
+
+    # Prepare key once for all encryptions
+    to_key = {
+        'id': crypto.b64decode(their_key_id),
+        'key': their_key,
+        'type': 'symmetric'
+    }
+
+    # Resolve address once
+    from core import transport
+    to_addr = None
+    if conn['from_addr_ip']:
+        to_addr = (conn['from_addr_ip'], conn['from_addr_port'])
+    if not to_addr:
+        to_addr = get_address_for_peer(to_peer_shared_id, recorded_by, db)
+    if not to_addr:
+        to_addr = transport.get_peer_address(to_peer_shared_id)
+
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+
+    # Send all blobs
+    sent = 0
+    for blob in blobs:
+        wrapped = crypto.wrap(blob, to_key, db)
+        transport.send(wrapped, from_addr, to_addr)
+        sent += 1
+
+    if sent > 0:
+        log.debug(f"connection_request.send_batch: sent {sent} blobs on {key_id[:20]}...")
+
+    return sent
+
+
 # ============================================================================
 # Command handler registration
 # ============================================================================
