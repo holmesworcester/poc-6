@@ -418,16 +418,29 @@ def materialize_log_batch(
         "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
         event_rows,
     )
-    db._conn.executemany(
-        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-        recorded_rows,
-    )
-    db._conn.executemany(
-        "INSERT OR IGNORE INTO ingest_index "
-        "(log_id, event_id, recorded_id, recorded_by, hint, event_type, received_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        index_rows,
-    )
+
+    # Only add to ingest_index for recorded events that were actually newly inserted
+    # This prevents double-projection when local events arrive via sync
+    if recorded_rows:
+        placeholders = ",".join("(?, ?, ?)" for _ in recorded_rows)
+        params = [val for row in recorded_rows for val in row]
+        cursor = db._conn.execute(
+            f"INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES {placeholders} RETURNING id",
+            params,
+        )
+        newly_inserted_ids = {row[0] for row in cursor.fetchall()}
+
+        # Filter index_rows to only include newly inserted recorded events
+        index_rows = [row for row in index_rows if row[2] in newly_inserted_ids]  # row[2] is recorded_id
+        recorded_ids[:] = [rid for rid in recorded_ids if rid in newly_inserted_ids]
+
+    if index_rows:
+        db._conn.executemany(
+            "INSERT OR IGNORE INTO ingest_index "
+            "(log_id, event_id, recorded_id, recorded_by, hint, event_type, received_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            index_rows,
+        )
     if metadata_rows:
         by_peer: dict[str, list[tuple[str, str, str | None, int | None]]] = {}
         for event_id, recorded_by, source_ip, source_port in metadata_rows:

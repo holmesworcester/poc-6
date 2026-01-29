@@ -151,9 +151,9 @@ LEVEL_PREFIX_LEN = {
     'prefix_10': 10,   # time + 4 hash chars (65,536 sub-buckets per time)
 }
 
-# When bucket has this many events or fewer, send event IDs instead of drilling down
-# 100 is a good balance: small enough for reliable delivery, large enough for efficiency
-EVENTS_THRESHOLD = 50
+# When bucket has this many events or fewer, stop drilling and send all blobs.
+# 100 avoids prefix_10 explosion for ~10MB files while still splitting large files.
+EVENTS_THRESHOLD = 100
 
 
 class RangeStatus(Enum):
@@ -1059,8 +1059,7 @@ def handle_range_request(
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
         # At finest level OR bucket has few enough events to send directly
-        max_events = wire_format.NEGENTROPY_EVENT_ID_MAX
-        if level == 'prefix_10' or event_count <= max_events:
+        if level == 'prefix_10' or event_count <= EVENTS_THRESHOLD:
             safedb.execute("""
                 UPDATE negentropy_sync_state
                 SET status = 'events_sent', updated_at = ?
