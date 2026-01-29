@@ -134,9 +134,11 @@ NEGENTROPY_LEVEL_ROOT = 0
 NEGENTROPY_LEVEL_PREFIX_2 = 1
 NEGENTROPY_LEVEL_PREFIX_4 = 2
 NEGENTROPY_LEVEL_PREFIX_6 = 3
+NEGENTROPY_LEVEL_PREFIX_8 = 4
+NEGENTROPY_LEVEL_PREFIX_10 = 5
 
 NEGENTROPY_RANGE_ID_SIZE = 8
-NEGENTROPY_PREFIX_BYTES = 3
+NEGENTROPY_PREFIX_BYTES = 5  # 5 bytes = 10 hex chars for prefix_10
 NEGENTROPY_EVENT_ID_MAX = 15
 
 _HEADER_STRUCT = struct.Struct("<BBBBIQQ16s8s")
@@ -1607,6 +1609,8 @@ def encode_negentropy_plaintext(
         NEGENTROPY_LEVEL_PREFIX_2,
         NEGENTROPY_LEVEL_PREFIX_4,
         NEGENTROPY_LEVEL_PREFIX_6,
+        NEGENTROPY_LEVEL_PREFIX_8,
+        NEGENTROPY_LEVEL_PREFIX_10,
     ):
         raise ValueError("invalid negentropy level")
     if len(prefix_bytes) > NEGENTROPY_PREFIX_BYTES:
@@ -1629,12 +1633,13 @@ def encode_negentropy_plaintext(
     payload[41] = level
     payload[42] = len(prefix_bytes)
     payload[43:43 + len(prefix_bytes)] = prefix_bytes
-    payload[46:62] = hash_bytes
-    payload[62:78] = root_hash
-    struct.pack_into("<I", payload, 78, total_events)
-    payload[82:90] = parent_range_id
-    payload[90] = len(event_ids)
-    cursor = 91
+    # Prefix can be up to 5 bytes (43:48), hash starts at 48
+    payload[48:64] = hash_bytes
+    payload[64:80] = root_hash
+    struct.pack_into("<I", payload, 80, total_events)
+    payload[84:92] = parent_range_id
+    payload[92] = len(event_ids)
+    cursor = 93
     for event_id in event_ids:
         payload[cursor:cursor + 16] = event_id
         cursor += 16
@@ -1656,15 +1661,16 @@ def decode_negentropy_plaintext(data: bytes) -> dict[str, Any]:
     if prefix_len > NEGENTROPY_PREFIX_BYTES:
         raise ValueError("invalid prefix length")
     prefix_bytes = data[43:43 + prefix_len]
-    hash_bytes = data[46:62]
-    root_hash = data[62:78]
-    (total_events,) = struct.unpack_from("<I", data, 78)
-    parent_range_id = data[82:90]
-    event_count = data[90]
+    # Prefix can be up to 5 bytes (43:48), hash starts at 48
+    hash_bytes = data[48:64]
+    root_hash = data[64:80]
+    (total_events,) = struct.unpack_from("<I", data, 80)
+    parent_range_id = data[84:92]
+    event_count = data[92]
     if event_count > NEGENTROPY_EVENT_ID_MAX:
         raise ValueError("negentropy event_count exceeds max")
     event_ids: list[bytes] = []
-    cursor = 91
+    cursor = 93
     for _ in range(event_count):
         event_ids.append(data[cursor:cursor + 16])
         cursor += 16
@@ -4613,6 +4619,10 @@ def encode_negentropy_wire_event(
         level_id = NEGENTROPY_LEVEL_PREFIX_4
     elif level_name == "prefix_6":
         level_id = NEGENTROPY_LEVEL_PREFIX_6
+    elif level_name == "prefix_8":
+        level_id = NEGENTROPY_LEVEL_PREFIX_8
+    elif level_name == "prefix_10":
+        level_id = NEGENTROPY_LEVEL_PREFIX_10
     else:
         level_id = NEGENTROPY_LEVEL_ROOT
 
@@ -4687,6 +4697,10 @@ def decode_negentropy_wire_event(data: bytes) -> dict[str, Any]:
         level_str = "prefix_4"
     elif level_value == NEGENTROPY_LEVEL_PREFIX_6:
         level_str = "prefix_6"
+    elif level_value == NEGENTROPY_LEVEL_PREFIX_8:
+        level_str = "prefix_8"
+    elif level_value == NEGENTROPY_LEVEL_PREFIX_10:
+        level_str = "prefix_10"
     else:
         raise ValueError("invalid negentropy level")
 

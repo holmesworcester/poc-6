@@ -13,11 +13,13 @@ Design goals:
 - Connection-scoped: ranges tracked by connection_id
 - Temporal locality: old time ranges stabilize, recent ranges are active
 
-Bucket hierarchy (by time prefix):
+Bucket hierarchy (time prefix + hash suffix):
 - root: all events
-- prefix_2: ~200 day buckets (coarse time ranges)
-- prefix_4: ~18 hour buckets (medium time ranges)
-- prefix_6: ~4 minute buckets (fine time ranges)
+- prefix_2: ~200 day buckets (coarse time)
+- prefix_4: ~18 hour buckets (medium time)
+- prefix_6: ~4 minute buckets (fine time)
+- prefix_8: time + 2 hash chars (256 sub-buckets per time bucket)
+- prefix_10: time + 4 hash chars (65,536 sub-buckets per time bucket)
 
 The unified key is: time_hex (6 chars) + event_hash (10 chars) = 16 hex chars
 - time_hex: (created_at_ms >> 18) & 0xFFFFFF as 6 hex chars (~4.4 min units)
@@ -28,11 +30,16 @@ Time granularity (created_at_ms >> 18 = ~4.4 minute units):
 - prefix_4: 2^8 * 4.4 min ≈ 18 hours per bucket
 - prefix_6: 4.4 minutes per bucket
 
-Benefits over hash-only bucketing:
+For large files (same created_at, different hashes):
+- prefix_6: all slices in 1 bucket (time only)
+- prefix_8: 256 sub-buckets by hash
+- prefix_10: 65,536 sub-buckets by hash
+- 1GB file (2.4M slices) → ~37 events per prefix_10 bucket
+
+Benefits:
 - Old time ranges fossilize (no new events land in old buckets)
 - Recent events cluster together (efficient "catch up" sync)
-- File slices with same created_at stay in same bucket (sync atomically)
-- "Send all at leaf" is efficient since bucket contains mostly needed events
+- Large files subdivide by hash (prevents huge buckets)
 
 Protocol flow:
 1. On new connection: send root hash
@@ -119,18 +126,29 @@ def _handle_negentropy_sync(args: dict, recorded_by: str, recorded_at: int, db: 
 register_command_handler('handle_negentropy_sync', _handle_negentropy_sync)
 
 
-# Hierarchy levels - reduced to 4 levels for efficiency
-# root (0) -> prefix_2 -> prefix_4 -> prefix_6
-# prefix_6 (24 bits) = 16.7M possible buckets, enough for 100GB+ files
-# With EVENTS_THRESHOLD=100, this handles up to 1.67 billion events
-LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
+# Hierarchy levels - time prefix (6 chars) + hash suffix (up to 4 chars)
+# root (0) -> prefix_2 -> prefix_4 -> prefix_6 -> prefix_8 -> prefix_10
+#                                     ^time^      ^--hash--^
+#
+# For file slices with same created_at (same time prefix):
+# - prefix_6: all in 1 bucket (time only)
+# - prefix_8: 256 sub-buckets by hash
+# - prefix_10: 65,536 sub-buckets by hash
+#
+# 1GB file = 2.4M slices:
+# - prefix_6: 1 bucket × 2.4M events (too many!)
+# - prefix_8: 256 buckets × ~9,400 events each
+# - prefix_10: 65,536 buckets × ~37 events each (under threshold)
+LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
 
 # Hex characters per level
 LEVEL_PREFIX_LEN = {
     'root': 0,
-    'prefix_2': 2,   # 256 buckets
-    'prefix_4': 4,   # 65,536 buckets
-    'prefix_6': 6,   # 16,777,216 buckets
+    'prefix_2': 2,     # 256 buckets (coarse time)
+    'prefix_4': 4,     # 65,536 buckets (medium time)
+    'prefix_6': 6,     # 16.7M buckets (fine time, ~4.4 min)
+    'prefix_8': 8,     # time + 2 hash chars (256 sub-buckets per time)
+    'prefix_10': 10,   # time + 4 hash chars (65,536 sub-buckets per time)
 }
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down
@@ -946,7 +964,7 @@ def get_events_in_bucket(
     db,
     recorded_by: str,
     prefix: str,
-    level: str = 'prefix_6'
+    level: str = 'prefix_10'
 ) -> list[str]:
     """Get all event IDs in a bucket at any level.
 
@@ -1133,7 +1151,7 @@ def handle_range_request(
 
         # At finest level OR bucket has few enough events to send directly
         max_events = wire_format.NEGENTROPY_EVENT_ID_MAX
-        if level == 'prefix_6' or event_count <= max_events:
+        if level == 'prefix_10' or event_count <= max_events:
             safedb.execute("""
                 UPDATE negentropy_sync_state
                 SET status = 'events_sent', updated_at = ?
@@ -1147,15 +1165,11 @@ def handle_range_request(
                 sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
                 log.info(f"negentropy: sent {sent} event blobs at {level} level ({len(event_ids)} events in bucket)")
 
-            # Truncate event_ids for wire message only (payload size limit)
-            wire_event_ids = event_ids[:max_events] if len(event_ids) > max_events else event_ids
-
-            # Also send the event IDs so they know what we have (for bidirectional sync)
+            # Send acknowledgment (blobs already sent above, no need to send event_ids)
             responses.append({
                 'type': 'range_events',
                 'range_id': range_id,
                 'prefix': prefix,
-                'event_ids': wire_event_ids,
                 'our_hash': our_hash.hex() if our_hash else '',
                 'root_hash': root_hash.hex() if root_hash else '',
                 'total_events': total_events,
@@ -1314,9 +1328,10 @@ def handle_range_events(
     msg: dict,
     t_ms: int
 ) -> list[dict]:
-    """Handle incoming events for a bucket.
+    """Handle incoming range_events message.
 
-    Sends actual event blobs for events they need.
+    Sends our blobs for this bucket. Receiver dedupes.
+    Note: event_ids no longer sent in wire message - just send all our blobs.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -1325,25 +1340,14 @@ def handle_range_events(
 
     range_id = msg['range_id']
     prefix = msg.get('prefix', '')
-    their_event_ids = set(msg['event_ids'])
 
     # Get root hash and total events for responses
     root_hash = get_root_hash(db, recorded_by)
-    total_events = get_total_event_count(db, recorded_by)
 
     # Check for checkpoint
     their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
     if their_root_hash and their_root_hash == root_hash:
         _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
-
-    # Get our events for this bucket
-    our_event_ids = set(get_events_in_bucket(db, recorded_by, prefix))
-
-    # Events they have that we don't -> we need to request/store
-    events_we_need = their_event_ids - our_event_ids
-
-    # Events we have that they don't -> send blobs
-    events_they_need = our_event_ids - their_event_ids
 
     # Mark range complete
     safedb.execute("""
@@ -1352,10 +1356,11 @@ def handle_range_events(
         WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
     """, (t_ms, recorded_by, connection_id, range_id))
 
-    # Send actual event blobs they need
-    if events_they_need:
-        sent = _send_event_blobs(db, recorded_by, connection_id, list(events_they_need), t_ms)
-        log.info(f"negentropy: sent {sent} event blobs to connection {connection_id[:20]}...")
+    # Send ALL our events for this bucket - they'll dedupe on their side
+    our_event_ids = get_events_in_bucket(db, recorded_by, prefix)
+    if our_event_ids:
+        sent = _send_event_blobs(db, recorded_by, connection_id, our_event_ids, t_ms)
+        log.info(f"negentropy: sent {sent} event blobs for prefix {prefix}")
 
     # No protocol response needed - we sent the blobs directly
     return []

@@ -81,12 +81,14 @@ def test_unified_key_time_distribution():
 
 
 def test_1gb_file_bucket_distribution(fresh_db):
-    """Test that a 1GB file's slices cluster in same time bucket.
+    """Test that a 1GB file's slices spread across hash buckets.
 
     A 1GB file = 1,073,741,824 bytes / 450 bytes per slice = 2,386,093 slices
 
-    With time+hash unified keys, all slices (same created_at) cluster in
-    the same time bucket. This is by design - they sync together atomically.
+    With time+hash unified keys:
+    - All slices share same time prefix (prefix_6)
+    - But spread across hash buckets (prefix_8, prefix_10)
+    - This keeps bucket sizes manageable for sync
     """
     db = fresh_db
 
@@ -105,7 +107,7 @@ def test_1gb_file_bucket_distribution(fresh_db):
     print(f"EVENTS_THRESHOLD: {EVENTS_THRESHOLD}")
     print()
 
-    # All samples should share the same time prefix
+    # All samples should share the same time prefix (first 6 chars)
     time_prefix = sample_keys[0][:6]
     assert all(k[:6] == time_prefix for k in sample_keys), \
         "All file slices should have same time prefix"
@@ -122,15 +124,20 @@ def test_1gb_file_bucket_distribution(fresh_db):
 
         print(f"{level:12s} (prefix_len={prefix_len:2d}): {unique_prefixes:>6,} unique prefixes")
 
-    # At prefix_6 (24 bits = 6 hex chars), all slices are in ONE bucket
-    # because they share the same time prefix
-    finest_level = LEVELS[-1]  # prefix_6
-    finest_prefixes = set(k[:6] for k in sample_keys)
-    assert len(finest_prefixes) == 1, \
-        f"All file slices should be in same prefix_6 bucket, got {len(finest_prefixes)}"
+    # At prefix_6, all slices are in ONE bucket (same time)
+    prefix_6_buckets = set(k[:6] for k in sample_keys)
+    assert len(prefix_6_buckets) == 1, \
+        f"All file slices should be in same prefix_6 bucket, got {len(prefix_6_buckets)}"
 
-    print(f"\nAll {num_slices:,} slices cluster in time bucket: {time_prefix}")
-    print("This is intentional - file slices sync atomically together")
+    # At prefix_10, slices spread across many buckets (by hash)
+    prefix_10_buckets = set(k[:10] for k in sample_keys)
+    # With 10000 samples and good hash distribution, expect most to be unique
+    assert len(prefix_10_buckets) > sample_size * 0.9, \
+        f"File slices should spread across prefix_10 buckets, got {len(prefix_10_buckets)}"
+
+    print(f"\nAt prefix_6: 1 bucket (all same time)")
+    print(f"At prefix_10: {len(prefix_10_buckets)} buckets (spread by hash)")
+    print("Large files subdivide by hash for efficient sync")
 
 
 def test_bucket_subdivision_across_time(fresh_db):
