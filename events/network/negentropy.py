@@ -556,15 +556,15 @@ class CCState:
     """Congestion control state for a single connection."""
     window: int = 1              # Max in-flight range operations
     in_flight: int = 0           # Currently awaiting response
-    rtt_ms: float = 200.0        # RTT estimate (exponential moving average)
-    last_send_ms: int = 0        # Time of oldest in-flight request
+    rtt_ms: float = 1000.0       # RTT estimate (start high, converges down)
+    last_activity_ms: int = 0    # Time of last send or response (for timeout)
 
 
 # Constants for congestion control
 CC_MIN_WINDOW = 1
 CC_MAX_WINDOW = 32
 CC_RTT_ALPHA = 0.2               # EMA smoothing factor
-CC_TIMEOUT_MULTIPLIER = 3        # Timeout = 3 * RTT
+CC_TIMEOUT_MULTIPLIER = 5        # Timeout = 5 * RTT (tolerant of bursty traffic)
 
 
 # Module-level CC state per connection
@@ -589,33 +589,34 @@ def _cc_can_send(recorded_by: str, connection_id: str) -> bool:
 def _cc_on_send(recorded_by: str, connection_id: str, t_ms: int) -> None:
     """Record that we sent a range request."""
     state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight == 0:
-        state.last_send_ms = t_ms
+    state.last_activity_ms = t_ms
     state.in_flight += 1
 
 
 def _cc_on_response(recorded_by: str, connection_id: str, t_ms: int) -> None:
     """Record that we received a response (range_matched or range_response)."""
     state = _get_cc_state(recorded_by, connection_id)
+    state.last_activity_ms = t_ms  # Track activity for timeout
+
+    old_in_flight = state.in_flight
     if state.in_flight > 0:
         state.in_flight -= 1
 
-    if state.in_flight == 0 and state.last_send_ms > 0:
-        # All requests answered - measure RTT and grow window
-        rtt_sample = t_ms - state.last_send_ms
-        if rtt_sample > 0:
-            state.rtt_ms = (1 - CC_RTT_ALPHA) * state.rtt_ms + CC_RTT_ALPHA * rtt_sample
+    log.debug(f"CC: response conn={connection_id[:16]}... in_flight {old_in_flight}->{state.in_flight}")
+
+    if state.in_flight == 0:
+        # All requests answered - grow window
         state.window = min(state.window + 1, CC_MAX_WINDOW)
-        log.debug(f"CC: conn={connection_id[:16]}... RTT={state.rtt_ms:.0f}ms window={state.window}")
+        log.debug(f"CC: window grew to {state.window}")
 
 
 def _cc_check_timeout(recorded_by: str, connection_id: str, t_ms: int) -> bool:
     """Check for timeout and shrink window if needed. Returns True if timed out."""
     state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0 and state.last_send_ms > 0:
+    if state.in_flight > 0 and state.last_activity_ms > 0:
         timeout_ms = CC_TIMEOUT_MULTIPLIER * state.rtt_ms
-        if (t_ms - state.last_send_ms) > timeout_ms:
-            # Timeout - shrink window and reset in_flight
+        if (t_ms - state.last_activity_ms) > timeout_ms:
+            # Timeout - no activity for too long, shrink window and reset
             old_window = state.window
             state.window = max(CC_MIN_WINDOW, state.window // 2)
             state.in_flight = 0

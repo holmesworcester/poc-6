@@ -551,7 +551,7 @@ class NegentropySyncJob(Job):
     """Send negentropy sync messages to all established connections."""
 
     def __init__(self):
-        super().__init__('negentropy_sync', every_ms=1_000, budget_ms=25)  # 1 second
+        super().__init__('negentropy_sync', every_ms=100, budget_ms=25)  # 100ms for responsive CC
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import negentropy
