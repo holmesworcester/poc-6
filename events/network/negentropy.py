@@ -1,38 +1,36 @@
 """
-Negentropy-style deterministic sync protocol - HASH-ONLY BUCKETS variant.
+Negentropy-style deterministic sync protocol with adaptive depth splitting.
 
-This variant uses pure hash-based bucketing - the unified key is derived
-entirely from the event_id (hash bytes), with no timestamp dependency. This ensures
-that all peers compute identical keys for the same events, enabling
-accurate root hash comparison for sync detection.
+This module implements set reconciliation using hierarchical bucket hashes
+with time-based prefixes and adaptive splitting for large buckets.
 
 Design goals:
 - Deterministic: no false positives, exact set reconciliation
 - Finality: clear "done" state when synced (root hashes match)
-- UI-inspectable: track state per connection for visibility
-- Connection-scoped: ranges tracked by connection_id
-- Peer-consistent: same event_id always produces same unified_key
+- Fossilization: old time buckets stop changing and can be cached
+- Scalable: handles large files (1GB+) without range explosion
 
-Bucket hierarchy (by hash prefix):
-- root: all events
-- prefix_2: first 2 hex chars (256 buckets)
-- prefix_4: first 4 hex chars (65536 buckets)
-- prefix_6 through prefix_6: progressively finer hash buckets
+Unified key format (16 hex chars = 8 bytes):
+- time_hex (6 chars) = coarse timestamp (~4.4 minute buckets)
+- hash (10 chars) = event_id hash prefix
 
-The unified key is: event_id_bytes[:8] as 16 hex chars
-This provides uniform distribution across all bucket levels.
+Bucket hierarchy:
+- root → prefix_2 → prefix_4 → prefix_6 (time-based, deterministic)
+- At prefix_6 with many events: switch to adaptive binary splitting
 
-Trade-offs vs time-based bucketing:
-- Loses temporal locality (can't efficiently sync "just recent events")
-- Gains peer consistency (same event = same bucket on all peers)
-- Better for encrypted events where created_at is unavailable
+Adaptive splitting (within time buckets):
+- When a prefix_6 bucket has > EVENTS_THRESHOLD events, split by median
+- Binary splits use lo_key/hi_key bounds for precise ranges
+- Continues splitting until each range has ≤ EVENTS_THRESHOLD events
+- Avoids "range explosion" for large files with same timestamp
 
 Protocol flow:
 1. On new connection: send root hash
-2. Receive their hash, compare ranges
-3. For mismatched ranges: drill down by hash prefix until bucket has ≤EVENTS_THRESHOLD events
-4. At threshold: send actual event IDs
-5. When root hashes match: sync complete for this connection
+2. If roots match: synced (log checkpoint)
+3. If roots differ: drill down through prefix levels
+4. At prefix_6 with many events: switch to adaptive splitting
+5. When range has ≤ EVENTS_THRESHOLD events: send blobs directly
+6. When root hashes match: sync complete for this connection
 """
 
 import hashlib
@@ -75,13 +73,19 @@ LEVEL_ROOT = 0
 LEVEL_PREFIX_2 = 1
 LEVEL_PREFIX_4 = 2
 LEVEL_PREFIX_6 = 3
-LEVEL_PREFIX_8 = 4
-LEVEL_PREFIX_10 = 5
+LEVEL_ADAPTIVE = 0xFF  # Adaptive splitting (uses lo_key/hi_key bounds)
 
 # Negentropy wire format sizes
 RANGE_ID_SIZE = 8
-PREFIX_BYTES = 5  # 5 bytes = 10 hex chars for prefix_10
+PREFIX_BYTES = 3  # 3 bytes = 6 hex chars for prefix_6
+UNIFIED_KEY_SIZE = 8  # 8 bytes = 16 hex chars (time + hash)
 EVENT_ID_MAX = 15
+
+# Bounds flags for adaptive splitting
+BOUNDS_NONE = 0
+BOUNDS_HAS_LO = 1
+BOUNDS_HAS_HI = 2
+BOUNDS_HAS_BOTH = 3
 
 # v2 event specification - minimal, as this is a sync protocol message
 EVENT_SPEC = {
@@ -113,6 +117,8 @@ def encode_plaintext(
     total_events: int,
     parent_range_id: bytes,
     event_ids: list[bytes],
+    lo_key: bytes | None = None,
+    hi_key: bytes | None = None,
 ) -> bytes:
     """Encode a negentropy payload plaintext.
 
@@ -128,15 +134,18 @@ def encode_plaintext(
     - root_hash (16)
     - total_events (u32)
     - parent_range_id (8)
+    - bounds_flags (1)
+    - lo_key (8) - adaptive range lower bound
+    - hi_key (8) - adaptive range upper bound
     - event_count (1)
-    - event_ids (15 * 16 = 240)
+    - event_ids (15 * 16 = 240) - legacy, rarely used
     """
     _require_len("connection_id", connection_id, 16)
     _require_len("reply_connection_id", reply_connection_id, 16)
     if msg_type not in (MSG_RANGE_REQUEST, MSG_RANGE_MATCHED, MSG_RANGE_EVENTS):
         raise ValueError("invalid negentropy msg_type")
     _require_len("range_id", range_id, RANGE_ID_SIZE)
-    if level not in (LEVEL_ROOT, LEVEL_PREFIX_2, LEVEL_PREFIX_4, LEVEL_PREFIX_6):
+    if level not in (LEVEL_ROOT, LEVEL_PREFIX_2, LEVEL_PREFIX_4, LEVEL_PREFIX_6, LEVEL_ADAPTIVE):
         raise ValueError("invalid negentropy level")
     if len(prefix_bytes) > PREFIX_BYTES:
         raise ValueError("prefix_bytes exceeds max")
@@ -150,6 +159,15 @@ def encode_plaintext(
     for event_id in event_ids:
         _require_len("event_id", event_id, 16)
 
+    # Compute bounds flags
+    bounds_flags = BOUNDS_NONE
+    if lo_key:
+        _require_len("lo_key", lo_key, UNIFIED_KEY_SIZE)
+        bounds_flags |= BOUNDS_HAS_LO
+    if hi_key:
+        _require_len("hi_key", hi_key, UNIFIED_KEY_SIZE)
+        bounds_flags |= BOUNDS_HAS_HI
+
     payload = bytearray(WIRE_PLAINTEXT_SIZE)
     payload[0:16] = connection_id
     payload[16:32] = reply_connection_id
@@ -162,8 +180,15 @@ def encode_plaintext(
     payload[62:78] = root_hash
     struct.pack_into("<I", payload, 78, total_events)
     payload[82:90] = parent_range_id
-    payload[90] = len(event_ids)
-    cursor = 91
+    # Adaptive splitting bounds
+    payload[90] = bounds_flags
+    if lo_key:
+        payload[91:99] = lo_key
+    if hi_key:
+        payload[99:107] = hi_key
+    # Event IDs (legacy)
+    payload[107] = len(event_ids)
+    cursor = 108
     for event_id in event_ids:
         payload[cursor:cursor + 16] = event_id
         cursor += 16
@@ -189,11 +214,16 @@ def decode_plaintext(data: bytes) -> dict[str, Any]:
     root_hash = data[62:78]
     (total_events,) = struct.unpack_from("<I", data, 78)
     parent_range_id = data[82:90]
-    event_count = data[90]
+    # Adaptive splitting bounds
+    bounds_flags = data[90]
+    lo_key = data[91:99] if (bounds_flags & BOUNDS_HAS_LO) else None
+    hi_key = data[99:107] if (bounds_flags & BOUNDS_HAS_HI) else None
+    # Event IDs (legacy)
+    event_count = data[107]
     if event_count > EVENT_ID_MAX:
         raise ValueError("negentropy event_count exceeds max")
     event_ids_list: list[bytes] = []
-    cursor = 91
+    cursor = 108
     for _ in range(event_count):
         event_ids_list.append(data[cursor:cursor + 16])
         cursor += 16
@@ -208,6 +238,8 @@ def decode_plaintext(data: bytes) -> dict[str, Any]:
         "root_hash": root_hash,
         "total_events": total_events,
         "parent_range_id": parent_range_id,
+        "lo_key": lo_key,
+        "hi_key": hi_key,
         "event_ids": event_ids_list,
     }
 
@@ -264,6 +296,21 @@ def _decode_hash(data: bytes) -> str | None:
     return data.hex()
 
 
+def _encode_unified_key(key_hex: str | None) -> bytes | None:
+    """Encode a unified key (16 hex chars -> 8 bytes)."""
+    if not key_hex:
+        return None
+    raw = bytes.fromhex(key_hex)
+    return _require_len("unified_key", raw, UNIFIED_KEY_SIZE)
+
+
+def _decode_unified_key(data: bytes | None) -> str | None:
+    """Decode a unified key (8 bytes -> 16 hex chars)."""
+    if not data:
+        return None
+    return data.hex()
+
+
 def encode_wire_event(
     *,
     connection_id_b64: str,
@@ -291,6 +338,8 @@ def encode_wire_event(
         level_id = LEVEL_PREFIX_4
     elif level_name == "prefix_6":
         level_id = LEVEL_PREFIX_6
+    elif level_name == "adaptive":
+        level_id = LEVEL_ADAPTIVE
     else:
         level_id = LEVEL_ROOT
 
@@ -305,6 +354,10 @@ def encode_wire_event(
     root_hash = _encode_hash(msg.get("root_hash"))
     total_events = int(msg.get("total_events") or 0)
     parent_range_id = _encode_range_id(msg.get("parent_range_id"))
+
+    # Adaptive splitting bounds
+    lo_key = _encode_unified_key(msg.get("lo_key"))
+    hi_key = _encode_unified_key(msg.get("hi_key"))
 
     event_ids: list[bytes] = []
     if msg_type_id == MSG_RANGE_EVENTS:
@@ -323,6 +376,8 @@ def encode_wire_event(
         total_events=total_events,
         parent_range_id=parent_range_id,
         event_ids=event_ids,
+        lo_key=lo_key,
+        hi_key=hi_key,
     )
     header = wire_format.WireHeader(
         version=1,
@@ -366,6 +421,8 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         level_str = "prefix_4"
     elif level_value == LEVEL_PREFIX_6:
         level_str = "prefix_6"
+    elif level_value == LEVEL_ADAPTIVE:
+        level_str = "adaptive"
     else:
         raise ValueError("invalid negentropy level")
 
@@ -378,6 +435,15 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
     prefix_str = _decode_prefix(decoded["prefix_bytes"])
     if prefix_str:
         msg_result["prefix"] = prefix_str
+
+    # Adaptive splitting bounds
+    lo_key = _decode_unified_key(decoded.get("lo_key"))
+    hi_key = _decode_unified_key(decoded.get("hi_key"))
+    if lo_key:
+        msg_result["lo_key"] = lo_key
+    if hi_key:
+        msg_result["hi_key"] = hi_key
+
     if msg_type_str == "range_request":
         msg_result["level"] = level_str
         msg_result["prefix"] = prefix_str
@@ -456,21 +522,23 @@ register_command_handler('handle_negentropy_sync', _handle_negentropy_sync)
 # - prefix_6: 1 bucket × 2.4M events (too many!)
 # - prefix_8: 256 buckets × ~9,400 events each
 # - prefix_10: 65,536 buckets × ~37 events each (under threshold)
-LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
+# Hierarchy levels - deterministic time-based buckets up to prefix_6
+# After prefix_6, switch to adaptive splitting within time buckets
+LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
 
-# Hex characters per level
+# Hex characters per level (time-based up to prefix_6)
+# unified_key = time_hex (6 chars) + hash (10 chars)
 LEVEL_PREFIX_LEN = {
     'root': 0,
-    'prefix_2': 2,     # 256 buckets (coarse time)
-    'prefix_4': 4,     # 65,536 buckets (medium time)
-    'prefix_6': 6,     # 16.7M buckets (fine time, ~4.4 min)
-    'prefix_8': 8,     # time + 2 hash chars (256 sub-buckets per time)
-    'prefix_10': 10,   # time + 4 hash chars (65,536 sub-buckets per time)
+    'prefix_2': 2,     # 256 buckets (~19 hours each)
+    'prefix_4': 4,     # 65,536 buckets (~4.4 minutes each)
+    'prefix_6': 6,     # 16.7M buckets (~1 second each) - time boundary
+    'adaptive': 16,    # Full unified key for adaptive ranges
 }
 
-# When bucket has this many events or fewer, send event IDs instead of drilling down
-# 100 is a good balance: small enough for reliable delivery, large enough for efficiency
-EVENTS_THRESHOLD = 50
+# When bucket has this many events or fewer, send event blobs directly
+# Larger values reduce round trips but increase message size
+EVENTS_THRESHOLD = 100
 
 
 # ============================================================================
@@ -603,29 +671,46 @@ class EventsMessage:
 # ============================================================================
 
 def compute_unified_key(event_id: str, created_at: int = 0) -> str:
-    """Compute the unified hash key for an event.
+    """Compute the unified key for an event: time_hex (6 chars) + hash (10 chars).
 
-    The unified key is derived from the event_id hash bytes.
-    This avoids re-hashing event_ids and remains peer-consistent.
+    The unified key combines timestamp and event_id hash:
+    - First 6 hex chars (3 bytes, 24 bits) = timestamp / 256 (4.4-minute buckets)
+    - Next 10 hex chars (5 bytes, 40 bits) = event_id hash prefix
+
+    This provides:
+    - Temporal locality: events cluster by time in the prefix tree
+    - Fossilization: old time buckets stop changing and can be cached
+    - Uniform distribution within time buckets: large files spread evenly
 
     Args:
-        event_id: The event identifier
-        created_at: Ignored (kept for API compatibility during transition)
+        event_id: The event identifier (base64-encoded hash)
+        created_at: Timestamp in milliseconds
 
     Returns:
-        16 character hex string (64 bits of hash)
+        16 character hex string (64 bits total)
     """
-    # Use the event_id hash bytes directly when possible
+    # Time component: 24 bits of coarse timestamp (~4.4 minute buckets)
+    # Divide by 256*1000 to get ~4.4 minute granularity
+    coarse_time = (created_at // 256000) & 0xFFFFFF  # 24 bits
+    time_hex = f"{coarse_time:06x}"  # 6 hex chars
+
+    # Hash component: 40 bits from event_id
+    # Only use raw bytes if event_id looks like a proper base64-encoded hash
+    # (real event_ids are 16 or 32 byte hashes, base64-encoded to ~22 or ~43 chars)
     try:
         raw = crypto.b64decode(event_id)
-        if len(raw) >= 8:
-            return raw[:8].hex()
+        # Real event_ids decode to 16 or 32 bytes (hash outputs)
+        if len(raw) in (16, 32):
+            hash_hex = raw[:5].hex()  # 10 hex chars
+        else:
+            # Not a real event_id, use blake2b
+            h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=5).digest()
+            hash_hex = h.hex()
     except Exception:
-        pass
+        h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=5).digest()
+        hash_hex = h.hex()
 
-    # Fallback for non-standard test IDs
-    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
-    return h.hex()  # 16 hex chars
+    return time_hex + hash_hex  # 16 hex chars total
 
 
 def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
@@ -1320,6 +1405,167 @@ def get_event_count_in_bucket(
     return row['cnt'] if row else 0
 
 
+# ============================================================================
+# Adaptive Splitting - Range-based query functions
+# ============================================================================
+
+def get_events_in_range(
+    db,
+    recorded_by: str,
+    prefix: str,
+    lo_key: str | None = None,
+    hi_key: str | None = None,
+) -> list[str]:
+    """Get all event IDs in an adaptive range.
+
+    Returns events whose unified_key:
+    - Starts with prefix
+    - Is >= lo_key (if provided)
+    - Is < hi_key (if provided)
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        prefix: Time prefix (6 hex chars for prefix_6)
+        lo_key: Optional lower bound (inclusive)
+        hi_key: Optional upper bound (exclusive)
+
+    Returns:
+        List of event IDs ordered by unified_key
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    conditions = ["recorded_by = ?"]
+    params: list[Any] = [recorded_by]
+
+    if prefix:
+        conditions.append("unified_key LIKE ?")
+        params.append(prefix + '%')
+
+    if lo_key:
+        conditions.append("unified_key >= ?")
+        params.append(lo_key)
+
+    if hi_key:
+        conditions.append("unified_key < ?")
+        params.append(hi_key)
+
+    sql = f"""
+        SELECT event_id FROM negentropy_events
+        WHERE {' AND '.join(conditions)}
+        ORDER BY unified_key
+    """
+    rows = safedb.query(sql, tuple(params))
+    return [r['event_id'] for r in rows]
+
+
+def get_event_count_in_range(
+    db,
+    recorded_by: str,
+    prefix: str,
+    lo_key: str | None = None,
+    hi_key: str | None = None,
+) -> int:
+    """Get count of events in an adaptive range."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    conditions = ["recorded_by = ?"]
+    params: list[Any] = [recorded_by]
+
+    if prefix:
+        conditions.append("unified_key LIKE ?")
+        params.append(prefix + '%')
+
+    if lo_key:
+        conditions.append("unified_key >= ?")
+        params.append(lo_key)
+
+    if hi_key:
+        conditions.append("unified_key < ?")
+        params.append(hi_key)
+
+    sql = f"""
+        SELECT COUNT(*) as cnt FROM negentropy_events
+        WHERE {' AND '.join(conditions)}
+    """
+    row = safedb.query_one(sql, tuple(params))
+    return row['cnt'] if row else 0
+
+
+def compute_range_hash(
+    db,
+    recorded_by: str,
+    prefix: str,
+    lo_key: str | None = None,
+    hi_key: str | None = None,
+) -> bytes:
+    """Compute XOR fingerprint hash for an adaptive range.
+
+    For adaptive ranges, we compute the hash on-demand by XORing
+    fingerprints of all events in the range.
+    """
+    event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
+    if not event_ids:
+        return b''
+
+    result = compute_fingerprint(event_ids[0])
+    for event_id in event_ids[1:]:
+        result = xor_bytes(result, compute_fingerprint(event_id))
+    return result
+
+
+def find_split_point(
+    db,
+    recorded_by: str,
+    prefix: str,
+    lo_key: str | None = None,
+    hi_key: str | None = None,
+) -> str | None:
+    """Find the median unified_key to split an adaptive range.
+
+    Returns the median key, which becomes the boundary between
+    two child ranges: [lo_key, median) and [median, hi_key).
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    conditions = ["recorded_by = ?"]
+    params: list[Any] = [recorded_by]
+
+    if prefix:
+        conditions.append("unified_key LIKE ?")
+        params.append(prefix + '%')
+
+    if lo_key:
+        conditions.append("unified_key >= ?")
+        params.append(lo_key)
+
+    if hi_key:
+        conditions.append("unified_key < ?")
+        params.append(hi_key)
+
+    # Get count first
+    count_sql = f"""
+        SELECT COUNT(*) as cnt FROM negentropy_events
+        WHERE {' AND '.join(conditions)}
+    """
+    count_row = safedb.query_one(count_sql, tuple(params))
+    count = count_row['cnt'] if count_row else 0
+
+    if count <= 1:
+        return None
+
+    # Get median using OFFSET
+    median_offset = count // 2
+    sql = f"""
+        SELECT unified_key FROM negentropy_events
+        WHERE {' AND '.join(conditions)}
+        ORDER BY unified_key
+        LIMIT 1 OFFSET ?
+    """
+    row = safedb.query_one(sql, tuple(params) + (median_offset,))
+    return row['unified_key'] if row else None
+
+
 def get_total_event_count(db, recorded_by: str) -> int:
     """Get total number of events being synced."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -1397,6 +1643,7 @@ def handle_range_request(
     """Handle an incoming range request.
 
     Compares our hash with theirs and returns appropriate response.
+    Uses adaptive splitting at prefix_6 level for large buckets.
     All responses include root_hash and total_events for progress tracking.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -1405,14 +1652,24 @@ def handle_range_request(
     level = msg['level']
     prefix = msg.get('prefix', '')
     their_hash = bytes.fromhex(msg['hash']) if msg['hash'] else b''
+    lo_key = msg.get('lo_key')
+    hi_key = msg.get('hi_key')
 
     # Get root hash and total events for all responses
     root_hash = get_root_hash(db, recorded_by)
     total_events = get_total_event_count(db, recorded_by)
 
-    # Compute our hash for this bucket
-    our_hash = recompute_bucket_hash(db, recorded_by, level, prefix)
-    log.info(f"negentropy.handle_range_request: level={level} prefix={prefix} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'} match={our_hash == their_hash}")
+    # Compute our hash for this range
+    if level == 'adaptive':
+        # Adaptive range: compute hash for lo_key/hi_key bounds
+        our_hash = compute_range_hash(db, recorded_by, prefix, lo_key, hi_key)
+        event_count = get_event_count_in_range(db, recorded_by, prefix, lo_key, hi_key)
+    else:
+        # Prefix-based bucket
+        our_hash = recompute_bucket_hash(db, recorded_by, level, prefix)
+        event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
+
+    log.info(f"negentropy.handle_range_request: level={level} prefix={prefix} lo={lo_key} hi={hi_key} count={event_count} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'}")
 
     # Record the range
     safedb.execute("""
@@ -1447,74 +1704,114 @@ def handle_range_request(
             'total_events': total_events,
         })
 
-    else:
-        # Hashes differ - check if we should send events or drill down
-        event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
+    elif event_count <= EVENTS_THRESHOLD:
+        # Bucket/range has few enough events - send blobs directly
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'events_sent', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
 
-        # At finest level OR bucket has few enough events to send directly
-        max_events = EVENT_ID_MAX
-        if level == 'prefix_6' or event_count <= max_events:
-            safedb.execute("""
-                UPDATE negentropy_sync_state
-                SET status = 'events_sent', updated_at = ?
-                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-            """, (t_ms, recorded_by, connection_id, range_id))
-
+        if level == 'adaptive':
+            event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
+        else:
             event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
-            if len(event_ids) > max_events:
-                log.warning(
-                    f"negentropy: truncating {len(event_ids)} event_ids to {max_events} for wire payload"
-                )
-                event_ids = event_ids[:max_events]
 
-            # Send actual event blobs - they'll dedupe on their side
+        # Send actual event blobs - they'll dedupe on their side
+        if event_ids:
+            sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+            log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events)")
+
+        # Limit event_ids in wire message (blobs already sent)
+        wire_event_ids = event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids
+
+        responses.append({
+            'type': 'range_events',
+            'range_id': range_id,
+            'prefix': prefix,
+            'event_ids': wire_event_ids,
+            'our_hash': our_hash.hex() if our_hash else '',
+            'root_hash': root_hash.hex() if root_hash else '',
+            'total_events': total_events,
+        })
+
+    elif level == 'prefix_6' or level == 'adaptive':
+        # At prefix_6 or adaptive with many events: use adaptive binary split
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'diverged', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
+
+        # Find median to split on
+        split_key = find_split_point(db, recorded_by, prefix, lo_key, hi_key)
+        if not split_key:
+            # Can't split further, send what we have
+            event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
             if event_ids:
                 sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-                log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events in bucket)")
+                log.info(f"negentropy: sent {sent} blobs (no split point)")
+            return responses
 
-            # Also send the event IDs so they know what we have (for bidirectional sync)
+        # Create two child ranges: [lo, split) and [split, hi)
+        for child_lo, child_hi in [(lo_key, split_key), (split_key, hi_key)]:
+            child_hash = compute_range_hash(db, recorded_by, prefix, child_lo, child_hi)
+            if not child_hash:
+                continue  # Empty range
+
+            child_range_id = generate_range_id()
+            safedb.execute("""
+                INSERT INTO negentropy_sync_state
+                (recorded_by, connection_id, range_id, level, prefix,
+                 our_hash, their_hash, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+            """, (recorded_by, connection_id, child_range_id, 'adaptive', prefix, child_hash, t_ms, t_ms))
+
             responses.append({
-                'type': 'range_events',
-                'range_id': range_id,
+                'type': 'range_request',
+                'range_id': child_range_id,
+                'level': 'adaptive',
                 'prefix': prefix,
-                'event_ids': event_ids,
-                'our_hash': our_hash.hex() if our_hash else '',
+                'lo_key': child_lo,
+                'hi_key': child_hi,
+                'hash': child_hash.hex() if child_hash else '',
+                'parent_range_id': range_id,
                 'root_hash': root_hash.hex() if root_hash else '',
                 'total_events': total_events,
             })
 
-        else:
-            # Drill down: send child hashes
-            child_level = get_child_level(level)
-            child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
+    else:
+        # Drill down: send child prefix hashes (root → prefix_2 → prefix_4 → prefix_6)
+        child_level = get_child_level(level)
+        child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
+
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'diverged', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
+
+        # Create child ranges
+        for child_prefix, child_hash in child_hashes.items():
+            child_range_id = generate_range_id()
 
             safedb.execute("""
-                UPDATE negentropy_sync_state
-                SET status = 'diverged', updated_at = ?
-                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-            """, (t_ms, recorded_by, connection_id, range_id))
+                INSERT INTO negentropy_sync_state
+                (recorded_by, connection_id, range_id, level, prefix,
+                 our_hash, their_hash, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+            """, (recorded_by, connection_id, child_range_id, child_level, child_prefix, child_hash, t_ms, t_ms))
 
-            # Create child ranges
-            for child_prefix, child_hash in child_hashes.items():
-                child_range_id = generate_range_id()
-
-                safedb.execute("""
-                    INSERT INTO negentropy_sync_state
-                    (recorded_by, connection_id, range_id, level, prefix,
-                     our_hash, their_hash, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-                """, (recorded_by, connection_id, child_range_id, child_level, child_prefix, child_hash, t_ms, t_ms))
-
-                responses.append({
-                    'type': 'range_request',
-                    'range_id': child_range_id,
-                    'level': child_level,
-                    'prefix': child_prefix,
-                    'hash': child_hash.hex() if child_hash else '',
-                    'parent_range_id': range_id,
-                    'root_hash': root_hash.hex() if root_hash else '',
-                    'total_events': total_events,
-                })
+            responses.append({
+                'type': 'range_request',
+                'range_id': child_range_id,
+                'level': child_level,
+                'prefix': child_prefix,
+                'hash': child_hash.hex() if child_hash else '',
+                'parent_range_id': range_id,
+                'root_hash': root_hash.hex() if root_hash else '',
+                'total_events': total_events,
+            })
 
     return responses
 

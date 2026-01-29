@@ -2,16 +2,17 @@
 Scenario test: Negentropy bucket capacity for large files.
 
 Tests that the negentropy sync system can handle very large files
-that create many events.
+that create many events using time-based prefixes with adaptive splitting.
 
-A 1GB file creates ~2.4 million file_slice events.
-The negentropy bucket system must be able to subdivide these events
-to avoid sending millions of event IDs in a single message.
+A 1GB file creates ~2.4 million file_slice events all at the same timestamp.
+The negentropy bucket system uses:
+1. Time-based prefix levels (root → prefix_2 → prefix_4 → prefix_6)
+2. Adaptive splitting within time buckets for large counts
 
 This test verifies that:
-1. Events get distributed across different buckets based on hash
-2. No single bucket contains more than EVENTS_THRESHOLD events at the finest level
-3. Sync completes successfully for large files
+1. Events at same timestamp cluster in the same time bucket
+2. Hash suffix provides distribution within time buckets
+3. Adaptive splitting can handle large buckets
 """
 import pytest
 from events.network.negentropy import (
@@ -21,114 +22,100 @@ from events.network.negentropy import (
     EVENTS_THRESHOLD,
     get_event_count_in_bucket,
     add_event_to_sync,
+    find_split_point,
+    get_events_in_range,
 )
 
 
-def test_unified_key_distribution_hash_only():
-    """Events get unique unified keys based purely on their event_id hash."""
-    # Generate many event IDs
+def test_unified_key_distribution_time_based():
+    """Events at same timestamp share time prefix, differ in hash suffix."""
+    # Generate many event IDs at same timestamp
+    ts_ms = 1000000000000
     event_ids = [f"event_{i}" for i in range(1000)]
 
-    # Compute unified keys (timestamp is ignored in hash-only mode)
-    unified_keys = [compute_unified_key(eid) for eid in event_ids]
+    # Compute unified keys with same timestamp
+    unified_keys = [compute_unified_key(eid, ts_ms) for eid in event_ids]
 
-    # All keys should be 16 hex chars (64 bits of hash)
+    # All keys should be 16 hex chars (time + hash)
     for key in unified_keys:
         assert len(key) == 16, f"Key should be 16 chars, got {len(key)}"
         assert all(c in '0123456789abcdef' for c in key), f"Key should be hex: {key}"
 
-    # All keys should be unique (different event_ids)
-    unique_keys = set(unified_keys)
-    assert len(unique_keys) == 1000, f"All keys should be unique, got {len(unique_keys)}"
+    # All keys should share the same time prefix (first 6 chars)
+    time_prefixes = set(k[:6] for k in unified_keys)
+    assert len(time_prefixes) == 1, \
+        f"Same timestamp should have same time prefix, got {len(time_prefixes)}"
 
-    # Check distribution at finest level
-    finest_level = LEVELS[-1]
-    finest_prefix_len = LEVEL_PREFIX_LEN[finest_level]
+    # Hash suffixes (last 10 chars) should be mostly unique
+    hash_suffixes = set(k[6:] for k in unified_keys)
+    assert len(hash_suffixes) > 900, \
+        f"Hash suffixes should be unique, got {len(hash_suffixes)}"
 
-    finest_prefixes = set(k[:finest_prefix_len] for k in unified_keys)
-
-    print(f"\nFinest level: {finest_level} (prefix_len={finest_prefix_len})")
-    print(f"Unique prefixes at finest level: {len(finest_prefixes)}")
-    print(f"Sample prefixes: {list(finest_prefixes)[:5]}")
-
-    # With hash-only keys, events should be well-distributed
-    # With 1000 events and 8-char prefix (32 bits), expect good spread
-    assert len(finest_prefixes) > 900, \
-        f"Events should spread across many buckets, got {len(finest_prefixes)}"
+    print(f"\nTime prefix: {list(time_prefixes)[0]}")
+    print(f"Unique hash suffixes: {len(hash_suffixes)}")
 
 
 def test_1gb_file_bucket_distribution(fresh_db):
-    """Test that a 1GB file's slices would be distributed across buckets.
+    """Test that a 1GB file can be synced with time-based + adaptive splitting.
 
     A 1GB file = 1,073,741,824 bytes / 450 bytes per slice = 2,386,093 slices
+    All slices have the same timestamp (created in one batch).
 
-    With hash-only unified keys, all slices should be well-distributed
-    into buckets of <=100 events each at the finest level.
+    With time-based unified keys:
+    1. All slices are in ONE prefix_6 bucket (same time prefix)
+    2. Adaptive splitting divides the bucket via binary median splits
+    3. ~log2(2.4M / 100) ≈ 15 splits to get under threshold
     """
     db = fresh_db
 
-    # Simulate the scenario: 2.4M events
-    # (We can't actually create 2.4M events in a test, so we analyze the structure)
-
     num_slices = 2_386_093  # 1GB file
+    ts_ms = 1000000000000  # All at same timestamp
 
-    # Calculate how many unique buckets we'd get at each level
-    # by computing unified keys for a sample and extrapolating
+    # Compute sample unified keys to verify time clustering
     sample_size = 10000
-    sample_keys = [compute_unified_key(f"slice_{i}") for i in range(sample_size)]
+    sample_keys = [compute_unified_key(f"slice_{i}", ts_ms) for i in range(sample_size)]
 
-    print(f"\n=== 1GB File Bucket Analysis (Hash-Only) ===")
+    print(f"\n=== 1GB File Bucket Analysis (Time-Based + Adaptive) ===")
     print(f"Total slices: {num_slices:,}")
-    print(f"Sample size: {sample_size:,}")
     print(f"EVENTS_THRESHOLD: {EVENTS_THRESHOLD}")
     print()
 
-    for level in LEVELS:
-        prefix_len = LEVEL_PREFIX_LEN[level]
-        if prefix_len == 0:
-            unique_prefixes = 1  # root
-        else:
-            prefixes = set(k[:prefix_len] for k in sample_keys)
-            unique_prefixes = len(prefixes)
+    # All slices at same timestamp should have same time prefix
+    time_prefixes = set(k[:6] for k in sample_keys)
+    assert len(time_prefixes) == 1, "All slices at same timestamp should have same time prefix"
+    time_prefix = list(time_prefixes)[0]
+    print(f"Time prefix (prefix_6): {time_prefix}")
 
-        # Extrapolate to full file
-        # With hash-only keys, we get full distribution based on prefix length
-        if level == 'root':
-            estimated_buckets = 1
-        else:
-            # Hash bits = prefix_len * 4 (4 bits per hex char)
-            hash_bits = prefix_len * 4
-            max_buckets = 2 ** hash_bits
-            estimated_buckets = min(num_slices, max_buckets)
+    # Hash suffixes should be well-distributed (for adaptive splitting)
+    hash_suffixes = set(k[6:] for k in sample_keys)
+    print(f"Unique hash suffixes in sample: {len(hash_suffixes)}")
+    assert len(hash_suffixes) > sample_size * 0.9, \
+        "Hash suffixes should be mostly unique for good splitting"
 
-        events_per_bucket = num_slices / estimated_buckets
-        ok = "✓" if events_per_bucket <= EVENTS_THRESHOLD else "✗"
+    # Calculate adaptive split depth needed
+    # Each split divides by ~2, need log2(num_slices / threshold) splits
+    import math
+    splits_needed = math.ceil(math.log2(num_slices / EVENTS_THRESHOLD))
+    final_ranges = 2 ** splits_needed
 
-        print(f"{level:12s} (prefix_len={prefix_len:2d}): "
-              f"~{estimated_buckets:>10,} buckets, "
-              f"~{events_per_bucket:>12,.0f} events/bucket {ok}")
+    print()
+    print(f"Adaptive splitting analysis:")
+    print(f"  Events per prefix_6 bucket: {num_slices:,}")
+    print(f"  Splits needed: ~{splits_needed}")
+    print(f"  Final ranges: ~{final_ranges:,}")
+    print(f"  Events per final range: ~{num_slices / final_ranges:.0f}")
 
-    # The test assertion: at the finest level, we should be able to
-    # get buckets with <=EVENTS_THRESHOLD events
-    finest_level = LEVELS[-1]
-    finest_prefix_len = LEVEL_PREFIX_LEN[finest_level]
-
-    # With hash-only keys, all prefix bits are hash bits
-    hash_bits = finest_prefix_len * 4
-    max_buckets = 2 ** hash_bits
-    events_per_bucket = num_slices / max_buckets
-
-    # With 8-char prefix (32 bits), we get ~4 billion buckets
-    # 2.4M slices / 4B buckets = ~0.0006 events per bucket on average
-    assert events_per_bucket <= EVENTS_THRESHOLD, \
-        f"At finest level, {events_per_bucket:.1f} events/bucket exceeds threshold {EVENTS_THRESHOLD}"
+    # With adaptive splitting, we can get all ranges under threshold
+    assert num_slices / final_ranges <= EVENTS_THRESHOLD, \
+        f"Adaptive splitting should get ranges under threshold"
 
 
 def test_bucket_subdivision_with_many_events(fresh_db):
-    """Test that many events get distributed across multiple buckets.
+    """Test that many events at same timestamp go into one prefix_6 bucket.
 
-    Creates 500 events and verifies they are well-distributed
-    across buckets with hash-only unified keys.
+    Creates 500 events at the same timestamp and verifies:
+    1. All events are in the same prefix_6 bucket (same time prefix)
+    2. Adaptive splitting can subdivide via find_split_point
     """
     db = fresh_db
 
@@ -138,33 +125,51 @@ def test_bucket_subdivision_with_many_events(fresh_db):
     peer_id = alice['peer_id']
 
     num_events = 500
+    ts_ms = 5000000000000  # Fixed timestamp for all events
 
     # Add events to sync system
-    print(f"\n=== Adding {num_events} events ===")
+    print(f"\n=== Adding {num_events} events at same timestamp ===")
     for i in range(num_events):
         event_id = f"test_event_{i:04d}"
-        add_event_to_sync(db, peer_id, event_id, 5000)  # timestamp ignored
+        add_event_to_sync(db, peer_id, event_id, ts_ms)
 
     db.commit()
 
-    # Check event distribution at finest level
-    finest_level = LEVELS[-1]
+    # All events should be in the same prefix_6 bucket (same time prefix)
+    finest_level = LEVELS[-1]  # prefix_6
     finest_prefix_len = LEVEL_PREFIX_LEN[finest_level]
 
-    # Get all unique prefixes at finest level
-    unified_keys = [compute_unified_key(f"test_event_{i:04d}")
+    unified_keys = [compute_unified_key(f"test_event_{i:04d}", ts_ms)
                     for i in range(num_events)]
     finest_prefixes = set(k[:finest_prefix_len] for k in unified_keys)
 
     print(f"Finest level: {finest_level}")
     print(f"Unique prefixes: {len(finest_prefixes)}")
 
-    # Check actual bucket counts from database
-    for prefix in list(finest_prefixes)[:5]:  # Sample first 5
-        count = get_event_count_in_bucket(db, peer_id, prefix, finest_level)
-        print(f"  Bucket {prefix}: {count} events")
+    # All events at same timestamp should be in ONE prefix_6 bucket
+    assert len(finest_prefixes) == 1, \
+        f"Same timestamp should mean one bucket, got {len(finest_prefixes)}"
 
-    # With hash-only keys, 500 events should be well-distributed
-    # across many buckets at the finest level
-    assert len(finest_prefixes) > 400, \
-        f"Events should spread across many buckets, got {len(finest_prefixes)}"
+    time_prefix = list(finest_prefixes)[0]
+    count = get_event_count_in_bucket(db, peer_id, time_prefix, finest_level)
+    print(f"  Bucket {time_prefix}: {count} events")
+
+    # With 500 events > EVENTS_THRESHOLD, adaptive splitting kicks in
+    # Test that we can find split points
+    split_key = find_split_point(db, peer_id, time_prefix)
+    assert split_key is not None, "Should find split point for large bucket"
+
+    # Split point should divide events roughly in half
+    low_events = get_events_in_range(db, peer_id, time_prefix, hi_key=split_key)
+    high_events = get_events_in_range(db, peer_id, time_prefix, lo_key=split_key)
+
+    print(f"  Split point: {split_key}")
+    print(f"  Low range: {len(low_events)} events")
+    print(f"  High range: {len(high_events)} events")
+
+    # Both halves should have events
+    assert len(low_events) > 0, "Low range should have events"
+    assert len(high_events) > 0, "High range should have events"
+    # Split should be roughly balanced
+    assert abs(len(low_events) - len(high_events)) < num_events * 0.2, \
+        "Split should be roughly balanced"

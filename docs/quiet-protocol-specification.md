@@ -991,53 +991,82 @@ When making connections (see: [Connection](#connection)) peers preferentially pi
 
 ## Negentropy Protocol
 
-As an alternative to bloom filters, we implement deterministic set reconciliation using hierarchical bucket hashes (inspired by [Negentropy](https://github.com/hoytech/negentropy)). This provides exact reconciliation with no false positives and clear "synced" checkpoints.
+Deterministic set reconciliation using hierarchical bucket hashes with adaptive splitting (inspired by [Negentropy](https://github.com/hoytech/negentropy)). Provides exact reconciliation with no false positives and clear "synced" checkpoints.
 
 ### Unified Key
 
-Each event maps to a 64-bit unified key combining timestamp and hash:
+Each event maps to a 64-bit unified key:
 
 ```
-unified_key = timestamp_hex (12 chars, 48 bits) + event_hash (4 chars, 16 bits)
+unified_key = time_hex (6 chars) + hash (10 chars)
 ```
 
-High-order bits are timestamp (events cluster by time); low-order bits are hash (same-timestamp events spread uniformly). This handles large files: 1GB = ~2.4M slices at same timestamp distributed across 65K hash buckets.
+- **time_hex**: Coarse timestamp `(created_at_ms / 256000) & 0xFFFFFF` (~4.4 minute buckets)
+- **hash**: First 5 bytes of event_id hash
+
+Time prefix provides temporal locality and fossilization (old buckets stop changing). Hash suffix distributes same-timestamp events uniformly.
 
 ### Bucket Hierarchy
 
-Events are organized into a prefix tree by unified key:
+Time-based prefix tree up to prefix_6, then adaptive splitting:
 
 ```
-root → prefix_2 → prefix_4 → ... → prefix_12 (full timestamp) → prefix_14 → prefix_16 (leaf)
+root → prefix_2 → prefix_4 → prefix_6 → [adaptive splitting]
 ```
 
-Each level adds 2 hex characters (8 bits). Bucket hash is BLAKE2b-128 of sorted child hashes (or sorted event IDs at leaf level).
+Each prefix level adds 2 hex characters. At prefix_6, all events with the same timestamp are in one bucket. For large buckets (>100 events), adaptive binary splitting divides by median key.
+
+### XOR Fingerprinting
+
+Bucket hashes use XOR fingerprinting: `bucket_hash = XOR(fingerprint(event_id) for all events)`. Properties:
+- O(1) updates when events added/removed
+- Commutative and associative (order-independent)
+- Empty bucket = zero hash
 
 ### Protocol Flow
 
 1. On connection: send root hash
 2. If roots match: synced (log checkpoint)
-3. If roots differ: drill down, comparing child bucket hashes
-4. When bucket has ≤100 events: exchange event IDs directly
-5. Send missing event blobs; recipient processes through normal `recorded` → projection path
+3. If roots differ: drill down through prefix levels
+4. At prefix_6 with many events: switch to adaptive binary splits using `lo_key`/`hi_key` bounds
+5. When range has ≤100 events: send blobs directly
+6. Every message includes root hash; checkpoint logged when roots match
 
-Every message includes the current root hash. When root hashes match mid-protocol, a checkpoint is logged immediately—even if sub-ranges are still being reconciled.
+### Adaptive Splitting
+
+When a prefix_6 bucket exceeds `EVENTS_THRESHOLD` (100):
+- Find median unified_key as split point
+- Create two child ranges: `[lo, median)` and `[median, hi)`
+- Continue splitting until all ranges ≤ threshold
+- Avoids "range explosion" for large files (~log₂(n/100) splits for n events)
+
+### Wire Format
+
+Fixed 344-byte plaintext with adaptive bounds:
+
+| Field | Bytes | Description |
+|-------|-------|-------------|
+| connection_id | 16 | Sender's connection ID |
+| reply_connection_id | 16 | Receiver's connection ID |
+| msg_type | 1 | 1=request, 2=matched, 3=events |
+| range_id | 8 | Unique range identifier |
+| level | 1 | 0=root, 1-3=prefix_2/4/6, 0xFF=adaptive |
+| prefix | 3 | Time prefix bytes |
+| hash | 16 | Bucket/range hash |
+| root_hash | 16 | Current root hash |
+| total_events | 4 | Total event count |
+| parent_range_id | 8 | Parent range (for drilling) |
+| bounds_flags | 1 | Adaptive bounds present |
+| lo_key | 8 | Lower bound (if adaptive) |
+| hi_key | 8 | Upper bound (if adaptive) |
 
 ### Properties
 
-- **Deterministic**: No false positives; exact set difference computed
-- **Efficient**: O(log n) messages for small differences; O(n) for disjoint sets
-- **Resumable**: Per-connection state tracks which ranges are pending/matched/complete
-- **Observable**: UI can display sync progress as percentage of ranges matched
-
-## Informal Convergence Proof
-
-Our Bloom is 512 bits (64 bytes), ~100 IDs and k = 5 hashes. Probability a single test wrongly says "present" is:
-
-`FPR ≈ 0.03  (≈ 3 %)`
-
-Missed items in one pass will surface on the next pass with probability
-`p = (FPR)^k ≈ 3 %^5 ≈ 2.4 × 10⁻⁸` (or lower given packet loss) so each event is delivered with probability 1.
+- **Deterministic**: No false positives; exact set difference
+- **Efficient**: O(log n) for small differences; O(n) for disjoint sets
+- **Scalable**: Handles 1GB+ files via adaptive splitting
+- **Fossilization**: Old time buckets cached indefinitely
+- **Observable**: UI shows sync progress as percentage of ranges matched
 
 ## Hole Punching
 

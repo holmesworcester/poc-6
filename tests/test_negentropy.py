@@ -1,6 +1,6 @@
 """Tests for negentropy-style deterministic sync protocol.
 
-Tests the hash-only prefix-based bucketing system.
+Tests the time-based prefix bucketing with adaptive splitting.
 """
 import pytest
 import sqlite3
@@ -19,49 +19,55 @@ def db():
 
 
 class TestUnifiedKey:
-    """Test unified key computation (hash-only variant)."""
+    """Test unified key computation (time + hash variant)."""
 
     def test_unified_key_format(self):
         """Unified key is 16 hex chars (64 bits)."""
         event_id = 'test_event_abc123'
-        key = negentropy.compute_unified_key(event_id)
+        key = negentropy.compute_unified_key(event_id, 1000000000000)
         assert len(key) == 16
         assert all(c in '0123456789abcdef' for c in key)
 
-    def test_unified_key_ignores_timestamp(self):
-        """Timestamp is ignored - same event_id always produces same key."""
+    def test_unified_key_includes_timestamp(self):
+        """Different timestamps produce different keys (time is in prefix)."""
         event_id = 'test_event'
-        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # With timestamp
-        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Different timestamp
-        key3 = negentropy.compute_unified_key(event_id)  # No timestamp
-        assert key1 == key2 == key3  # All same because only event_id matters
+        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # Early time
+        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Later time
+        # First 6 chars are time-based, so different timestamps should differ
+        assert key1[:6] != key2[:6]
+        # Hash portion (last 10 chars) should be same for same event_id
+        assert key1[6:] == key2[6:]
 
     def test_unified_key_deterministic(self):
-        """Same event_id produces same key."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt1')
+        """Same event_id and timestamp produces same key."""
+        key1 = negentropy.compute_unified_key('evt1', 1000000000000)
+        key2 = negentropy.compute_unified_key('evt1', 1000000000000)
         assert key1 == key2
 
     def test_unified_key_different_events(self):
-        """Different events produce different keys."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt2')
-        assert key1 != key2
+        """Different events at same timestamp have different hash suffix."""
+        ts = 1000000000000
+        key1 = negentropy.compute_unified_key('evt1', ts)
+        key2 = negentropy.compute_unified_key('evt2', ts)
+        # Time prefix should be same
+        assert key1[:6] == key2[:6]
+        # Hash suffix should differ
+        assert key1[6:] != key2[6:]
 
     def test_decode_unified_key(self):
-        """Decode returns (0, full_hash) in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
+        """Decode returns (0, full_key) for compatibility."""
+        key = negentropy.compute_unified_key('evt1', 1000000000000)
         decoded_ts, hash_hex = negentropy.decode_unified_key(key)
-        assert decoded_ts == 0  # No timestamp in hash-only mode
-        assert hash_hex == key  # Full hash returned
+        assert decoded_ts == 0  # Compatibility mode
+        assert hash_hex == key
 
 
 class TestPrefixLevels:
     """Test prefix hierarchy."""
 
     def test_levels_defined(self):
-        """All expected levels exist (6 levels for large file support)."""
-        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
+        """Time-based levels end at prefix_6, then adaptive."""
+        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6']
         assert negentropy.LEVELS == expected
 
     def test_get_prefix_for_level(self):
@@ -74,23 +80,18 @@ class TestPrefixLevels:
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_2') == unified_key[:2]
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_4') == unified_key[:4]
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_6') == unified_key[:6]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_8') == unified_key[:8]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_10') == unified_key[:10]
 
     def test_get_child_level(self):
-        """Child level is next in hierarchy."""
+        """Child level is next in hierarchy (stops at prefix_6)."""
         assert negentropy.get_child_level('root') == 'prefix_2'
         assert negentropy.get_child_level('prefix_2') == 'prefix_4'
         assert negentropy.get_child_level('prefix_4') == 'prefix_6'
-        assert negentropy.get_child_level('prefix_6') == 'prefix_8'
-        assert negentropy.get_child_level('prefix_8') == 'prefix_10'
-        assert negentropy.get_child_level('prefix_10') is None  # Finest level
+        assert negentropy.get_child_level('prefix_6') is None  # Switches to adaptive
 
     def test_get_parent_level(self):
         """Parent level is previous in hierarchy."""
-        assert negentropy.get_parent_level('prefix_10') == 'prefix_8'
-        assert negentropy.get_parent_level('prefix_8') == 'prefix_6'
         assert negentropy.get_parent_level('prefix_6') == 'prefix_4'
+        assert negentropy.get_parent_level('prefix_4') == 'prefix_2'
         assert negentropy.get_parent_level('prefix_2') == 'root'
         assert negentropy.get_parent_level('root') is None  # Coarsest level
 
@@ -99,11 +100,11 @@ class TestFormatHuman:
     """Test human-readable unified key formatting."""
 
     def test_format_unified_key_human(self):
-        """Format shows hash prefix in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
+        """Format shows hash prefix."""
+        key = negentropy.compute_unified_key('evt1', 1000000000000)
         formatted = negentropy.format_unified_key_human(key)
         assert 'hash:' in formatted
-        assert key[:8] in formatted  # Shows hash prefix
+        assert key[:8] in formatted  # Shows prefix
 
 
 class TestXORFingerprinting:
