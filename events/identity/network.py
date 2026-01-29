@@ -5,7 +5,12 @@ EVENT_TYPE = 'network'
 SHAREABLE = True  # Network root of trust syncs to all peers
 PROJECTION_TABLE = None
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x27  # TYPE_NETWORK
+WIRE_PLAINTEXT_SIZE = 344  # NETWORK_PLAINTEXT_SIZE
+
 from typing import Any
+import struct
 import logging
 from core import crypto
 from core import store
@@ -35,13 +40,86 @@ EVENT_SPEC = {
 log = logging.getLogger(__name__)
 
 
+# Wire format functions - encode/decode for network event type
+
+def encode_plaintext(network_pubkey: bytes) -> bytes:
+    """Encode a network payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - network_pubkey (32)
+    - pad
+    """
+    wire_format._require_len("network_pubkey", network_pubkey, wire_format.PUBKEY_SIZE)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:32] = network_pubkey
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a network payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"network plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+    return {"network_pubkey": data[0:32]}
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a network wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    network_pubkey: bytes,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete network wire event."""
+    plaintext = encode_plaintext(network_pubkey=network_pubkey)
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=0,
+        signer_type=wire_format.SIGNER_NETWORK,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * wire_format.SIGNER_ID_SIZE,
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = wire_format._pad_payload(plaintext)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a network wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for network")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    return {
+        "type": EVENT_TYPE,
+        "network_pubkey": crypto.b64encode(decoded["network_pubkey"]),
+        "signer_type": "network",
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+
 
 def _wire_shadow_network(network_pubkey_b64: str) -> None:
     """Validate network fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_network_plaintext(
+    plaintext = encode_plaintext(
         network_pubkey=crypto.b64decode(network_pubkey_b64)
     )
-    decoded = wire_format.decode_network_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["network_pubkey"] != crypto.b64decode(network_pubkey_b64):
         raise ValueError("wire shadow decode network_pubkey mismatch")
 
@@ -71,7 +149,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
     # Generate network's own keypair (network is self-signed)
     network_private_key, network_public_key = crypto.generate_keypair()
 
-    blob = wire_format.encode_network_wire_event(
+    blob = encode_wire_event(
         network_pubkey=network_public_key,
         created_at_ms=t_ms,
         private_key=network_private_key,
@@ -201,10 +279,10 @@ def get_public_key_from_store(network_id: str, db: Any) -> bytes | None:
         return None
 
     try:
-        if not wire_format.is_wire_network_envelope(blob):
+        if not is_wire_envelope(blob):
             log.warning(f"get_public_key_from_store() expected wire network event: {network_id[:20]}...")
             return None
-        event_data = wire_format.decode_network_wire_event(blob)
+        event_data = decode_wire_event(blob)
         if event_data.get('type') != 'network':
             log.warning(f"get_public_key_from_store() not a network event: {network_id[:20]}...")
             return None

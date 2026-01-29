@@ -8,8 +8,15 @@ EVENT_TYPE = 'connection_prekey'
 SHAREABLE = False  # Local-only - contains private key material
 PROJECTION_TABLE = None
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x30  # TYPE_CONNECTION_PREKEY
+WIRE_PLAINTEXT_SIZE = 344  # CONNECTION_PREKEY_PLAINTEXT_SIZE
+PUBKEY_SIZE = 32
+PRIVKEY_SIZE = 32
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -17,6 +24,89 @@ from core.db import create_unsafe_db, create_safe_db
 from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# Wire format functions - encode/decode for connection_prekey event type
+
+def encode_plaintext(public_key: bytes, private_key: bytes) -> bytes:
+    """Encode a connection_prekey payload plaintext.
+
+    Layout (344 bytes):
+    - public_key (32)
+    - private_key (32)
+    - pad
+    """
+    wire_format._require_len("public_key", public_key, PUBKEY_SIZE)
+    wire_format._require_len("private_key", private_key, PRIVKEY_SIZE)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:PUBKEY_SIZE] = public_key
+    payload[PUBKEY_SIZE:PUBKEY_SIZE + PRIVKEY_SIZE] = private_key
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a connection_prekey payload plaintext."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"connection_prekey plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    return {
+        "public_key": data[0:PUBKEY_SIZE],
+        "private_key": data[PUBKEY_SIZE:PUBKEY_SIZE + PRIVKEY_SIZE],
+    }
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a connection_prekey wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    public_key: bytes,
+    private_key: bytes,
+    signed_by_b64: str,
+    created_at_ms: int,
+) -> bytes:
+    """Encode a complete connection_prekey wire event."""
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_plaintext(public_key=public_key, private_key=private_key)
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_UNSIGNED,
+        signer_type=wire_format.SIGNER_PEER,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    payload = wire_format._pad_payload(plaintext)
+    signature = b"\x00" * wire_format.SIGNATURE_SIZE
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a connection_prekey wire event."""
+    header, payload, _signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for connection_prekey")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    return {
+        "type": EVENT_TYPE,
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "private_key": crypto.b64encode(decoded["private_key"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+    }
 
 
 # Transit prekeys expire after 30 days (in milliseconds)
@@ -74,11 +164,11 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
 def _wire_shadow_connection_prekey(public_key_b64: str, private_key_b64: str, owner_peer_id: str) -> None:
     """Validate connection_prekey fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_connection_prekey_plaintext(
+    plaintext = encode_plaintext(
         public_key=crypto.b64decode(public_key_b64),
         private_key=crypto.b64decode(private_key_b64),
     )
-    decoded = wire_format.decode_connection_prekey_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["public_key"] != crypto.b64decode(public_key_b64):
         raise ValueError("wire shadow decode public_key mismatch")
 
@@ -144,7 +234,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
         peer_id,
     )
 
-    blob = wire_format.encode_connection_prekey_wire_event(
+    blob = encode_wire_event(
         public_key=prekey_public,
         private_key=prekey_private,
         signed_by_b64=peer_id,
@@ -196,7 +286,7 @@ def create_with_material(public_key: bytes, private_key: bytes, peer_id: str, t_
         peer_id,
     )
 
-    blob = wire_format.encode_connection_prekey_wire_event(
+    blob = encode_wire_event(
         public_key=public_key,
         private_key=private_key,
         signed_by_b64=peer_id,

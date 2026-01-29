@@ -12,8 +12,8 @@ Tests:
 import sqlite3
 from core.db import Database
 from core import schema
-from core import wire_format
 from events.identity import user, invite, peer
+from events.identity import invite as invite_module
 from events.content import message
 from events.network import connection_request as conn_module
 from tests.utils.tick_helper import run_ticks, assert_eventually
@@ -274,8 +274,8 @@ def test_three_player_messaging(fresh_db):
             inv_blob = store.get(inv['invite_id'], db)
             if inv_blob:
                 inv_data = None
-                if wire_format.is_wire_invite_envelope(inv_blob):
-                    inv_data = wire_format.decode_invite_wire_event(inv_blob)
+                if invite_module.is_wire_envelope(inv_blob):
+                    inv_data = invite_module.decode_wire_event(inv_blob)
                 else:
                     try:
                         inv_data = json.loads(inv_blob.decode())

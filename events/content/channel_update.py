@@ -9,7 +9,13 @@ EVENT_TYPE = 'channel_update'
 SHAREABLE = True  # Channel updates sync to all members
 PROJECTION_TABLE = None
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x0A  # TYPE_CHANNEL_UPDATE
+WIRE_PLAINTEXT_SIZE = 344  # CHANNEL_UPDATE_PLAINTEXT_SIZE
+NAME_MAX = 64
+
 from typing import Any
+import struct
 import logging
 from core import crypto
 from core import store
@@ -21,6 +27,193 @@ from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
+
+
+# Wire format functions - encode/decode for channel_update event type
+
+def encode_plaintext(
+    channel_id: bytes,
+    group_id: bytes,
+    updated_by: bytes,
+    new_channel_name: str | bytes | None,
+    new_disappearing_time_ms: int | None,
+) -> bytes:
+    """Encode a channel_update payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - channel_id (16)
+    - group_id (16)
+    - updated_by (16)
+    - name_len (u16)
+    - name_bytes (NAME_MAX)
+    - new_disappearing_time_ms (u64) - 0xFFFFFFFFFFFFFFFF if None
+    - pad
+    """
+    wire_format._require_len("channel_id", channel_id, 16)
+    wire_format._require_len("group_id", group_id, 16)
+    wire_format._require_len("updated_by", updated_by, 16)
+    if new_channel_name is None:
+        name_bytes = b""
+    elif isinstance(new_channel_name, str):
+        name_bytes = new_channel_name.encode("utf-8")
+    else:
+        name_bytes = bytes(new_channel_name)
+    if len(name_bytes) > NAME_MAX:
+        raise ValueError(f"new_channel_name exceeds {NAME_MAX} bytes, got {len(name_bytes)}")
+    ttl_value = 0xFFFFFFFFFFFFFFFF if new_disappearing_time_ms is None else new_disappearing_time_ms
+    if ttl_value < 0 or ttl_value > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("new_disappearing_time_ms must fit in u64")
+
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = channel_id
+    payload[16:32] = group_id
+    payload[32:48] = updated_by
+    struct.pack_into("<H", payload, 48, len(name_bytes))
+    payload[50:50 + len(name_bytes)] = name_bytes
+    struct.pack_into("<Q", payload, 50 + NAME_MAX, ttl_value)
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a channel_update payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"channel_update plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    channel_id = data[0:16]
+    group_id = data[16:32]
+    updated_by = data[32:48]
+    (name_len,) = struct.unpack_from("<H", data, 48)
+    if name_len > NAME_MAX:
+        raise ValueError(f"new_channel_name_len exceeds {NAME_MAX}, got {name_len}")
+    name_bytes = data[50:50 + name_len]
+    new_channel_name = name_bytes.decode("utf-8") if name_len else None
+    (new_disappearing_time_ms,) = struct.unpack_from("<Q", data, 50 + NAME_MAX)
+    if new_disappearing_time_ms == 0xFFFFFFFFFFFFFFFF:
+        new_disappearing_time_ms = None
+    return {
+        "channel_id": channel_id,
+        "group_id": group_id,
+        "updated_by": updated_by,
+        "new_channel_name": new_channel_name,
+        "new_disappearing_time_ms": new_disappearing_time_ms,
+    }
+
+
+def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
+    """Encrypt channel_update plaintext into wire payload."""
+    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"channel_update plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
+    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
+    if key_data.get("type") != "symmetric":
+        raise ValueError("channel_update payload requires symmetric key")
+    nonce = crypto.deterministic_nonce(key_id, plaintext)
+    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
+    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
+        raise ValueError("unexpected ciphertext length for channel_update payload")
+    payload = key_id + nonce + ciphertext
+    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
+
+
+def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt wire payload to channel_update plaintext."""
+    if key_data.get("type") != "symmetric":
+        raise ValueError("channel_update payload requires symmetric key")
+    nonce = payload[16:40]
+    ciphertext = payload[40:]
+    return crypto.decrypt(ciphertext, key_data["key"], nonce)
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a channel_update wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    channel_id_b64: str,
+    group_id_b64: str,
+    updated_by_b64: str,
+    signer_type: str,
+    new_channel_name: str | None,
+    new_disappearing_time_ms: int | None,
+    global_count: int,
+    created_at_ms: int,
+    key_data: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete channel_update wire event."""
+    if global_count < 0 or global_count > 0xFFFFFFFF:
+        raise ValueError("global_count must fit in u32")
+    channel_id = crypto.b64decode(channel_id_b64)
+    group_id = crypto.b64decode(group_id_b64)
+    updated_by = crypto.b64decode(updated_by_b64)
+    plaintext = encode_plaintext(
+        channel_id=channel_id,
+        group_id=group_id,
+        updated_by=updated_by,
+        new_channel_name=new_channel_name,
+        new_disappearing_time_ms=new_disappearing_time_ms,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_ENCRYPTED,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=global_count,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", updated_by, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_payload(plaintext, key_data)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode a channel_update wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        return None, []
+    if header.flags & wire_format.FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
+        if not key_data:
+            return None, [key_id_b64]
+        plaintext = _decrypt_payload(payload, key_data)
+    else:
+        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+
+    decoded = decode_plaintext(plaintext)
+    if decoded["updated_by"] != header.signer_id:
+        raise ValueError("updated_by does not match signer_id")
+    event_data = {
+        "type": EVENT_TYPE,
+        "channel_id": crypto.b64encode(decoded["channel_id"]),
+        "group_id": crypto.b64encode(decoded["group_id"]),
+        "updated_by": crypto.b64encode(decoded["updated_by"]),
+        "new_channel_name": decoded["new_channel_name"],
+        "new_disappearing_time_ms": decoded["new_disappearing_time_ms"],
+        "global_count": header.count,
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    return event_data, []
 
 
 EVENT_SPEC = {
@@ -107,14 +300,14 @@ def _wire_shadow_channel_update(
     new_disappearing_time_ms: int | None,
 ) -> None:
     """Validate channel_update fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_channel_update_plaintext(
+    plaintext = encode_plaintext(
         channel_id=crypto.b64decode(channel_id),
         group_id=crypto.b64decode(group_id),
         updated_by=crypto.b64decode(updated_by),
         new_channel_name=new_channel_name,
         new_disappearing_time_ms=new_disappearing_time_ms,
     )
-    decoded = wire_format.decode_channel_update_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["channel_id"] != crypto.b64decode(channel_id):
         raise ValueError("wire shadow decode channel_id mismatch")
 
@@ -191,7 +384,7 @@ def create(
 
     private_key = peer.get_private_key(peer_id, peer_id, db)
     key_data = group.pick_key(group_id, peer_id, db)
-    blob = wire_format.encode_channel_update_wire_event(
+    blob = encode_wire_event(
         channel_id_b64=channel_id,
         group_id_b64=group_id,
         updated_by_b64=peer_shared_id,

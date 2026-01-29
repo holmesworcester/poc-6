@@ -103,7 +103,7 @@ def _apply_emit_events(
     """
     from core import store
     from core import crypto
-    from core import wire_format
+    from events.group import group_key
     for emit in emit_events:
         peer_id = emit.peer_id or recorded_by
 
@@ -114,7 +114,7 @@ def _apply_emit_events(
             key_b64 = event_data.get("key")
             if not key_b64:
                 raise ValueError("group_key emit missing key material")
-            blob = wire_format.encode_group_key_wire_event(
+            blob = group_key.encode_wire_event(
                 key=crypto.b64decode(key_b64),
                 created_at_ms=0,
             )

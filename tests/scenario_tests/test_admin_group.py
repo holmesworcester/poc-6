@@ -14,7 +14,7 @@ Tests:
 """
 from core.db import create_safe_db, create_unsafe_db
 from events.identity import user, invite, network as network_module, peer, admin
-from core import crypto, store, wire_format
+from core import crypto, store
 from tests.utils.tick_helper import assert_eventually
 
 
@@ -170,7 +170,7 @@ def test_admin_group_workflow(fresh_db):
 
 
     charlie_private_key = peer.get_private_key(charlie['peer_id'], charlie['peer_id'], db)
-    rogue_invite_blob = wire_format.encode_invite_wire_event(
+    rogue_invite_blob = invite.encode_wire_event(
         mode="user",
         invite_pubkey_b64=rogue_invite_pubkey_b64,
         invite_prekey_id_b64=rogue_invite_prekey_id,

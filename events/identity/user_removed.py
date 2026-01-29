@@ -5,8 +5,13 @@ EVENT_TYPE = 'user_removed'
 SHAREABLE = True  # User removal syncs across network
 PROJECTION_TABLE = None
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x22  # TYPE_USER_REMOVED
+WIRE_PLAINTEXT_SIZE = 344  # USER_REMOVED_PLAINTEXT_SIZE
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -16,6 +21,88 @@ from core.projection.apply import register_command_handler
 from events.identity import user, peer_shared, network
 
 log = logging.getLogger(__name__)
+
+
+# Wire format functions - encode/decode for user_removed event type
+
+def encode_plaintext(removed_user_id: bytes) -> bytes:
+    """Encode a user_removed payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - removed_user_id (16)
+    - pad (328)
+    """
+    wire_format._require_len("removed_user_id", removed_user_id, 16)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = removed_user_id
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a user_removed payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"user_removed plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    return {"removed_user_id": data[0:16]}
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a user_removed wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    removed_user_id_b64: str,
+    removed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete user_removed wire event."""
+    removed_user_id = crypto.b64decode(removed_user_id_b64)
+    signer_id = crypto.b64decode(removed_by_b64)
+    plaintext = encode_plaintext(removed_user_id=removed_user_id)
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=0,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = wire_format._pad_payload(plaintext)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a user_removed wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for user_removed")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    event_data = {
+        "type": EVENT_TYPE,
+        "removed_user_id": crypto.b64encode(decoded["removed_user_id"]),
+        "removed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    return event_data
 
 
 # V2 Projector specification
@@ -96,7 +183,7 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
 
     from events.identity import peer
     private_key = peer.get_private_key(removed_by_local_peer_id, removed_by_local_peer_id, db)
-    blob = wire_format.encode_user_removed_wire_event(
+    blob = encode_wire_event(
         removed_user_id_b64=removed_user_id,
         removed_by_b64=removed_by_peer_id,
         signer_type="peer_shared",
@@ -189,10 +276,10 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
 def _wire_shadow_user_removed(removed_user_id: str) -> None:
     """Validate user_removed fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_user_removed_plaintext(
+    plaintext = encode_plaintext(
         removed_user_id=crypto.b64decode(removed_user_id),
     )
-    decoded = wire_format.decode_user_removed_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["removed_user_id"] != crypto.b64decode(removed_user_id):
         raise ValueError("wire shadow decode removed_user_id mismatch")
 

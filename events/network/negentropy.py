@@ -39,6 +39,7 @@ import hashlib
 import logging
 import os
 import sqlite3
+import struct
 from datetime import datetime, timezone
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -60,6 +61,26 @@ EVENT_TYPE = 'negentropy'
 SHAREABLE = False  # Point-to-point sync protocol, don't broadcast to others
 PROJECTION_TABLE = None  # No persistent projection table
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x37  # TYPE_NEGENTROPY
+WIRE_PLAINTEXT_SIZE = 344  # NEGENTROPY_PLAINTEXT_SIZE
+
+# Negentropy message types
+MSG_RANGE_REQUEST = 1
+MSG_RANGE_MATCHED = 2
+MSG_RANGE_EVENTS = 3
+
+# Negentropy level constants
+LEVEL_ROOT = 0
+LEVEL_PREFIX_2 = 1
+LEVEL_PREFIX_4 = 2
+LEVEL_PREFIX_6 = 3
+
+# Negentropy wire format sizes
+RANGE_ID_SIZE = 8
+PREFIX_BYTES = 3
+EVENT_ID_MAX = 15
+
 # v2 event specification - minimal, as this is a sync protocol message
 EVENT_SPEC = {
     'encrypted': False,  # Plain JSON sync protocol message
@@ -68,6 +89,315 @@ EVENT_SPEC = {
     'optional': {},
     'cascade_on_delete': [],
 }
+
+
+# Wire format functions - encode/decode for negentropy event type
+
+def _require_len(name: str, value: bytes, expected: int) -> bytes:
+    if len(value) != expected:
+        raise ValueError(f"{name} must be {expected} bytes, got {len(value)}")
+    return value
+
+
+def encode_plaintext(
+    connection_id: bytes,
+    reply_connection_id: bytes,
+    msg_type: int,
+    range_id: bytes,
+    level: int,
+    prefix_bytes: bytes,
+    hash_bytes: bytes,
+    root_hash: bytes,
+    total_events: int,
+    parent_range_id: bytes,
+    event_ids: list[bytes],
+) -> bytes:
+    """Encode a negentropy payload plaintext.
+
+    Layout (344 bytes):
+    - connection_id (16)
+    - reply_connection_id (16)
+    - msg_type (1)
+    - range_id (8)
+    - level (1)
+    - prefix_len (1)
+    - prefix_bytes (3)
+    - hash_bytes (16)
+    - root_hash (16)
+    - total_events (u32)
+    - parent_range_id (8)
+    - event_count (1)
+    - event_ids (15 * 16 = 240)
+    """
+    _require_len("connection_id", connection_id, 16)
+    _require_len("reply_connection_id", reply_connection_id, 16)
+    if msg_type not in (MSG_RANGE_REQUEST, MSG_RANGE_MATCHED, MSG_RANGE_EVENTS):
+        raise ValueError("invalid negentropy msg_type")
+    _require_len("range_id", range_id, RANGE_ID_SIZE)
+    if level not in (LEVEL_ROOT, LEVEL_PREFIX_2, LEVEL_PREFIX_4, LEVEL_PREFIX_6):
+        raise ValueError("invalid negentropy level")
+    if len(prefix_bytes) > PREFIX_BYTES:
+        raise ValueError("prefix_bytes exceeds max")
+    _require_len("hash_bytes", hash_bytes, 16)
+    _require_len("root_hash", root_hash, 16)
+    if total_events < 0 or total_events > 0xFFFFFFFF:
+        raise ValueError("total_events must fit in u32")
+    _require_len("parent_range_id", parent_range_id, RANGE_ID_SIZE)
+    if len(event_ids) > EVENT_ID_MAX:
+        raise ValueError("event_ids exceeds max")
+    for event_id in event_ids:
+        _require_len("event_id", event_id, 16)
+
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = connection_id
+    payload[16:32] = reply_connection_id
+    payload[32] = msg_type
+    payload[33:41] = range_id
+    payload[41] = level
+    payload[42] = len(prefix_bytes)
+    payload[43:43 + len(prefix_bytes)] = prefix_bytes
+    payload[46:62] = hash_bytes
+    payload[62:78] = root_hash
+    struct.pack_into("<I", payload, 78, total_events)
+    payload[82:90] = parent_range_id
+    payload[90] = len(event_ids)
+    cursor = 91
+    for event_id in event_ids:
+        payload[cursor:cursor + 16] = event_id
+        cursor += 16
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a negentropy payload plaintext."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"negentropy plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    connection_id = data[0:16]
+    reply_connection_id = data[16:32]
+    msg_type = data[32]
+    range_id = data[33:41]
+    level = data[41]
+    prefix_len = data[42]
+    if prefix_len > PREFIX_BYTES:
+        raise ValueError("invalid prefix length")
+    prefix_bytes_data = data[43:43 + prefix_len]
+    hash_bytes = data[46:62]
+    root_hash = data[62:78]
+    (total_events,) = struct.unpack_from("<I", data, 78)
+    parent_range_id = data[82:90]
+    event_count = data[90]
+    if event_count > EVENT_ID_MAX:
+        raise ValueError("negentropy event_count exceeds max")
+    event_ids_list: list[bytes] = []
+    cursor = 91
+    for _ in range(event_count):
+        event_ids_list.append(data[cursor:cursor + 16])
+        cursor += 16
+    return {
+        "connection_id": connection_id,
+        "reply_connection_id": reply_connection_id,
+        "msg_type": msg_type,
+        "range_id": range_id,
+        "level": level,
+        "prefix_bytes": prefix_bytes_data,
+        "hash_bytes": hash_bytes,
+        "root_hash": root_hash,
+        "total_events": total_events,
+        "parent_range_id": parent_range_id,
+        "event_ids": event_ids_list,
+    }
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a negentropy wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def _encode_range_id(range_id: str | None) -> bytes:
+    if not range_id:
+        return b"\x00" * RANGE_ID_SIZE
+    raw = bytes.fromhex(range_id)
+    return _require_len("range_id", raw, RANGE_ID_SIZE)
+
+
+def _decode_range_id(data: bytes) -> str:
+    _require_len("range_id", data, RANGE_ID_SIZE)
+    return data.hex()
+
+
+def _encode_prefix(prefix: str | None) -> bytes:
+    if not prefix:
+        return b""
+    if len(prefix) % 2 != 0:
+        raise ValueError("prefix must be even-length hex")
+    raw = bytes.fromhex(prefix)
+    if len(raw) > PREFIX_BYTES:
+        raise ValueError("prefix too long")
+    return raw
+
+
+def _decode_prefix(prefix_bytes_data: bytes) -> str:
+    return prefix_bytes_data.hex()
+
+
+def _encode_hash(hex_value: str | None) -> bytes:
+    if not hex_value:
+        return b"\x00" * 16
+    raw = bytes.fromhex(hex_value)
+    return _require_len("hash", raw, 16)
+
+
+def _decode_hash(data: bytes) -> str | None:
+    _require_len("hash", data, 16)
+    if data == b"\x00" * 16:
+        return None
+    return data.hex()
+
+
+def encode_wire_event(
+    *,
+    connection_id_b64: str,
+    reply_connection_id_b64: str,
+    msg: dict[str, Any],
+    created_at_ms: int,
+) -> bytes:
+    """Encode a complete negentropy wire event."""
+    msg_type = msg.get("type")
+    if msg_type == "range_request":
+        msg_type_id = MSG_RANGE_REQUEST
+    elif msg_type == "range_matched":
+        msg_type_id = MSG_RANGE_MATCHED
+    elif msg_type == "range_events":
+        msg_type_id = MSG_RANGE_EVENTS
+    else:
+        raise ValueError("unknown negentropy msg type")
+
+    level_name = msg.get("level")
+    if level_name == "root":
+        level_id = LEVEL_ROOT
+    elif level_name == "prefix_2":
+        level_id = LEVEL_PREFIX_2
+    elif level_name == "prefix_4":
+        level_id = LEVEL_PREFIX_4
+    elif level_name == "prefix_6":
+        level_id = LEVEL_PREFIX_6
+    else:
+        level_id = LEVEL_ROOT
+
+    range_id = _encode_range_id(msg.get("range_id"))
+    prefix_bytes_encoded = _encode_prefix(msg.get("prefix"))
+
+    if msg_type_id == MSG_RANGE_EVENTS:
+        hash_bytes = _encode_hash(msg.get("our_hash"))
+    else:
+        hash_bytes = _encode_hash(msg.get("hash"))
+
+    root_hash = _encode_hash(msg.get("root_hash"))
+    total_events = int(msg.get("total_events") or 0)
+    parent_range_id = _encode_range_id(msg.get("parent_range_id"))
+
+    event_ids: list[bytes] = []
+    if msg_type_id == MSG_RANGE_EVENTS:
+        for event_id_b64 in msg.get("event_ids", []):
+            event_ids.append(_require_len("event_id", crypto.b64decode(event_id_b64), 16))
+
+    plaintext = encode_plaintext(
+        connection_id=crypto.b64decode(connection_id_b64),
+        reply_connection_id=crypto.b64decode(reply_connection_id_b64),
+        msg_type=msg_type_id,
+        range_id=range_id,
+        level=level_id,
+        prefix_bytes=prefix_bytes_encoded,
+        hash_bytes=hash_bytes,
+        root_hash=root_hash,
+        total_events=total_events,
+        parent_range_id=parent_range_id,
+        event_ids=event_ids,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_UNSIGNED,
+        signer_type=wire_format.SIGNER_NONE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * wire_format.SIGNER_ID_SIZE,
+    )
+    payload = wire_format._pad_payload(plaintext)
+    signature = b"\x00" * wire_format.SIGNATURE_SIZE
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a negentropy wire event."""
+    header, payload, _signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for negentropy")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+
+    msg_type = decoded["msg_type"]
+    if msg_type == MSG_RANGE_REQUEST:
+        msg_type_str = "range_request"
+    elif msg_type == MSG_RANGE_MATCHED:
+        msg_type_str = "range_matched"
+    elif msg_type == MSG_RANGE_EVENTS:
+        msg_type_str = "range_events"
+    else:
+        raise ValueError("invalid negentropy msg_type")
+
+    level_value = decoded["level"]
+    if level_value == LEVEL_ROOT:
+        level_str = "root"
+    elif level_value == LEVEL_PREFIX_2:
+        level_str = "prefix_2"
+    elif level_value == LEVEL_PREFIX_4:
+        level_str = "prefix_4"
+    elif level_value == LEVEL_PREFIX_6:
+        level_str = "prefix_6"
+    else:
+        raise ValueError("invalid negentropy level")
+
+    msg_result: dict[str, Any] = {
+        "type": msg_type_str,
+        "range_id": _decode_range_id(decoded["range_id"]),
+        "root_hash": _decode_hash(decoded["root_hash"]) or "",
+        "total_events": decoded["total_events"],
+    }
+    prefix_str = _decode_prefix(decoded["prefix_bytes"])
+    if prefix_str:
+        msg_result["prefix"] = prefix_str
+    if msg_type_str == "range_request":
+        msg_result["level"] = level_str
+        msg_result["prefix"] = prefix_str
+        msg_result["hash"] = _decode_hash(decoded["hash_bytes"]) or ""
+        parent_range = _decode_range_id(decoded["parent_range_id"])
+        if parent_range != "0000000000000000":
+            msg_result["parent_range_id"] = parent_range
+    elif msg_type_str == "range_events":
+        msg_result["our_hash"] = _decode_hash(decoded["hash_bytes"]) or ""
+        msg_result["event_ids"] = [crypto.b64encode(event_id) for event_id in decoded["event_ids"]]
+        msg_result["prefix"] = prefix_str
+    else:
+        pass
+
+    event_data = {
+        "type": "negentropy",
+        "connection_id": crypto.b64encode(decoded["connection_id"]),
+        "reply_connection_id": crypto.b64encode(decoded["reply_connection_id"]),
+        "data": msg_result,
+        "created_at": header.created_at_ms,
+    }
+    return event_data
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
@@ -1110,7 +1440,7 @@ def handle_range_request(
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
         # At finest level OR bucket has few enough events to send directly
-        max_events = wire_format.NEGENTROPY_EVENT_ID_MAX
+        max_events = EVENT_ID_MAX
         if level == 'prefix_6' or event_count <= max_events:
             safedb.execute("""
                 UPDATE negentropy_sync_state
@@ -1388,7 +1718,7 @@ def sync_connection(
     for msg in msgs:
         # Wrap in negentropy envelope for ephemeral detection
         # Include reply_key_id so receiver knows which key_id to use
-        blob = wire_format.encode_negentropy_wire_event(
+        blob = encode_wire_event(
             connection_id_b64=conn.key_id,
             reply_connection_id_b64=conn.their_key_id,
             msg=msg,
@@ -1434,7 +1764,7 @@ def handle_incoming(
     for response in responses:
         # Wrap response in envelope
         # Include reply_connection_id so receiver knows which connection_id to use
-        blob = wire_format.encode_negentropy_wire_event(
+        blob = encode_wire_event(
             connection_id_b64=connection_id,
             reply_connection_id_b64=sender_connection_id,
             msg=response,

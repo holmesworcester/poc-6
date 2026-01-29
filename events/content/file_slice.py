@@ -17,8 +17,16 @@ EVENT_TYPE = 'file_slice'
 SHAREABLE = True  # File slices sync to message recipients
 PROJECTION_TABLE = None  # No created_at lookup needed
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x08  # TYPE_FILE_SLICE
+# file_slice has a different wire format - no separate plaintext size
+FILE_SLICE_CIPHERTEXT_SIZE = 450
+FILE_SLICE_NONCE_SIZE = 24
+FILE_SLICE_TAG_SIZE = 16
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -38,6 +46,87 @@ EVENT_SPEC = {
     'optional': {},
     'cascade_on_delete': [],
 }
+
+
+# Wire format functions - file_slice uses a special format, not the standard envelope
+
+def _require_len(name: str, value: bytes, expected: int) -> bytes:
+    if len(value) != expected:
+        raise ValueError(f"{name} must be {expected} bytes, got {len(value)}")
+    return value
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a file_slice wire format."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    return data[0] == 1 and data[1] == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    file_id: bytes,
+    slice_number: int,
+    nonce: bytes,
+    ciphertext: bytes,
+    poly_tag: bytes,
+) -> bytes:
+    """Encode a file_slice wire event.
+
+    file_slice has a special format - not the standard envelope:
+    - byte 0: version (1)
+    - byte 1: type (TYPE_FILE_SLICE = 0x08)
+    - bytes 2-17: file_id (16 bytes)
+    - bytes 18-21: slice_number (u32 little-endian)
+    - bytes 22-45: nonce (24 bytes)
+    - bytes 46-495: padded ciphertext (450 bytes)
+    - bytes 496-511: poly_tag (16 bytes)
+    """
+    _require_len("file_id", file_id, 16)
+    if slice_number < 0 or slice_number > 0xFFFFFFFF:
+        raise ValueError("slice_number must fit in u32")
+    _require_len("nonce", nonce, FILE_SLICE_NONCE_SIZE)
+    _require_len("poly_tag", poly_tag, FILE_SLICE_TAG_SIZE)
+    ciphertext = bytes(ciphertext)
+    if len(ciphertext) > FILE_SLICE_CIPHERTEXT_SIZE:
+        raise ValueError(
+            f"ciphertext exceeds {FILE_SLICE_CIPHERTEXT_SIZE} bytes, got {len(ciphertext)}"
+        )
+    padded_ciphertext = ciphertext + (b"\x00" * (FILE_SLICE_CIPHERTEXT_SIZE - len(ciphertext)))
+    blob = bytearray(wire_format.WIRE_SIZE)
+    blob[0] = 1
+    blob[1] = WIRE_TYPE_CODE
+    blob[2:18] = file_id
+    struct.pack_into("<I", blob, 18, slice_number)
+    blob[22:46] = nonce
+    blob[46:46 + FILE_SLICE_CIPHERTEXT_SIZE] = padded_ciphertext
+    blob[496:512] = poly_tag
+    return bytes(blob)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a file_slice wire event.
+
+    Returns dict with type, file_id, slice_number, nonce, ciphertext, poly_tag
+    (all ids/bytes as base64 strings).
+    """
+    if len(data) != wire_format.WIRE_SIZE:
+        raise ValueError(f"file_slice must be {wire_format.WIRE_SIZE} bytes, got {len(data)}")
+    if data[0] != 1 or data[1] != WIRE_TYPE_CODE:
+        raise ValueError("unexpected version or type for file_slice")
+    file_id = data[2:18]
+    (slice_number,) = struct.unpack_from("<I", data, 18)
+    nonce = data[22:46]
+    ciphertext = data[46:46 + FILE_SLICE_CIPHERTEXT_SIZE]
+    poly_tag = data[496:512]
+    return {
+        "type": EVENT_TYPE,
+        "file_id": crypto.b64encode(file_id),
+        "slice_number": slice_number,
+        "nonce": crypto.b64encode(nonce),
+        "ciphertext": crypto.b64encode(ciphertext),
+        "poly_tag": crypto.b64encode(poly_tag),
+    }
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
@@ -98,14 +187,14 @@ def _wire_shadow_file_slice(
     poly_tag_b64: str,
 ) -> None:
     """Validate file_slice fields against the fixed-size wire layout."""
-    plaintext = wire_format.encode_file_slice_wire_event(
+    plaintext = encode_wire_event(
         file_id=crypto.b64decode(file_id),
         slice_number=slice_number,
         nonce=crypto.b64decode(nonce_b64),
         ciphertext=crypto.b64decode(ciphertext_b64),
         poly_tag=crypto.b64decode(poly_tag_b64),
     )
-    decoded = wire_format.decode_file_slice_wire_event(plaintext)
+    decoded = decode_wire_event(plaintext)
     if decoded["file_id"] != file_id:
         raise ValueError("wire shadow decode file_id mismatch")
 
@@ -138,7 +227,7 @@ def create(file_id: str, slice_number: int, nonce: bytes, ciphertext: bytes,
         log.info(f"file_slice.create() file_id={file_id}, slice_number={slice_number}, "
                  f"ciphertext_size={len(ciphertext)}B")
 
-    blob = wire_format.encode_file_slice_wire_event(
+    blob = encode_wire_event(
         file_id=crypto.b64decode(file_id),
         slice_number=slice_number,
         nonce=nonce,
@@ -181,7 +270,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
     # Build all event blobs upfront (no signing - integrity via root_hash)
     event_blobs = []
     for slice_number, slice_nonce, ciphertext, poly_tag in slices_data:
-        blob = wire_format.encode_file_slice_wire_event(
+        blob = encode_wire_event(
             file_id=crypto.b64decode(file_id),
             slice_number=slice_number,
             nonce=slice_nonce,

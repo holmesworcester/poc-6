@@ -6,8 +6,14 @@ EVENT_TYPE = 'group'
 SHAREABLE = True  # Groups sync for access control
 PROJECTION_TABLE = ('groups', 'group_id')
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x10  # TYPE_GROUP
+WIRE_PLAINTEXT_SIZE = 344  # GROUP_PLAINTEXT_SIZE
+NAME_MAX = 64
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -45,6 +51,178 @@ EVENT_SPEC = {
 
 log = logging.getLogger(__name__)
 
+
+# Wire format functions - encode/decode for group event type
+
+def encode_plaintext(
+    name: str | bytes,
+    key_id: bytes,
+    is_main: int | bool,
+    network_id: bytes | None,
+) -> bytes:
+    """Encode a group payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - name_len (u16)
+    - name (NAME_MAX)
+    - key_id (16)
+    - is_main (1)
+    - network_id (16)
+    - pad
+    """
+    wire_format._require_len("key_id", key_id, 16)
+    if isinstance(name, str):
+        name_bytes = name.encode("utf-8")
+    else:
+        name_bytes = bytes(name)
+    if not name_bytes:
+        raise ValueError("group name must not be empty")
+    if len(name_bytes) > NAME_MAX:
+        raise ValueError(f"name exceeds {NAME_MAX} bytes, got {len(name_bytes)}")
+    network_bytes = network_id or (b"\x00" * 16)
+    wire_format._require_len("network_id", network_bytes, 16)
+
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    struct.pack_into("<H", payload, 0, len(name_bytes))
+    payload[2:2 + len(name_bytes)] = name_bytes
+    payload[2 + NAME_MAX:2 + NAME_MAX + 16] = key_id
+    payload[18 + NAME_MAX] = 1 if is_main else 0
+    payload[19 + NAME_MAX:19 + NAME_MAX + 16] = network_bytes
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a group payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"group plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+    (name_len,) = struct.unpack_from("<H", data, 0)
+    if name_len > NAME_MAX:
+        raise ValueError(f"name_len exceeds {NAME_MAX}, got {name_len}")
+    name_bytes = data[2:2 + name_len]
+    try:
+        name = name_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("name is not valid utf-8") from exc
+    key_id = data[2 + NAME_MAX:2 + NAME_MAX + 16]
+    is_main = data[18 + NAME_MAX]
+    network_id = data[19 + NAME_MAX:19 + NAME_MAX + 16]
+    if network_id == b"\x00" * 16:
+        network_id = None
+    return {
+        "name": name,
+        "key_id": key_id,
+        "is_main": is_main,
+        "network_id": network_id,
+    }
+
+
+def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
+    """Encrypt group plaintext into wire payload."""
+    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"group plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
+    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
+    if key_data.get("type") != "symmetric":
+        raise ValueError("group payload requires symmetric key")
+    nonce = crypto.deterministic_nonce(key_id, plaintext)
+    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
+    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
+        raise ValueError("unexpected ciphertext length for group payload")
+    payload = key_id + nonce + ciphertext
+    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
+
+
+def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt wire payload to group plaintext."""
+    if key_data.get("type") != "symmetric":
+        raise ValueError("group payload requires symmetric key")
+    nonce = payload[16:40]
+    ciphertext = payload[40:]
+    return crypto.decrypt(ciphertext, key_data["key"], nonce)
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a group wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    name: str,
+    key_id_b64: str,
+    is_main: int | bool,
+    network_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    key_data: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete group wire event."""
+    key_id = crypto.b64decode(key_id_b64)
+    network_id = crypto.b64decode(network_id_b64) if network_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_plaintext(
+        name=name,
+        key_id=key_id,
+        is_main=is_main,
+        network_id=network_id,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_ENCRYPTED,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_payload(plaintext, key_data)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode a group wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        return None, []
+    if header.flags & wire_format.FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
+        if not key_data:
+            return None, [key_id_b64]
+        plaintext = _decrypt_payload(payload, key_data)
+    else:
+        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    event_data = {
+        "type": EVENT_TYPE,
+        "name": decoded["name"],
+        "key_id": crypto.b64encode(decoded["key_id"]),
+        "is_main": decoded["is_main"],
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    if decoded["network_id"]:
+        event_data["network_id"] = crypto.b64encode(decoded["network_id"])
+    return event_data, []
 
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
@@ -92,7 +270,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     # Get key_data for encryption
     key_data = group_key.get_key(key_id, peer_id, db)
 
-    blob = wire_format.encode_group_wire_event(
+    blob = encode_wire_event(
         name=name,
         key_id_b64=key_id,
         is_main=is_main,
@@ -168,13 +346,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
 def _wire_shadow_group(name: str, key_id: str, is_main: int, network_id: str | None) -> None:
     """Validate group fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_group_plaintext(
+    plaintext = encode_plaintext(
         name=name,
         key_id=crypto.b64decode(key_id),
         is_main=is_main,
         network_id=crypto.b64decode(network_id) if network_id else None,
     )
-    decoded = wire_format.decode_group_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["key_id"] != crypto.b64decode(key_id):
         raise ValueError("wire shadow decode key_id mismatch")
 

@@ -174,7 +174,7 @@ class SyncRespondJob(Job):
         super().__init__('sync_respond', every_ms=50, budget_ms=5)
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from core import ingest, crypto, wire_format
+        from core import ingest, crypto
         from events.network import negentropy
 
         batch_size = int(os.getenv("SYNC_RESPOND_BATCH", "500"))
@@ -206,9 +206,9 @@ class SyncRespondJob(Job):
                     continue
                 if event_blob[:1] in (b'{', b'['):
                     raise ValueError("JSON event blobs are no longer supported")
-                if not wire_format.is_wire_negentropy_envelope(event_blob):
+                if not negentropy.is_wire_envelope(event_blob):
                     continue
-                event_data = wire_format.decode_negentropy_wire_event(event_blob)
+                event_data = negentropy.decode_wire_event(event_blob)
                 connection_id = event_data.get("reply_connection_id")
                 if not connection_id:
                     continue

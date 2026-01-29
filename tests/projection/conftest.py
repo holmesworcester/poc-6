@@ -4,8 +4,8 @@ import sqlite3
 from core.db import Database
 from core import schema
 from core import crypto
-from core import wire_format
 from events import registry
+from events.identity import network as network_module
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def network_state(projection_db):
 
     # Create network event
     network_private_key, network_public_key = crypto.generate_keypair()
-    blob = wire_format.encode_network_wire_event(
+    blob = network_module.encode_wire_event(
         network_pubkey=network_public_key,
         created_at_ms=1000,
         private_key=network_private_key,

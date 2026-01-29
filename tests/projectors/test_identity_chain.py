@@ -19,8 +19,9 @@ import uuid
 from pathlib import Path
 
 from core.db import Database, create_safe_db, create_unsafe_db
-from core import schema, store, crypto, wire_format
+from core import schema, store, crypto
 from core import recorded
+from events.identity import network as network_module
 from events.identity import peer
 
 
@@ -86,7 +87,7 @@ class TestNetworkProjector:
 
         # Create a mock network event (as if Alice created it)
         network_private_key, network_public_key = crypto.generate_keypair()
-        network_blob = wire_format.encode_network_wire_event(
+        network_blob = network_module.encode_wire_event(
             network_pubkey=network_public_key,
             created_at_ms=500,
             private_key=network_private_key,

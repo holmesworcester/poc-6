@@ -5,7 +5,15 @@ from typing import Any
 EVENT_TYPE = 'peer'
 SHAREABLE = False  # Local-only - contains private key material
 PROJECTION_TABLE = None  # No projection table (stored in peers table)
+
+# Wire format constants
+WIRE_TYPE_CODE = 0x23  # TYPE_PEER
+WIRE_PLAINTEXT_SIZE = 344  # PEER_PLAINTEXT_SIZE
+PUBKEY_SIZE = 32
+PRIVKEY_SIZE = 32
+
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -14,6 +22,82 @@ from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+
+# Wire format functions - encode/decode for peer event type
+
+def encode_plaintext(public_key: bytes, private_key: bytes) -> bytes:
+    """Encode a peer payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - public_key (32)
+    - private_key (32)
+    - pad (280)
+    """
+    wire_format._require_len("public_key", public_key, PUBKEY_SIZE)
+    wire_format._require_len("private_key", private_key, PRIVKEY_SIZE)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:32] = public_key
+    payload[32:64] = private_key
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a peer payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"peer plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+    return {
+        "public_key": data[0:32],
+        "private_key": data[32:64],
+    }
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a peer wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    public_key: bytes,
+    private_key: bytes,
+    created_at_ms: int,
+) -> bytes:
+    """Encode a complete peer wire event."""
+    plaintext = encode_plaintext(public_key=public_key, private_key=private_key)
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_UNSIGNED,
+        signer_type=wire_format.SIGNER_NONE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * wire_format.SIGNER_ID_SIZE,
+    )
+    payload = wire_format._pad_payload(plaintext)
+    signature = b"\x00" * wire_format.SIGNATURE_SIZE
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a peer wire event."""
+    header, payload, _signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for peer")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    return {
+        "type": "peer",
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "private_key": crypto.b64encode(decoded["private_key"]),
+        "created_at": header.created_at_ms,
+    }
 
 
 # v2 event specification - no signer, no deps (local-only unsigned event)
@@ -86,7 +170,7 @@ def create(t_ms: int, db: Any) -> str:
 
     _wire_shadow_peer(event_data['public_key'], event_data['private_key'])
 
-    blob = wire_format.encode_peer_wire_event(
+    blob = encode_wire_event(
         public_key=public_key,
         private_key=private_key,
         created_at_ms=t_ms,
@@ -106,11 +190,11 @@ def create(t_ms: int, db: Any) -> str:
 
 def _wire_shadow_peer(public_key_b64: str, private_key_b64: str) -> None:
     """Validate peer fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_peer_plaintext(
+    plaintext = encode_plaintext(
         public_key=crypto.b64decode(public_key_b64),
         private_key=crypto.b64decode(private_key_b64),
     )
-    decoded = wire_format.decode_peer_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["public_key"] != crypto.b64decode(public_key_b64):
         raise ValueError("wire shadow decode public_key mismatch")
 

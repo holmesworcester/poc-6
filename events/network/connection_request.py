@@ -17,8 +17,13 @@ EVENT_TYPE = 'connection_request'
 SHAREABLE = False  # Local-only - contains symmetric key material
 PROJECTION_TABLE = 'pending_connection_requests'
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x32  # TYPE_CONNECTION_REQUEST
+WIRE_PLAINTEXT_SIZE = 344  # CONNECTION_REQUEST_PLAINTEXT_SIZE
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -31,6 +36,128 @@ log = logging.getLogger(__name__)
 
 # Connection TTL (5 minutes default)
 CONNECTION_TTL_MS = 300_000
+
+
+# Wire format functions - encode/decode for connection_request event type
+
+def encode_plaintext(
+    key: bytes,
+    to_peer_shared_id: bytes | None,
+    invite_id: bytes | None,
+) -> bytes:
+    """Encode a connection_request payload plaintext.
+
+    Layout (344 bytes):
+    - key (32 bytes)
+    - to_peer_shared_id (16 bytes, or zeros if None)
+    - invite_id (16 bytes, or zeros if None)
+    - pad
+    """
+    wire_format._require_len("key", key, wire_format.SECRET_SIZE)
+    to_peer_bytes = to_peer_shared_id or (b"\x00" * 16)
+    invite_bytes = invite_id or (b"\x00" * 16)
+    wire_format._require_len("to_peer_shared_id", to_peer_bytes, 16)
+    wire_format._require_len("invite_id", invite_bytes, 16)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:wire_format.SECRET_SIZE] = key
+    payload[32:48] = to_peer_bytes
+    payload[48:64] = invite_bytes
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a connection_request payload plaintext."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"connection_request plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    key = data[0:wire_format.SECRET_SIZE]
+    to_peer_shared_id = data[32:48]
+    invite_id = data[48:64]
+    if to_peer_shared_id == b"\x00" * 16:
+        to_peer_shared_id = None
+    if invite_id == b"\x00" * 16:
+        invite_id = None
+    return {
+        "key": key,
+        "to_peer_shared_id": to_peer_shared_id,
+        "invite_id": invite_id,
+    }
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a connection_request wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    key: bytes,
+    to_peer_shared_id_b64: str | None,
+    invite_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    ttl_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete connection_request wire event.
+
+    Note: connection_request uses sealed encryption (not group encryption),
+    so plaintext is not encrypted - just padded.
+    """
+    to_peer_shared_id = crypto.b64decode(to_peer_shared_id_b64) if to_peer_shared_id_b64 else None
+    invite_id = crypto.b64decode(invite_id_b64) if invite_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_plaintext(
+        key=key,
+        to_peer_shared_id=to_peer_shared_id,
+        invite_id=invite_id,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=0,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=ttl_ms,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = wire_format._pad_payload(plaintext)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a connection_request wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for connection_request")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    event_data = {
+        "type": EVENT_TYPE,
+        "key": crypto.b64encode(decoded["key"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "ttl_ms": header.ttl_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    if decoded["to_peer_shared_id"]:
+        event_data["to_peer_shared_id"] = crypto.b64encode(decoded["to_peer_shared_id"])
+    if decoded["invite_id"]:
+        event_data["invite_id"] = crypto.b64encode(decoded["invite_id"])
+    return event_data
 
 
 # v2 event specification
@@ -119,7 +246,7 @@ def create(
         # Normal mode: sign with peer's private key
         private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
 
-    blob = wire_format.encode_connection_request_wire_event(
+    blob = encode_wire_event(
         key=symmetric_key,
         to_peer_shared_id_b64=to_peer_shared_id,
         invite_id_b64=invite_id,
@@ -247,12 +374,12 @@ def _wire_shadow_connection_request(
     invite_id: str | None,
 ) -> None:
     """Validate connection_request fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_connection_request_plaintext(
+    plaintext = encode_plaintext(
         key=crypto.b64decode(key_b64),
         to_peer_shared_id=crypto.b64decode(to_peer_shared_id) if to_peer_shared_id else None,
         invite_id=crypto.b64decode(invite_id) if invite_id else None,
     )
-    decoded = wire_format.decode_connection_request_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["key"] != crypto.b64decode(key_b64):
         raise ValueError("wire shadow decode key mismatch")
 

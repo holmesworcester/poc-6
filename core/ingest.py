@@ -8,6 +8,7 @@ import logging
 from core import crypto
 from core import wire_format
 from events import registry
+from events.network import negentropy
 from core.db import create_safe_db
 
 log = logging.getLogger(__name__)
@@ -194,78 +195,10 @@ def append_incoming_log(
 
 
 def _event_type_from_envelope(event_blob: bytes) -> str | None:
-    if wire_format.is_wire_message_envelope(event_blob):
-        return "message"
-    if wire_format.is_wire_channel_envelope(event_blob):
-        return "channel"
-    if wire_format.is_wire_message_update_envelope(event_blob):
-        return "message_update"
-    if wire_format.is_wire_message_deletion_envelope(event_blob):
-        return "message_deletion"
-    if wire_format.is_wire_message_reaction_envelope(event_blob):
-        return "message_reaction"
-    if wire_format.is_wire_message_reaction_deletion_envelope(event_blob):
-        return "message_reaction_deletion"
-    if wire_format.is_wire_message_attachment_envelope(event_blob):
-        return "message_attachment"
-    if wire_format.is_wire_message_rekey_envelope(event_blob):
-        return "message_rekey"
-    if wire_format.is_wire_channel_update_envelope(event_blob):
-        return "channel_update"
-    if wire_format.is_wire_group_envelope(event_blob):
-        return "group"
-    if wire_format.is_wire_group_member_envelope(event_blob):
-        return "group_member"
-    if wire_format.is_wire_group_key_envelope(event_blob):
-        return "group_key"
-    if wire_format.is_wire_group_key_shared_envelope(event_blob):
-        return "group_key_shared"
-    if wire_format.is_wire_group_prekey_envelope(event_blob):
-        return "group_prekey"
-    if wire_format.is_wire_group_prekey_shared_envelope(event_blob):
-        return "group_prekey_shared"
-    if wire_format.is_wire_connection_prekey_envelope(event_blob):
-        return "connection_prekey"
-    if wire_format.is_wire_connection_prekey_shared_envelope(event_blob):
-        return "connection_prekey_shared"
-    if wire_format.is_wire_connection_request_envelope(event_blob):
-        return "connection_request"
-    if wire_format.is_wire_connection_ack_envelope(event_blob):
-        return "connection_ack"
-    if wire_format.is_wire_file_slice(event_blob):
-        return "file_slice"
-    if wire_format.is_wire_user_envelope(event_blob):
-        return "user"
-    if wire_format.is_wire_username_update_envelope(event_blob):
-        return "username_update"
-    if wire_format.is_wire_user_removed_envelope(event_blob):
-        return "user_removed"
-    if wire_format.is_wire_peer_envelope(event_blob):
-        return "peer"
-    if wire_format.is_wire_peer_shared_envelope(event_blob):
-        return "peer_shared"
-    if wire_format.is_wire_peer_name_update_envelope(event_blob):
-        return "peer_name_update"
-    if wire_format.is_wire_peer_removed_envelope(event_blob):
-        return "peer_removed"
-    if wire_format.is_wire_network_envelope(event_blob):
-        return "network"
-    if wire_format.is_wire_network_name_update_envelope(event_blob):
-        return "network_name_update"
-    if wire_format.is_wire_admin_envelope(event_blob):
-        return "admin"
-    if wire_format.is_wire_invite_envelope(event_blob):
-        return "invite"
-    if wire_format.is_wire_invite_accepted_envelope(event_blob):
-        return "invite_accepted"
-    if wire_format.is_wire_self_address_envelope(event_blob):
-        return "self_address"
-    if wire_format.is_wire_observed_address_envelope(event_blob):
-        return "observed_address"
-    if wire_format.is_wire_network_intro_envelope(event_blob):
-        return "network_intro"
-    if wire_format.is_wire_negentropy_envelope(event_blob):
-        return "negentropy"
+    """Get event type from wire envelope using registry."""
+    type_code = wire_format.get_wire_type_code(event_blob)
+    if type_code is not None:
+        return registry.get_event_type_by_code(type_code)
     return None
 
 
@@ -316,8 +249,8 @@ def materialize_log_batch(
         if event_blob[:1] in (b'{', b'['):
             raise ValueError("JSON event blobs are no longer supported")
 
-        if wire_format.is_wire_negentropy_envelope(event_blob):
-            event_data = wire_format.decode_negentropy_wire_event(event_blob)
+        if negentropy.is_wire_envelope(event_blob):
+            event_data = negentropy.decode_wire_event(event_blob)
             protocol_rows.append((log_id, recorded_by, event_data))
             protocol_log_ids.append(log_id)
             continue

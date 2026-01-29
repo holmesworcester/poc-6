@@ -10,9 +10,9 @@ import sqlite3
 from core.db import Database
 from core import schema
 from core import crypto
-from core import wire_format
 from core import store
 from events.identity import user, network
+from events.identity import invite as invite_module
 
 
 def test_bootstrap_user_invite_signed_by_network():
@@ -35,9 +35,9 @@ def test_bootstrap_user_invite_signed_by_network():
 
     # Verify network event has network_pubkey
     network_blob = store.get(network_id, db)
-    if not wire_format.is_wire_network_envelope(network_blob):
+    if not network.is_wire_envelope(network_blob):
         raise AssertionError("expected wire network event")
-    network_event = wire_format.decode_network_wire_event(network_blob)
+    network_event = network.decode_wire_event(network_blob)
     assert 'network_pubkey' in network_event, "Network event should have network_pubkey"
     print(f"Network has network_pubkey: {network_event['network_pubkey'][:20]}...")
 
@@ -65,9 +65,9 @@ def test_bootstrap_user_invite_signed_by_network():
 
     # Verify the invite structure
     invite_blob = store.get(invite_id, db)
-    if not wire_format.is_wire_invite_envelope(invite_blob):
+    if not invite_module.is_wire_envelope(invite_blob):
         raise AssertionError("expected wire invite event")
-    invite_event = wire_format.decode_invite_wire_event(invite_blob)
+    invite_event = invite_module.decode_wire_event(invite_blob)
 
     assert invite_event['type'] == 'invite', "Should be invite type"
     assert invite_event['mode'] == 'user', "Should be mode=user"
@@ -98,9 +98,9 @@ def test_network_get_public_key():
 
     # Get network_pubkey from event
     network_blob = store.get(network_id, db)
-    if not wire_format.is_wire_network_envelope(network_blob):
+    if not network.is_wire_envelope(network_blob):
         raise AssertionError("expected wire network event")
-    network_event = wire_format.decode_network_wire_event(network_blob)
+    network_event = network.decode_wire_event(network_blob)
     expected_pubkey = crypto.b64decode(network_event['network_pubkey'])
 
     db.commit()

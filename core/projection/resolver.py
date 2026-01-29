@@ -4,9 +4,10 @@ from __future__ import annotations
 from typing import Any
 import os
 
-from core import crypto, store, wire_format
+from core import crypto, store
 from core.db import SUBJECTIVE_TABLES, create_safe_db, create_unsafe_db
 from events import registry
+from events.identity import invite
 from .types import ProjectionContext, ResolveResult
 
 _CONTEXT_KEYS = {
@@ -427,9 +428,9 @@ def _resolve_invite_pubkey(
         return None
     if blob[:1] in (b'{', b'['):
         raise ValueError("JSON invite blobs are no longer supported")
-    if not wire_format.is_wire_invite_envelope(blob):
+    if not invite.is_wire_envelope(blob):
         return None
-    invite_data = wire_format.decode_invite_wire_event(blob)
+    invite_data = invite.decode_wire_event(blob)
     invite_pubkey = invite_data.get("invite_pubkey")
     if not invite_pubkey:
         return None

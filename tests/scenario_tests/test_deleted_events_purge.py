@@ -11,8 +11,9 @@ This ensures deleted content is truly gone and cannot be recovered via sync.
 """
 import sqlite3
 from core.db import Database, create_safe_db, create_unsafe_db
-from core import schema, store, crypto, recorded, wire_format
+from core import schema, store, crypto, recorded
 from events.identity import user, invite, peer as peer_module
+from events.content import message as message_module
 from events.content import message, channel
 from events.content import message_deletion
 from core import tick
@@ -109,7 +110,7 @@ def test_deleted_message_arriving_via_sync_is_immediately_purged(fresh_db):
     private_key = peer_module.get_private_key(alice['peer_id'], alice['peer_id'], db)
     from events.group import group
     key_data = group.pick_key(group_id, alice['peer_id'], db)
-    blob = wire_format.encode_message_wire_event(
+    blob = message_module.encode_wire_event(
         channel_id_b64=channel_id,
         author_id_b64=alice['user_id'],
         signed_by_b64=identity['peer_shared_id'],

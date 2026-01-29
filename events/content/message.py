@@ -5,7 +5,13 @@ EVENT_TYPE = 'message'
 SHAREABLE = True  # Messages sync to channel members
 PROJECTION_TABLE = ('messages', 'message_id')
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x01  # TYPE_MESSAGE
+WIRE_PLAINTEXT_SIZE = 344  # MESSAGE_PLAINTEXT_SIZE
+CONTENT_MAX = 256
+
 from typing import Any
+import struct
 import logging
 from core import crypto
 from core import store
@@ -22,18 +28,193 @@ log = logging.getLogger(__name__)
 DEFAULT_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 
+# Wire format functions - encode/decode for message event type
+
+def encode_plaintext(
+    channel_id: bytes,
+    author_id: bytes,
+    content: str | bytes,
+    disappearing_time_ms: int,
+) -> bytes:
+    """Encode a message payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - channel_id (16)
+    - author_id (16)
+    - disappearing_time_ms (u64)
+    - content_len (u16)
+    - content_bytes (CONTENT_MAX)
+    - pad
+    """
+    wire_format._require_len("channel_id", channel_id, 16)
+    wire_format._require_len("author_id", author_id, 16)
+
+    if isinstance(content, str):
+        content_bytes = content.encode("utf-8")
+    else:
+        content_bytes = bytes(content)
+
+    if len(content_bytes) > CONTENT_MAX:
+        raise ValueError(f"content exceeds {CONTENT_MAX} bytes, got {len(content_bytes)}")
+
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = channel_id
+    payload[16:32] = author_id
+    struct.pack_into("<Q", payload, 32, disappearing_time_ms)
+    struct.pack_into("<H", payload, 40, len(content_bytes))
+    payload[42:42 + len(content_bytes)] = content_bytes
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a message payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"message plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+
+    channel_id = data[0:16]
+    author_id = data[16:32]
+    (disappearing_time_ms,) = struct.unpack_from("<Q", data, 32)
+    (content_len,) = struct.unpack_from("<H", data, 40)
+
+    if content_len > CONTENT_MAX:
+        raise ValueError(f"content_len exceeds {CONTENT_MAX}, got {content_len}")
+
+    content_bytes = data[42:42 + content_len]
+    try:
+        content = content_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("content is not valid utf-8") from exc
+
+    return {
+        "channel_id": channel_id,
+        "author_id": author_id,
+        "disappearing_time_ms": disappearing_time_ms,
+        "content": content,
+    }
+
+
+def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
+    """Encrypt message plaintext into wire payload."""
+    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"message plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
+    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
+    if key_data.get("type") != "symmetric":
+        raise ValueError("message payload requires symmetric key")
+    nonce = crypto.deterministic_nonce(key_id, plaintext)
+    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
+    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
+        raise ValueError("unexpected ciphertext length for message payload")
+    payload = key_id + nonce + ciphertext
+    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
+
+
+def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt wire payload to message plaintext."""
+    if key_data.get("type") != "symmetric":
+        raise ValueError("message payload requires symmetric key")
+    key_id = payload[:16]
+    nonce = payload[16:40]
+    ciphertext = payload[40:]
+    return crypto.decrypt(ciphertext, key_data["key"], nonce)
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a message wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    channel_id_b64: str,
+    author_id_b64: str,
+    content: str,
+    ttl_ms: int,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    key_data: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete message wire event."""
+    channel_id = crypto.b64decode(channel_id_b64)
+    author_id = crypto.b64decode(author_id_b64)
+    signer_id = crypto.b64decode(signed_by_b64)
+
+    plaintext = encode_plaintext(
+        channel_id=channel_id,
+        author_id=author_id,
+        content=content,
+        disappearing_time_ms=ttl_ms,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_ENCRYPTED,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=ttl_ms,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_payload(plaintext, key_data)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode a message wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        return None, []
+    if header.flags & wire_format.FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
+        if not key_data:
+            return None, [key_id_b64]
+        plaintext = _decrypt_payload(payload, key_data)
+    else:
+        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+
+    decoded = decode_plaintext(plaintext)
+    event_data = {
+        "type": EVENT_TYPE,
+        "channel_id": crypto.b64encode(decoded["channel_id"]),
+        "author_id": crypto.b64encode(decoded["author_id"]),
+        "disappearing_time_ms": decoded["disappearing_time_ms"],
+        "content": decoded["content"],
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    return event_data, []
+
 
 def _wire_shadow_message(channel_id: str, author_id: str, content: str, disappearing_time_ms: int) -> None:
     """Validate message fields against the fixed-size wire payload layout."""
     channel_id_bytes = crypto.b64decode(channel_id)
     author_id_bytes = crypto.b64decode(author_id)
-    plaintext = wire_format.encode_message_plaintext(
+    plaintext = encode_plaintext(
         channel_id=channel_id_bytes,
         author_id=author_id_bytes,
         content=content,
         disappearing_time_ms=disappearing_time_ms,
     )
-    decoded = wire_format.decode_message_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["content"] != content:
         raise ValueError("wire shadow decode content mismatch")
 
@@ -106,7 +287,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     else:
         ttl_ms = 0
 
-    if not wire_format.is_wire_message_envelope(event_blob):
+    if not is_wire_envelope(event_blob):
         return ProjectorResult(writes=tuple(), valid_event=False)
     _header, payload, _signature = wire_format.parse_envelope(event_blob)
     key_id_bytes = payload[:crypto.KEY_ID_SIZE]
@@ -219,7 +400,7 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     # Get key_data for encryption (group.pick_key uses peer_id for access control)
     key_data = group.pick_key(group_id, peer_id, db)
 
-    blob = wire_format.encode_message_wire_event(
+    blob = encode_wire_event(
         channel_id_b64=channel_id,
         author_id_b64=user_id,
         signed_by_b64=peer_shared_id,
@@ -343,7 +524,7 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
 
         _wire_shadow_message(channel_id, user_id, content, disappearing_time_ms)
 
-        blob = wire_format.encode_message_wire_event(
+        blob = encode_wire_event(
             channel_id_b64=channel_id,
             author_id_b64=user_id,
             signed_by_b64=peer_shared_id,

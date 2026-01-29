@@ -12,6 +12,9 @@ from core.db import create_safe_db, create_unsafe_db
 from core import crypto
 from core import wire_format
 from events.identity import user, invite, peer
+from events.content import message as message_module
+from events.group import group_prekey as group_prekey_module
+from events.group import group_key as group_key_module
 from events.content import message, message_deletion
 from events.network import connection_prekey
 from events.group import group_prekey
@@ -44,7 +47,7 @@ def test_delete_message_marks_key_for_purging(fresh_db_with_alice):
     assert message_blob is not None
 
     blob = message_blob['blob']
-    assert wire_format.is_wire_message_envelope(blob)
+    assert message_module.is_wire_envelope(blob)
     _header, payload, _signature = wire_format.parse_envelope(blob)
     key_id_bytes = payload[:crypto.KEY_ID_SIZE]
     key_id_b64 = crypto.b64encode(key_id_bytes)
@@ -100,7 +103,7 @@ def test_delete_and_rekey_message(fresh_db_with_alice):
         (msg2_id,)
     )
     msg2_blob_bytes = msg2_blob['blob']
-    assert wire_format.is_wire_message_envelope(msg2_blob_bytes)
+    assert message_module.is_wire_envelope(msg2_blob_bytes)
     _header, payload, _signature = wire_format.parse_envelope(msg2_blob_bytes)
     msg2_key_id_bytes = payload[:crypto.KEY_ID_SIZE]
     msg2_key_id_b64 = crypto.b64encode(msg2_key_id_bytes)
@@ -839,9 +842,9 @@ def test_deterministic_prekey_ids(fresh_db_with_alice):
         "SELECT blob FROM store WHERE id = ?",
         (prekey_id1,)
     )
-    if not wire_format.is_wire_group_prekey_envelope(blob_row['blob']):
+    if not group_prekey_module.is_wire_envelope(blob_row['blob']):
         raise AssertionError("expected wire group_prekey event")
-    event_data = wire_format.decode_group_prekey_wire_event(blob_row['blob'])
+    event_data = group_prekey_module.decode_wire_event(blob_row['blob'])
     prekey_public = crypto.b64decode(event_data['public_key'])
 
     print("\n=== Recreate prekey with same key material ===")
@@ -899,9 +902,9 @@ def test_deterministic_group_key_ids(fresh_db_with_alice):
         "SELECT blob FROM store WHERE id = ?",
         (key_id1,)
     )
-    if not wire_format.is_wire_group_key_envelope(blob_row['blob']):
+    if not group_key_module.is_wire_envelope(blob_row['blob']):
         raise AssertionError("expected wire group_key event")
-    event_data = wire_format.decode_group_key_wire_event(blob_row['blob'])
+    event_data = group_key_module.decode_wire_event(blob_row['blob'])
     key_material = crypto.b64decode(event_data['key'])
 
     print("\n=== Recreate key with same material ===")

@@ -5,8 +5,14 @@ from typing import Any
 EVENT_TYPE = 'user'
 SHAREABLE = True  # User events sync across the network
 PROJECTION_TABLE = ('users', 'user_id')
+
+# Wire format constants
+WIRE_TYPE_CODE = 0x20  # TYPE_USER
+WIRE_PLAINTEXT_SIZE = 344  # USER_PLAINTEXT_SIZE
+
 import base64
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -16,6 +22,115 @@ from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+
+# Wire format functions - encode/decode for user event type
+
+def encode_plaintext(
+    invite_id: bytes,
+    user_pubkey: bytes,
+    network_id: bytes | None,
+) -> bytes:
+    """Encode a user payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - invite_id (16)
+    - user_pubkey (32)
+    - network_id (16)
+    - pad
+    """
+    wire_format._require_len("invite_id", invite_id, 16)
+    wire_format._require_len("user_pubkey", user_pubkey, wire_format.PUBKEY_SIZE)
+    network_bytes = network_id or (b"\x00" * 16)
+    wire_format._require_len("network_id", network_bytes, 16)
+
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = invite_id
+    payload[16:48] = user_pubkey
+    payload[48:64] = network_bytes
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a user payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"user plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+    invite_id = data[0:16]
+    user_pubkey = data[16:48]
+    network_id = data[48:64]
+    if network_id == b"\x00" * 16:
+        network_id = None
+    return {
+        "invite_id": invite_id,
+        "user_pubkey": user_pubkey,
+        "network_id": network_id,
+    }
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a user wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    invite_id_b64: str,
+    user_pubkey_b64: str,
+    network_id_b64: str | None,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete user wire event."""
+    invite_id = crypto.b64decode(invite_id_b64)
+    user_pubkey = crypto.b64decode(user_pubkey_b64)
+    network_id = crypto.b64decode(network_id_b64) if network_id_b64 else None
+
+    plaintext = encode_plaintext(
+        invite_id=invite_id,
+        user_pubkey=user_pubkey,
+        network_id=network_id,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=0,
+        signer_type=wire_format.SIGNER_INVITE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", invite_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = wire_format._pad_payload(plaintext)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a user wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for user")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    event_data = {
+        "type": EVENT_TYPE,
+        "invite_id": crypto.b64encode(decoded["invite_id"]),
+        "signed_by": crypto.b64encode(decoded["invite_id"]),
+        "signer_type": "invite",
+        "user_pubkey": crypto.b64encode(decoded["user_pubkey"]),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    if decoded["network_id"]:
+        event_data["network_id"] = crypto.b64encode(decoded["network_id"])
+    return event_data
 
 
 # v2 event specification - signed by invite_id
@@ -167,7 +282,7 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
 
     _wire_shadow_user(invite_id, user_pubkey_b64, network_id)
 
-    blob = wire_format.encode_user_wire_event(
+    blob = encode_wire_event(
         invite_id_b64=invite_id,
         user_pubkey_b64=user_pubkey_b64,
         network_id_b64=network_id,
@@ -189,12 +304,12 @@ def create(peer_id: str, name: str, t_ms: int, db: Any,
 
 def _wire_shadow_user(invite_id: str, user_pubkey_b64: str, network_id: str | None) -> None:
     """Validate user fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_user_plaintext(
+    plaintext = encode_plaintext(
         invite_id=crypto.b64decode(invite_id),
         user_pubkey=crypto.b64decode(user_pubkey_b64),
         network_id=crypto.b64decode(network_id) if network_id else None,
     )
-    decoded = wire_format.decode_user_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["invite_id"] != crypto.b64decode(invite_id):
         raise ValueError("wire shadow decode invite_id mismatch")
 

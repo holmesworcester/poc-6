@@ -1,5 +1,5 @@
 """Tests for intro TTL handling."""
-from core import crypto, store, wire_format
+from core import crypto, store
 from core.db import create_safe_db
 from events.identity import peer as peer_module
 from events.network import intro as intro_module
@@ -20,7 +20,7 @@ def test_intro_stale_is_dropped(fresh_db_with_alice):
     private_key = peer_module.get_private_key(alice['peer_id'], alice['peer_id'], db)
 
     # Create intro with specific timestamp using wire format
-    blob = wire_format.encode_network_intro_wire_event(
+    blob = intro_module.encode_wire_event(
         peer1_id_b64=alice['peer_id'],
         peer2_id_b64=alice['peer_id'],
         signed_by_b64=alice['peer_shared_id'],

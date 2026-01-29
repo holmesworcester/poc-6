@@ -8,8 +8,8 @@ Provides utilities for:
 from typing import Any
 from core import crypto
 from core import store
-from core import wire_format
 from core.db import create_safe_db
+from events.identity import admin as admin_module
 
 
 def build_signed_event(
@@ -44,7 +44,7 @@ def build_signed_event(
     full_data["_wire_signature"] = signature
 
     # Build a minimal wire envelope if possible; fall back to empty blob for resolver-only tests.
-    blob = wire_format.encode_admin_wire_event(
+    blob = admin_module.encode_wire_event(
         user_id_b64=full_data.get("user_id", crypto.b64encode(b"\x00" * 32)),
         network_id_b64=full_data.get("network_id", crypto.b64encode(b"\x00" * 32)),
         signed_by_b64=full_data.get("signed_by", crypto.b64encode(b"\x00" * 32)),

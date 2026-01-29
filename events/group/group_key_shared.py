@@ -5,19 +5,160 @@ EVENT_TYPE = 'group_key_shared'
 SHAREABLE = True  # Sealed keys sync to enable group decryption
 PROJECTION_TABLE = ('group_keys_shared', 'group_key_shared_id')
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x13  # TYPE_GROUP_KEY_SHARED
+WIRE_PLAINTEXT_SIZE = 312  # GROUP_KEY_SHARED_PLAINTEXT_SIZE
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
 from events.group import group_prekey
+from events.group import group_key
 from events.identity import peer
+from events.identity import invite
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp, EmitEvent
 from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
+
+# Wire format functions - encode/decode for group_key_shared event type
+
+def encode_plaintext(
+    key_id: bytes,
+    symmetric_key: bytes,
+    recipient_prekey_id: bytes,
+) -> bytes:
+    """Encode a group_key_shared payload plaintext (pre-encryption)."""
+    wire_format._require_len("key_id", key_id, 16)
+    wire_format._require_len("symmetric_key", symmetric_key, wire_format.SECRET_SIZE)
+    wire_format._require_len("recipient_prekey_id", recipient_prekey_id, 16)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = key_id
+    payload[16:48] = symmetric_key
+    payload[48:64] = recipient_prekey_id
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a group_key_shared payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"group_key_shared plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    return {
+        "key_id": data[0:16],
+        "symmetric_key": data[16:48],
+        "recipient_prekey_id": data[48:64],
+    }
+
+
+def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
+    """Encrypt group_key_shared plaintext into wire payload."""
+    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"group_key_shared plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
+    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
+    if key_data.get("type") != "asymmetric":
+        raise ValueError("group_key_shared payload requires asymmetric key")
+    sealed = crypto.seal(plaintext, key_data["public_key"])
+    if len(sealed) != wire_format.PAYLOAD_SIZE - 16:
+        raise ValueError("unexpected sealed length for group_key_shared payload")
+    payload = key_id + sealed
+    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
+
+
+def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt wire payload to group_key_shared plaintext."""
+    if key_data.get("type") != "asymmetric":
+        raise ValueError("group_key_shared payload requires asymmetric key")
+    sealed = payload[16:]
+    return crypto.unseal(sealed, key_data["private_key"])
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a group_key_shared wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    key_id_b64: str,
+    symmetric_key_b64: str,
+    recipient_prekey_id_b64: str,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    recipient_prekey: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete group_key_shared wire event."""
+    key_id = crypto.b64decode(key_id_b64)
+    symmetric_key = crypto.b64decode(symmetric_key_b64)
+    recipient_prekey_id = crypto.b64decode(recipient_prekey_id_b64)
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_plaintext(
+        key_id=key_id,
+        symmetric_key=symmetric_key,
+        recipient_prekey_id=recipient_prekey_id,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_ENCRYPTED | wire_format.FLAG_WRAP_ASYM,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_payload(plaintext, recipient_prekey)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode a group_key_shared wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        return None, []
+    if header.flags & wire_format.FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = crypto.get_event_key_by_id(key_id, recorded_by, db)
+        if not key_data:
+            return None, [key_id_b64]
+        plaintext = _decrypt_payload(payload, key_data)
+    else:
+        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    event_data = {
+        "type": EVENT_TYPE,
+        "key_id": crypto.b64encode(decoded["key_id"]),
+        "symmetric_key": crypto.b64encode(decoded["symmetric_key"]),
+        "recipient_prekey_id": crypto.b64encode(decoded["recipient_prekey_id"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    return event_data, []
 
 
 # v2 event specification - asymmetrically encrypted, signed by peer_shared
@@ -68,7 +209,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     # Verify the computed key_id matches the claimed key_id
     # Security check: prevents sender from claiming wrong key_id
-    deterministic_blob = wire_format.encode_group_key_wire_event(
+    deterministic_blob = group_key.encode_wire_event(
         key=crypto.b64decode(symmetric_key_b64),
         created_at_ms=0,
     )
@@ -133,9 +274,9 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     if not key_blob:
         raise ValueError(f"key not found: {key_id}")
 
-    if not wire_format.is_wire_group_key_envelope(key_blob):
+    if not group_key.is_wire_envelope(key_blob):
         raise ValueError("group_key_shared requires wire group_key event")
-    key_data = wire_format.decode_group_key_wire_event(key_blob)
+    key_data = group_key.decode_wire_event(key_blob)
     symmetric_key_b64 = key_data['key']
 
     # Get recipient's group prekey for wrapping (asymmetric encryption)
@@ -150,7 +291,7 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
     # Sign the inner event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    wrapped_blob = wire_format.encode_group_key_shared_wire_event(
+    wrapped_blob = encode_wire_event(
         key_id_b64=key_id,
         symmetric_key_b64=symmetric_key_b64,
         recipient_prekey_id_b64=recipient_prekey_id,
@@ -195,9 +336,9 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     if not key_blob:
         raise ValueError(f"key not found: {key_id}")
 
-    if not wire_format.is_wire_group_key_envelope(key_blob):
+    if not group_key.is_wire_envelope(key_blob):
         raise ValueError("group_key_shared requires wire group_key event")
-    key_data = wire_format.decode_group_key_wire_event(key_blob)
+    key_data = group_key.decode_wire_event(key_blob)
     symmetric_key_b64 = key_data['key']
 
     # Get invite event to extract prekey info
@@ -205,9 +346,9 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
     if not invite_blob:
         raise ValueError(f"invite not found: {invite_id}")
 
-    if not wire_format.is_wire_invite_envelope(invite_blob):
+    if not invite.is_wire_envelope(invite_blob):
         raise ValueError("group_key_shared requires wire invite event")
-    invite_data = wire_format.decode_invite_wire_event(invite_blob)
+    invite_data = invite.decode_wire_event(invite_blob)
     invite_prekey_id = invite_data['invite_prekey_id']
     invite_pubkey_b64 = invite_data['invite_pubkey']
 
@@ -222,7 +363,7 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
 
     # Sign and wrap
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    wrapped_blob = wire_format.encode_group_key_shared_wire_event(
+    wrapped_blob = encode_wire_event(
         key_id_b64=key_id,
         symmetric_key_b64=symmetric_key_b64,
         recipient_prekey_id_b64=invite_prekey_id,

@@ -66,8 +66,8 @@ from events.group import group_member, group_key, group_key_shared, group
 from events.content import message
 from tests.utils.tick_helper import run_ticks, assert_eventually
 from core import crypto
-from core import wire_format
 from core import store
+from events.identity import invite as invite_module
 
 
 # =============================================================================
@@ -381,7 +381,7 @@ class TestInvitationRejection:
 
         # Craft rogue invite (bypassing authorization checks) using wire format
         charlie_private_key = peer.get_private_key(charlie['peer_id'], charlie['peer_id'], db)
-        rogue_blob = wire_format.encode_invite_wire_event(
+        rogue_blob = invite_module.encode_wire_event(
             mode="user",
             invite_pubkey_b64=crypto.b64encode(rogue_public_key),
             invite_prekey_id_b64=rogue_prekey_id,

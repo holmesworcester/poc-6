@@ -5,20 +5,290 @@ EVENT_TYPE = 'invite'
 SHAREABLE = True  # Invites sync to enable network membership
 PROJECTION_TABLE = ('invites', 'invite_id')
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x2A  # TYPE_INVITE
+WIRE_PLAINTEXT_SIZE = 344  # INVITE_PLAINTEXT_SIZE
+INVITE_MODE_USER = 0
+INVITE_MODE_PEER = 1
+
 from typing import Any
 import json
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
 from events.identity import peer, peer_shared, network
 from events.content import channel
 from events.group import group
+from events.group import group_prekey
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
+
+# Wire format functions - encode/decode for invite event type
+
+def encode_plaintext(
+    mode: int,
+    invite_pubkey: bytes,
+    invite_prekey_id: bytes | None,
+    group_id: bytes | None,
+    channel_id: bytes | None,
+    key_id: bytes | None,
+    network_id: bytes | None,
+    inviter_peer_shared_id: bytes | None,
+    inviter_user_id: bytes | None,
+    target_user_id: bytes | None,
+    admin_grant_id: bytes | None,
+    inviter_ip: str | None,
+    inviter_port: int | None,
+) -> bytes:
+    """Encode an invite payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - mode (1)
+    - invite_pubkey (32)
+    - invite_prekey_id (16)
+    - group_id (16)
+    - channel_id (16)
+    - key_id (16)
+    - network_id (16)
+    - inviter_peer_shared_id (16)
+    - inviter_user_id (16)
+    - target_user_id (16)
+    - admin_grant_id (16)
+    - inviter_ip (16)
+    - inviter_port (2)
+    - pad
+    """
+    if mode not in (INVITE_MODE_USER, INVITE_MODE_PEER):
+        raise ValueError(f"invite mode must be {INVITE_MODE_USER} or {INVITE_MODE_PEER}")
+    wire_format._require_len("invite_pubkey", invite_pubkey, wire_format.PUBKEY_SIZE)
+    invite_prekey_bytes = invite_prekey_id or (b"\x00" * 16)
+    wire_format._require_len("invite_prekey_id", invite_prekey_bytes, 16)
+    group_bytes = group_id or (b"\x00" * 16)
+    wire_format._require_len("group_id", group_bytes, 16)
+    channel_bytes = channel_id or (b"\x00" * 16)
+    wire_format._require_len("channel_id", channel_bytes, 16)
+    key_bytes = key_id or (b"\x00" * 16)
+    wire_format._require_len("key_id", key_bytes, 16)
+    network_bytes = network_id or (b"\x00" * 16)
+    wire_format._require_len("network_id", network_bytes, 16)
+    inviter_peer_bytes = inviter_peer_shared_id or (b"\x00" * 16)
+    wire_format._require_len("inviter_peer_shared_id", inviter_peer_bytes, 16)
+    inviter_user_bytes = inviter_user_id or (b"\x00" * 16)
+    wire_format._require_len("inviter_user_id", inviter_user_bytes, 16)
+    target_user_bytes = target_user_id or (b"\x00" * 16)
+    wire_format._require_len("target_user_id", target_user_bytes, 16)
+    admin_grant_bytes = admin_grant_id or (b"\x00" * 16)
+    wire_format._require_len("admin_grant_id", admin_grant_bytes, 16)
+    if inviter_port is not None and (inviter_port < 0 or inviter_port > 0xFFFF):
+        raise ValueError("inviter_port must fit in u16")
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0] = mode
+    payload[1:33] = invite_pubkey
+    payload[33:49] = invite_prekey_bytes
+    payload[49:65] = group_bytes
+    payload[65:81] = channel_bytes
+    payload[81:97] = key_bytes
+    payload[97:113] = network_bytes
+    payload[113:129] = inviter_peer_bytes
+    payload[129:145] = inviter_user_bytes
+    payload[145:161] = target_user_bytes
+    payload[161:177] = admin_grant_bytes
+    payload[177:193] = wire_format._encode_ip16(inviter_ip)
+    struct.pack_into("<H", payload, 193, inviter_port or 0)
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode an invite payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"invite plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+    mode = data[0]
+    invite_pubkey = data[1:33]
+    invite_prekey_id = data[33:49]
+    group_id = data[49:65]
+    channel_id = data[65:81]
+    key_id = data[81:97]
+    network_id = data[97:113]
+    inviter_peer_shared_id = data[113:129]
+    inviter_user_id = data[129:145]
+    target_user_id = data[145:161]
+    admin_grant_id = data[161:177]
+    inviter_ip = wire_format._decode_ip16(data[177:193])
+    (inviter_port,) = struct.unpack_from("<H", data, 193)
+    if invite_prekey_id == b"\x00" * 16:
+        invite_prekey_id = None
+    if group_id == b"\x00" * 16:
+        group_id = None
+    if channel_id == b"\x00" * 16:
+        channel_id = None
+    if key_id == b"\x00" * 16:
+        key_id = None
+    if network_id == b"\x00" * 16:
+        network_id = None
+    if inviter_peer_shared_id == b"\x00" * 16:
+        inviter_peer_shared_id = None
+    if inviter_user_id == b"\x00" * 16:
+        inviter_user_id = None
+    if target_user_id == b"\x00" * 16:
+        target_user_id = None
+    if admin_grant_id == b"\x00" * 16:
+        admin_grant_id = None
+    if inviter_port == 0:
+        inviter_port = None
+    return {
+        "mode": mode,
+        "invite_pubkey": invite_pubkey,
+        "invite_prekey_id": invite_prekey_id,
+        "group_id": group_id,
+        "channel_id": channel_id,
+        "key_id": key_id,
+        "network_id": network_id,
+        "inviter_peer_shared_id": inviter_peer_shared_id,
+        "inviter_user_id": inviter_user_id,
+        "target_user_id": target_user_id,
+        "admin_grant_id": admin_grant_id,
+        "inviter_ip": inviter_ip,
+        "inviter_port": inviter_port,
+    }
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is an invite wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    mode: str,
+    invite_pubkey_b64: str,
+    invite_prekey_id_b64: str | None,
+    group_id_b64: str | None,
+    channel_id_b64: str | None,
+    key_id_b64: str | None,
+    network_id_b64: str | None,
+    inviter_peer_shared_id_b64: str | None,
+    inviter_user_id_b64: str | None,
+    target_user_id_b64: str | None,
+    admin_grant_id_b64: str | None,
+    inviter_ip: str | None,
+    inviter_port: int | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete invite wire event."""
+    if mode == "user":
+        mode_value = INVITE_MODE_USER
+    elif mode == "peer":
+        mode_value = INVITE_MODE_PEER
+    else:
+        raise ValueError("invite mode must be 'user' or 'peer'")
+
+    invite_pubkey = crypto.b64decode(invite_pubkey_b64)
+    invite_prekey_id = crypto.b64decode(invite_prekey_id_b64) if invite_prekey_id_b64 else None
+    group_id = crypto.b64decode(group_id_b64) if group_id_b64 else None
+    channel_id = crypto.b64decode(channel_id_b64) if channel_id_b64 else None
+    key_id = crypto.b64decode(key_id_b64) if key_id_b64 else None
+    network_id = crypto.b64decode(network_id_b64) if network_id_b64 else None
+    inviter_peer_shared_id = (
+        crypto.b64decode(inviter_peer_shared_id_b64) if inviter_peer_shared_id_b64 else None
+    )
+    inviter_user_id = crypto.b64decode(inviter_user_id_b64) if inviter_user_id_b64 else None
+    target_user_id = crypto.b64decode(target_user_id_b64) if target_user_id_b64 else None
+    admin_grant_id = crypto.b64decode(admin_grant_id_b64) if admin_grant_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+
+    plaintext = encode_plaintext(
+        mode=mode_value,
+        invite_pubkey=invite_pubkey,
+        invite_prekey_id=invite_prekey_id,
+        group_id=group_id,
+        channel_id=channel_id,
+        key_id=key_id,
+        network_id=network_id,
+        inviter_peer_shared_id=inviter_peer_shared_id,
+        inviter_user_id=inviter_user_id,
+        target_user_id=target_user_id,
+        admin_grant_id=admin_grant_id,
+        inviter_ip=inviter_ip,
+        inviter_port=inviter_port,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=0,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = wire_format._pad_payload(plaintext)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode an invite wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for invite")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+
+    if decoded["mode"] == INVITE_MODE_USER:
+        mode = "user"
+    elif decoded["mode"] == INVITE_MODE_PEER:
+        mode = "peer"
+    else:
+        raise ValueError("invalid invite mode")
+
+    event_data = {
+        "type": "invite",
+        "mode": mode,
+        "invite_pubkey": crypto.b64encode(decoded["invite_pubkey"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    if decoded["invite_prekey_id"]:
+        event_data["invite_prekey_id"] = crypto.b64encode(decoded["invite_prekey_id"])
+    if decoded["group_id"]:
+        event_data["group_id"] = crypto.b64encode(decoded["group_id"])
+    if decoded["channel_id"]:
+        event_data["channel_id"] = crypto.b64encode(decoded["channel_id"])
+    if decoded["key_id"]:
+        event_data["key_id"] = crypto.b64encode(decoded["key_id"])
+    if decoded["network_id"]:
+        event_data["network_id"] = crypto.b64encode(decoded["network_id"])
+    if decoded["inviter_peer_shared_id"]:
+        event_data["inviter_peer_shared_id"] = crypto.b64encode(decoded["inviter_peer_shared_id"])
+    if decoded["inviter_user_id"]:
+        event_data["inviter_user_id"] = crypto.b64encode(decoded["inviter_user_id"])
+    if decoded["target_user_id"]:
+        event_data["user_id"] = crypto.b64encode(decoded["target_user_id"])
+    if decoded["admin_grant_id"]:
+        event_data["admin_grant"] = crypto.b64encode(decoded["admin_grant_id"])
+    if decoded["inviter_ip"] is not None:
+        event_data["address"] = decoded["inviter_ip"]
+    if decoded["inviter_port"] is not None:
+        event_data["port"] = decoded["inviter_port"]
+    return event_data
 
 
 def _wire_shadow_invite(
@@ -39,8 +309,8 @@ def _wire_shadow_invite(
     """Validate invite fields against the fixed-size wire payload layout."""
     if mode not in ("user", "peer"):
         raise ValueError("invite mode must be 'user' or 'peer'")
-    mode_value = wire_format.INVITE_MODE_USER if mode == "user" else wire_format.INVITE_MODE_PEER
-    plaintext = wire_format.encode_invite_plaintext(
+    mode_value = INVITE_MODE_USER if mode == "user" else INVITE_MODE_PEER
+    plaintext = encode_plaintext(
         mode=mode_value,
         invite_pubkey=crypto.b64decode(invite_pubkey_b64),
         invite_prekey_id=crypto.b64decode(invite_prekey_id) if invite_prekey_id else None,
@@ -55,7 +325,7 @@ def _wire_shadow_invite(
         inviter_ip=address,
         inviter_port=port,
     )
-    decoded = wire_format.decode_invite_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["mode"] != mode_value:
         raise ValueError("wire shadow decode mode mismatch")
 
@@ -318,9 +588,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Get the public key from the created prekey for the invite event
     prekey_blob = store.get(local_prekey_id, unsafedb)
-    if not wire_format.is_wire_group_prekey_envelope(prekey_blob):
+    if not group_prekey.is_wire_envelope(prekey_blob):
         raise ValueError("invite requires wire group_prekey event")
-    prekey_data = wire_format.decode_group_prekey_wire_event(prekey_blob)
+    prekey_data = group_prekey.decode_wire_event(prekey_blob)
     invite_pubkey_b64 = prekey_data['public_key']
 
     # Create shareable prekey event for sync
@@ -402,7 +672,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         port=inviter_port,
     )
 
-    invite_blob = wire_format.encode_invite_wire_event(
+    invite_blob = encode_wire_event(
         mode=mode,
         invite_pubkey_b64=invite_pubkey_b64,
         invite_prekey_id_b64=invite_prekey_id,
@@ -578,7 +848,7 @@ def create_peer_invite(
         port=None,
     )
 
-    blob = wire_format.encode_invite_wire_event(
+    blob = encode_wire_event(
         mode="peer",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
         invite_prekey_id_b64=None,
@@ -654,7 +924,7 @@ def create_bootstrap_user_invite(
         port=None,
     )
 
-    blob = wire_format.encode_invite_wire_event(
+    blob = encode_wire_event(
         mode="user",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
         invite_prekey_id_b64=None,

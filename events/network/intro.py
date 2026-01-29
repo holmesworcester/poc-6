@@ -16,11 +16,16 @@ EVENT_TYPE = 'network_intro'
 SHAREABLE = True  # Intros sync for NAT traversal
 PROJECTION_TABLE = None
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x36  # TYPE_NETWORK_INTRO
+WIRE_PLAINTEXT_SIZE = 344  # NETWORK_INTRO_PLAINTEXT_SIZE
+
 # Intros are time-sensitive; drop if too old on receipt.
 INTRO_TTL_MS = 30_000
 
 from typing import Any, Optional, List
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -31,16 +36,104 @@ from events.identity import peer_shared
 log = logging.getLogger(__name__)
 
 
+# Wire format functions - encode/decode for network_intro event type
+
+def encode_plaintext(peer1_id: bytes, peer2_id: bytes) -> bytes:
+    """Encode a network_intro payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - peer1_id (16)
+    - peer2_id (16)
+    - pad
+    """
+    wire_format._require_len("peer1_id", peer1_id, 16)
+    wire_format._require_len("peer2_id", peer2_id, 16)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = peer1_id
+    payload[16:32] = peer2_id
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a network_intro payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"network_intro plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    return {"peer1_id": data[0:16], "peer2_id": data[16:32]}
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a network_intro wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    peer1_id_b64: str,
+    peer2_id_b64: str,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete network_intro wire event."""
+    peer1_id = crypto.b64decode(peer1_id_b64)
+    peer2_id = crypto.b64decode(peer2_id_b64)
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_plaintext(peer1_id=peer1_id, peer2_id=peer2_id)
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=0,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = wire_format._pad_payload(plaintext)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a network_intro wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for network_intro")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    return {
+        "type": EVENT_TYPE,
+        "peer1_id": crypto.b64encode(decoded["peer1_id"]),
+        "peer2_id": crypto.b64encode(decoded["peer2_id"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+
 
 def _wire_shadow_network_intro(peer1_id: str, peer2_id: str) -> None:
     """Validate network_intro fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_network_intro_plaintext(
+    plaintext = encode_plaintext(
         peer1_id=crypto.b64decode(peer1_id),
         peer2_id=crypto.b64decode(peer2_id),
     )
-    decoded = wire_format.decode_network_intro_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["peer1_id"] != crypto.b64decode(peer1_id):
         raise ValueError("wire shadow decode peer1_id mismatch")
+
+
 # v2 event specification - signed by peer_shared, no deps
 EVENT_SPEC = {
     'encrypted': False,
@@ -135,7 +228,7 @@ def create(
     private_key = peer.get_private_key(initiator_peer_id, initiator_peer_id, db)
     _wire_shadow_network_intro(peer1_id, peer2_id)
 
-    blob = wire_format.encode_network_intro_wire_event(
+    blob = encode_wire_event(
         peer1_id_b64=peer1_id,
         peer2_id_b64=peer2_id,
         signed_by_b64=initiator_peer_shared_id,

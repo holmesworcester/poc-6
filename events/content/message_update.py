@@ -5,6 +5,7 @@ Uses global_count for convergent update ordering (highest wins).
 """
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -98,6 +99,205 @@ EVENT_TYPE = 'message_update'
 SHAREABLE = True
 PROJECTION_TABLE = ('message_updates', 'update_id')
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x03  # TYPE_MESSAGE_UPDATE
+WIRE_PLAINTEXT_SIZE = 344  # MESSAGE_UPDATE_PLAINTEXT_SIZE
+UPDATE_MAX = 256
+
+
+# Wire format functions - encode/decode for message_update event type
+
+def encode_plaintext(
+    message_id: bytes,
+    group_id: bytes,
+    edited_by: bytes,
+    author_id: bytes,
+    new_content: str | bytes,
+) -> bytes:
+    """Encode a message_update payload plaintext (pre-encryption).
+
+    Layout (344 bytes):
+    - message_id (16)
+    - group_id (16)
+    - edited_by (16)
+    - author_id (16)
+    - new_content_len (u16)
+    - new_content_bytes (UPDATE_MAX)
+    - pad
+    """
+    wire_format._require_len("message_id", message_id, 16)
+    wire_format._require_len("group_id", group_id, 16)
+    wire_format._require_len("edited_by", edited_by, 16)
+    wire_format._require_len("author_id", author_id, 16)
+
+    if isinstance(new_content, str):
+        content_bytes = new_content.encode("utf-8")
+    else:
+        content_bytes = bytes(new_content)
+
+    if len(content_bytes) > UPDATE_MAX:
+        raise ValueError(f"new_content exceeds {UPDATE_MAX} bytes, got {len(content_bytes)}")
+
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:16] = message_id
+    payload[16:32] = group_id
+    payload[32:48] = edited_by
+    payload[48:64] = author_id
+    struct.pack_into("<H", payload, 64, len(content_bytes))
+    payload[66:66 + len(content_bytes)] = content_bytes
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a message_update payload plaintext (post-decryption)."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"message_update plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+
+    message_id = data[0:16]
+    group_id = data[16:32]
+    edited_by = data[32:48]
+    author_id = data[48:64]
+    (content_len,) = struct.unpack_from("<H", data, 64)
+
+    if content_len > UPDATE_MAX:
+        raise ValueError(f"new_content_len exceeds {UPDATE_MAX}, got {content_len}")
+
+    content_bytes = data[66:66 + content_len]
+    try:
+        new_content = content_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("new_content is not valid utf-8") from exc
+
+    return {
+        "message_id": message_id,
+        "group_id": group_id,
+        "edited_by": edited_by,
+        "author_id": author_id,
+        "new_content": new_content,
+    }
+
+
+def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
+    """Encrypt message_update plaintext into wire payload."""
+    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"message_update plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
+    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
+    if key_data.get("type") != "symmetric":
+        raise ValueError("message_update payload requires symmetric key")
+    nonce = crypto.deterministic_nonce(key_id, plaintext)
+    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
+    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
+        raise ValueError("unexpected ciphertext length for message_update payload")
+    payload = key_id + nonce + ciphertext
+    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
+
+
+def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt wire payload to message_update plaintext."""
+    if key_data.get("type") != "symmetric":
+        raise ValueError("message_update payload requires symmetric key")
+    key_id = payload[:16]
+    nonce = payload[16:40]
+    ciphertext = payload[40:]
+    return crypto.decrypt(ciphertext, key_data["key"], nonce)
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a message_update wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(
+    *,
+    message_id_b64: str,
+    group_id_b64: str,
+    edited_by_b64: str,
+    author_id_b64: str,
+    signer_type: str,
+    new_content: str,
+    global_count: int,
+    created_at_ms: int,
+    key_data: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode a complete message_update wire event."""
+    if global_count < 0 or global_count > 0xFFFFFFFF:
+        raise ValueError("global_count must fit in u32")
+
+    message_id = crypto.b64decode(message_id_b64)
+    group_id = crypto.b64decode(group_id_b64)
+    edited_by = crypto.b64decode(edited_by_b64)
+    author_id = crypto.b64decode(author_id_b64)
+
+    plaintext = encode_plaintext(
+        message_id=message_id,
+        group_id=group_id,
+        edited_by=edited_by,
+        author_id=author_id,
+        new_content=new_content,
+    )
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_ENCRYPTED,
+        signer_type=wire_format.signer_type_from_str(signer_type),
+        count=global_count,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=wire_format._require_len("signer_id", edited_by, wire_format.SIGNER_ID_SIZE),
+    )
+    signed_bytes = wire_format._signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_payload(plaintext, key_data)
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode a message_update wire event."""
+    header, payload, signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        return None, []
+    if header.flags & wire_format.FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
+        if not key_data:
+            return None, [key_id_b64]
+        plaintext = _decrypt_payload(payload, key_data)
+    else:
+        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+
+    decoded = decode_plaintext(plaintext)
+    if decoded["edited_by"] != header.signer_id:
+        raise ValueError("edited_by does not match signer_id")
+    event_data = {
+        "type": EVENT_TYPE,
+        "message_id": crypto.b64encode(decoded["message_id"]),
+        "group_id": crypto.b64encode(decoded["group_id"]),
+        "edited_by": crypto.b64encode(decoded["edited_by"]),
+        "author_id": crypto.b64encode(decoded["author_id"]),
+        "new_content": decoded["new_content"],
+        "global_count": header.count,
+        "created_at": header.created_at_ms,
+        "signer_type": wire_format.signer_type_to_str(header.signer_type),
+        "_wire_signature": signature,
+        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
+    }
+    return event_data, []
+
 
 def create(
     message_id: str,
@@ -162,7 +362,7 @@ def create(
 
     private_key = peer.get_private_key(peer_id, peer_id, db)
     key_data = group_module.pick_key(group_id, peer_id, db)
-    blob = wire_format.encode_message_update_wire_event(
+    blob = encode_wire_event(
         message_id_b64=message_id,
         group_id_b64=group_id,
         edited_by_b64=peer_shared_id,
@@ -192,14 +392,14 @@ def _wire_shadow_message_update(
     new_content: str,
 ) -> None:
     """Validate message_update fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_message_update_plaintext(
+    plaintext = encode_plaintext(
         message_id=crypto.b64decode(message_id),
         group_id=crypto.b64decode(group_id),
         edited_by=crypto.b64decode(edited_by),
         author_id=crypto.b64decode(author_id),
         new_content=new_content,
     )
-    decoded = wire_format.decode_message_update_plaintext(plaintext)
+    decoded = decode_plaintext(plaintext)
     if decoded["new_content"] != new_content:
         raise ValueError("wire shadow decode new_content mismatch")
 

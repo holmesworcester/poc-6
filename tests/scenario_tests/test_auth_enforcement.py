@@ -5,8 +5,12 @@ These tests are expected to fail until projection enforces auth checks
 for sensitive events received via sync.
 """
 from core.db import create_safe_db, create_unsafe_db
-from core import store, recorded, wire_format
+from core import store, recorded
 from events.identity import user, invite, peer
+from events.content import message_deletion as message_deletion_module
+from events.content import message_reaction_deletion as message_reaction_deletion_module
+from events.identity import user_removed as user_removed_module
+from events.identity import peer_removed as peer_removed_module
 from events.content import message, message_reaction
 from events.group import group as group_module
 from tests.utils.tick_helper import initial_sync, assert_eventually
@@ -68,7 +72,7 @@ def test_non_admin_cannot_delete_message_via_sync(fresh_db):
     # Bob crafts an unauthorized deletion event (not author, not admin)
     bob_private_key = peer.get_private_key(bob["peer_id"], bob["peer_id"], db)
     key_data = group_module.pick_key(group_id, bob["peer_id"], db)
-    deletion_blob = wire_format.encode_message_deletion_wire_event(
+    deletion_blob = message_deletion_module.encode_wire_event(
         message_id_b64=msg["id"],
         signed_by_b64=bob["peer_shared_id"],
         signer_type="peer_shared",
@@ -137,7 +141,7 @@ def test_non_reactor_cannot_delete_reaction_via_sync(fresh_db):
     # Bob crafts an unauthorized reaction deletion (not reactor)
     bob_private_key = peer.get_private_key(bob["peer_id"], bob["peer_id"], db)
     key_data = group_module.pick_key(group_id, bob["peer_id"], db)
-    deletion_blob = wire_format.encode_message_reaction_deletion_wire_event(
+    deletion_blob = message_reaction_deletion_module.encode_wire_event(
         reaction_id_b64=reaction_id,
         signed_by_b64=bob["peer_shared_id"],
         signer_type="peer_shared",
@@ -216,7 +220,7 @@ def test_admin_cannot_delete_reaction_via_sync(fresh_db):
     # Alice (admin) crafts a reaction deletion for Bob's reaction (should be unauthorized)
     alice_private_key = peer.get_private_key(alice["peer_id"], alice["peer_id"], db)
     key_data = group_module.pick_key(group_id, alice["peer_id"], db)
-    deletion_blob = wire_format.encode_message_reaction_deletion_wire_event(
+    deletion_blob = message_reaction_deletion_module.encode_wire_event(
         reaction_id_b64=reaction_id,
         signed_by_b64=alice["peer_shared_id"],
         signer_type="peer_shared",
@@ -245,7 +249,7 @@ def test_non_admin_cannot_remove_user_via_sync(fresh_db):
 
     # Bob crafts an unauthorized user_removed for Alice
     bob_private_key = peer.get_private_key(bob["peer_id"], bob["peer_id"], db)
-    removal_blob = wire_format.encode_user_removed_wire_event(
+    removal_blob = user_removed_module.encode_wire_event(
         removed_user_id_b64=alice["user_id"],
         removed_by_b64=bob["peer_shared_id"],
         signer_type="peer_shared",
@@ -273,7 +277,7 @@ def test_non_admin_cannot_remove_peer_via_sync(fresh_db):
 
     # Bob crafts an unauthorized peer_removed for Alice's peer
     bob_private_key = peer.get_private_key(bob["peer_id"], bob["peer_id"], db)
-    removal_blob = wire_format.encode_peer_removed_wire_event(
+    removal_blob = peer_removed_module.encode_wire_event(
         removed_peer_id_b64=alice["peer_shared_id"],
         removed_by_b64=bob["peer_shared_id"],
         signer_type="peer_shared",

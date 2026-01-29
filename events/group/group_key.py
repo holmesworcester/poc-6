@@ -5,13 +5,86 @@ EVENT_TYPE = 'group_key'
 SHAREABLE = False  # Local-only - contains symmetric key material
 PROJECTION_TABLE = None
 
+# Wire format constants
+WIRE_TYPE_CODE = 0x12  # TYPE_GROUP_KEY
+WIRE_PLAINTEXT_SIZE = 344  # GROUP_KEY_PLAINTEXT_SIZE
+
 from typing import Any
 import logging
+import struct
 from core import crypto
 from core import store
 from core import wire_format
 from core.db import create_safe_db
 from core.projection.types import ProjectorResult, WriteOp
+
+log = logging.getLogger(__name__)
+
+
+# Wire format functions - encode/decode for group_key event type
+
+def encode_plaintext(key: bytes) -> bytes:
+    """Encode a group_key payload plaintext.
+
+    Layout (344 bytes):
+    - key (32 bytes SECRET_SIZE)
+    - pad (312 bytes)
+    """
+    wire_format._require_len("key", key, wire_format.SECRET_SIZE)
+    payload = bytearray(WIRE_PLAINTEXT_SIZE)
+    payload[0:wire_format.SECRET_SIZE] = key
+    return bytes(payload)
+
+
+def decode_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a group_key payload plaintext."""
+    if len(data) != WIRE_PLAINTEXT_SIZE:
+        raise ValueError(f"group_key plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
+    return {"key": data[0:wire_format.SECRET_SIZE]}
+
+
+def is_wire_envelope(data: bytes) -> bool:
+    """Check if data is a group_key wire envelope."""
+    if len(data) != wire_format.WIRE_SIZE:
+        return False
+    try:
+        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+
+
+def encode_wire_event(*, key: bytes, created_at_ms: int) -> bytes:
+    """Encode a complete group_key wire event."""
+    plaintext = encode_plaintext(key=key)
+    header = wire_format.WireHeader(
+        version=1,
+        event_type=WIRE_TYPE_CODE,
+        flags=wire_format.FLAG_UNSIGNED,
+        signer_type=wire_format.SIGNER_NONE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * wire_format.SIGNER_ID_SIZE,
+    )
+    payload = wire_format._pad_payload(plaintext)
+    signature = b"\x00" * wire_format.SIGNATURE_SIZE
+    return wire_format.build_envelope(header, payload, signature)
+
+
+def decode_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a group_key wire event."""
+    header, payload, _signature = wire_format.parse_envelope(data)
+    if header.event_type != WIRE_TYPE_CODE:
+        raise ValueError("unexpected event type for group_key")
+    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
+    decoded = decode_plaintext(plaintext)
+    return {
+        "type": "group_key",
+        "key": crypto.b64encode(decoded["key"]),
+        "created_at": header.created_at_ms,
+    }
+
 
 EVENT_SPEC = {
     'encrypted': False,
@@ -19,9 +92,6 @@ EVENT_SPEC = {
     'optional': {},
     'cascade_on_delete': [],
 }
-
-log = logging.getLogger(__name__)
-
 
 
 def create(peer_id: str, t_ms: int, db: Any) -> str:
@@ -35,7 +105,7 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     # This ensures same key material = same key_id on all peers
     _wire_shadow_group_key(crypto.b64encode(key))
 
-    blob = wire_format.encode_group_key_wire_event(
+    blob = encode_wire_event(
         key=key,
         created_at_ms=0,
     )
@@ -69,7 +139,7 @@ def create_with_material(key_material: bytes, peer_id: str, t_ms: int, db: Any) 
     # This ensures same key material = same key_id on all peers
     _wire_shadow_group_key(crypto.b64encode(key_material))
 
-    blob = wire_format.encode_group_key_wire_event(
+    blob = encode_wire_event(
         key=key_material,
         created_at_ms=0,
     )
@@ -114,8 +184,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
 def _wire_shadow_group_key(key_b64: str) -> None:
     """Validate group_key fields against the fixed-size wire payload layout."""
-    plaintext = wire_format.encode_group_key_plaintext(key=crypto.b64decode(key_b64))
-    decoded = wire_format.decode_group_key_plaintext(plaintext)
+    plaintext = encode_plaintext(key=crypto.b64decode(key_b64))
+    decoded = decode_plaintext(plaintext)
     if decoded["key"] != crypto.b64decode(key_b64):
         raise ValueError("wire shadow decode key mismatch")
 
