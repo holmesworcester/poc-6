@@ -2877,6 +2877,10 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
 def run_interactive(session: CLISession):
     """Run interactive REPL mode."""
+    import threading
+    from core import transport
+    from core import tick as tick_module
+
     # Set up readline for history and tab completion
     completer = setup_readline(session)
 
@@ -2885,22 +2889,49 @@ def run_interactive(session: CLISession):
     print("use TAB for completion, UP/DOWN for history")
     print()
 
+    # Start background sync thread if UDP networking is enabled
+    sync_thread = None
+    stop_sync = threading.Event()
+
+    if transport.get_mode() == transport.TransportMode.UDP:
+        def background_sync():
+            while not stop_sync.is_set():
+                try:
+                    t_ms = int(time.time() * 1000)
+                    session.current_time_ms = t_ms
+                    tick_module.tick(t_ms=t_ms, db=session.db)
+                    session.db.commit()
+                except Exception:
+                    pass  # Don't crash the background thread
+                time.sleep(0.1)
+
+        sync_thread = threading.Thread(target=background_sync, daemon=True)
+        sync_thread.start()
+        print("(background sync active)")
+        print()
+
     display_state(session)
     print()
 
-    while True:
-        try:
-            line = input("> ").strip()
-            if not execute_command(session, line, show_prompt=True):
+    try:
+        while True:
+            try:
+                line = input("> ").strip()
+                if not execute_command(session, line, show_prompt=True):
+                    break
+            except KeyboardInterrupt:
+                print()
+                print("goodbye!")
                 break
-        except KeyboardInterrupt:
-            print()
-            print("goodbye!")
-            break
-        except EOFError:
-            print()
-            print("goodbye!")
-            break
+            except EOFError:
+                print()
+                print("goodbye!")
+                break
+    finally:
+        # Stop background sync thread
+        if sync_thread:
+            stop_sync.set()
+            sync_thread.join(timeout=1.0)
 
 
 def run_non_interactive(session: CLISession):
