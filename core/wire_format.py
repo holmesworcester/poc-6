@@ -72,6 +72,19 @@ OBSERVED_ADDRESS_PLAINTEXT_SIZE = 344
 NETWORK_INTRO_PLAINTEXT_SIZE = 344
 NEGENTROPY_PLAINTEXT_SIZE = 344
 
+# TreeKEM Phase 1 plaintext sizes
+PUBKEY_PLAINTEXT_SIZE = 344
+SECRET_PLAINTEXT_SIZE = 344
+SECRET_SHARED_PLAINTEXT_SIZE = 344
+REMOVAL_EPOCH_PLAINTEXT_SIZE = 344
+KEY_REQUEST_PLAINTEXT_SIZE = 344
+
+# TreeKEM Phase 2 plaintext sizes
+TREEKEM_SECRET_PLAINTEXT_SIZE = 344
+TREEKEM_PUBKEY_PLAINTEXT_SIZE = 344
+TREEKEM_UPDATE_PLAINTEXT_SIZE = 344
+TREEKEM_SECRET_SHARED_PLAINTEXT_SIZE = 344
+
 # Flags
 FLAG_ENCRYPTED = 1 << 0
 FLAG_WRAP_ASYM = 1 << 1
@@ -122,6 +135,19 @@ TYPE_SELF_ADDRESS = 0x34
 TYPE_OBSERVED_ADDRESS = 0x35
 TYPE_NETWORK_INTRO = 0x36
 TYPE_NEGENTROPY = 0x37
+
+# TreeKEM Phase 1 event types
+TYPE_PUBKEY = 0x40
+TYPE_SECRET = 0x41
+TYPE_SECRET_SHARED = 0x42
+TYPE_REMOVAL_EPOCH = 0x43
+TYPE_KEY_REQUEST = 0x44
+
+# TreeKEM Phase 2 event types
+TYPE_TREEKEM_SECRET = 0x45
+TYPE_TREEKEM_PUBKEY = 0x46
+TYPE_TREEKEM_UPDATE = 0x47
+TYPE_TREEKEM_SECRET_SHARED = 0x48
 
 INVITE_MODE_USER = 0
 INVITE_MODE_PEER = 1
@@ -4721,3 +4747,902 @@ def decode_negentropy_wire_event(data: bytes) -> dict[str, Any]:
         "created_at": header.created_at_ms,
     }
     return event_data
+
+
+# =============================================================================
+# TreeKEM Phase 1: is_wire_* helper functions
+# =============================================================================
+
+def is_wire_pubkey_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_PUBKEY
+
+
+def is_wire_secret_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_SECRET
+
+
+def is_wire_secret_shared_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_SECRET_SHARED
+
+
+def is_wire_removal_epoch_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_REMOVAL_EPOCH
+
+
+def is_wire_key_request_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_KEY_REQUEST
+
+
+# =============================================================================
+# TreeKEM Phase 2: is_wire_* helper functions
+# =============================================================================
+
+def is_wire_treekem_secret_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TREEKEM_SECRET
+
+
+def is_wire_treekem_pubkey_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TREEKEM_PUBKEY
+
+
+def is_wire_treekem_update_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TREEKEM_UPDATE
+
+
+def is_wire_treekem_secret_shared_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TREEKEM_SECRET_SHARED
+
+
+# =============================================================================
+# TreeKEM Phase 1: Pubkey (signed, shareable)
+# =============================================================================
+
+def encode_pubkey_plaintext(*, public_key: bytes, removal_epoch_id: bytes | None) -> bytes:
+    """Encode pubkey plaintext: public_key (32) + removal_epoch_id (16, nullable)."""
+    public_key = _require_len("public_key", public_key, 32)
+    removal_epoch_id = removal_epoch_id or b"\x00" * 16
+    removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
+    return public_key + removal_epoch_id
+
+
+def decode_pubkey_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode pubkey plaintext."""
+    public_key = data[:32]
+    removal_epoch_id = data[32:48]
+    return {
+        "public_key": public_key,
+        "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
+    }
+
+
+def encode_pubkey_wire_event(
+    *,
+    public_key: bytes,
+    removal_epoch_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed pubkey wire event."""
+    removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_pubkey_plaintext(public_key=public_key, removal_epoch_id=removal_epoch_id)
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_PUBKEY,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_pubkey_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a pubkey wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_PUBKEY:
+        raise ValueError("unexpected event type for pubkey")
+    plaintext = payload[:PUBKEY_PLAINTEXT_SIZE]
+    decoded = decode_pubkey_plaintext(plaintext)
+    return {
+        "type": "pubkey",
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 1: Secret (deterministic, local-only)
+# =============================================================================
+
+def encode_secret_plaintext(*, key: bytes) -> bytes:
+    """Encode secret plaintext: key (32)."""
+    return _require_len("key", key, 32)
+
+
+def decode_secret_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode secret plaintext."""
+    return {"key": data[:32]}
+
+
+def encode_secret_wire_event(*, key: bytes, created_at_ms: int) -> bytes:
+    """Encode a deterministic secret wire event."""
+    plaintext = encode_secret_plaintext(key=key)
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_SECRET,
+        flags=FLAG_UNSIGNED,
+        signer_type=SIGNER_NONE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * SIGNER_ID_SIZE,
+    )
+    payload = _pad_payload(plaintext)
+    signature = b"\x00" * SIGNATURE_SIZE
+    return build_envelope(header, payload, signature)
+
+
+def decode_secret_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a secret wire event."""
+    header, payload, _signature = parse_envelope(data)
+    if header.event_type != TYPE_SECRET:
+        raise ValueError("unexpected event type for secret")
+    plaintext = payload[:SECRET_PLAINTEXT_SIZE]
+    decoded = decode_secret_plaintext(plaintext)
+    return {
+        "type": "secret",
+        "key": crypto.b64encode(decoded["key"]),
+        "created_at": header.created_at_ms,
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 1: Secret Shared (encrypted to recipient pubkey)
+# =============================================================================
+
+def encode_secret_shared_plaintext(
+    *,
+    secret_id: bytes,
+    symmetric_key: bytes,
+    recipient_pubkey_id: bytes,
+) -> bytes:
+    """Encode secret_shared plaintext."""
+    secret_id = _require_len("secret_id", secret_id, 16)
+    symmetric_key = _require_len("symmetric_key", symmetric_key, 32)
+    recipient_pubkey_id = _require_len("recipient_pubkey_id", recipient_pubkey_id, 16)
+    return secret_id + symmetric_key + recipient_pubkey_id
+
+
+def decode_secret_shared_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode secret_shared plaintext."""
+    return {
+        "secret_id": data[:16],
+        "symmetric_key": data[16:48],
+        "recipient_pubkey_id": data[48:64],
+    }
+
+
+def _encrypt_secret_shared_payload(plaintext: bytes, recipient_pubkey: dict[str, Any]) -> bytes:
+    """Encrypt secret_shared payload to recipient's pubkey."""
+    public_key = recipient_pubkey["public_key"]
+    key_id = recipient_pubkey["id"]
+    encrypted = crypto.seal(plaintext, public_key)
+    result = key_id + encrypted
+    # Pad to PAYLOAD_SIZE
+    if len(result) < PAYLOAD_SIZE:
+        result = result + b"\x00" * (PAYLOAD_SIZE - len(result))
+    return result
+
+
+def _decrypt_secret_shared_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt secret_shared payload."""
+    # Find the actual encrypted length by removing padding
+    # sealed_box overhead is 48 bytes (32 ephemeral pubkey + 16 tag)
+    encrypted = payload[16:]
+    private_key = key_data["private_key"]
+    return crypto.unseal(encrypted, private_key)
+
+
+def encode_secret_shared_wire_event(
+    *,
+    secret_id_b64: str,
+    symmetric_key_b64: str,
+    recipient_pubkey_id_b64: str,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    recipient_pubkey: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode an encrypted secret_shared wire event."""
+    secret_id = crypto.b64decode(secret_id_b64)
+    symmetric_key = crypto.b64decode(symmetric_key_b64)
+    recipient_pubkey_id = crypto.b64decode(recipient_pubkey_id_b64)
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_secret_shared_plaintext(
+        secret_id=secret_id,
+        symmetric_key=symmetric_key,
+        recipient_pubkey_id=recipient_pubkey_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_SECRET_SHARED,
+        flags=FLAG_ENCRYPTED | FLAG_WRAP_ASYM,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_secret_shared_payload(plaintext, recipient_pubkey)
+    return build_envelope(header, payload, signature)
+
+
+def decode_secret_shared_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode an encrypted secret_shared wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_SECRET_SHARED:
+        return None, []
+    if header.flags & FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = None
+        if key_cache:
+            key_data = key_cache.get(key_id_b64)
+        if not key_data:
+            key_data = crypto.get_event_key_by_id(key_id, recorded_by, db)
+        if not key_data:
+            return None, [key_id_b64]
+        try:
+            plaintext = _decrypt_secret_shared_payload(payload, key_data)
+        except Exception:
+            return None, [key_id_b64]
+    else:
+        plaintext = payload[:SECRET_SHARED_PLAINTEXT_SIZE]
+    decoded = decode_secret_shared_plaintext(plaintext)
+    return {
+        "type": "secret_shared",
+        "secret_id": crypto.b64encode(decoded["secret_id"]),
+        "symmetric_key": crypto.b64encode(decoded["symmetric_key"]),
+        "recipient_pubkey_id": crypto.b64encode(decoded["recipient_pubkey_id"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }, []
+
+
+# =============================================================================
+# TreeKEM Phase 1: Removal Epoch (signed, shareable)
+# =============================================================================
+
+def encode_removal_epoch_plaintext(
+    *,
+    removed_peer_id: bytes,
+    removed_user_id: bytes | None,
+    parent_epoch_id: bytes | None,
+) -> bytes:
+    """Encode removal_epoch plaintext."""
+    removed_peer_id = _require_len("removed_peer_id", removed_peer_id, 16)
+    removed_user_id = removed_user_id or b"\x00" * 16
+    removed_user_id = _require_len("removed_user_id", removed_user_id, 16)
+    parent_epoch_id = parent_epoch_id or b"\x00" * 16
+    parent_epoch_id = _require_len("parent_epoch_id", parent_epoch_id, 16)
+    return removed_peer_id + removed_user_id + parent_epoch_id
+
+
+def decode_removal_epoch_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode removal_epoch plaintext."""
+    removed_peer_id = data[:16]
+    removed_user_id = data[16:32]
+    parent_epoch_id = data[32:48]
+    return {
+        "removed_peer_id": removed_peer_id,
+        "removed_user_id": removed_user_id if removed_user_id != b"\x00" * 16 else None,
+        "parent_epoch_id": parent_epoch_id if parent_epoch_id != b"\x00" * 16 else None,
+    }
+
+
+def encode_removal_epoch_wire_event(
+    *,
+    removed_peer_id_b64: str,
+    removed_user_id_b64: str | None,
+    parent_epoch_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed removal_epoch wire event."""
+    removed_peer_id = crypto.b64decode(removed_peer_id_b64)
+    removed_user_id = crypto.b64decode(removed_user_id_b64) if removed_user_id_b64 else None
+    parent_epoch_id = crypto.b64decode(parent_epoch_id_b64) if parent_epoch_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_removal_epoch_plaintext(
+        removed_peer_id=removed_peer_id,
+        removed_user_id=removed_user_id,
+        parent_epoch_id=parent_epoch_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_REMOVAL_EPOCH,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_removal_epoch_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a removal_epoch wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_REMOVAL_EPOCH:
+        raise ValueError("unexpected event type for removal_epoch")
+    plaintext = payload[:REMOVAL_EPOCH_PLAINTEXT_SIZE]
+    decoded = decode_removal_epoch_plaintext(plaintext)
+    return {
+        "type": "removal_epoch",
+        "removed_peer_id": crypto.b64encode(decoded["removed_peer_id"]),
+        "removed_user_id": crypto.b64encode(decoded["removed_user_id"]) if decoded["removed_user_id"] else None,
+        "parent_epoch_id": crypto.b64encode(decoded["parent_epoch_id"]) if decoded["parent_epoch_id"] else None,
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 1: Key Request (signed, shareable)
+# =============================================================================
+
+def encode_key_request_plaintext(
+    *,
+    requested_key_id: bytes,
+    requester_pubkey_id: bytes,
+) -> bytes:
+    """Encode key_request plaintext."""
+    requested_key_id = _require_len("requested_key_id", requested_key_id, 16)
+    requester_pubkey_id = _require_len("requester_pubkey_id", requester_pubkey_id, 16)
+    return requested_key_id + requester_pubkey_id
+
+
+def decode_key_request_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode key_request plaintext."""
+    return {
+        "requested_key_id": data[:16],
+        "requester_pubkey_id": data[16:32],
+    }
+
+
+def encode_key_request_wire_event(
+    *,
+    requested_key_id_b64: str,
+    requester_pubkey_id_b64: str,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed key_request wire event."""
+    requested_key_id = crypto.b64decode(requested_key_id_b64)
+    requester_pubkey_id = crypto.b64decode(requester_pubkey_id_b64)
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_key_request_plaintext(
+        requested_key_id=requested_key_id,
+        requester_pubkey_id=requester_pubkey_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_KEY_REQUEST,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_key_request_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a key_request wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_KEY_REQUEST:
+        raise ValueError("unexpected event type for key_request")
+    plaintext = payload[:KEY_REQUEST_PLAINTEXT_SIZE]
+    decoded = decode_key_request_plaintext(plaintext)
+    return {
+        "type": "key_request",
+        "requested_key_id": crypto.b64encode(decoded["requested_key_id"]),
+        "requester_pubkey_id": crypto.b64encode(decoded["requester_pubkey_id"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 2: treekem_secret (deterministic, local-only)
+# =============================================================================
+
+def encode_treekem_secret_plaintext(*, depth: int, path_prefix: bytes, key: bytes) -> bytes:
+    """Encode treekem_secret plaintext: depth (1) + path_prefix (16) + key (32)."""
+    if depth < 0 or depth > 255:
+        raise ValueError("depth must be 0-255")
+    path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
+    key = _require_len("key", key, 32)
+    return bytes([depth]) + path_prefix_padded + key
+
+
+def decode_treekem_secret_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode treekem_secret plaintext."""
+    depth = data[0]
+    path_prefix = data[1:17]
+    key = data[17:49]
+    return {"depth": depth, "path_prefix": path_prefix, "key": key}
+
+
+def encode_treekem_secret_wire_event(
+    *,
+    depth: int,
+    path_prefix: bytes,
+    key: bytes,
+    created_at_ms: int,
+) -> bytes:
+    """Encode a deterministic treekem_secret wire event."""
+    plaintext = encode_treekem_secret_plaintext(depth=depth, path_prefix=path_prefix, key=key)
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TREEKEM_SECRET,
+        flags=FLAG_UNSIGNED,
+        signer_type=SIGNER_NONE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * SIGNER_ID_SIZE,
+    )
+    payload = _pad_payload(plaintext)
+    signature = b"\x00" * SIGNATURE_SIZE
+    return build_envelope(header, payload, signature)
+
+
+def decode_treekem_secret_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a treekem_secret wire event."""
+    header, payload, _signature = parse_envelope(data)
+    if header.event_type != TYPE_TREEKEM_SECRET:
+        raise ValueError("unexpected event type for treekem_secret")
+    plaintext = payload[:TREEKEM_SECRET_PLAINTEXT_SIZE]
+    decoded = decode_treekem_secret_plaintext(plaintext)
+    return {
+        "type": "treekem_secret",
+        "depth": decoded["depth"],
+        "path_prefix": crypto.b64encode(decoded["path_prefix"]),
+        "key": crypto.b64encode(decoded["key"]),
+        "created_at": header.created_at_ms,
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 2: treekem_pubkey (signed, shareable)
+# =============================================================================
+
+def encode_treekem_pubkey_plaintext(
+    *,
+    depth: int,
+    path_prefix: bytes,
+    public_key: bytes,
+    parent_pubkey_id: bytes | None,
+    removal_epoch_id: bytes | None,
+) -> bytes:
+    """Encode treekem_pubkey plaintext."""
+    if depth < 0 or depth > 255:
+        raise ValueError("depth must be 0-255")
+    path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
+    public_key = _require_len("public_key", public_key, 32)
+    parent_pubkey_id = parent_pubkey_id or b"\x00" * 16
+    parent_pubkey_id = _require_len("parent_pubkey_id", parent_pubkey_id, 16)
+    removal_epoch_id = removal_epoch_id or b"\x00" * 16
+    removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
+    return bytes([depth]) + path_prefix_padded + public_key + parent_pubkey_id + removal_epoch_id
+
+
+def decode_treekem_pubkey_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode treekem_pubkey plaintext."""
+    depth = data[0]
+    path_prefix = data[1:17]
+    public_key = data[17:49]
+    parent_pubkey_id = data[49:65]
+    removal_epoch_id = data[65:81]
+    return {
+        "depth": depth,
+        "path_prefix": path_prefix,
+        "public_key": public_key,
+        "parent_pubkey_id": parent_pubkey_id if parent_pubkey_id != b"\x00" * 16 else None,
+        "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
+    }
+
+
+def encode_treekem_pubkey_wire_event(
+    *,
+    depth: int,
+    path_prefix: bytes,
+    public_key: bytes,
+    parent_pubkey_id_b64: str | None,
+    removal_epoch_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed treekem_pubkey wire event."""
+    parent_pubkey_id = crypto.b64decode(parent_pubkey_id_b64) if parent_pubkey_id_b64 else None
+    removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_treekem_pubkey_plaintext(
+        depth=depth,
+        path_prefix=path_prefix,
+        public_key=public_key,
+        parent_pubkey_id=parent_pubkey_id,
+        removal_epoch_id=removal_epoch_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TREEKEM_PUBKEY,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_treekem_pubkey_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a treekem_pubkey wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_TREEKEM_PUBKEY:
+        raise ValueError("unexpected event type for treekem_pubkey")
+    plaintext = payload[:TREEKEM_PUBKEY_PLAINTEXT_SIZE]
+    decoded = decode_treekem_pubkey_plaintext(plaintext)
+    return {
+        "type": "treekem_pubkey",
+        "depth": decoded["depth"],
+        "path_prefix": crypto.b64encode(decoded["path_prefix"]),
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "parent_pubkey_id": crypto.b64encode(decoded["parent_pubkey_id"]) if decoded["parent_pubkey_id"] else None,
+        "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 2: treekem_update (signed, shareable)
+# =============================================================================
+
+def encode_treekem_update_plaintext(
+    *,
+    author_peer_id: bytes,
+    removal_epoch_id: bytes | None,
+    base_update_id: bytes | None,
+    root_pubkey_id: bytes,
+) -> bytes:
+    """Encode treekem_update plaintext."""
+    author_peer_id = _require_len("author_peer_id", author_peer_id, 16)
+    removal_epoch_id = removal_epoch_id or b"\x00" * 16
+    removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
+    base_update_id = base_update_id or b"\x00" * 16
+    base_update_id = _require_len("base_update_id", base_update_id, 16)
+    root_pubkey_id = _require_len("root_pubkey_id", root_pubkey_id, 16)
+    return author_peer_id + removal_epoch_id + base_update_id + root_pubkey_id
+
+
+def decode_treekem_update_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode treekem_update plaintext."""
+    author_peer_id = data[:16]
+    removal_epoch_id = data[16:32]
+    base_update_id = data[32:48]
+    root_pubkey_id = data[48:64]
+    return {
+        "author_peer_id": author_peer_id,
+        "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
+        "base_update_id": base_update_id if base_update_id != b"\x00" * 16 else None,
+        "root_pubkey_id": root_pubkey_id,
+    }
+
+
+def encode_treekem_update_wire_event(
+    *,
+    author_peer_id_b64: str,
+    removal_epoch_id_b64: str | None,
+    base_update_id_b64: str | None,
+    root_pubkey_id_b64: str,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed treekem_update wire event."""
+    author_peer_id = crypto.b64decode(author_peer_id_b64)
+    removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
+    base_update_id = crypto.b64decode(base_update_id_b64) if base_update_id_b64 else None
+    root_pubkey_id = crypto.b64decode(root_pubkey_id_b64)
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_treekem_update_plaintext(
+        author_peer_id=author_peer_id,
+        removal_epoch_id=removal_epoch_id,
+        base_update_id=base_update_id,
+        root_pubkey_id=root_pubkey_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TREEKEM_UPDATE,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_treekem_update_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a treekem_update wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_TREEKEM_UPDATE:
+        raise ValueError("unexpected event type for treekem_update")
+    plaintext = payload[:TREEKEM_UPDATE_PLAINTEXT_SIZE]
+    decoded = decode_treekem_update_plaintext(plaintext)
+    return {
+        "type": "treekem_update",
+        "author_peer_id": crypto.b64encode(decoded["author_peer_id"]),
+        "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
+        "base_update_id": crypto.b64encode(decoded["base_update_id"]) if decoded["base_update_id"] else None,
+        "root_pubkey_id": crypto.b64encode(decoded["root_pubkey_id"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 2: treekem_secret_shared (encrypted to recipient pubkey)
+# =============================================================================
+
+def encode_treekem_secret_shared_plaintext(
+    *,
+    treekem_secret_id: bytes,
+    symmetric_key: bytes,
+    recipient_pubkey_id: bytes,
+    source_update_id: bytes | None,
+    depth: int,
+) -> bytes:
+    """Encode treekem_secret_shared plaintext."""
+    treekem_secret_id = _require_len("treekem_secret_id", treekem_secret_id, 16)
+    symmetric_key = _require_len("symmetric_key", symmetric_key, 32)
+    recipient_pubkey_id = _require_len("recipient_pubkey_id", recipient_pubkey_id, 16)
+    source_update_id = source_update_id or b"\x00" * 16
+    source_update_id = _require_len("source_update_id", source_update_id, 16)
+    if depth < 0 or depth > 255:
+        raise ValueError("depth must be 0-255")
+    return treekem_secret_id + symmetric_key + recipient_pubkey_id + source_update_id + bytes([depth])
+
+
+def decode_treekem_secret_shared_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode treekem_secret_shared plaintext."""
+    treekem_secret_id = data[:16]
+    symmetric_key = data[16:48]
+    recipient_pubkey_id = data[48:64]
+    source_update_id = data[64:80]
+    depth = data[80] if len(data) > 80 else 0
+    return {
+        "treekem_secret_id": treekem_secret_id,
+        "symmetric_key": symmetric_key,
+        "recipient_pubkey_id": recipient_pubkey_id,
+        "source_update_id": source_update_id if source_update_id != b"\x00" * 16 else None,
+        "depth": depth,
+    }
+
+
+def _encrypt_treekem_secret_shared_payload(plaintext: bytes, recipient_pubkey: dict[str, Any]) -> bytes:
+    """Encrypt treekem_secret_shared payload to recipient's pubkey."""
+    public_key = recipient_pubkey["public_key"]
+    key_id = recipient_pubkey["id"]
+    encrypted = crypto.seal(plaintext, public_key)
+    result = key_id + encrypted
+    # Pad to PAYLOAD_SIZE
+    if len(result) < PAYLOAD_SIZE:
+        result = result + b"\x00" * (PAYLOAD_SIZE - len(result))
+    return result
+
+
+def _decrypt_treekem_secret_shared_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt treekem_secret_shared payload."""
+    encrypted = payload[16:]
+    private_key = key_data["private_key"]
+    return crypto.unseal(encrypted, private_key)
+
+
+def encode_treekem_secret_shared_wire_event(
+    *,
+    treekem_secret_id_b64: str,
+    symmetric_key_b64: str,
+    recipient_pubkey_id_b64: str,
+    source_update_id_b64: str | None,
+    depth: int,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    recipient_pubkey: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode an encrypted treekem_secret_shared wire event."""
+    treekem_secret_id = crypto.b64decode(treekem_secret_id_b64)
+    symmetric_key = crypto.b64decode(symmetric_key_b64)
+    recipient_pubkey_id = crypto.b64decode(recipient_pubkey_id_b64)
+    source_update_id = crypto.b64decode(source_update_id_b64) if source_update_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_treekem_secret_shared_plaintext(
+        treekem_secret_id=treekem_secret_id,
+        symmetric_key=symmetric_key,
+        recipient_pubkey_id=recipient_pubkey_id,
+        source_update_id=source_update_id,
+        depth=depth,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TREEKEM_SECRET_SHARED,
+        flags=FLAG_ENCRYPTED | FLAG_WRAP_ASYM,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_treekem_secret_shared_payload(plaintext, recipient_pubkey)
+    return build_envelope(header, payload, signature)
+
+
+def decode_treekem_secret_shared_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode an encrypted treekem_secret_shared wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_TREEKEM_SECRET_SHARED:
+        return None, []
+    if header.flags & FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = None
+        if key_cache:
+            key_data = key_cache.get(key_id_b64)
+        if not key_data:
+            key_data = crypto.get_event_key_by_id(key_id, recorded_by, db)
+        if not key_data:
+            return None, [key_id_b64]
+        try:
+            plaintext = _decrypt_treekem_secret_shared_payload(payload, key_data)
+        except Exception:
+            return None, [key_id_b64]
+    else:
+        plaintext = payload[:TREEKEM_SECRET_SHARED_PLAINTEXT_SIZE]
+    decoded = decode_treekem_secret_shared_plaintext(plaintext)
+    return {
+        "type": "treekem_secret_shared",
+        "treekem_secret_id": crypto.b64encode(decoded["treekem_secret_id"]),
+        "symmetric_key": crypto.b64encode(decoded["symmetric_key"]),
+        "recipient_pubkey_id": crypto.b64encode(decoded["recipient_pubkey_id"]),
+        "source_update_id": crypto.b64encode(decoded["source_update_id"]) if decoded["source_update_id"] else None,
+        "depth": decoded["depth"],
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }, []

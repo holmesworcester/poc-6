@@ -66,6 +66,22 @@ SUBJECTIVE_TABLES = {
     'negentropy_sync_state',       # Negentropy sync: per-connection sync state (peer-scoped)
     'negentropy_checkpoints',      # Negentropy sync: completion checkpoints (peer-scoped)
     'trust_anchors',               # Trust anchors: network_ids pre-approved by invite_accepted (peer-scoped)
+    # TreeKEM Phase 1 tables
+    'pubkeys',                     # TreeKEM pubkeys (peer-scoped)
+    'pubkey_secrets',              # TreeKEM pubkey private keys (peer-scoped, local-only)
+    'secrets',                     # TreeKEM symmetric secrets (peer-scoped)
+    'secrets_shared',              # TreeKEM shared secrets (peer-scoped)
+    'removal_epochs',              # Removal epoch tracking (peer-scoped)
+    'removal_epoch_refs',          # Removal epoch removed entity refs (peer-scoped)
+    'removal_epoch_parents',       # Removal epoch parent links (peer-scoped)
+    'key_requests',                # Key healing requests (peer-scoped)
+    # TreeKEM Phase 2 tables
+    'treekem_secrets',             # TreeKEM tree node secrets (peer-scoped)
+    'treekem_pubkeys',             # TreeKEM tree node pubkeys (peer-scoped)
+    'treekem_pubkey_secrets',      # TreeKEM tree node private keys (peer-scoped, local-only)
+    'treekem_updates',             # TreeKEM update orchestration (peer-scoped)
+    'treekem_secrets_shared',      # TreeKEM shared secrets (peer-scoped)
+    'treekem_tree_state',          # TreeKEM winning state cache (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

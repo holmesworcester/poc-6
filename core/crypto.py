@@ -297,6 +297,32 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
             'type': 'asymmetric'
         }
 
+    # Check pubkey_secrets (TreeKEM Phase 1 asymmetric)
+    pubkey_row = safedb.query_one(
+        "SELECT private_key FROM pubkey_secrets WHERE pubkey_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
+    )
+    if pubkey_row and pubkey_row['private_key']:
+        log.debug(f"get_event_key_by_id() found pubkey_secret for pubkey_id={key_id}")
+        return {
+            'id': id_bytes,
+            'private_key': pubkey_row['private_key'],
+            'type': 'asymmetric'
+        }
+
+    # Check treekem_pubkey_secrets (TreeKEM Phase 2 asymmetric)
+    treekem_pubkey_row = safedb.query_one(
+        "SELECT private_key FROM treekem_pubkey_secrets WHERE treekem_pubkey_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
+    )
+    if treekem_pubkey_row and treekem_pubkey_row['private_key']:
+        log.debug(f"get_event_key_by_id() found treekem_pubkey_secret for treekem_pubkey_id={key_id}")
+        return {
+            'id': id_bytes,
+            'private_key': treekem_pubkey_row['private_key'],
+            'type': 'asymmetric'
+        }
+
     log.debug(f"get_event_key_by_id() NO KEY FOUND for key_id={key_id}, recorded_by={recorded_by[:20]}...")
     return None
 

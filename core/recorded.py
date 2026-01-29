@@ -509,6 +509,30 @@ def _decode_event_blob(
         event_data = wire_format.decode_network_intro_wire_event(event_blob)
     elif wire_format.is_wire_negentropy_envelope(event_blob):
         event_data = wire_format.decode_negentropy_wire_event(event_blob)
+    # TreeKEM Phase 1 event types
+    elif wire_format.is_wire_pubkey_envelope(event_blob):
+        event_data = wire_format.decode_pubkey_wire_event(event_blob)
+    elif wire_format.is_wire_secret_envelope(event_blob):
+        event_data = wire_format.decode_secret_wire_event(event_blob)
+    elif wire_format.is_wire_secret_shared_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_secret_shared_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_removal_epoch_envelope(event_blob):
+        event_data = wire_format.decode_removal_epoch_wire_event(event_blob)
+    elif wire_format.is_wire_key_request_envelope(event_blob):
+        event_data = wire_format.decode_key_request_wire_event(event_blob)
+    # TreeKEM Phase 2 event types
+    elif wire_format.is_wire_treekem_secret_envelope(event_blob):
+        event_data = wire_format.decode_treekem_secret_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_pubkey_envelope(event_blob):
+        event_data = wire_format.decode_treekem_pubkey_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_update_envelope(event_blob):
+        event_data = wire_format.decode_treekem_update_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_secret_shared_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_treekem_secret_shared_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
     else:
         if event_blob and event_blob[:1] in (b'{', b'['):
             raise ValueError("JSON event blobs are no longer supported")
