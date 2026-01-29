@@ -141,7 +141,13 @@ NEGENTROPY_LEVEL_PREFIX_10 = 5
 
 NEGENTROPY_RANGE_ID_SIZE = 8
 NEGENTROPY_PREFIX_BYTES = 5  # 5 bytes = 10 hex chars for prefix_10
-NEGENTROPY_EVENT_ID_MAX = 15
+NEGENTROPY_EVENT_ID_MAX = 15  # Legacy, unused
+NEGENTROPY_KEY_SIZE = 8  # 8 bytes = 16 hex chars for unified key
+NEGENTROPY_BOUNDS_NONE = 0
+NEGENTROPY_BOUNDS_HAS_LO = 1
+NEGENTROPY_BOUNDS_HAS_HI = 2
+NEGENTROPY_BOUNDS_HAS_BOTH = 3
+NEGENTROPY_LEVEL_ADAPTIVE = 0xFF  # Adaptive splitting (uses lo/hi keys)
 
 _HEADER_STRUCT = struct.Struct("<BBBBIQQ16s8s")
 
@@ -1598,7 +1604,9 @@ def encode_negentropy_plaintext(
     root_hash: bytes,
     total_events: int,
     parent_range_id: bytes,
-    event_ids: list[bytes],
+    event_ids: list[bytes],  # Legacy, unused - kept for compatibility
+    lo_key: bytes | None = None,
+    hi_key: bytes | None = None,
 ) -> bytes:
     """Encode a negentropy payload plaintext (pre-encryption)."""
     _require_len("connection_id", connection_id, 16)
@@ -1613,6 +1621,7 @@ def encode_negentropy_plaintext(
         NEGENTROPY_LEVEL_PREFIX_6,
         NEGENTROPY_LEVEL_PREFIX_8,
         NEGENTROPY_LEVEL_PREFIX_10,
+        NEGENTROPY_LEVEL_ADAPTIVE,
     ):
         raise ValueError("invalid negentropy level")
     if len(prefix_bytes) > NEGENTROPY_PREFIX_BYTES:
@@ -1622,10 +1631,10 @@ def encode_negentropy_plaintext(
     if total_events < 0 or total_events > 0xFFFFFFFF:
         raise ValueError("total_events must fit in u32")
     _require_len("parent_range_id", parent_range_id, NEGENTROPY_RANGE_ID_SIZE)
-    if len(event_ids) > NEGENTROPY_EVENT_ID_MAX:
-        raise ValueError("event_ids exceeds max")
-    for event_id in event_ids:
-        _require_len("event_id", event_id, 16)
+    if lo_key is not None:
+        _require_len("lo_key", lo_key, NEGENTROPY_KEY_SIZE)
+    if hi_key is not None:
+        _require_len("hi_key", hi_key, NEGENTROPY_KEY_SIZE)
 
     payload = bytearray(NEGENTROPY_PLAINTEXT_SIZE)
     payload[0:16] = connection_id
@@ -1640,11 +1649,18 @@ def encode_negentropy_plaintext(
     payload[64:80] = root_hash
     struct.pack_into("<I", payload, 80, total_events)
     payload[84:92] = parent_range_id
-    payload[92] = len(event_ids)
-    cursor = 93
-    for event_id in event_ids:
-        payload[cursor:cursor + 16] = event_id
-        cursor += 16
+    # Byte 92: bounds_flags (replaces event_count)
+    bounds_flags = 0
+    if lo_key is not None:
+        bounds_flags |= NEGENTROPY_BOUNDS_HAS_LO
+    if hi_key is not None:
+        bounds_flags |= NEGENTROPY_BOUNDS_HAS_HI
+    payload[92] = bounds_flags
+    # Bytes 93-101: lo_key, 101-109: hi_key
+    if lo_key is not None:
+        payload[93:101] = lo_key
+    if hi_key is not None:
+        payload[101:109] = hi_key
     return bytes(payload)
 
 
@@ -1668,14 +1684,14 @@ def decode_negentropy_plaintext(data: bytes) -> dict[str, Any]:
     root_hash = data[64:80]
     (total_events,) = struct.unpack_from("<I", data, 80)
     parent_range_id = data[84:92]
-    event_count = data[92]
-    if event_count > NEGENTROPY_EVENT_ID_MAX:
-        raise ValueError("negentropy event_count exceeds max")
-    event_ids: list[bytes] = []
-    cursor = 93
-    for _ in range(event_count):
-        event_ids.append(data[cursor:cursor + 16])
-        cursor += 16
+    # Byte 92: bounds_flags (replaces event_count)
+    bounds_flags = data[92]
+    lo_key: bytes | None = None
+    hi_key: bytes | None = None
+    if bounds_flags & NEGENTROPY_BOUNDS_HAS_LO:
+        lo_key = data[93:101]
+    if bounds_flags & NEGENTROPY_BOUNDS_HAS_HI:
+        hi_key = data[101:109]
     return {
         "connection_id": connection_id,
         "reply_connection_id": reply_connection_id,
@@ -1687,7 +1703,9 @@ def decode_negentropy_plaintext(data: bytes) -> dict[str, Any]:
         "root_hash": root_hash,
         "total_events": total_events,
         "parent_range_id": parent_range_id,
-        "event_ids": event_ids,
+        "event_ids": [],  # Legacy, always empty now
+        "lo_key": lo_key,
+        "hi_key": hi_key,
     }
 
 
@@ -4605,6 +4623,21 @@ def _decode_negentropy_hash(data: bytes) -> str | None:
     return data.hex()
 
 
+def _encode_negentropy_key(hex_value: str | None) -> bytes | None:
+    """Encode a unified key (16 hex chars = 8 bytes) for lo/hi bounds."""
+    if not hex_value:
+        return None
+    raw = bytes.fromhex(hex_value)
+    return _require_len("unified_key", raw, NEGENTROPY_KEY_SIZE)
+
+
+def _decode_negentropy_key(data: bytes | None) -> str | None:
+    """Decode a unified key from bytes."""
+    if data is None:
+        return None
+    return data.hex()
+
+
 def encode_negentropy_wire_event(
     *,
     connection_id_b64: str,
@@ -4635,6 +4668,8 @@ def encode_negentropy_wire_event(
         level_id = NEGENTROPY_LEVEL_PREFIX_8
     elif level_name == "prefix_10":
         level_id = NEGENTROPY_LEVEL_PREFIX_10
+    elif level_name == "adaptive":
+        level_id = NEGENTROPY_LEVEL_ADAPTIVE
     else:
         level_id = NEGENTROPY_LEVEL_ROOT
 
@@ -4650,10 +4685,9 @@ def encode_negentropy_wire_event(
     total_events = int(msg.get("total_events") or 0)
     parent_range_id = _encode_negentropy_range_id(msg.get("parent_range_id"))
 
-    event_ids: list[bytes] = []
-    if msg_type_id == NEGENTROPY_MSG_RANGE_EVENTS:
-        for event_id_b64 in msg.get("event_ids", []):
-            event_ids.append(_require_len("event_id", crypto.b64decode(event_id_b64), 16))
+    # Adaptive splitting bounds
+    lo_key = _encode_negentropy_key(msg.get("lo_key"))
+    hi_key = _encode_negentropy_key(msg.get("hi_key"))
 
     plaintext = encode_negentropy_plaintext(
         connection_id=crypto.b64decode(connection_id_b64),
@@ -4666,7 +4700,9 @@ def encode_negentropy_wire_event(
         root_hash=root_hash,
         total_events=total_events,
         parent_range_id=parent_range_id,
-        event_ids=event_ids,
+        event_ids=[],  # Legacy, unused
+        lo_key=lo_key,
+        hi_key=hi_key,
     )
     header = WireHeader(
         version=1,
@@ -4713,6 +4749,8 @@ def decode_negentropy_wire_event(data: bytes) -> dict[str, Any]:
         level_str = "prefix_8"
     elif level_value == NEGENTROPY_LEVEL_PREFIX_10:
         level_str = "prefix_10"
+    elif level_value == NEGENTROPY_LEVEL_ADAPTIVE:
+        level_str = "adaptive"
     else:
         raise ValueError("invalid negentropy level")
 
@@ -4725,6 +4763,13 @@ def decode_negentropy_wire_event(data: bytes) -> dict[str, Any]:
     prefix_str = _decode_negentropy_prefix(decoded["prefix_bytes"])
     if prefix_str:
         msg["prefix"] = prefix_str
+    # Adaptive splitting bounds
+    lo_key_str = _decode_negentropy_key(decoded.get("lo_key"))
+    hi_key_str = _decode_negentropy_key(decoded.get("hi_key"))
+    if lo_key_str:
+        msg["lo_key"] = lo_key_str
+    if hi_key_str:
+        msg["hi_key"] = hi_key_str
     if msg_type_str == "range_request":
         msg["level"] = level_str
         msg["prefix"] = prefix_str
