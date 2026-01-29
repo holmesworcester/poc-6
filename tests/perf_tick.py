@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from core import tick as tick_module
 
-TICK_INTERVAL_MS = 100  # Production interval
+TICK_INTERVAL_MS = 50  # Production interval (matches most granular job frequency)
 
 
 @dataclass
@@ -50,7 +50,7 @@ class PerfReport:
             f"Wall time:     {self.total_wall_time_sec:.2f}s",
             f"Sim time:      {self.total_sim_time_ms}ms ({self.total_sim_time_ms/1000:.1f}s)",
             f"Total ticks:   {self.total_ticks}",
-            f"Ticks > 100ms: {self.ticks_exceeded} ({100*self.ticks_exceeded/max(1,self.total_ticks):.1f}%)",
+            f"Ticks > {TICK_INTERVAL_MS}ms: {self.ticks_exceeded} ({100*self.ticks_exceeded/max(1,self.total_ticks):.1f}%)",
             f"Max tick time: {self.max_tick_time_ms:.1f}ms",
         ]
         if self.tick_times:
@@ -68,8 +68,8 @@ def run_realtime(
 ) -> tuple[int, PerfReport]:
     """Run ticks at wall-clock time until condition is met.
 
-    Each tick is followed by a sleep to maintain 100ms intervals. If a tick
-    takes longer than 100ms, no sleep occurs and the next tick starts
+    Each tick is followed by a sleep to maintain 50ms intervals. If a tick
+    takes longer than 50ms, no sleep occurs and the next tick starts
     immediately (backpressure).
 
     Args:
@@ -135,7 +135,7 @@ def run_ticks_timed(
         db: Database connection
         start_t_ms: Starting simulation time
         num_ticks: Number of ticks to run
-        realtime: If True, sleep between ticks to maintain 100ms intervals.
+        realtime: If True, sleep between ticks to maintain 50ms intervals.
                   If False, run as fast as possible (still measures time).
 
     Returns:

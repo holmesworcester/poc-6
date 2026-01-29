@@ -83,21 +83,21 @@ class TestRealNetworking:
 
         # Alice creates network
         alice.new_network(name='Alice', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # Alice creates invite
         invite_link = alice.create_invite(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # Out-of-band: Bob learns Alice's address
         bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
 
         # Bob creates peer and joins
         bob.create_peer(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # NOTE: Alice learns Bob's address from the connection request packet metadata
         # No need to pre-register it - this is the "no cheating" rule
@@ -122,17 +122,17 @@ class TestRealNetworking:
 
         # Setup network
         alice.new_network(name='Alice', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         invite_link = alice.create_invite(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
         bob.create_peer(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # First establish connection
         tick_all(alice, bob, t_ms=t_ms, rounds=50)
@@ -175,17 +175,17 @@ class TestRealNetworking:
 
         # Setup
         alice.new_network(name='Alice', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         invite_link = alice.create_invite(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
         bob.create_peer(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
 
         # Sync to establish connection
@@ -194,7 +194,7 @@ class TestRealNetworking:
 
         # Alice sends a message
         msg_id = alice.send_message(content="Hello Bob over UDP!", t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # Sync the message
         tick_all(alice, bob, t_ms=t_ms, rounds=50)
@@ -215,17 +215,17 @@ class TestRealNetworking:
 
         # Setup
         alice.new_network(name='Alice', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         invite_link = alice.create_invite(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
         bob.create_peer(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
 
         # Sync to establish connection and sync channel to Bob
@@ -234,7 +234,7 @@ class TestRealNetworking:
 
         # Alice sends message
         alice_msg_id = alice.send_message(content="Hello from Alice!", t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # Sync
         tick_all(alice, bob, t_ms=t_ms, rounds=30)
@@ -242,7 +242,7 @@ class TestRealNetworking:
 
         # Bob sends message (using Alice's channel which he synced)
         bob_msg_id = bob.send_message(content="Hello from Bob!", t_ms=t_ms, channel_id=alice.channel_id)
-        t_ms += 100
+        t_ms += 50
 
         # Sync more
         tick_all(alice, bob, t_ms=t_ms, rounds=30)
@@ -268,18 +268,18 @@ class TestThreePlayerNetworking:
 
         # Alice creates network
         alice.new_network(name='Alice', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         # Alice invites Bob
         invite_bob = alice.create_invite(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
         bob.create_peer(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         bob.join(invite_link=invite_bob, name='Bob', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
 
         # Sync Alice and Bob
@@ -288,19 +288,19 @@ class TestThreePlayerNetworking:
 
         # Alice invites Charlie (only admins can create invites)
         invite_charlie = alice.create_invite(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         charlie.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
         charlie.create_peer(t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
         charlie.join(invite_link=invite_charlie, name='Charlie', t_ms=t_ms)
-        t_ms += 100
+        t_ms += 50
 
 
         # Sync all three
         tick_all(alice, bob, charlie, t_ms=t_ms, rounds=100)
-        t_ms += 10000
+        t_ms += 5000
 
         # All should see all users
         alice_users = alice.get_users()

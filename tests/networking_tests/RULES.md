@@ -60,7 +60,7 @@ def test_real_networking_example(create_client):
         route_udp_packets([alice, bob])
         alice.tick(t_ms)
         bob.tick(t_ms)
-        t_ms += 100
+        t_ms += 50  # 50ms tick interval matches most granular job
 
     # 6. Assert using API calls
     alice_conns = connection.get_connections(alice.peer_id, t_ms, alice.db)

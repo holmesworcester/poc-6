@@ -166,21 +166,21 @@ class TestConnectionBasic:
 
             # Alice creates network
             alice.new_network(name='Alice', t_ms=t_ms)
-            t_ms += 100
+            t_ms += 50
 
             # Alice creates invite
             invite_link = alice.create_invite(t_ms=t_ms)
-            t_ms += 100
+            t_ms += 50
 
             # Bob learns Alice's address out-of-band
             bob.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
 
             # Bob creates peer and joins
             bob.create_peer(t_ms=t_ms)
-            t_ms += 100
+            t_ms += 50
 
             bob.join(invite_link=invite_link, name='Bob', t_ms=t_ms)
-            t_ms += 100
+            t_ms += 50
 
             # Alice learns Bob's address
             alice.add_peer_address(bob.peer_shared_id, '127.0.0.1', bob.udp_port)

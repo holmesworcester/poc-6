@@ -44,7 +44,7 @@ def test_non_admin_cannot_delete_message_via_sync(fresh_db):
     alice, bob, t_ms = _setup_alice_bob(db)
 
     # Alice sends a message
-    t_ms += 100
+    t_ms += 50
     msg = message.create(
         peer_id=alice["peer_id"],
         channel_id=alice["channel_id"],
@@ -102,7 +102,7 @@ def test_non_reactor_cannot_delete_reaction_via_sync(fresh_db):
     alice, bob, t_ms = _setup_alice_bob(db)
 
     # Alice sends a message
-    t_ms += 100
+    t_ms += 50
     msg = message.create(
         peer_id=alice["peer_id"],
         channel_id=alice["channel_id"],
@@ -169,7 +169,7 @@ def test_admin_cannot_delete_reaction_via_sync(fresh_db):
     alice, bob, t_ms = _setup_alice_bob(db)
 
     # Alice sends a message
-    t_ms += 100
+    t_ms += 50
     msg = message.create(
         peer_id=alice["peer_id"],
         channel_id=alice["channel_id"],

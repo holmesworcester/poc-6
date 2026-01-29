@@ -7,8 +7,20 @@ from typing import Any, Callable
 from core import tick as tick_module
 
 
+# Production job frequencies (from jobs.py):
+# - receive, sync_respond, sync_update: every 50ms (most granular)
+# - negentropy_sync: every 100ms
+# - SyncConnectSend: every 1000ms (1 second)
+# - Other jobs: slower (minutes/hours)
+
+# Test timing constants
+TICK_INTERVAL_MS = 50  # Match most granular job frequency (50ms) for proper job execution
+INITIAL_SYNC_ROUNDS = 30  # ~1.5 seconds - enough for initial connection + first sync
+MESSAGE_SYNC_ROUNDS = 40  # ~2 seconds - enough for message propagation
+CONVERGENCE_ROUNDS = 200  # ~10 seconds - for complete event convergence tests
+
 # Global test timeout - increase this if tests are timing out
-# 500 rounds = 50 seconds of simulated time at 100ms intervals
+# 500 rounds = 25 seconds of simulated time at 50ms intervals
 DEFAULT_MAX_ROUNDS = 500
 
 # Monotonic test clock to prevent backwards time across helpers
@@ -55,7 +67,7 @@ def assert_eventually(
     db: Any,
     start_t_ms: int | None = None,
     max_rounds: int = None,
-    interval_ms: int = 100,
+    interval_ms: int = None,  # Default: TICK_INTERVAL_MS (50ms)
     msg: str = None
 ) -> int:
     """Run ticks until check() passes or timeout.
@@ -70,7 +82,7 @@ def assert_eventually(
         db: Database connection
         start_t_ms: Starting timestamp (None = use monotonic test clock)
         max_rounds: Maximum ticks before giving up (default: DEFAULT_MAX_ROUNDS)
-        interval_ms: Time between ticks (default 100ms)
+        interval_ms: Time between ticks (default: TICK_INTERVAL_MS = 50ms)
         msg: Optional message for timeout failure
 
     Returns:
@@ -92,6 +104,8 @@ def assert_eventually(
     """
     if max_rounds is None:
         max_rounds = DEFAULT_MAX_ROUNDS
+    if interval_ms is None:
+        interval_ms = TICK_INTERVAL_MS
 
     last_error = None
 
@@ -128,18 +142,6 @@ def assert_eventually(
     return start_t_ms + max_rounds * interval_ms
 
 
-# Production job frequencies (from jobs.py):
-# - SyncReceive/SyncSend: every 100ms
-# - SyncConnectSend: every 1000ms (1 second)
-# - Other jobs: slower (minutes/hours)
-
-# Test timing constants
-TICK_INTERVAL_MS = 100  # Match sync job frequency for realistic timing
-INITIAL_SYNC_ROUNDS = 15  # ~1.5 seconds - enough for initial connection + first sync
-MESSAGE_SYNC_ROUNDS = 20  # ~2 seconds - enough for message propagation
-CONVERGENCE_ROUNDS = 100  # ~10 seconds - for complete event convergence tests
-
-
 def run_ticks(db: Any, start_t_ms: int | None, num_rounds: int, interval_ms: int = TICK_INTERVAL_MS) -> int:
     """Run multiple ticks with consistent timing.
 
@@ -147,7 +149,7 @@ def run_ticks(db: Any, start_t_ms: int | None, num_rounds: int, interval_ms: int
         db: Database connection
         start_t_ms: Starting timestamp in milliseconds (None = use monotonic test clock)
         num_rounds: Number of tick cycles to run
-        interval_ms: Time between ticks (default: 100ms to match sync jobs)
+        interval_ms: Time between ticks (default: 50ms to match most granular jobs)
 
     Returns:
         Final timestamp after all ticks
@@ -166,7 +168,7 @@ def initial_sync(db: Any, start_t_ms: int | None = None) -> int:
 
     Runs enough ticks for:
     - Connection announcement (1 second)
-    - Initial sync request/response (multiple 100ms cycles)
+    - Initial sync request/response (multiple 50ms cycles)
     - GKS event propagation
 
     Args:
@@ -202,7 +204,7 @@ def convergence_sync(db: Any, start_t_ms: int | None, max_rounds: int = CONVERGE
     Args:
         db: Database connection
         start_t_ms: Starting timestamp
-        max_rounds: Maximum rounds to run (default: 100 for ~10 seconds)
+        max_rounds: Maximum rounds to run (default: 200 for ~10 seconds)
 
     Returns:
         Final timestamp

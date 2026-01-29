@@ -105,10 +105,10 @@ def test_multiple_removals_no_key_explosion(fresh_db):
     for i in range(3):
         # Create invite and join
         _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-        t_ms += 100
+        t_ms += 50
         user_peer_id = peer.create(t_ms=t_ms, db=db)
         joined = user.join(peer_id=user_peer_id, invite_link=invite_link, name=f'User{i}', t_ms=t_ms, db=db)
-        t_ms += 100
+        t_ms += 50
         db.commit()
 
         # Wait for user to join

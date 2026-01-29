@@ -1188,13 +1188,13 @@ class TestHistoricalKeyAccess:
         for i in range(3):
             # User joins
             invite_id, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-            t_ms += 100
+            t_ms += 50
             temp_peer_id = peer.create(t_ms=t_ms, db=db)
             temp_user = user.join(peer_id=temp_peer_id, invite_link=invite_link, name=f'Temp{i}', t_ms=t_ms, db=db)
-            t_ms += 100
+            t_ms += 50
             db.commit()
             run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
-            t_ms += 1000
+            t_ms += 500
 
             # User removed (key rotates)
             user_removed.create(
@@ -1204,10 +1204,10 @@ class TestHistoricalKeyAccess:
                 t_ms=t_ms,
                 db=db
             )
-            t_ms += 100
+            t_ms += 50
             db.commit()
             run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
-            t_ms += 1000
+            t_ms += 500
 
         # Verify Alice now has multiple keys
         safedb = create_safe_db(db, recorded_by=alice['peer_id'])
@@ -1216,10 +1216,10 @@ class TestHistoricalKeyAccess:
 
         # Final user joins
         final_invite_id, final_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-        t_ms += 100
+        t_ms += 50
         final_peer_id = peer.create(t_ms=t_ms, db=db)
         final_user = user.join(peer_id=final_peer_id, invite_link=final_invite_link, name='FinalUser', t_ms=t_ms, db=db)
-        t_ms += 100
+        t_ms += 50
         db.commit()
 
         # CRITICAL: Final user must have ALL historical keys
@@ -1946,7 +1946,7 @@ class TestStateMachine:
         # Transition: Alice promotes Bob
         alice_grant = admin.my_grant(alice['user_id'], alice['network_id'], alice['peer_id'], db)
         alice_private_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
-        t_ms += 100
+        t_ms += 50
         admin.create(
             user_id=bob['user_id'],
             network_id=alice['network_id'],
@@ -1969,12 +1969,12 @@ class TestStateMachine:
         assert bob_grant is not None, "Bob should have admin_grant after sync"
 
         # Transition: Bob can now create invites
-        t_ms += 100
+        t_ms += 50
         invite_id2, invite_link2, _ = invite.create(peer_id=bob['peer_id'], t_ms=t_ms, db=db)
         assert invite_id2 is not None
 
         # Charlie joins via Bob's invite
-        t_ms += 100
+        t_ms += 50
         charlie_peer_id = peer.create(t_ms=t_ms, db=db)
         charlie = user.join(peer_id=charlie_peer_id, invite_link=invite_link2, name='Charlie', t_ms=t_ms, db=db)
         db.commit()

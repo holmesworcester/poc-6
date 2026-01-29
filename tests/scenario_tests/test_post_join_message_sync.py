@@ -63,7 +63,7 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
     )
 
     # Alice sends message with attachment #2
-    t_ms += 100
+    t_ms += 50
     msg2 = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
@@ -97,7 +97,7 @@ def test_post_join_message_sync_with_prior_attachments(fresh_db):
     t_ms = assert_eventually(bob_sees_2_messages, db=db, start_t_ms=t_ms + 200)
 
     # Alice sends 3rd message (plain text, no attachment)
-    t_ms += 100
+    t_ms += 50
     message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
@@ -144,7 +144,7 @@ def test_post_join_plain_message_sync(fresh_db):
     t_ms = run_ticks(db, 3000, 15)
 
     # Alice sends a message AFTER Bob has joined
-    t_ms += 100
+    t_ms += 50
     message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],

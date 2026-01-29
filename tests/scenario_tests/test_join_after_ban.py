@@ -289,12 +289,12 @@ def test_rapid_join_ban_join_cycle(fresh_db):
     for i in range(3):
         # Create invite
         _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-        t_ms += 100
+        t_ms += 50
 
         # User joins
         user_peer_id = peer.create(t_ms=t_ms, db=db)
         joined_user = user.join(peer_id=user_peer_id, invite_link=invite_link, name=f'User{i}', t_ms=t_ms, db=db)
-        t_ms += 100
+        t_ms += 50
         db.commit()
 
         # Wait for user to join
@@ -327,7 +327,7 @@ def test_rapid_join_ban_join_cycle(fresh_db):
 
     # Now final user joins
     _, final_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-    t_ms += 100
+    t_ms += 50
 
     final_peer_id = peer.create(t_ms=t_ms, db=db)
     final_user = user.join(peer_id=final_peer_id, invite_link=final_invite_link, name='FinalUser', t_ms=t_ms, db=db)
