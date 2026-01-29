@@ -1,37 +1,44 @@
 """
-Negentropy-style deterministic sync protocol - HASH-ONLY BUCKETS variant.
+Negentropy-style deterministic sync protocol - TIME+HASH BUCKETS variant.
 
-This variant uses pure hash-based bucketing - the unified key is derived
-entirely from the event_id (hash bytes), with no timestamp dependency. This ensures
-that all peers compute identical keys for the same events, enabling
-accurate root hash comparison for sync detection.
+This variant uses time-prefixed bucketing: the unified key starts with
+created_at bits, followed by event_id hash bits. This gives temporal
+locality - old time ranges fossilize and stop changing, while recent
+events cluster in "hot" buckets.
 
 Design goals:
 - Deterministic: no false positives, exact set reconciliation
 - Finality: clear "done" state when synced (root hashes match)
 - UI-inspectable: track state per connection for visibility
 - Connection-scoped: ranges tracked by connection_id
-- Peer-consistent: same event_id always produces same unified_key
+- Temporal locality: old time ranges stabilize, recent ranges are active
 
-Bucket hierarchy (by hash prefix):
+Bucket hierarchy (by time prefix):
 - root: all events
-- prefix_2: first 2 hex chars (256 buckets)
-- prefix_4: first 4 hex chars (65536 buckets)
-- prefix_6 through prefix_6: progressively finer hash buckets
+- prefix_2: ~200 day buckets (coarse time ranges)
+- prefix_4: ~18 hour buckets (medium time ranges)
+- prefix_6: ~4 minute buckets (fine time ranges)
 
-The unified key is: event_id_bytes[:8] as 16 hex chars
-This provides uniform distribution across all bucket levels.
+The unified key is: time_hex (6 chars) + event_hash (10 chars) = 16 hex chars
+- time_hex: (created_at_ms >> 18) & 0xFFFFFF as 6 hex chars (~4.4 min units)
+- event_hash: first 5 bytes of event_id as 10 hex chars
 
-Trade-offs vs time-based bucketing:
-- Loses temporal locality (can't efficiently sync "just recent events")
-- Gains peer consistency (same event = same bucket on all peers)
-- Better for encrypted events where created_at is unavailable
+Time granularity (created_at_ms >> 18 = ~4.4 minute units):
+- prefix_2: 2^16 * 4.4 min ≈ 200 days per bucket
+- prefix_4: 2^8 * 4.4 min ≈ 18 hours per bucket
+- prefix_6: 4.4 minutes per bucket
+
+Benefits over hash-only bucketing:
+- Old time ranges fossilize (no new events land in old buckets)
+- Recent events cluster together (efficient "catch up" sync)
+- File slices with same created_at stay in same bucket (sync atomically)
+- "Send all at leaf" is efficient since bucket contains mostly needed events
 
 Protocol flow:
 1. On new connection: send root hash
 2. Receive their hash, compare ranges
-3. For mismatched ranges: drill down by hash prefix until bucket has ≤EVENTS_THRESHOLD events
-4. At threshold: send actual event IDs
+3. For mismatched ranges: drill down by time prefix until bucket has ≤EVENTS_THRESHOLD events
+4. At threshold: send actual event IDs (and blobs)
 5. When root hashes match: sync complete for this connection
 """
 
@@ -261,29 +268,44 @@ class EventsMessage:
 # ============================================================================
 
 def compute_unified_key(event_id: str, created_at: int = 0) -> str:
-    """Compute the unified hash key for an event.
+    """Compute the unified time+hash key for an event.
 
-    The unified key is derived from the event_id hash bytes.
-    This avoids re-hashing event_ids and remains peer-consistent.
+    The unified key combines created_at (time) with event_id (hash):
+    - High bits: (created_at_ms >> 18) as 6 hex chars (24 bits, ~4.4 min granularity)
+    - Low bits: event_id hash as 10 hex chars (40 bits for uniqueness)
+
+    This gives time-based bucketing where old time ranges stabilize.
+    File slices with the same created_at cluster in the same time bucket.
 
     Args:
         event_id: The event identifier
-        created_at: Ignored (kept for API compatibility during transition)
+        created_at: Event creation timestamp in milliseconds
 
     Returns:
-        16 character hex string (64 bits of hash)
+        16 character hex string (time_hex + hash_hex)
     """
-    # Use the event_id hash bytes directly when possible
-    try:
-        raw = crypto.b64decode(event_id)
-        if len(raw) >= 8:
-            return raw[:8].hex()
-    except Exception:
-        pass
+    # Time component: >> 18 gives ~4.4 minute granularity per unit
+    # 24 bits covers ~130 years of 4.4 minute buckets
+    time_shifted = (created_at >> 18) & 0xFFFFFF  # 24 bits
+    time_hex = f"{time_shifted:06x}"  # 6 hex chars
 
-    # Fallback for non-standard test IDs
-    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
-    return h.hex()  # 16 hex chars
+    # Hash component from event_id for uniqueness within same timestamp
+    # Real event IDs are 16-byte hashes base64-encoded (22+ chars)
+    # Use those bytes directly; for shorter test IDs, use BLAKE2b
+    hash_hex = None
+    if len(event_id) >= 22:  # Min length for 16-byte base64
+        try:
+            raw = crypto.b64decode(event_id)
+            if len(raw) >= 5:
+                hash_hex = raw[:5].hex()  # 5 bytes = 10 hex chars
+        except Exception:
+            pass
+
+    if hash_hex is None:
+        h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=5).digest()
+        hash_hex = h.hex()
+
+    return time_hex + hash_hex  # 16 hex chars total
 
 
 def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
@@ -1119,23 +1141,21 @@ def handle_range_request(
             """, (t_ms, recorded_by, connection_id, range_id))
 
             event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
-            if len(event_ids) > max_events:
-                log.warning(
-                    f"negentropy: truncating {len(event_ids)} event_ids to {max_events} for wire payload"
-                )
-                event_ids = event_ids[:max_events]
 
-            # Send actual event blobs - they'll dedupe on their side
+            # Send ALL event blobs - they'll dedupe on their side
             if event_ids:
                 sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-                log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events in bucket)")
+                log.info(f"negentropy: sent {sent} event blobs at {level} level ({len(event_ids)} events in bucket)")
+
+            # Truncate event_ids for wire message only (payload size limit)
+            wire_event_ids = event_ids[:max_events] if len(event_ids) > max_events else event_ids
 
             # Also send the event IDs so they know what we have (for bidirectional sync)
             responses.append({
                 'type': 'range_events',
                 'range_id': range_id,
                 'prefix': prefix,
-                'event_ids': event_ids,
+                'event_ids': wire_event_ids,
                 'our_hash': our_hash.hex() if our_hash else '',
                 'root_hash': root_hash.hex() if root_hash else '',
                 'total_events': total_events,
@@ -1266,18 +1286,24 @@ def _send_event_blobs(
     """
     from events.network import connection_request as conn_module
 
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    sent = 0
+    if not event_ids:
+        return 0
 
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Fetch all blobs first
+    blobs = []
     for event_id in event_ids:
         try:
             event_blob = safedb.get_shareable_blob(event_id)
-            if conn_module.send(recorded_by, connection_id, event_blob, t_ms, db):
-                sent += 1
-                log.debug(f"negentropy: sent blob for {event_id[:20]}...")
+            if event_blob:
+                blobs.append(event_blob)
         except Exception as e:
-            log.warning(f"negentropy: failed to send blob for {event_id[:20]}...: {e}")
+            log.warning(f"negentropy: failed to get blob for {event_id[:20]}...: {e}")
 
+    # Send all blobs in batch (single connection lookup)
+    sent = conn_module.send_batch(recorded_by, connection_id, blobs, t_ms, db)
+    log.debug(f"negentropy: sent {sent} blobs")
     return sent
 
 
@@ -1676,24 +1702,34 @@ def get_global_sync_status(db, t_ms: int) -> dict:
 # ============================================================================
 
 def decode_unified_key(unified_key: str) -> tuple[int, str]:
-    """Decode a unified key (hash-only variant).
+    """Decode a unified key into its time and hash components.
 
-    In the hash-only variant, the unified key is purely derived from event_id.
-    This function returns (0, full_hash) for compatibility with code that
-    expects a (timestamp, hash) tuple.
+    The unified key format is: time_hex (6 chars) + hash_hex (10 chars)
+    Time is encoded as (created_at_ms >> 18).
 
     Args:
         unified_key: 16 character hex string
 
     Returns:
-        Tuple of (0, full_hash_hex) - timestamp is always 0 in hash-only mode
+        Tuple of (approx_timestamp_ms, hash_hex)
     """
-    return 0, unified_key
+    time_hex = unified_key[:6]
+    hash_hex = unified_key[6:]
+    # Recover approximate timestamp (loses low 18 bits)
+    time_shifted = int(time_hex, 16)
+    approx_timestamp_ms = time_shifted << 18
+    return approx_timestamp_ms, hash_hex
 
 
 def format_unified_key_human(unified_key: str) -> str:
     """Format a unified key for human-readable display.
 
-    In hash-only mode, just shows the hash prefix since there's no timestamp.
+    Shows the approximate time and hash prefix.
     """
-    return f"hash:{unified_key[:8]}..."
+    approx_ts, hash_hex = decode_unified_key(unified_key)
+    if approx_ts > 0:
+        dt = datetime.fromtimestamp(approx_ts / 1000, tz=timezone.utc)
+        time_str = dt.strftime("%Y-%m-%d %H:%M")
+    else:
+        time_str = "epoch"
+    return f"t:{time_str} h:{hash_hex[:6]}..."

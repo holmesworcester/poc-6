@@ -1,6 +1,6 @@
 """Tests for negentropy-style deterministic sync protocol.
 
-Tests the hash-only prefix-based bucketing system.
+Tests the time+hash prefix-based bucketing system.
 """
 import pytest
 import sqlite3
@@ -19,41 +19,51 @@ def db():
 
 
 class TestUnifiedKey:
-    """Test unified key computation (hash-only variant)."""
+    """Test unified key computation (time+hash variant)."""
 
     def test_unified_key_format(self):
         """Unified key is 16 hex chars (64 bits)."""
         event_id = 'test_event_abc123'
-        key = negentropy.compute_unified_key(event_id)
+        key = negentropy.compute_unified_key(event_id, 1718451045000)
         assert len(key) == 16
         assert all(c in '0123456789abcdef' for c in key)
 
-    def test_unified_key_ignores_timestamp(self):
-        """Timestamp is ignored - same event_id always produces same key."""
+    def test_unified_key_uses_timestamp(self):
+        """Different timestamps produce different keys (time prefix differs)."""
         event_id = 'test_event'
-        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # With timestamp
-        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Different timestamp
-        key3 = negentropy.compute_unified_key(event_id)  # No timestamp
-        assert key1 == key2 == key3  # All same because only event_id matters
+        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # ~2001
+        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # ~2033
+        # Keys should differ because time component differs
+        assert key1 != key2
+        # But hash suffix should be the same (same event_id)
+        assert key1[6:] == key2[6:]  # Last 10 chars are hash
 
     def test_unified_key_deterministic(self):
-        """Same event_id produces same key."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt1')
+        """Same event_id and timestamp produces same key."""
+        ts = 1718451045000
+        key1 = negentropy.compute_unified_key('evt1', ts)
+        key2 = negentropy.compute_unified_key('evt1', ts)
         assert key1 == key2
 
     def test_unified_key_different_events(self):
         """Different events produce different keys."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt2')
+        ts = 1718451045000
+        key1 = negentropy.compute_unified_key('evt1', ts)
+        key2 = negentropy.compute_unified_key('evt2', ts)
+        # Time prefix is the same, but hash suffix differs
+        assert key1[:6] == key2[:6]  # Same time prefix
+        assert key1[6:] != key2[6:]  # Different hash suffix
         assert key1 != key2
 
     def test_decode_unified_key(self):
-        """Decode returns (0, full_hash) in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
+        """Decode extracts approximate timestamp and hash suffix."""
+        ts_ms = 1718451045000  # June 2024
+        key = negentropy.compute_unified_key('evt1', ts_ms)
         decoded_ts, hash_hex = negentropy.decode_unified_key(key)
-        assert decoded_ts == 0  # No timestamp in hash-only mode
-        assert hash_hex == key  # Full hash returned
+        # Timestamp loses low 18 bits (~4.4 min resolution)
+        # So decoded should be within ~5 minutes of original
+        assert abs(decoded_ts - ts_ms) < 5 * 60 * 1000  # Within 5 minutes
+        assert len(hash_hex) == 10  # Hash is last 10 chars
 
 
 class TestPrefixLevels:
@@ -93,11 +103,13 @@ class TestFormatHuman:
     """Test human-readable unified key formatting."""
 
     def test_format_unified_key_human(self):
-        """Format shows hash prefix in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
+        """Format shows time and hash prefix."""
+        ts_ms = 1718451045000  # June 2024
+        key = negentropy.compute_unified_key('evt1', ts_ms)
         formatted = negentropy.format_unified_key_human(key)
-        assert 'hash:' in formatted
-        assert key[:8] in formatted  # Shows hash prefix
+        assert 't:' in formatted  # Shows time
+        assert 'h:' in formatted  # Shows hash
+        assert '2024' in formatted  # Year should be present
 
 
 class TestXORFingerprinting:

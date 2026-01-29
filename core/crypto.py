@@ -625,13 +625,15 @@ def unwrap(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None
                          namespace_name="both")
 
 
-def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
-    """Deterministically wrap plaintext bytes with key. Same plaintext + key → same blob.
+def wrap(plaintext_bytes: bytes, key_data: Any, db: Any, random_nonce: bool = False) -> bytes:
+    """Wrap plaintext bytes with key.
 
     Args:
         plaintext_bytes: Raw bytes to encrypt (caller must canonicalize JSON if needed)
         key_data: Key dict with 'id', 'type', and 'key' or 'public_key'
         db: Database connection
+        random_nonce: If True, use random nonce (faster, for transit).
+                      If False (default), use deterministic nonce (for content-addressing).
 
     Returns:
         Encrypted blob: id + encrypted_data (nonce + ciphertext for symmetric)
@@ -640,6 +642,7 @@ def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
     For double-wrapping, simply call wrap() again on the output bytes.
     """
     import logging
+    import os
     log = logging.getLogger(__name__)
 
     # Get the key id from key_data
@@ -654,8 +657,11 @@ def wrap(plaintext_bytes: bytes, key_data: Any, db: Any) -> bytes:
     log.debug(f"crypto.wrap() called: key_id={key_id_b64}, key_type={key_type}, plaintext_size={len(plaintext_bytes)}B")
 
     if key_type == 'symmetric':
-        # Symmetric encryption with deterministic nonce
-        nonce = deterministic_nonce(id_bytes, plaintext_bytes)
+        # Use random nonce for transit (faster) or deterministic for content-addressing
+        if random_nonce:
+            nonce = os.urandom(NONCE_SIZE)
+        else:
+            nonce = deterministic_nonce(id_bytes, plaintext_bytes)
         ciphertext = encrypt(plaintext_bytes, key_data['key'], nonce)
         encrypted_data = nonce + ciphertext
         log.debug(f"crypto.wrap() symmetric encrypt SUCCESS, encrypted_size={len(encrypted_data)}B")

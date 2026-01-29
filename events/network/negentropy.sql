@@ -1,13 +1,14 @@
--- Negentropy-style UNIFIED TIME+HASH sync protocol
+-- Negentropy-style TIME+HASH sync protocol
 --
 -- Deterministic sync with finality, designed for UI inspection.
--- Uses a unified key: timestamp || event_hash for bucketing.
+-- Uses a unified key: time_prefix || event_hash for bucketing.
 --
 -- Key design:
 -- - Tracks sync state per connection (not per peer)
 -- - Range requests narrow down by unified key prefix
--- - Unified key = timestamp_hex (12 chars) + event_hash (4 chars)
--- - Events cluster by time but spread uniformly within same timestamp
+-- - Unified key = time_hex (6 chars) + event_hash (10 chars)
+-- - Time encoding: (created_at_ms >> 18) gives ~4.4 minute granularity
+-- - Events cluster by time, old time ranges fossilize
 -- - Finality: when ranges match, sync is complete
 -- - Buckets identified by prefix of unified key
 
@@ -38,11 +39,12 @@ ON negentropy_buckets(recorded_by, level, prefix);
 -- Maps events to their unified key for hash computation.
 -- This is the source of truth for what we're syncing.
 --
--- unified_key format: timestamp_hex (12 chars, 48 bits ms) + event_hash (4 chars, 16 bits)
--- Example: "01932a4b5c6d" + "a1b2" = "01932a4b5c6da1b2"
+-- unified_key format: time_hex (6 chars, 24 bits) + event_hash (10 chars, 40 bits)
+-- Time encoding: (created_at_ms >> 18) & 0xFFFFFF (~4.4 minute granularity)
+-- Example: "1a2b3c" + "d4e5f6a7b8" = "1a2b3cd4e5f6a7b8"
 --
 -- This key naturally clusters events by time (high-order bits) while
--- spreading events with same timestamp uniformly (low-order bits).
+-- providing uniqueness via hash (low-order bits). Old time ranges fossilize.
 
 CREATE TABLE IF NOT EXISTS negentropy_events (
     recorded_by TEXT NOT NULL,

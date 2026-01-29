@@ -230,7 +230,7 @@ def send_ack_for_request(
         'type': 'symmetric'
     }
 
-    wrapped = crypto.wrap(ack_blob, to_key, db)
+    wrapped = crypto.wrap(ack_blob, to_key, db, random_nonce=True)
 
     from core import transport
     from events.network.connection_request import get_address_for_peer
