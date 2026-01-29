@@ -2,9 +2,9 @@
 -- Tracks who requested what and whether we've responded
 CREATE TABLE IF NOT EXISTS key_requests (
     request_id TEXT NOT NULL,
-    requested_secret_id TEXT NOT NULL,
-    removal_epoch_id TEXT,  -- The epoch context of the request
-    requester_peer_id TEXT NOT NULL,  -- Who is asking
+    requested_key_id TEXT NOT NULL,       -- The key being requested
+    requester_pubkey_id TEXT NOT NULL,    -- Requester's pubkey for response encryption
+    requester_peer_id TEXT NOT NULL,      -- Who is asking (signed_by)
     created_at INTEGER NOT NULL,
     recorded_at INTEGER NOT NULL,
     fulfilled INTEGER NOT NULL DEFAULT 0,  -- 1 if we've responded
@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS key_requests (
     PRIMARY KEY (request_id, recorded_by)
 );
 
-CREATE INDEX IF NOT EXISTS idx_key_requests_by_secret
-ON key_requests(requested_secret_id, recorded_by);
+CREATE INDEX IF NOT EXISTS idx_key_requests_by_key
+ON key_requests(requested_key_id, recorded_by);
 
 CREATE INDEX IF NOT EXISTS idx_key_requests_unfulfilled
 ON key_requests(recorded_by, fulfilled) WHERE fulfilled = 0;

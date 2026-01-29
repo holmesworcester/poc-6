@@ -45,12 +45,12 @@ def project_pure(ctx: Any) -> ProjectorResult:
     """
     event_data = ctx.event_data
 
-    requested_secret_id = event_data.get('requested_secret_id')
-    removal_epoch_id = event_data.get('removal_epoch_id')  # Can be None
+    requested_key_id = event_data.get('requested_key_id')
+    requester_pubkey_id = event_data.get('requester_pubkey_id')
     signed_by = event_data.get('signed_by')
     created_at = event_data.get('created_at')
 
-    if not requested_secret_id or not signed_by or created_at is None:
+    if not requested_key_id or not requester_pubkey_id or not signed_by or created_at is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     writes = (
@@ -59,8 +59,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
             table='key_requests',
             values={
                 'request_id': ctx.event_id,
-                'requested_secret_id': requested_secret_id,
-                'removal_epoch_id': removal_epoch_id,
+                'requested_key_id': requested_key_id,
+                'requester_pubkey_id': requester_pubkey_id,
                 'requester_peer_id': signed_by,
                 'created_at': created_at,
                 'recorded_at': ctx.recorded_at,
@@ -75,8 +75,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
             command_type='check_key_request_fulfillment',
             args={
                 'request_id': ctx.event_id,
-                'requested_secret_id': requested_secret_id,
-                'removal_epoch_id': removal_epoch_id,
+                'requested_key_id': requested_key_id,
+                'requester_pubkey_id': requester_pubkey_id,
                 'requester_peer_id': signed_by,
             },
         ),
@@ -151,32 +151,31 @@ def fulfill_request(request_id: str, peer_id: str, t_ms: int, db: Any) -> str | 
         log.info(f"key_request.fulfill_request() already fulfilled: {request_id}")
         return None
 
-    requested_secret_id = request['requested_secret_id']
-    removal_epoch_id = request['removal_epoch_id']
+    requested_key_id = request['requested_key_id']
+    requester_pubkey_id = request['requester_pubkey_id']
     requester_peer_id = request['requester_peer_id']
 
     # Check if we have the secret
     from events.group import secret
-    key_bytes = secret.get_key_bytes(requested_secret_id, peer_id, db)
+    key_bytes = secret.get_key_bytes(requested_key_id, peer_id, db)
     if not key_bytes:
-        log.info(f"key_request.fulfill_request() we don't have secret: {requested_secret_id}")
+        log.info(f"key_request.fulfill_request() we don't have secret: {requested_key_id}")
         return None
 
-    # Check if the requester is still valid (not removed)
-    if removal_epoch_id:
-        from events.identity import removal_epoch
-        if removal_epoch.is_removed(requester_peer_id, removal_epoch_id, peer_id, db):
-            log.warning(f"key_request.fulfill_request() requester was removed: {requester_peer_id}")
-            return None
+    # Get requester's pubkey for wrapping
+    from events.group import pubkey
+    recipient_pubkey = pubkey.get_pubkey_by_id(requester_pubkey_id, peer_id, db)
+    if not recipient_pubkey:
+        log.warning(f"key_request.fulfill_request() requester pubkey not found: {requester_pubkey_id}")
+        return None
 
     # Create secret_shared event for the requester
     from events.group import secret_shared
     try:
         secret_shared_id = secret_shared.create(
-            secret_id=requested_secret_id,
+            secret_id=requested_key_id,
             peer_id=peer_id,
-            recipient_peer_id=requester_peer_id,
-            removal_epoch_id=removal_epoch_id,
+            recipient_pubkey_id=requester_pubkey_id,
             t_ms=t_ms,
             db=db
         )

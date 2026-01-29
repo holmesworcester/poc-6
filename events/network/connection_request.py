@@ -1377,3 +1377,75 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
 
 # Register the command handler at module load time
 register_command_handler('send_connection_ack', _handle_send_connection_ack)
+
+
+# ============================================================================
+# Online/Offline API for simulating network partitions
+# ============================================================================
+
+# Module-level state for tracking offline peers
+_offline_peers: set[str] = set()
+
+
+def set_all_online() -> None:
+    """Reset all peers to online state.
+
+    Called at the start of tests to ensure clean state.
+    """
+    global _offline_peers
+    _offline_peers.clear()
+
+
+def go_offline(peer_id: str) -> None:
+    """Mark a peer as offline.
+
+    Offline peers won't receive or send sync messages.
+
+    Args:
+        peer_id: The peer ID to mark offline
+    """
+    _offline_peers.add(peer_id)
+    log.debug(f"connection_request.go_offline: peer {peer_id[:20]}... is now offline")
+
+
+def go_online(peer_id: str) -> None:
+    """Mark a peer as online.
+
+    Args:
+        peer_id: The peer ID to mark online
+    """
+    _offline_peers.discard(peer_id)
+    log.debug(f"connection_request.go_online: peer {peer_id[:20]}... is now online")
+
+
+def is_offline(peer_id: str) -> bool:
+    """Check if a peer is offline.
+
+    Args:
+        peer_id: The peer ID to check
+
+    Returns:
+        True if the peer is offline
+    """
+    return peer_id in _offline_peers
+
+
+def is_online(peer_id: str) -> bool:
+    """Check if a peer is online.
+
+    Args:
+        peer_id: The peer ID to check
+
+    Returns:
+        True if the peer is online
+    """
+    return peer_id not in _offline_peers
+
+
+def get_offline_peers() -> set[str]:
+    """Get the set of offline peer IDs.
+
+    Returns:
+        Copy of the set of offline peer IDs
+    """
+    return _offline_peers.copy()

@@ -5559,7 +5559,12 @@ def _encrypt_treekem_secret_shared_payload(plaintext: bytes, recipient_pubkey: d
 
 def _decrypt_treekem_secret_shared_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
     """Decrypt treekem_secret_shared payload."""
-    encrypted = payload[16:]
+    # Plaintext is 81 bytes (16+32+16+16+1)
+    # Sealed format: ephemeral_public (32) + nonce (24) + ciphertext (81) + MAC (16) = 153 bytes
+    PLAINTEXT_SIZE = 81
+    SEALED_OVERHEAD = 32 + 24 + 16  # ephemeral key + nonce + MAC
+    SEALED_SIZE = PLAINTEXT_SIZE + SEALED_OVERHEAD  # 153 bytes
+    encrypted = payload[16:16 + SEALED_SIZE]
     private_key = key_data["private_key"]
     return crypto.unseal(encrypted, private_key)
 
