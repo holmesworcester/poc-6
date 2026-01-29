@@ -175,11 +175,16 @@ def test_admin_cannot_delete_reaction_via_sync(fresh_db):
     )
     db.commit()
 
-    # Simulate sync so Bob can see the message
-    t_ms += 50
-    bob_msg_recorded_id = recorded.create(msg["id"], bob["peer_id"], t_ms, db, return_dupes=False)
-    recorded.project(bob_msg_recorded_id, db)
-    db.commit()
+    # Wait for Bob to receive the message via sync
+    def bob_sees_message():
+        safedb_bob = create_safe_db(db, recorded_by=bob["peer_id"])
+        row = safedb_bob.query_one(
+            "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (msg["id"], bob["peer_id"]),
+        )
+        assert row is not None
+
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
 
     # Bob reacts to Alice's message
     t_ms += 50
@@ -192,14 +197,19 @@ def test_admin_cannot_delete_reaction_via_sync(fresh_db):
     )
     db.commit()
 
-    # Simulate sync so Alice can see Bob's reaction
-    t_ms += 10
-    alice_reaction_recorded_id = recorded.create(reaction_id, alice["peer_id"], t_ms, db, return_dupes=False)
-    recorded.project(alice_reaction_recorded_id, db)
-    db.commit()
+    # Wait for Alice to see Bob's reaction via sync
+    safedb_alice = create_safe_db(db, recorded_by=alice["peer_id"])
+
+    def alice_sees_reaction():
+        row = safedb_alice.query_one(
+            "SELECT 1 FROM message_reactions WHERE reaction_id = ? AND recorded_by = ?",
+            (reaction_id, alice["peer_id"]),
+        )
+        assert row is not None
+
+    t_ms = assert_eventually(alice_sees_reaction, db=db, start_t_ms=t_ms)
 
     # Resolve group_id for the message channel
-    safedb_alice = create_safe_db(db, recorded_by=alice["peer_id"])
     channel_row = safedb_alice.query_one(
         "SELECT group_id FROM channels WHERE channel_id = ? AND recorded_by = ?",
         (alice["channel_id"], alice["peer_id"]),

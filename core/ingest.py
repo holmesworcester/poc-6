@@ -7,6 +7,7 @@ import logging
 
 from core import crypto
 from core import wire_format
+from core import transport
 from events import registry
 from core.db import create_safe_db
 
@@ -57,6 +58,48 @@ def _unwrap_transit_with_key(blob: bytes, key_data: dict[str, Any]) -> bytes | N
     except Exception:
         return None
     return None
+
+
+def _send_transport_ack(db: Any, key_id: str, ack_count: int, t_ms: int) -> bool:
+    """Send a transport ACK to a connection.
+
+    Args:
+        db: Database connection
+        key_id: Connection key_id to send ACK on
+        ack_count: Number of blobs being acknowledged
+        t_ms: Current timestamp
+
+    Returns:
+        True if sent successfully
+    """
+    if ack_count <= 0:
+        return False
+
+    # Get recorded_by for this connection
+    row = db._conn.execute(
+        "SELECT recorded_by FROM connections WHERE key_id = ?",
+        (key_id,),
+    ).fetchone()
+
+    if not row:
+        log.debug(f"_send_transport_ack: connection {key_id[:16]}... not found")
+        return False
+
+    recorded_by = row[0]
+
+    # Encode the transport_ack event
+    ack_blob = wire_format.encode_transport_ack_wire_event(
+        ack_count=ack_count,
+        created_at_ms=t_ms,
+    )
+
+    # Use connection_request.send which handles all the address resolution
+    from events.network import connection_request
+    result = connection_request.send(recorded_by, key_id, ack_blob, t_ms, db)
+
+    if result:
+        log.debug(f"_send_transport_ack: sent ack_count={ack_count} to {key_id[:16]}...")
+    return result
 
 
 def queue_incoming(
@@ -127,6 +170,9 @@ def queue_incoming(
             }
             key_map.setdefault(peer_id, []).append((peer_id, key_data))
 
+        # Track receipts per flow_key (connection key_id) for ACKs
+        ack_pending: dict[str, int] = {}  # flow_key -> ack_count
+
         for blob, from_addr, _key_id_bytes, key_id_b64 in entries:
             candidates = key_map.get(key_id_b64, [])
             if not candidates:
@@ -136,12 +182,31 @@ def queue_incoming(
                 event_blob = _unwrap_transit_with_key(blob, key_data)
                 if not event_blob:
                     continue
+
+                # Handle transport_ack immediately - don't queue
+                if wire_format.is_wire_transport_ack_envelope(event_blob):
+                    try:
+                        ack_data = wire_format.decode_transport_ack_wire_event(event_blob)
+                        transport.flow_on_ack(key_id_b64, ack_data.get("ack_count", 0))
+                    except Exception as e:
+                        log.warning(f"ingest: failed to decode transport_ack: {e}")
+                    continue  # Don't add to rows
+
+                # Track receipt for flow control ACKs
+                ack_count = transport.flow_on_receive(key_id_b64, t_ms)
+                if ack_count > 0:
+                    ack_pending[key_id_b64] = ack_pending.get(key_id_b64, 0) + ack_count
+
                 hint = (
                     b""
                     if event_blob[:1] in (b"{", b"[")
                     else event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b""
                 )
                 rows.append((hint, recorded_by, t_ms, source_ip, source_port, None, event_blob, 0))
+
+        # Send ACKs for flows that reached threshold
+        for flow_key, ack_count in ack_pending.items():
+            _send_transport_ack(db, flow_key, ack_count, t_ms)
 
     if not rows:
         return 0

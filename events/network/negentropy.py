@@ -156,97 +156,6 @@ LEVEL_PREFIX_LEN = {
 EVENTS_THRESHOLD = 50
 
 
-# ============================================================================
-# Congestion Control State
-# ============================================================================
-# Per-connection adaptive windowing based on RTT measurement.
-# See docs/quiet-protocol-specification.md "Congestion control" section.
-
-@dataclass
-class CCState:
-    """Congestion control state for a single connection."""
-    window: int = 1              # Max in-flight range operations
-    in_flight: int = 0           # Currently awaiting response
-    rtt_ms: float = 200.0        # RTT estimate (exponential moving average)
-    last_send_ms: int = 0        # Time of oldest in-flight request
-
-
-# Constants for congestion control
-CC_MIN_WINDOW = 1
-CC_MAX_WINDOW = 32
-CC_RTT_ALPHA = 0.2               # EMA smoothing factor
-CC_TIMEOUT_MULTIPLIER = 3        # Timeout = 3 * RTT
-
-
-# Module-level CC state per connection
-# Key: (recorded_by, connection_id) tuple
-_cc_state: dict[tuple[str, str], CCState] = {}
-
-
-def _get_cc_state(recorded_by: str, connection_id: str) -> CCState:
-    """Get or create CC state for a connection."""
-    key = (recorded_by, connection_id)
-    if key not in _cc_state:
-        _cc_state[key] = CCState()
-    return _cc_state[key]
-
-
-def _cc_can_send(recorded_by: str, connection_id: str) -> bool:
-    """Check if congestion control allows sending more requests."""
-    state = _get_cc_state(recorded_by, connection_id)
-    return state.in_flight < state.window
-
-
-def _cc_on_send(recorded_by: str, connection_id: str, t_ms: int) -> None:
-    """Record that we sent a range request."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight == 0:
-        state.last_send_ms = t_ms
-    state.in_flight += 1
-
-
-def _cc_on_response(recorded_by: str, connection_id: str, t_ms: int) -> None:
-    """Record that we received a response (range_matched or range_response)."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0:
-        state.in_flight -= 1
-
-    if state.in_flight == 0 and state.last_send_ms > 0:
-        # All requests answered - measure RTT and grow window
-        rtt_sample = t_ms - state.last_send_ms
-        if rtt_sample > 0:
-            state.rtt_ms = (1 - CC_RTT_ALPHA) * state.rtt_ms + CC_RTT_ALPHA * rtt_sample
-        state.window = min(state.window + 1, CC_MAX_WINDOW)
-        log.debug(f"CC: conn={connection_id[:16]}... RTT={state.rtt_ms:.0f}ms window={state.window}")
-
-
-def _cc_check_timeout(recorded_by: str, connection_id: str, t_ms: int) -> bool:
-    """Check for timeout and shrink window if needed. Returns True if timed out."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0 and state.last_send_ms > 0:
-        timeout_ms = CC_TIMEOUT_MULTIPLIER * state.rtt_ms
-        if (t_ms - state.last_send_ms) > timeout_ms:
-            # Timeout - shrink window and reset in_flight
-            old_window = state.window
-            state.window = max(CC_MIN_WINDOW, state.window // 2)
-            state.in_flight = 0
-            log.info(f"CC: timeout conn={connection_id[:16]}... window {old_window}->{state.window}")
-            return True
-    return False
-
-
-def _cc_reset(recorded_by: str, connection_id: str) -> None:
-    """Reset CC state for a connection (e.g., on disconnect)."""
-    key = (recorded_by, connection_id)
-    if key in _cc_state:
-        del _cc_state[key]
-
-
-def _cc_reset_all() -> None:
-    """Reset all CC state. For testing only."""
-    _cc_state.clear()
-
-
 class RangeStatus(Enum):
     PENDING = 'pending'          # Waiting for their response
     MATCHED = 'matched'          # Hashes match, range synced
@@ -453,7 +362,7 @@ def _fetch_existing_event_ids(db, recorded_by: str, event_ids: list[str]) -> set
 def _apply_bucket_deltas(
     db,
     recorded_by: str,
-    new_events: list[tuple[str, str]],
+    new_events: list[tuple[str, str, bytes]],  # (event_id, unified_key, fingerprint)
 ) -> None:
     if not new_events:
         return
@@ -464,8 +373,8 @@ def _apply_bucket_deltas(
     bucket_xors: dict[tuple[str, str], bytes] = {}
     bucket_counts: dict[tuple[str, str], int] = {}
 
-    for event_id, unified_key in new_events:
-        fingerprint = compute_fingerprint(event_id)
+    for event_id, unified_key, fingerprint in new_events:
+        # fingerprint is now pre-computed and passed in
 
         for level in LEVELS:
             prefix_len = LEVEL_PREFIX_LEN[level]
@@ -526,7 +435,7 @@ def _apply_bucket_deltas(
 def _apply_bucket_removals(
     db,
     recorded_by: str,
-    removed_events: list[tuple[str, str]],
+    removed_events: list[tuple[str, str, bytes]],  # (event_id, unified_key, fingerprint)
 ) -> None:
     if not removed_events:
         return
@@ -537,8 +446,8 @@ def _apply_bucket_removals(
     bucket_xors: dict[tuple[str, str], bytes] = {}
     bucket_counts: dict[tuple[str, str], int] = {}
 
-    for event_id, unified_key in removed_events:
-        fingerprint = compute_fingerprint(event_id)
+    for event_id, unified_key, fingerprint in removed_events:
+        # fingerprint is now pre-computed and passed in
         for level in LEVELS:
             prefix_len = LEVEL_PREFIX_LEN[level]
             prefix = unified_key[:prefix_len]
@@ -608,27 +517,27 @@ def _apply_bucket_removals(
 def _insert_negentropy_events_returning(
     db,
     recorded_by: str,
-    batch_data: list[tuple[str, str, str, int]],
-) -> list[tuple[str, str]]:
+    batch_data: list[tuple[str, str, str, int, bytes]],  # (recorded_by, event_id, unified_key, created_at, fingerprint)
+) -> list[tuple[str, str, bytes]]:  # Returns (event_id, unified_key, fingerprint)
     if not batch_data:
         return []
 
     max_vars = int(os.getenv("NEGENTROPY_INSERT_CHUNK", "200"))
-    inserted_rows: list[tuple[str, str]] = []
+    inserted_rows: list[tuple[str, str, bytes]] = []
 
     for chunk in _chunked(batch_data, max_vars):
-        placeholders = ",".join("(?, ?, ?, ?)" for _ in chunk)
+        placeholders = ",".join("(?, ?, ?, ?, ?)" for _ in chunk)
         sql = (
             "INSERT OR IGNORE INTO negentropy_events "
-            "(recorded_by, event_id, unified_key, created_at) "
+            "(recorded_by, event_id, unified_key, created_at, fingerprint) "
             f"VALUES {placeholders} "
-            "RETURNING event_id, unified_key"
+            "RETURNING event_id, unified_key, fingerprint"
         )
         params: list[Any] = []
-        for recorded_by_value, event_id, unified_key, created_at in chunk:
-            params.extend([recorded_by_value, event_id, unified_key, created_at])
+        for recorded_by_value, event_id, unified_key, created_at, fingerprint in chunk:
+            params.extend([recorded_by_value, event_id, unified_key, created_at, fingerprint])
         rows = db._conn.execute(sql, tuple(params)).fetchall()
-        inserted_rows.extend((row[0], row[1]) for row in rows)
+        inserted_rows.extend((row[0], row[1], row[2]) for row in rows)
 
     return inserted_rows
 
@@ -654,15 +563,16 @@ def add_events_to_sync_batch(
     if not events:
         return
 
-    # Build batch data for insert and cache unified keys
-    batch_data: list[tuple[str, str, str, int]] = []
+    # Build batch data for insert - compute unified_key and fingerprint once per event
+    batch_data: list[tuple[str, str, str, int, bytes]] = []
     seen_event_ids: set[str] = set()
     for event_id, created_at in events:
         if event_id in seen_event_ids:
             continue
         seen_event_ids.add(event_id)
         unified_key = compute_unified_key(event_id, created_at)
-        batch_data.append((recorded_by, event_id, unified_key, created_at))
+        fingerprint = compute_fingerprint(event_id)
+        batch_data.append((recorded_by, event_id, unified_key, created_at, fingerprint))
 
     # Batch insert and get inserted rows for bucket deltas
     if not defer_buckets:
@@ -671,24 +581,24 @@ def add_events_to_sync_batch(
         except sqlite3.OperationalError:
             db._conn.executemany("""
                 INSERT OR IGNORE INTO negentropy_events
-                (recorded_by, event_id, unified_key, created_at)
-                VALUES (?, ?, ?, ?)
+                (recorded_by, event_id, unified_key, created_at, fingerprint)
+                VALUES (?, ?, ?, ?, ?)
             """, batch_data)
-            event_ids = [event_id for _recorded_by, event_id, _unified_key, _created_at in batch_data]
+            event_ids = [event_id for _recorded_by, event_id, _unified_key, _created_at, _fp in batch_data]
             existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
             inserted_rows = [
-                (event_id, unified_key)
-                for _recorded_by, event_id, unified_key, _created_at in batch_data
+                (event_id, unified_key, fingerprint)
+                for _recorded_by, event_id, unified_key, _created_at, fingerprint in batch_data
                 if event_id not in existing_event_ids
             ]
         _apply_bucket_deltas(db, recorded_by, inserted_rows)
         return
 
-    # Deferred path: insert only
+    # Deferred path: insert only (fingerprint stored for later bucket rebuild)
     db._conn.executemany("""
         INSERT OR IGNORE INTO negentropy_events
-        (recorded_by, event_id, unified_key, created_at)
-        VALUES (?, ?, ?, ?)
+        (recorded_by, event_id, unified_key, created_at, fingerprint)
+        VALUES (?, ?, ?, ?, ?)
     """, batch_data)
 
 
@@ -708,18 +618,18 @@ def remove_events_from_sync_batch(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unique_ids = list(dict.fromkeys(event_ids))
 
-    removed_rows: list[tuple[str, str]] = []
+    removed_rows: list[tuple[str, str, bytes]] = []  # (event_id, unified_key, fingerprint)
     chunk_size = int(os.getenv("NEGENTROPY_EVENT_CHUNK", "400"))
 
     for chunk in _chunked(unique_ids, chunk_size):
         placeholders = ",".join("?" for _ in chunk)
         rows = safedb.query(
-            f"SELECT event_id, unified_key FROM negentropy_events "
+            f"SELECT event_id, unified_key, fingerprint FROM negentropy_events "
             f"WHERE recorded_by = ? AND event_id IN ({placeholders})",
             tuple([recorded_by, *chunk]),
         )
         for row in rows:
-            removed_rows.append((row["event_id"], row["unified_key"]))
+            removed_rows.append((row["event_id"], row["unified_key"], row["fingerprint"]))
 
     if not removed_rows:
         return 0
@@ -739,7 +649,7 @@ def remove_events_from_sync_batch(
 def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
     """Rebuild all bucket hashes for a peer from scratch.
 
-    Efficiently computes XOR fingerprints for all events in one pass.
+    Reads pre-computed fingerprints from negentropy_events table.
     This is O(n) in events + O(b) in buckets, much faster than
     incremental updates for large batches.
 
@@ -748,9 +658,9 @@ def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
     safedb = create_safe_db(db, recorded_by=recorded_by)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    # Load all events for this peer
+    # Load all events with pre-computed fingerprints
     rows = safedb.query("""
-        SELECT event_id, unified_key FROM negentropy_events
+        SELECT unified_key, fingerprint FROM negentropy_events
         WHERE recorded_by = ?
     """, (recorded_by,))
 
@@ -759,9 +669,8 @@ def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
     bucket_counts: dict[tuple[str, str], int] = {}
 
     for row in rows:
-        event_id = row['event_id']
         unified_key = row['unified_key']
-        fingerprint = compute_fingerprint(event_id)
+        fingerprint = row['fingerprint']  # Use stored fingerprint - no recomputation
 
         for level in LEVELS:
             prefix_len = LEVEL_PREFIX_LEN[level]
@@ -1165,12 +1074,15 @@ def handle_range_request(
                 sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
                 log.info(f"negentropy: sent {sent} event blobs at {level} level ({len(event_ids)} events in bucket)")
 
-            # Send acknowledgment (blobs already sent above, no need to send event_ids)
+            # Continue negotiation with range_request - protocol loops until hashes match
+            # The other side will receive our blobs, update their hash, and respond
+            new_range_id = generate_range_id()
             responses.append({
-                'type': 'range_events',
-                'range_id': range_id,
+                'type': 'range_request',
+                'range_id': new_range_id,
+                'level': level,
                 'prefix': prefix,
-                'our_hash': our_hash.hex() if our_hash else '',
+                'hash': our_hash.hex() if our_hash else '',
                 'root_hash': root_hash.hex() if root_hash else '',
                 'total_events': total_events,
             })
@@ -1261,9 +1173,6 @@ def handle_range_matched(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     range_id = msg['range_id']
 
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
-
     safedb.execute("""
         UPDATE negentropy_sync_state
         SET status = 'complete', updated_at = ?
@@ -1305,65 +1214,17 @@ def _send_event_blobs(
 
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Fetch all blobs first
-    blobs = []
-    for event_id in event_ids:
-        try:
-            event_blob = safedb.get_shareable_blob(event_id)
-            if event_blob:
-                blobs.append(event_blob)
-        except Exception as e:
-            log.warning(f"negentropy: failed to get blob for {event_id[:20]}...: {e}")
+    # Bulk fetch all blobs in a single query
+    blobs_by_id = safedb.get_shareable_blobs(event_ids)
+    blobs = list(blobs_by_id.values())
+
+    if not blobs:
+        return 0
 
     # Send all blobs in batch (single connection lookup)
     sent = conn_module.send_batch(recorded_by, connection_id, blobs, t_ms, db)
-    log.debug(f"negentropy: sent {sent} blobs")
+    log.debug(f"negentropy: sent {sent} blobs (fetched {len(blobs_by_id)} of {len(event_ids)} requested)")
     return sent
-
-
-def handle_range_events(
-    db,
-    recorded_by: str,
-    connection_id: str,
-    msg: dict,
-    t_ms: int
-) -> list[dict]:
-    """Handle incoming range_events message.
-
-    Sends our blobs for this bucket. Receiver dedupes.
-    Note: event_ids no longer sent in wire message - just send all our blobs.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
-
-    range_id = msg['range_id']
-    prefix = msg.get('prefix', '')
-
-    # Get root hash and total events for responses
-    root_hash = get_root_hash(db, recorded_by)
-
-    # Check for checkpoint
-    their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
-    if their_root_hash and their_root_hash == root_hash:
-        _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
-
-    # Mark range complete
-    safedb.execute("""
-        UPDATE negentropy_sync_state
-        SET status = 'complete', updated_at = ?
-        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-    """, (t_ms, recorded_by, connection_id, range_id))
-
-    # Send ALL our events for this bucket - they'll dedupe on their side
-    our_event_ids = get_events_in_bucket(db, recorded_by, prefix)
-    if our_event_ids:
-        sent = _send_event_blobs(db, recorded_by, connection_id, our_event_ids, t_ms)
-        log.info(f"negentropy: sent {sent} event blobs for prefix {prefix}")
-
-    # No protocol response needed - we sent the blobs directly
-    return []
 
 
 def handle_sync_message(
@@ -1383,8 +1244,6 @@ def handle_sync_message(
         return handle_range_request(db, recorded_by, connection_id, msg, t_ms)
     elif msg_type == 'range_matched':
         return handle_range_matched(db, recorded_by, connection_id, msg, t_ms)
-    elif msg_type == 'range_events':
-        return handle_range_events(db, recorded_by, connection_id, msg, t_ms)
     else:
         return []  # Unknown message type
 
@@ -1427,8 +1286,6 @@ def sync_connection(
         )
         if conn_module.send(recorded_by, conn.key_id, blob, t_ms, db):
             sent += 1
-            # Track for congestion control
-            _cc_on_send(recorded_by, conn.key_id, t_ms)
     return sent
 
 
@@ -1518,14 +1375,6 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
                 continue
 
             total_connections += 1
-
-            # Check for CC timeout first (shrinks window if needed)
-            _cc_check_timeout(peer_id, conn.key_id, t_ms)
-
-            # Congestion control: only send if window allows
-            if not _cc_can_send(peer_id, conn.key_id):
-                log.debug(f"CC: skipping conn={conn.key_id[:16]}... (window full)")
-                continue
 
             sent = sync_connection(db, peer_id, conn, t_ms)
             total_messages += sent

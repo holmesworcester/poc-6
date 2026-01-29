@@ -6,7 +6,7 @@ These tests verify that the sync protocol adapts to network conditions:
 - Recovers when conditions improve
 - Achieves reasonable efficiency (doesn't waste bandwidth)
 
-CC is implemented in negentropy.py using adaptive windowing based on RTT.
+CC is now implemented at the transport layer using credit-based flow control.
 """
 import pytest
 import random
@@ -21,10 +21,10 @@ TEST_SEED = 42
 
 @pytest.fixture(autouse=True)
 def reset_cc_state():
-    """Reset CC state before each test for isolation."""
-    negentropy._cc_reset_all()
+    """Reset flow control state before each test for isolation."""
+    transport.flow_reset_all()
     yield
-    negentropy._cc_reset_all()
+    transport.flow_reset_all()
 
 
 def run_sync_rounds(db, sim: NetworkSimulator, rounds: int, t_ms_start: int, round_interval_ms: int = 100):

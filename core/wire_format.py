@@ -71,6 +71,7 @@ SELF_ADDRESS_PLAINTEXT_SIZE = 344
 OBSERVED_ADDRESS_PLAINTEXT_SIZE = 344
 NETWORK_INTRO_PLAINTEXT_SIZE = 344
 NEGENTROPY_PLAINTEXT_SIZE = 344
+TRANSPORT_ACK_PLAINTEXT_SIZE = 344
 
 # Flags
 FLAG_ENCRYPTED = 1 << 0
@@ -122,6 +123,7 @@ TYPE_SELF_ADDRESS = 0x34
 TYPE_OBSERVED_ADDRESS = 0x35
 TYPE_NETWORK_INTRO = 0x36
 TYPE_NEGENTROPY = 0x37
+TYPE_TRANSPORT_ACK = 0x38
 
 INVITE_MODE_USER = 0
 INVITE_MODE_PEER = 1
@@ -2071,6 +2073,16 @@ def is_wire_negentropy_envelope(data: bytes) -> bool:
     except ValueError:
         return False
     return header.version == 1 and header.event_type == TYPE_NEGENTROPY
+
+
+def is_wire_transport_ack_envelope(data: bytes) -> bool:
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TRANSPORT_ACK
 
 
 def _signing_bytes(header: WireHeader, plaintext: bytes) -> bytes:
@@ -4735,3 +4747,65 @@ def decode_negentropy_wire_event(data: bytes) -> dict[str, Any]:
         "created_at": header.created_at_ms,
     }
     return event_data
+
+
+# ============================================================================
+# Transport ACK (flow control)
+# ============================================================================
+
+def encode_transport_ack_plaintext(ack_count: int) -> bytes:
+    """Encode transport ACK plaintext."""
+    if ack_count < 0 or ack_count > 0xFFFFFFFF:
+        raise ValueError("ack_count must fit in u32")
+    payload = bytearray(TRANSPORT_ACK_PLAINTEXT_SIZE)
+    struct.pack_into("<I", payload, 0, ack_count)
+    return bytes(payload)
+
+
+def decode_transport_ack_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode transport ACK plaintext."""
+    if len(data) != TRANSPORT_ACK_PLAINTEXT_SIZE:
+        raise ValueError(
+            f"transport_ack plaintext must be {TRANSPORT_ACK_PLAINTEXT_SIZE} bytes, got {len(data)}"
+        )
+    (ack_count,) = struct.unpack_from("<I", data, 0)
+    return {"ack_count": ack_count}
+
+
+def encode_transport_ack_wire_event(
+    *,
+    ack_count: int,
+    created_at_ms: int,
+) -> bytes:
+    """Encode a transport ACK wire event."""
+    plaintext = encode_transport_ack_plaintext(ack_count)
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TRANSPORT_ACK,
+        flags=FLAG_UNSIGNED,
+        signer_type=SIGNER_NONE,
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=b"\x00" * SIGNER_ID_SIZE,
+    )
+    payload = _pad_payload(plaintext)
+    signature = b"\x00" * SIGNATURE_SIZE
+    return build_envelope(header, payload, signature)
+
+
+def decode_transport_ack_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a transport ACK wire event."""
+    if len(data) != WIRE_SIZE:
+        raise ValueError(f"Expected {WIRE_SIZE} bytes, got {len(data)}")
+    header = WireHeader.unpack(data[:HEADER_SIZE])
+    if header.event_type != TYPE_TRANSPORT_ACK:
+        raise ValueError(f"Expected TYPE_TRANSPORT_ACK, got {header.event_type}")
+    payload = data[HEADER_SIZE : HEADER_SIZE + PAYLOAD_SIZE]
+    plaintext = payload[:TRANSPORT_ACK_PLAINTEXT_SIZE]
+    decoded = decode_transport_ack_plaintext(plaintext)
+    return {
+        "type": "transport_ack",
+        "ack_count": decoded["ack_count"],
+        "created_at": header.created_at_ms,
+    }

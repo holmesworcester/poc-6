@@ -97,6 +97,106 @@ _pacer_config: Optional[PacerConfig] = None
 _pacer_buckets: dict[tuple[str, int], _LeakyBucket] = {}
 
 
+# ============================================================================
+# Flow Control (credit-based, per flow_key)
+# ============================================================================
+# Separate from sync protocol - operates at transport level on blob receipts.
+
+import os
+
+@dataclass
+class _FlowState:
+    """Per-flow congestion control state."""
+    window: int              # Max in-flight blobs
+    in_flight: int = 0       # Currently awaiting ACK
+    last_send_ms: int = 0    # Time of last send
+    recv_pending: int = 0    # Received blobs pending ACK
+    last_ack_ms: int = 0     # Time of last ACK sent
+
+
+# Flow control parameters (tunable via env vars for testing)
+FLOW_CONTROL_WINDOW = int(os.getenv("TRANSPORT_FLOW_WINDOW", "4096"))
+FLOW_CONTROL_TIMEOUT_MS = int(os.getenv("TRANSPORT_FLOW_TIMEOUT_MS", "1000"))
+FLOW_ACK_EVERY = int(os.getenv("TRANSPORT_ACK_EVERY", "100"))
+FLOW_ACK_INTERVAL_MS = int(os.getenv("TRANSPORT_ACK_INTERVAL_MS", "200"))
+
+_flow_state: dict[str, _FlowState] = {}
+
+
+def _get_flow_state(flow_key: str) -> _FlowState:
+    """Get or create flow state for a flow_key (typically connection key_id)."""
+    state = _flow_state.get(flow_key)
+    if not state:
+        state = _FlowState(window=FLOW_CONTROL_WINDOW)
+        _flow_state[flow_key] = state
+    return state
+
+
+def flow_can_send(flow_key: str, now_ms: int) -> bool:
+    """Check if flow control allows sending on this flow."""
+    if not flow_key:
+        return True  # No flow control if no key
+    state = _get_flow_state(flow_key)
+    if state.in_flight < state.window:
+        return True
+    # Timeout - reset in_flight and allow
+    if FLOW_CONTROL_TIMEOUT_MS > 0 and now_ms - state.last_send_ms >= FLOW_CONTROL_TIMEOUT_MS:
+        state.in_flight = 0
+        return True
+    return False
+
+
+def flow_on_send(flow_key: str, now_ms: int) -> None:
+    """Record that we sent a blob on this flow."""
+    if not flow_key:
+        return
+    state = _get_flow_state(flow_key)
+    state.in_flight += 1
+    state.last_send_ms = now_ms
+
+
+def flow_on_ack(flow_key: str, count: int) -> None:
+    """Record that we received an ACK for count blobs."""
+    if not flow_key or count <= 0:
+        return
+    state = _get_flow_state(flow_key)
+    state.in_flight = max(0, state.in_flight - count)
+    log.debug(f"flow_on_ack: {flow_key[:16]}... count={count} in_flight={state.in_flight}")
+
+
+def flow_on_receive(flow_key: str, now_ms: int) -> int:
+    """Record blob receipt, return ACK count if threshold reached.
+
+    Returns number of blobs to ACK (0 if not time to ACK yet).
+    """
+    if not flow_key:
+        return 0
+    state = _get_flow_state(flow_key)
+    state.recv_pending += 1
+
+    # ACK when we've received enough blobs or enough time has passed
+    ack_threshold = min(FLOW_ACK_EVERY, max(1, state.window // 4))
+    time_to_ack = FLOW_ACK_INTERVAL_MS > 0 and now_ms - state.last_ack_ms >= FLOW_ACK_INTERVAL_MS
+
+    if state.recv_pending >= ack_threshold or (time_to_ack and state.recv_pending > 0):
+        count = state.recv_pending
+        state.recv_pending = 0
+        state.last_ack_ms = now_ms
+        return count
+    return 0
+
+
+def flow_reset(flow_key: str) -> None:
+    """Reset flow state for a connection."""
+    if flow_key in _flow_state:
+        del _flow_state[flow_key]
+
+
+def flow_reset_all() -> None:
+    """Reset all flow state. For testing."""
+    _flow_state.clear()
+
+
 class TransportError(Exception):
     """Error for transport operations."""
     pass

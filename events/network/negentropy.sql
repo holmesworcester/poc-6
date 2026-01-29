@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS negentropy_events (
     event_id TEXT NOT NULL,
     unified_key TEXT NOT NULL,              -- 16-char hex: timestamp (12) + hash (4)
     created_at INTEGER NOT NULL,            -- Event timestamp (ms since epoch)
+    fingerprint BLOB NOT NULL,              -- 16-byte XOR fingerprint (precomputed from event_id bytes)
 
     PRIMARY KEY (recorded_by, event_id)
 );

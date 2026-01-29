@@ -318,10 +318,11 @@ class TestSyncProtocol:
         }
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
-        # With only 2 events, should send events directly instead of drilling down
-        assert any(r['type'] == 'range_events' for r in responses)
-        # Should NOT drill down since event count is below threshold
-        assert not any(r['type'] == 'range_request' for r in responses)
+        # With only 2 events, should send events directly and continue negotiating
+        # (sends blobs + range_request to keep negotiating until hashes match)
+        assert any(r['type'] == 'range_request' for r in responses)
+        # All responses should be range_request (no drilling down to children)
+        assert all(r['level'] == 'prefix_2' for r in responses if r['type'] == 'range_request')
 
     def test_drills_down_when_above_threshold(self, db):
         """When bucket has many events (> EVENTS_THRESHOLD), drill down instead."""
@@ -363,9 +364,7 @@ class TestSyncProtocol:
 
         # With > 100 events, should drill down to child level
         assert any(r['type'] == 'range_request' for r in responses)
-        # Should NOT send events directly at this level
-        assert not any(r['type'] == 'range_events' for r in responses)
-        # Child requests should be at 'prefix_4' level
+        # Child requests should be at 'prefix_4' level (drilling down)
         child_requests = [r for r in responses if r['type'] == 'range_request']
         assert all(r['level'] == 'prefix_4' for r in child_requests)
 

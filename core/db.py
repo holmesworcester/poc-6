@@ -419,6 +419,41 @@ class SafeDB:
 
         return result['blob']
 
+    def get_shareable_blobs(self, event_ids: list[str]) -> dict[str, bytes]:
+        """Get multiple blobs from store, only if this peer can share them.
+
+        Bulk fetch version of get_shareable_blob() for efficiency.
+        Returns a dict mapping event_id -> blob for events that exist and are shareable.
+        Events that don't exist or can't be shared are silently omitted.
+
+        Args:
+            event_ids: List of event IDs (base64 encoded strings)
+
+        Returns:
+            Dict mapping event_id -> blob bytes
+        """
+        if not event_ids:
+            return {}
+
+        # Chunk to avoid SQLite variable limits
+        chunk_size = 400
+        result: dict[str, bytes] = {}
+
+        for i in range(0, len(event_ids), chunk_size):
+            chunk = event_ids[i:i + chunk_size]
+            placeholders = ','.join('?' * len(chunk))
+            rows = self._db.query(f"""
+                SELECT se.event_id, s.blob
+                FROM store s
+                INNER JOIN shareable_events se
+                  ON se.event_id = s.id AND se.can_share_peer_id = ?
+                WHERE s.id IN ({placeholders})
+            """, (self.recorded_by, *chunk))
+            for row in rows:
+                result[row['event_id']] = row['blob']
+
+        return result
+
     def commit(self) -> None:
         """Commit the current transaction."""
         self._db.commit()

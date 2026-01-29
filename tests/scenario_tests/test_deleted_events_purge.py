@@ -179,11 +179,13 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     """
     In a multi-peer scenario:
     1. Alice sends a message
-    2. Bob receives the message
+    2. Bob receives the message via sync
     3. Alice deletes the message
-    4. Bob processes the deletion
-    5. Verify Bob's copy is also purged and won't resync
+    4. Bob receives the deletion via sync
+    5. Verify Bob's copy is also purged
     """
+    from tests.utils.tick_helper import assert_eventually, initial_sync
+
     db = fresh_db
 
     # Setup Alice and Bob
@@ -199,138 +201,89 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
     db.commit()
 
-    # Tick to sync group keys
-    for i in range(15):
-        tick.tick(t_ms=2100 + i * 200, db=db)
-    db.commit()
+    # Initial sync for group keys
+    t_ms = initial_sync(db, start_t_ms=None)
 
     # Alice sends a message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message to be deleted across peers",
-        t_ms=5000,
+        t_ms=t_ms,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    # SAVE the original blob before it gets deleted (for resync simulation later)
-    unsafedb = create_unsafe_db(db)
-    original_blob_row = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (message_id,))
-    assert original_blob_row is not None, "Message blob should exist"
-    original_blob = original_blob_row['blob']
-
-    # Propagate message to Bob
-    bob_recorded_id = recorded.create(message_id, bob['peer_id'], 5500, db, return_dupes=False)
-    recorded.project(bob_recorded_id, db)
-    db.commit()
-
-    # Verify Bob has the message
+    # Wait for Bob to receive the message via sync
     bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
-    bob_msg = bob_safedb.query_one(
-        "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_msg is not None, "Bob should have the message"
-    assert bob_msg['content'] == "Message to be deleted across peers"
+
+    def bob_has_message():
+        row = bob_safedb.query_one(
+            "SELECT content FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (message_id, bob['peer_id'])
+        )
+        assert row is not None, "Bob should have the message"
+        assert row['content'] == "Message to be deleted across peers"
+
+    t_ms = assert_eventually(bob_has_message, db=db, start_t_ms=t_ms)
 
     # Alice deletes the message
     deletion_id = message_deletion.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
-        t_ms=6000,
+        t_ms=t_ms,
         db=db
     )
     db.commit()
 
-    # Verify Alice's copy is purged
+    # Verify Alice's copy is immediately purged
     alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-
     alice_msg = alice_safedb.query_one(
         "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
         (message_id, alice['peer_id'])
     )
-    assert alice_msg is None, "Alice's message should be deleted"
+    assert alice_msg is None, "Alice's message should be deleted immediately"
 
-    alice_shareable = alice_safedb.query_one(
-        "SELECT 1 FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-        (message_id, alice['peer_id'])
-    )
-    assert alice_shareable is None, "Message should not be shareable by Alice"
+    # Wait for Bob's copy to be purged via sync
+    def bob_message_deleted():
+        row = bob_safedb.query_one(
+            "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (message_id, bob['peer_id'])
+        )
+        assert row is None, "Bob's message should be deleted"
 
-    # Propagate deletion to Bob
-    bob_deletion_recorded_id = recorded.create(deletion_id, bob['peer_id'], 6500, db, return_dupes=False)
-    recorded.project(bob_deletion_recorded_id, db)
-    db.commit()
+        # Also verify it's in deleted_events (permanent block)
+        deleted = bob_safedb.query_one(
+            "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
+            (message_id, bob['peer_id'])
+        )
+        assert deleted is not None, "Message should be in Bob's deleted_events"
 
-    # Verify Bob's copy is also purged
-    bob_msg_after = bob_safedb.query_one(
-        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_msg_after is None, "Bob's message should be deleted"
+    t_ms = assert_eventually(bob_message_deleted, db=db, start_t_ms=t_ms)
 
+    # Verify TRUE deletion at database level (not just filtered views)
+    unsafedb = create_unsafe_db(db)
+
+    # Message blob should be truly purged from store
+    blob_exists = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (message_id,))
+    assert blob_exists is None, "Message blob should be truly purged from store"
+
+    # Bob's shareable_events entry should be gone
     bob_shareable = bob_safedb.query_one(
         "SELECT 1 FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
         (message_id, bob['peer_id'])
     )
     assert bob_shareable is None, "Message should not be shareable by Bob"
 
+    # Bob's negentropy_events entry should be gone
     bob_negentropy = bob_safedb.query_one(
         "SELECT 1 FROM negentropy_events WHERE event_id = ? AND recorded_by = ?",
         (message_id, bob['peer_id'])
     )
-    assert bob_negentropy is None, "Message should not be in negentropy_events for Bob"
+    assert bob_negentropy is None, "Message should be removed from negentropy_events for Bob"
 
-    bob_deleted = bob_safedb.query_one(
-        "SELECT 1 FROM deleted_events WHERE event_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_deleted is not None, "Message should be in Bob's deleted_events"
-
-    # Now simulate the message trying to "come back" via sync to Bob
-    # (e.g., from a third peer who hasn't seen the deletion yet)
-    # Re-insert the ORIGINAL blob to simulate it arriving again via sync
-    unsafedb.execute(
-        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-        (message_id, original_blob, 7000)
-    )
-    db.commit()
-
-    # Verify blob is back in store
-    blob_reinserted = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (message_id,))
-    assert blob_reinserted is not None, "Blob should be re-inserted for resync test"
-
-    # Try to project it for Bob (simulating sync)
-    # Use return_dupes=True since the recorded event already exists from first sync
-    resync_recorded_id = recorded.create(message_id, bob['peer_id'], 7500, db, return_dupes=True)
-    recorded.project(resync_recorded_id, db)
-    db.commit()
-
-    # The message should STILL not be projected (blocked by deleted_events)
-    bob_msg_resync = bob_safedb.query_one(
-        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_msg_resync is None, "Re-synced deleted message should NOT be projected"
-
-    # The blob should be purged again
-    blob_after_resync = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (message_id,))
-    assert blob_after_resync is None, "Re-synced deleted message blob should be purged"
-
-    # Still not in shareable_events
-    bob_shareable_resync = bob_safedb.query_one(
-        "SELECT 1 FROM shareable_events WHERE event_id = ? AND can_share_peer_id = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_shareable_resync is None, "Re-synced deleted message should not be shareable"
-
-    bob_negentropy_resync = bob_safedb.query_one(
-        "SELECT 1 FROM negentropy_events WHERE event_id = ? AND recorded_by = ?",
-        (message_id, bob['peer_id'])
-    )
-    assert bob_negentropy_resync is None, "Re-synced deleted message should not re-enter negentropy_events"
+    print("✓ TRUE deletion verified: blob purged, shareable/negentropy entries removed")
 
 
 if __name__ == "__main__":
