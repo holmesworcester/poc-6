@@ -77,18 +77,22 @@ def _wire_shadow_secret(key_b64: str) -> None:
         raise ValueError("wire shadow decode key mismatch")
 
 
-def create(peer_id: str, t_ms: int, db: Any) -> str:
+def create(peer_id: str, peer_shared_id: str, group_id: str,
+           removal_epoch_id: str | None, t_ms: int, db: Any) -> str:
     """Create a new secret with a fresh symmetric key.
 
     Args:
         peer_id: Local peer ID (owner)
+        peer_shared_id: Public peer ID (for signing key_announce)
+        group_id: Group this secret belongs to
+        removal_epoch_id: Current removal epoch (key requires this for requests)
         t_ms: Timestamp
         db: Database connection
 
     Returns:
         secret_id: The event ID
     """
-    log.info(f"secret.create() creating new secret for peer_id={peer_id}, t_ms={t_ms}")
+    log.info(f"secret.create() creating new secret for peer_id={peer_id}, group={group_id[:20]}..., epoch={removal_epoch_id}, t_ms={t_ms}")
 
     # Generate symmetric key
     key = crypto.generate_secret()
@@ -105,6 +109,19 @@ def create(peer_id: str, t_ms: int, db: Any) -> str:
     secret_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"secret.create() created secret_id={secret_id}")
+
+    # Also announce this key so peers can detect they're missing it
+    from events.group import key_announce
+    key_announce.create(
+        key_id=secret_id,
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        removal_epoch_id=removal_epoch_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     return secret_id
 
 

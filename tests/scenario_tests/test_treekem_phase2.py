@@ -2,10 +2,10 @@
 TreeKEM Phase 2 Tests: O(log n) update path with hash-trie structure.
 
 Tests the TreeKEM O(log n) key distribution using:
-- treekem_secret: Tree node symmetric keys (local-only)
+- secret: Symmetric keys (local-only) - reused from Phase 1
 - treekem_pubkey: Tree node public keys (shareable)
 - treekem_update: Update orchestration events
-- treekem_secret_shared: Tree node key distribution (encrypted)
+- secret_shared: Key distribution encrypted to pubkeys - reused from Phase 1
 
 These tests verify the O(log n) update path mechanism where:
 - Tree positions are derived from peer_shared_id bits
@@ -20,7 +20,7 @@ from core import crypto
 from core import wire_format
 from core import treekem
 from events.identity import user, peer
-from events.group import treekem_secret, treekem_pubkey, treekem_update, treekem_secret_shared
+from events.group import secret, treekem_pubkey, treekem_update, secret_shared
 
 
 class TestTreeKEMUtilities:
@@ -106,86 +106,6 @@ class TestTreeKEMUtilities:
         assert treekem.copath_size(4) == 2
         assert treekem.copath_size(8) == 3
         assert treekem.copath_size(1024) == 10
-
-
-class TestTreeKEMSecretEvent:
-    """Test treekem_secret event creation and projection."""
-
-    def test_create_treekem_secret(self, fresh_db):
-        """Create a treekem_secret event and verify projection."""
-        db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
-        db.commit()
-
-        # Create a treekem_secret at depth 0 (root)
-        secret_id = treekem_secret.create(
-            depth=0,
-            path_prefix=b'',
-            peer_id=alice['peer_id'],
-            t_ms=2000,
-            db=db
-        )
-        db.commit()
-
-        assert len(secret_id) == 24  # base64 encoded event id
-
-        # Verify we can retrieve the secret
-        key_data = treekem_secret.get_key(secret_id, alice['peer_id'], db)
-        assert key_data is not None
-        assert key_data['type'] == 'symmetric'
-        assert len(key_data['key']) == 32
-        assert key_data['depth'] == 0
-
-    def test_treekem_secret_deterministic(self, fresh_db):
-        """Same key material produces same treekem_secret_id."""
-        db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
-        db.commit()
-
-        # Generate key material
-        key_material = crypto.generate_secret()
-
-        # Create secret with same material
-        secret_id1 = treekem_secret.create_with_material(
-            depth=1,
-            path_prefix=b'\x80',
-            key_material=key_material,
-            peer_id=alice['peer_id'],
-            t_ms=2000,
-            db=db
-        )
-        db.commit()
-
-        # Compute expected ID
-        blob = wire_format.encode_treekem_secret_wire_event(
-            depth=1,
-            path_prefix=b'\x80',
-            key=key_material,
-            created_at_ms=0
-        )
-        expected_id = crypto.b64encode(crypto.hash(blob))
-
-        assert secret_id1 == expected_id
-
-    def test_treekem_secret_wire_format(self):
-        """Test treekem_secret wire encoding/decoding roundtrip."""
-        key = crypto.generate_secret()
-
-        blob = wire_format.encode_treekem_secret_wire_event(
-            depth=5,
-            path_prefix=b'\xAB',
-            key=key,
-            created_at_ms=0,  # Deterministic
-        )
-
-        assert len(blob) == 512
-        assert wire_format.is_wire_treekem_secret_envelope(blob)
-
-        decoded = wire_format.decode_treekem_secret_wire_event(blob)
-        assert decoded['type'] == 'treekem_secret'
-        assert decoded['depth'] == 5
-        assert decoded['created_at'] == 0
-        assert crypto.b64decode(decoded['key']) == key
 
 
 class TestTreeKEMPubkeyEvent:
@@ -387,48 +307,6 @@ class TestTreeKEMUpdateEvent:
         assert decoded['removal_epoch_id'] is None
 
 
-class TestTreeKEMSecretSharedEvent:
-    """Test treekem_secret_shared event creation."""
-
-    def test_treekem_secret_shared_wire_format(self, fresh_db):
-        """Test treekem_secret_shared wire encoding basics."""
-        db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
-        db.commit()
-
-        # Generate test data
-        treekem_secret_id = crypto.b64encode(crypto.generate_secret()[:16])
-        symmetric_key = crypto.generate_secret()
-        recipient_pubkey_id = crypto.b64encode(crypto.generate_secret()[:16])
-        source_update_id = crypto.b64encode(crypto.generate_secret()[:16])
-
-        # Generate recipient keypair
-        recipient_private, recipient_public = crypto.generate_keypair()
-        recipient_pubkey = {
-            'id': crypto.b64decode(recipient_pubkey_id),
-            'public_key': recipient_public,
-            'type': 'asymmetric'
-        }
-
-        # Get signing key
-        signing_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
-
-        blob = wire_format.encode_treekem_secret_shared_wire_event(
-            treekem_secret_id_b64=treekem_secret_id,
-            symmetric_key_b64=crypto.b64encode(symmetric_key),
-            recipient_pubkey_id_b64=recipient_pubkey_id,
-            source_update_id_b64=source_update_id,
-            depth=3,
-            signed_by_b64=alice['peer_shared_id'],
-            signer_type="peer_shared",
-            created_at_ms=1000,
-            recipient_pubkey=recipient_pubkey,
-            private_key=signing_key,
-        )
-
-        assert wire_format.is_wire_treekem_secret_shared_envelope(blob)
-
-
 class TestOLogNEventCount:
     """Test that update paths generate O(log n) events."""
 
@@ -461,7 +339,9 @@ class TestEventRegistry:
         """Verify all TreeKEM Phase 2 events are in the registry."""
         from events import registry
 
-        phase2_events = ['treekem_secret', 'treekem_pubkey', 'treekem_update', 'treekem_secret_shared']
+        # Phase 2 uses treekem_pubkey and treekem_update
+        # (treekem_secret/treekem_secret_shared removed - use secret/secret_shared from Phase 1)
+        phase2_events = ['treekem_pubkey', 'treekem_update']
 
         for event_type in phase2_events:
             assert event_type in registry.get_registered_types(), f"{event_type} not registered"
@@ -471,12 +351,13 @@ class TestEventRegistry:
         from events import registry
 
         # Shareable events
-        assert registry.is_shareable('treekem_pubkey')
+        assert registry.is_shareable('treekem_pubkey_shared')
         assert registry.is_shareable('treekem_update')
-        assert registry.is_shareable('treekem_secret_shared')
+        assert registry.is_shareable('secret_shared')  # From Phase 1
 
-        # Local-only events
-        assert not registry.is_shareable('treekem_secret')
+        # Local-only events (contain private key material)
+        assert not registry.is_shareable('treekem_pubkey')  # Local keypair storage
+        assert not registry.is_shareable('secret')  # From Phase 1
 
 
 class TestIntegrationWithRemovalEpoch:
@@ -887,19 +768,23 @@ class TestUpdateChaining:
 
 
 class TestSecretSharing:
-    """Test treekem_secret_shared key distribution."""
+    """Test secret_shared key distribution to treekem_pubkey recipients."""
 
-    def test_share_secret_to_recipient(self, fresh_db):
-        """Share a secret to a recipient's pubkey."""
+    def test_share_secret_to_treekem_pubkey(self, fresh_db):
+        """Share a secret to a treekem_pubkey recipient."""
         db = fresh_db
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
-        # Create a treekem_secret
-        secret_id = treekem_secret.create(
-            depth=0,
-            path_prefix=b'',
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
+        # Create a secret (using Phase 1 secret module)
+        secret_id = secret.create(
             peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            group_id=test_group_id,
+            removal_epoch_id=None,
             t_ms=2000,
             db=db
         )
@@ -918,32 +803,13 @@ class TestSecretSharing:
         )
         db.commit()
 
-        # Create an update (needed for source_update_id)
-        root_pk_id, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
-            peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
-            t_ms=3500, db=db
-        )
-        update_id = treekem_update.create(
-            root_pubkey_id=root_pk_id,
-            removal_epoch_id=None,
-            base_update_id=None,
-            peer_id=alice['peer_id'],
-            peer_shared_id=alice['peer_shared_id'],
-            t_ms=4000,
-            db=db
-        )
-        db.commit()
-
-        # Share the secret
-        shared_id = treekem_secret_shared.create(
-            treekem_secret_id=secret_id,
-            depth=0,
-            path_prefix=b'',
-            source_update_id=update_id,
+        # Share the secret to the treekem_pubkey using secret_shared
+        shared_id = secret_shared.create_to_pubkey(
+            secret_id=secret_id,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             recipient_pubkey_id=recipient_pk_id,
+            removal_epoch_id=None,
             t_ms=5000,
             db=db
         )
@@ -951,22 +817,21 @@ class TestSecretSharing:
 
         assert len(shared_id) == 24
 
-        # Verify the share was recorded
-        shares = treekem_secret_shared.get_secrets_for_update(update_id, alice['peer_id'], db)
-        assert len(shares) == 1
-        assert shares[0]['treekem_secret_id'] == secret_id
-
     def test_share_to_multiple_copath_nodes(self, fresh_db):
-        """Share secret to multiple copath recipients."""
+        """Share secret to multiple copath recipients (treekem_pubkeys)."""
         db = fresh_db
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
-        # Create a secret
-        secret_id = treekem_secret.create(
-            depth=0,
-            path_prefix=b'',
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
+        # Create a secret (using Phase 1 secret module)
+        secret_id = secret.create(
             peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            group_id=test_group_id,
+            removal_epoch_id=None,
             t_ms=2000,
             db=db
         )
@@ -988,42 +853,19 @@ class TestSecretSharing:
             recipient_pubkeys.append(pk_id)
         db.commit()
 
-        # Create update
-        root_pk_id, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
-            peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
-            t_ms=4000, db=db
-        )
-        update_id = treekem_update.create(
-            root_pubkey_id=root_pk_id,
+        # Share to all copath nodes using secret_shared
+        shared_ids = secret_shared.share_secret_with_pubkeys(
+            secret_id=secret_id,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            recipient_pubkey_ids=recipient_pubkeys,
             removal_epoch_id=None,
-            base_update_id=None,
-            peer_id=alice['peer_id'],
-            peer_shared_id=alice['peer_shared_id'],
-            t_ms=5000,
-            db=db
-        )
-        db.commit()
-
-        # Share to all copath nodes
-        shared_ids = treekem_secret_shared.share_secret_with_copath(
-            treekem_secret_id=secret_id,
-            depth=0,
-            path_prefix=b'',
-            source_update_id=update_id,
-            copath_pubkey_ids=recipient_pubkeys,
-            peer_id=alice['peer_id'],
-            peer_shared_id=alice['peer_shared_id'],
             t_ms=6000,
             db=db
         )
         db.commit()
 
         assert len(shared_ids) == 3
-
-        # Verify all shares recorded
-        shares = treekem_secret_shared.get_secrets_for_update(update_id, alice['peer_id'], db)
-        assert len(shares) == 3
 
 
 class TestTreePositionCoverage:
@@ -1098,11 +940,15 @@ class TestEndToEndUpdatePath:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Step 1: Create root secret and pubkey
-        root_secret_id = treekem_secret.create(
-            depth=0,
-            path_prefix=b'',
+        root_secret_id = secret.create(
             peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            group_id=test_group_id,
+            removal_epoch_id=None,
             t_ms=2000,
             db=db
         )
@@ -1153,15 +999,13 @@ class TestEndToEndUpdatePath:
         )
         db.commit()
 
-        # Step 4: Share root secret to both child pubkeys
-        shared_ids = treekem_secret_shared.share_secret_with_copath(
-            treekem_secret_id=root_secret_id,
-            depth=0,
-            path_prefix=b'',
-            source_update_id=update_id,
-            copath_pubkey_ids=[left_child_pk, right_child_pk],
+        # Step 4: Share root secret to both child pubkeys using secret_shared
+        shared_ids = secret_shared.share_secret_with_pubkeys(
+            secret_id=root_secret_id,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
+            recipient_pubkey_ids=[left_child_pk, right_child_pk],
+            removal_epoch_id=None,
             t_ms=4000,
             db=db
         )
@@ -1172,8 +1016,8 @@ class TestEndToEndUpdatePath:
         assert update is not None
         assert update['root_pubkey_id'] == root_pubkey_id
 
-        shares = treekem_secret_shared.get_secrets_for_update(update_id, alice['peer_id'], db)
-        assert len(shares) == 2
+        # Verify we shared to both children
+        assert len(shared_ids) == 2
 
         # Verify pubkey tree structure
         root_pk = treekem_pubkey.get_pubkey_by_id(root_pubkey_id, alice['peer_id'], db)

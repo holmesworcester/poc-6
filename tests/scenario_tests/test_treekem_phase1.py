@@ -19,7 +19,7 @@ from core import schema
 from core import crypto
 from core import wire_format
 from events.identity import user, peer
-from events.group import pubkey, secret, secret_shared, key_request
+from events.group import pubkey, pubkey_shared, secret, secret_shared, key_request
 from events.identity import removal_epoch
 
 
@@ -32,10 +32,9 @@ class TestPubkeyEvent:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
-        # Create a pubkey
+        # Create a pubkey (peer_shared_id removed in sender key model)
         pubkey_id, private_key = pubkey.create(
             peer_id=alice['peer_id'],
-            peer_shared_id=alice['peer_shared_id'],
             t_ms=2000,
             db=db
         )
@@ -44,8 +43,8 @@ class TestPubkeyEvent:
         # Verify the pubkey was created
         assert len(pubkey_id) == 24  # base64 encoded event id
 
-        # Verify we can retrieve the pubkey
-        pk = pubkey.get_pubkey_for_peer(
+        # Verify we can retrieve the pubkey via pubkey_shared
+        pk = pubkey_shared.get_pubkey_for_peer(
             alice['peer_shared_id'],
             alice['peer_id'],
             db
@@ -54,36 +53,42 @@ class TestPubkeyEvent:
         assert pk['type'] == 'asymmetric'
         assert len(pk['public_key']) == 32
 
-        # Verify we can retrieve the private key
+        # Verify we can retrieve the private key from local pubkey
         pk_private = pubkey.get_private_key(pubkey_id, alice['peer_id'], db)
         assert pk_private is not None
         assert len(pk_private) == 32
 
     def test_pubkey_wire_format(self, fresh_db):
-        """Test pubkey wire encoding/decoding roundtrip."""
+        """Test pubkey_shared wire encoding/decoding roundtrip."""
         db = fresh_db
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
-        # Generate keypair
-        private_key, public_key = crypto.generate_keypair()
+        # First create a local pubkey to get a pubkey_id
+        pubkey_id, private_key = pubkey.create(alice['peer_id'], 2000, db)
+        db.commit()
+
+        # Get the public key via pubkey_shared
+        pubkey_data = pubkey_shared.get_pubkey_for_peer(alice['peer_shared_id'], alice['peer_id'], db)
+        public_key = pubkey_data['public_key']
         signing_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
 
-        # Encode
-        blob = wire_format.encode_pubkey_wire_event(
+        # Encode pubkey_shared (the shareable version)
+        blob = wire_format.encode_pubkey_shared_wire_event(
+            pubkey_id_b64=pubkey_id,
+            owner_peer_id_b64=alice['peer_shared_id'],
             public_key=public_key,
-            removal_epoch_id_b64=None,
             signed_by_b64=alice['peer_shared_id'],
             signer_type="peer_shared",
             created_at_ms=2000,
             private_key=signing_key,
         )
 
-        assert wire_format.is_wire_pubkey_envelope(blob)
+        assert wire_format.is_wire_pubkey_shared_envelope(blob)
 
         # Decode
-        decoded = wire_format.decode_pubkey_wire_event(blob)
-        assert decoded['type'] == 'pubkey'
+        decoded = wire_format.decode_pubkey_shared_wire_event(blob)
+        assert decoded['type'] == 'pubkey_shared'
         assert decoded['signed_by'] == alice['peer_shared_id']
         assert decoded['created_at'] == 2000
         assert crypto.b64decode(decoded['public_key']) == public_key
@@ -98,9 +103,15 @@ class TestSecretEvent:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Create a secret
         secret_id = secret.create(
             peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            group_id=test_group_id,
+            removal_epoch_id=None,
             t_ms=2000,
             db=db
         )
@@ -289,9 +300,12 @@ class TestKeyRequestEvent:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Create a secret to request and a pubkey for the response
-        secret_id = secret.create(alice['peer_id'], 2000, db)
-        pubkey_id, _ = pubkey.create(alice['peer_id'], alice['peer_shared_id'], 2001, db)
+        secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 2000, db)
+        pubkey_id, _ = pubkey.create(alice['peer_id'], 2001, db)  # peer_shared_id removed
         db.commit()
 
         # Create a key request (as if from another peer)
@@ -349,22 +363,23 @@ class TestSecretSharedEvent:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
-        # Alice creates a pubkey
-        pubkey_id, pubkey_private = pubkey.create(
-            alice['peer_id'], alice['peer_shared_id'], 2000, db
-        )
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
+        # Alice creates a pubkey (peer_shared_id removed in sender key model)
+        pubkey_id, pubkey_private = pubkey.create(alice['peer_id'], 2000, db)
         db.commit()
 
         # Alice creates a secret
-        secret_id = secret.create(alice['peer_id'], 3000, db)
+        secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 3000, db)
         db.commit()
 
         # Get the secret's raw key
         key_bytes = secret.get_key_bytes(secret_id, alice['peer_id'], db)
         assert key_bytes is not None
 
-        # Get Alice's pubkey for wrapping
-        alice_pubkey = pubkey.get_pubkey_for_peer(
+        # Get Alice's pubkey for wrapping via pubkey_shared
+        alice_pubkey = pubkey_shared.get_pubkey_for_peer(
             alice['peer_shared_id'], alice['peer_id'], db
         )
         assert alice_pubkey is not None
@@ -431,8 +446,11 @@ class TestRemovalBlocksDecryption:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Create a secret before removal
-        secret_id = secret.create(alice['peer_id'], 2000, db)
+        secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 2000, db)
         db.commit()
 
         # Create a removal epoch (simulating user removal)
@@ -509,14 +527,15 @@ class TestKeyRequestFulfillment:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Alice creates a pubkey (needed for wrapping)
-        pubkey_id, _ = pubkey.create(
-            alice['peer_id'], alice['peer_shared_id'], 2000, db
-        )
+        pubkey_id, _ = pubkey.create(alice['peer_id'], 2000, db)
         db.commit()
 
         # Alice creates a secret
-        secret_id = secret.create(alice['peer_id'], 3000, db)
+        secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 3000, db)
         db.commit()
 
         # Simulate a key request from "another peer" (using Alice's own ID for simplicity)
@@ -546,9 +565,7 @@ class TestKeyRequestFulfillment:
         db.commit()
 
         # Create a pubkey for the requester
-        pubkey_id, _ = pubkey.create(
-            alice['peer_id'], alice['peer_shared_id'], 1500, db
-        )
+        pubkey_id, _ = pubkey.create(alice['peer_id'], 1500, db)
         db.commit()
 
         # Create a fake secret_id that doesn't exist
@@ -575,8 +592,11 @@ class TestKeyRequestFulfillment:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Create a secret
-        secret_id = secret.create(alice['peer_id'], 2000, db)
+        secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 2000, db)
         db.commit()
 
         # Create a removal epoch that removes the requester
@@ -593,9 +613,7 @@ class TestKeyRequestFulfillment:
         db.commit()
 
         # Create a pubkey for the fake requester
-        fake_pubkey_id, _ = pubkey.create(
-            alice['peer_id'], alice['peer_shared_id'], 3500, db
-        )
+        fake_pubkey_id, _ = pubkey.create(alice['peer_id'], 3500, db)
         db.commit()
 
         # Simulate a request from the removed peer (by manually inserting)
@@ -637,8 +655,11 @@ class TestPartitionHealingScenario:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Alice creates initial secret (pre-removal)
-        initial_secret_id = secret.create(alice['peer_id'], 2000, db)
+        initial_secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 2000, db)
         db.commit()
 
         # Simulate partition A: Alice removes Carol
@@ -655,7 +676,7 @@ class TestPartitionHealingScenario:
         db.commit()
 
         # Alice creates post-removal secret (under new epoch)
-        post_removal_secret_id = secret.create(alice['peer_id'], 4000, db)
+        post_removal_secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 4000, db)
         db.commit()
 
         # Verify we have two different secrets
@@ -674,14 +695,15 @@ class TestPartitionHealingScenario:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Alice creates a pubkey for key wrapping
-        alice_pubkey_id, _ = pubkey.create(
-            alice['peer_id'], alice['peer_shared_id'], 1500, db
-        )
+        alice_pubkey_id, _ = pubkey.create(alice['peer_id'], 1500, db)
         db.commit()
 
         # Create a secret that Alice has
-        partition_a_secret_id = secret.create(alice['peer_id'], 2000, db)
+        partition_a_secret_id = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 2000, db)
         db.commit()
 
         # Create a removal epoch (simulating post-removal state)
@@ -732,8 +754,11 @@ class TestPartitionHealingScenario:
         alice = user.new_network(name='Alice', t_ms=1000, db=db)
         db.commit()
 
+        # Create a test group_id
+        test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
+
         # Initial shared secret (everyone has this pre-partition)
-        initial_secret = secret.create(alice['peer_id'], 2000, db)
+        initial_secret = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 2000, db)
         db.commit()
 
         # Partition A: removes user1, creates secret_a
@@ -747,7 +772,7 @@ class TestPartitionHealingScenario:
             t_ms=3000,
             db=db
         )
-        secret_a = secret.create(alice['peer_id'], 3500, db)
+        secret_a = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 3500, db)
         db.commit()
 
         # Partition B: removes user2 with epoch_a as parent (chained convergence)
@@ -761,7 +786,7 @@ class TestPartitionHealingScenario:
             t_ms=3001,
             db=db
         )
-        secret_b = secret.create(alice['peer_id'], 3501, db)
+        secret_b = secret.create(alice['peer_id'], alice['peer_shared_id'], test_group_id, None, 3501, db)
         db.commit()
 
         # With chained epochs, epoch_b includes all removals from epoch_a
@@ -769,7 +794,7 @@ class TestPartitionHealingScenario:
         assert removal_epoch.is_removed(user1_id, epoch_b, alice['peer_id'], db)
         assert removal_epoch.is_removed(user2_id, epoch_b, alice['peer_id'], db)
 
-        # Verify we have all the secrets locally
+        # Verify we have all our explicitly created secrets locally
         # In real partition scenario:
         # - Peer from partition A would have: initial_secret, secret_a (missing secret_b)
         # - Peer from partition B would have: initial_secret, secret_b (missing secret_a)
@@ -779,7 +804,9 @@ class TestPartitionHealingScenario:
         assert initial_secret in secret_ids
         assert secret_a in secret_ids
         assert secret_b in secret_ids
-        assert len(secret_ids) == 3  # All three secrets tracked
+        # Note: In sender key model, additional secrets may be created (e.g., for username encryption)
+        # so we check >= 3 rather than exactly 3
+        assert len(secret_ids) >= 3, f"Should have at least 3 secrets, got {len(secret_ids)}"
 
 
 class TestOnlineOfflineAPI:
@@ -844,6 +871,9 @@ class TestOnlineOfflineAPI:
         """Test that set_all_online brings everyone back online."""
         from events.network import connection_request
 
+        # Start fresh
+        connection_request.set_all_online()
+
         peer_a = crypto.b64encode(crypto.generate_secret()[:16])
         peer_b = crypto.b64encode(crypto.generate_secret()[:16])
 
@@ -891,7 +921,8 @@ class TestEventRegistry:
         """Verify all TreeKEM Phase 1 events are in the registry."""
         from events import registry
 
-        treekem_events = ['pubkey', 'secret', 'secret_shared', 'removal_epoch', 'key_request']
+        # pubkey (local) + pubkey_shared (shareable) in sender key model
+        treekem_events = ['pubkey', 'pubkey_shared', 'secret', 'secret_shared', 'removal_epoch', 'key_request']
 
         for event_type in treekem_events:
             assert event_type in registry.get_registered_types(), f"{event_type} not registered"
@@ -900,13 +931,14 @@ class TestEventRegistry:
         """Verify SHAREABLE flags are set correctly."""
         from events import registry
 
-        # Shareable events
-        assert registry.is_shareable('pubkey')
+        # Shareable events (pubkey_shared is shareable, pubkey is local)
+        assert registry.is_shareable('pubkey_shared')
         assert registry.is_shareable('secret_shared')
         assert registry.is_shareable('removal_epoch')
         assert registry.is_shareable('key_request')
 
-        # Local-only events
+        # Local-only events (pubkey stores private key, so is local)
+        assert not registry.is_shareable('pubkey')
         assert not registry.is_shareable('secret')
 
 

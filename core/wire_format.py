@@ -47,12 +47,12 @@ MESSAGE_REKEY_CIPHERTEXT_MAX = MESSAGE_REKEY_PLAINTEXT_SIZE - 34
 CHANNEL_UPDATE_PLAINTEXT_SIZE = 344
 GROUP_PLAINTEXT_SIZE = 344
 GROUP_MEMBER_PLAINTEXT_SIZE = 344
-GROUP_KEY_PLAINTEXT_SIZE = 344
-GROUP_KEY_SHARED_PLAINTEXT_SIZE = 312
-GROUP_PREKEY_PLAINTEXT_SIZE = 344
-GROUP_PREKEY_SHARED_PLAINTEXT_SIZE = 344
-CONNECTION_PREKEY_PLAINTEXT_SIZE = 344
-CONNECTION_PREKEY_SHARED_PLAINTEXT_SIZE = 344
+# DEPRECATED: GROUP_KEY_PLAINTEXT_SIZE = 344 (removed)
+# DEPRECATED: GROUP_KEY_SHARED_PLAINTEXT_SIZE = 312 (removed)
+# DEPRECATED: GROUP_PREKEY_PLAINTEXT_SIZE = 344 (removed)
+# DEPRECATED: GROUP_PREKEY_SHARED_PLAINTEXT_SIZE = 344 (removed)
+CONNECTION_PUBKEY_PLAINTEXT_SIZE = 344
+CONNECTION_PUBKEY_SHARED_PLAINTEXT_SIZE = 344
 CONNECTION_REQUEST_PLAINTEXT_SIZE = 344
 CONNECTION_ACK_PLAINTEXT_SIZE = 344
 USER_PLAINTEXT_SIZE = 344
@@ -73,15 +73,19 @@ NETWORK_INTRO_PLAINTEXT_SIZE = 344
 NEGENTROPY_PLAINTEXT_SIZE = 344
 
 # TreeKEM Phase 1 plaintext sizes
-PUBKEY_PLAINTEXT_SIZE = 344
+PUBKEY_LOCAL_PLAINTEXT_SIZE = 344   # Local: public_key (32) + private_key (32)
+PUBKEY_SHARED_PLAINTEXT_SIZE = 344  # Shared: pubkey_id (32) + owner_peer_id (32) + public_key (32)
 SECRET_PLAINTEXT_SIZE = 344
 SECRET_SHARED_PLAINTEXT_SIZE = 344
 REMOVAL_EPOCH_PLAINTEXT_SIZE = 344
 KEY_REQUEST_PLAINTEXT_SIZE = 344
+KEY_ANNOUNCE_PLAINTEXT_SIZE = 344
 
 # TreeKEM Phase 2 plaintext sizes
 TREEKEM_SECRET_PLAINTEXT_SIZE = 344
-TREEKEM_PUBKEY_PLAINTEXT_SIZE = 344
+TREEKEM_PUBKEY_PLAINTEXT_SIZE = 344  # Old shareable format (deprecated)
+TREEKEM_PUBKEY_LOCAL_PLAINTEXT_SIZE = 344   # Local: public_key (32) + private_key (32)
+TREEKEM_PUBKEY_SHARED_PLAINTEXT_SIZE = 344  # Shared: treekem_pubkey_id (16) + depth (1) + path_prefix (16) + public_key (32) + parent_id (16) + epoch_id (16)
 TREEKEM_UPDATE_PLAINTEXT_SIZE = 344
 TREEKEM_SECRET_SHARED_PLAINTEXT_SIZE = 344
 
@@ -111,10 +115,10 @@ TYPE_MESSAGE_REKEY = 0x09
 TYPE_CHANNEL_UPDATE = 0x0A
 TYPE_GROUP = 0x10
 TYPE_GROUP_MEMBER = 0x11
-TYPE_GROUP_KEY = 0x12
-TYPE_GROUP_KEY_SHARED = 0x13
-TYPE_GROUP_PREKEY = 0x14
-TYPE_GROUP_PREKEY_SHARED = 0x15
+# DEPRECATED: TYPE_GROUP_KEY = 0x12 (removed - use secret/sender keys)
+# DEPRECATED: TYPE_GROUP_KEY_SHARED = 0x13 (removed - use secret_shared)
+# DEPRECATED: TYPE_GROUP_PREKEY = 0x14 (removed - use pubkey)
+# DEPRECATED: TYPE_GROUP_PREKEY_SHARED = 0x15 (removed - use pubkey_shared)
 TYPE_USER = 0x20
 TYPE_USERNAME_UPDATE = 0x21
 TYPE_USER_REMOVED = 0x22
@@ -127,8 +131,8 @@ TYPE_NETWORK_NAME_UPDATE = 0x28
 TYPE_ADMIN = 0x29
 TYPE_INVITE = 0x2A
 TYPE_INVITE_ACCEPTED = 0x2B
-TYPE_CONNECTION_PREKEY = 0x30
-TYPE_CONNECTION_PREKEY_SHARED = 0x31
+TYPE_CONNECTION_PUBKEY = 0x30
+TYPE_CONNECTION_PUBKEY_SHARED = 0x31
 TYPE_CONNECTION_REQUEST = 0x32
 TYPE_CONNECTION_ACK = 0x33
 TYPE_SELF_ADDRESS = 0x34
@@ -137,7 +141,8 @@ TYPE_NETWORK_INTRO = 0x36
 TYPE_NEGENTROPY = 0x37
 
 # TreeKEM Phase 1 event types
-TYPE_PUBKEY = 0x40
+TYPE_PUBKEY = 0x40           # Local-only keypair storage
+TYPE_PUBKEY_SHARED = 0x4A    # Shareable public key
 TYPE_SECRET = 0x41
 TYPE_SECRET_SHARED = 0x42
 TYPE_REMOVAL_EPOCH = 0x43
@@ -145,9 +150,12 @@ TYPE_KEY_REQUEST = 0x44
 
 # TreeKEM Phase 2 event types
 TYPE_TREEKEM_SECRET = 0x45
-TYPE_TREEKEM_PUBKEY = 0x46
+TYPE_TREEKEM_PUBKEY = 0x46  # Old shareable format (deprecated, use TYPE_TREEKEM_PUBKEY_SHARED)
 TYPE_TREEKEM_UPDATE = 0x47
 TYPE_TREEKEM_SECRET_SHARED = 0x48
+TYPE_KEY_ANNOUNCE = 0x49
+TYPE_TREEKEM_PUBKEY_LOCAL = 0x4B   # Local-only keypair storage
+TYPE_TREEKEM_PUBKEY_SHARED = 0x4C  # Shareable tree position + public key
 
 INVITE_MODE_USER = 0
 INVITE_MODE_PEER = 1
@@ -935,21 +943,21 @@ def decode_group_prekey_shared_plaintext(data: bytes) -> dict[str, Any]:
     }
 
 
-def encode_connection_prekey_plaintext(public_key: bytes, private_key: bytes) -> bytes:
-    """Encode a connection_prekey payload plaintext."""
+def encode_connection_pubkey_plaintext(public_key: bytes, private_key: bytes) -> bytes:
+    """Encode a connection_pubkey payload plaintext."""
     _require_len("public_key", public_key, PUBKEY_SIZE)
     _require_len("private_key", private_key, PRIVKEY_SIZE)
-    payload = bytearray(CONNECTION_PREKEY_PLAINTEXT_SIZE)
+    payload = bytearray(CONNECTION_PUBKEY_PLAINTEXT_SIZE)
     payload[0:PUBKEY_SIZE] = public_key
     payload[PUBKEY_SIZE:PUBKEY_SIZE + PRIVKEY_SIZE] = private_key
     return bytes(payload)
 
 
-def decode_connection_prekey_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode a connection_prekey payload plaintext."""
-    if len(data) != CONNECTION_PREKEY_PLAINTEXT_SIZE:
+def decode_connection_pubkey_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a connection_pubkey payload plaintext."""
+    if len(data) != CONNECTION_PUBKEY_PLAINTEXT_SIZE:
         raise ValueError(
-            f"connection_prekey plaintext must be {CONNECTION_PREKEY_PLAINTEXT_SIZE} bytes, got {len(data)}"
+            f"connection_pubkey plaintext must be {CONNECTION_PUBKEY_PLAINTEXT_SIZE} bytes, got {len(data)}"
         )
     return {
         "public_key": data[0:PUBKEY_SIZE],
@@ -957,31 +965,31 @@ def decode_connection_prekey_plaintext(data: bytes) -> dict[str, Any]:
     }
 
 
-def encode_connection_prekey_shared_plaintext(
-    connection_prekey_id: bytes,
+def encode_connection_pubkey_shared_plaintext(
+    connection_pubkey_id: bytes,
     peer_id: bytes,
     public_key: bytes,
 ) -> bytes:
-    """Encode a connection_prekey_shared payload plaintext."""
-    _require_len("connection_prekey_id", connection_prekey_id, 16)
+    """Encode a connection_pubkey_shared payload plaintext."""
+    _require_len("connection_pubkey_id", connection_pubkey_id, 16)
     _require_len("peer_id", peer_id, 16)
     _require_len("public_key", public_key, PUBKEY_SIZE)
-    payload = bytearray(CONNECTION_PREKEY_SHARED_PLAINTEXT_SIZE)
-    payload[0:16] = connection_prekey_id
+    payload = bytearray(CONNECTION_PUBKEY_SHARED_PLAINTEXT_SIZE)
+    payload[0:16] = connection_pubkey_id
     payload[16:32] = peer_id
     payload[32:64] = public_key
     return bytes(payload)
 
 
-def decode_connection_prekey_shared_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode a connection_prekey_shared payload plaintext."""
-    if len(data) != CONNECTION_PREKEY_SHARED_PLAINTEXT_SIZE:
+def decode_connection_pubkey_shared_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode a connection_pubkey_shared payload plaintext."""
+    if len(data) != CONNECTION_PUBKEY_SHARED_PLAINTEXT_SIZE:
         raise ValueError(
-            "connection_prekey_shared plaintext must be "
-            f"{CONNECTION_PREKEY_SHARED_PLAINTEXT_SIZE} bytes, got {len(data)}"
+            "connection_pubkey_shared plaintext must be "
+            f"{CONNECTION_PUBKEY_SHARED_PLAINTEXT_SIZE} bytes, got {len(data)}"
         )
     return {
-        "connection_prekey_id": data[0:16],
+        "connection_pubkey_id": data[0:16],
         "peer_id": data[16:32],
         "public_key": data[32:64],
     }
@@ -1315,7 +1323,7 @@ def decode_admin_plaintext(data: bytes) -> dict[str, Any]:
 def encode_invite_plaintext(
     mode: int,
     invite_pubkey: bytes,
-    invite_prekey_id: bytes | None,
+    invite_pubkey_id: bytes | None,
     group_id: bytes | None,
     channel_id: bytes | None,
     key_id: bytes | None,
@@ -1331,8 +1339,8 @@ def encode_invite_plaintext(
     if mode not in (INVITE_MODE_USER, INVITE_MODE_PEER):
         raise ValueError(f"invite mode must be {INVITE_MODE_USER} or {INVITE_MODE_PEER}")
     _require_len("invite_pubkey", invite_pubkey, PUBKEY_SIZE)
-    invite_prekey_bytes = invite_prekey_id or (b"\x00" * 16)
-    _require_len("invite_prekey_id", invite_prekey_bytes, 16)
+    invite_prekey_bytes = invite_pubkey_id or (b"\x00" * 16)
+    _require_len("invite_pubkey_id", invite_prekey_bytes, 16)
     group_bytes = group_id or (b"\x00" * 16)
     _require_len("group_id", group_bytes, 16)
     channel_bytes = channel_id or (b"\x00" * 16)
@@ -1374,7 +1382,7 @@ def decode_invite_plaintext(data: bytes) -> dict[str, Any]:
         raise ValueError(f"invite plaintext must be {INVITE_PLAINTEXT_SIZE} bytes, got {len(data)}")
     mode = data[0]
     invite_pubkey = data[1:33]
-    invite_prekey_id = data[33:49]
+    invite_pubkey_id = data[33:49]
     group_id = data[49:65]
     channel_id = data[65:81]
     key_id = data[81:97]
@@ -1385,8 +1393,8 @@ def decode_invite_plaintext(data: bytes) -> dict[str, Any]:
     admin_grant_id = data[161:177]
     inviter_ip = _decode_ip16(data[177:193])
     (inviter_port,) = struct.unpack_from("<H", data, 193)
-    if invite_prekey_id == b"\x00" * 16:
-        invite_prekey_id = None
+    if invite_pubkey_id == b"\x00" * 16:
+        invite_pubkey_id = None
     if group_id == b"\x00" * 16:
         group_id = None
     if channel_id == b"\x00" * 16:
@@ -1408,7 +1416,7 @@ def decode_invite_plaintext(data: bytes) -> dict[str, Any]:
     return {
         "mode": mode,
         "invite_pubkey": invite_pubkey,
-        "invite_prekey_id": invite_prekey_id,
+        "invite_pubkey_id": invite_pubkey_id,
         "group_id": group_id,
         "channel_id": channel_id,
         "key_id": key_id,
@@ -1424,15 +1432,15 @@ def decode_invite_plaintext(data: bytes) -> dict[str, Any]:
 
 def encode_invite_accepted_plaintext(
     invite_id: bytes,
-    invite_prekey_id: bytes | None,
+    invite_pubkey_id: bytes | None,
     invite_private_key: bytes,
     inviter_peer_shared_id: bytes | None,
     network_id: bytes | None,
     channel_id: bytes | None,
     key_id: bytes | None,
-    inviter_connection_prekey_public_key: bytes | None,
-    inviter_connection_prekey_shared_id: bytes | None,
-    inviter_connection_prekey_id: bytes | None,
+    inviter_connection_pubkey_public_key: bytes | None,
+    inviter_connection_pubkey_shared_id: bytes | None,
+    inviter_connection_pubkey_id: bytes | None,
     inviter_ip: str | None,
     inviter_port: int | None,
     link_user_id: bytes | None,
@@ -1441,8 +1449,8 @@ def encode_invite_accepted_plaintext(
     """Encode an invite_accepted payload plaintext (pre-encryption)."""
     _require_len("invite_id", invite_id, 16)
     _require_len("invite_private_key", invite_private_key, PRIVKEY_SIZE)
-    invite_prekey_bytes = invite_prekey_id or (b"\x00" * 16)
-    _require_len("invite_prekey_id", invite_prekey_bytes, 16)
+    invite_prekey_bytes = invite_pubkey_id or (b"\x00" * 16)
+    _require_len("invite_pubkey_id", invite_prekey_bytes, 16)
     inviter_peer_bytes = inviter_peer_shared_id or (b"\x00" * 16)
     _require_len("inviter_peer_shared_id", inviter_peer_bytes, 16)
     network_bytes = network_id or (b"\x00" * 16)
@@ -1451,12 +1459,12 @@ def encode_invite_accepted_plaintext(
     _require_len("channel_id", channel_bytes, 16)
     key_bytes = key_id or (b"\x00" * 16)
     _require_len("key_id", key_bytes, 16)
-    inviter_prekey_pub = inviter_connection_prekey_public_key or (b"\x00" * PUBKEY_SIZE)
-    _require_len("inviter_connection_prekey_public_key", inviter_prekey_pub, PUBKEY_SIZE)
-    inviter_prekey_shared = inviter_connection_prekey_shared_id or (b"\x00" * 16)
-    _require_len("inviter_connection_prekey_shared_id", inviter_prekey_shared, 16)
-    inviter_prekey_id_bytes = inviter_connection_prekey_id or (b"\x00" * 16)
-    _require_len("inviter_connection_prekey_id", inviter_prekey_id_bytes, 16)
+    inviter_prekey_pub = inviter_connection_pubkey_public_key or (b"\x00" * PUBKEY_SIZE)
+    _require_len("inviter_connection_pubkey_public_key", inviter_prekey_pub, PUBKEY_SIZE)
+    inviter_prekey_shared = inviter_connection_pubkey_shared_id or (b"\x00" * 16)
+    _require_len("inviter_connection_pubkey_shared_id", inviter_prekey_shared, 16)
+    inviter_prekey_id_bytes = inviter_connection_pubkey_id or (b"\x00" * 16)
+    _require_len("inviter_connection_pubkey_id", inviter_prekey_id_bytes, 16)
     link_user_bytes = link_user_id or (b"\x00" * 16)
     _require_len("link_user_id", link_user_bytes, 16)
     blob_id_bytes = inviter_peer_shared_blob_id or (b"\x00" * 16)
@@ -1489,21 +1497,21 @@ def decode_invite_accepted_plaintext(data: bytes) -> dict[str, Any]:
             f"invite_accepted plaintext must be {INVITE_ACCEPTED_PLAINTEXT_SIZE} bytes, got {len(data)}"
         )
     invite_id = data[0:16]
-    invite_prekey_id = data[16:32]
+    invite_pubkey_id = data[16:32]
     invite_private_key = data[32:64]
     inviter_peer_shared_id = data[64:80]
     network_id = data[80:96]
     channel_id = data[96:112]
     key_id = data[112:128]
-    inviter_connection_prekey_public_key = data[128:160]
-    inviter_connection_prekey_shared_id = data[160:176]
-    inviter_connection_prekey_id = data[176:192]
+    inviter_connection_pubkey_public_key = data[128:160]
+    inviter_connection_pubkey_shared_id = data[160:176]
+    inviter_connection_pubkey_id = data[176:192]
     inviter_ip = _decode_ip16(data[192:208])
     (inviter_port,) = struct.unpack_from("<H", data, 208)
     link_user_id = data[210:226]
     inviter_peer_shared_blob_id = data[226:242]
-    if invite_prekey_id == b"\x00" * 16:
-        invite_prekey_id = None
+    if invite_pubkey_id == b"\x00" * 16:
+        invite_pubkey_id = None
     if inviter_peer_shared_id == b"\x00" * 16:
         inviter_peer_shared_id = None
     if network_id == b"\x00" * 16:
@@ -1512,12 +1520,12 @@ def decode_invite_accepted_plaintext(data: bytes) -> dict[str, Any]:
         channel_id = None
     if key_id == b"\x00" * 16:
         key_id = None
-    if inviter_connection_prekey_public_key == b"\x00" * PUBKEY_SIZE:
-        inviter_connection_prekey_public_key = None
-    if inviter_connection_prekey_shared_id == b"\x00" * 16:
-        inviter_connection_prekey_shared_id = None
-    if inviter_connection_prekey_id == b"\x00" * 16:
-        inviter_connection_prekey_id = None
+    if inviter_connection_pubkey_public_key == b"\x00" * PUBKEY_SIZE:
+        inviter_connection_pubkey_public_key = None
+    if inviter_connection_pubkey_shared_id == b"\x00" * 16:
+        inviter_connection_pubkey_shared_id = None
+    if inviter_connection_pubkey_id == b"\x00" * 16:
+        inviter_connection_pubkey_id = None
     if inviter_port == 0:
         inviter_port = None
     if link_user_id == b"\x00" * 16:
@@ -1526,15 +1534,15 @@ def decode_invite_accepted_plaintext(data: bytes) -> dict[str, Any]:
         inviter_peer_shared_blob_id = None
     return {
         "invite_id": invite_id,
-        "invite_prekey_id": invite_prekey_id,
+        "invite_pubkey_id": invite_pubkey_id,
         "invite_private_key": invite_private_key,
         "inviter_peer_shared_id": inviter_peer_shared_id,
         "network_id": network_id,
         "channel_id": channel_id,
         "key_id": key_id,
-        "inviter_connection_prekey_public_key": inviter_connection_prekey_public_key,
-        "inviter_connection_prekey_shared_id": inviter_connection_prekey_shared_id,
-        "inviter_connection_prekey_id": inviter_connection_prekey_id,
+        "inviter_connection_pubkey_public_key": inviter_connection_pubkey_public_key,
+        "inviter_connection_pubkey_shared_id": inviter_connection_pubkey_shared_id,
+        "inviter_connection_pubkey_id": inviter_connection_pubkey_id,
         "inviter_ip": inviter_ip,
         "inviter_port": inviter_port,
         "link_user_id": link_user_id,
@@ -1887,24 +1895,24 @@ def is_wire_group_prekey_shared_envelope(data: bytes) -> bool:
     return header.version == 1 and header.event_type == TYPE_GROUP_PREKEY_SHARED
 
 
-def is_wire_connection_prekey_envelope(data: bytes) -> bool:
+def is_wire_connection_pubkey_envelope(data: bytes) -> bool:
     if len(data) != WIRE_SIZE:
         return False
     try:
         header = WireHeader.unpack(data[:HEADER_SIZE])
     except ValueError:
         return False
-    return header.version == 1 and header.event_type == TYPE_CONNECTION_PREKEY
+    return header.version == 1 and header.event_type == TYPE_CONNECTION_PUBKEY
 
 
-def is_wire_connection_prekey_shared_envelope(data: bytes) -> bool:
+def is_wire_connection_pubkey_shared_envelope(data: bytes) -> bool:
     if len(data) != WIRE_SIZE:
         return False
     try:
         header = WireHeader.unpack(data[:HEADER_SIZE])
     except ValueError:
         return False
-    return header.version == 1 and header.event_type == TYPE_CONNECTION_PREKEY_SHARED
+    return header.version == 1 and header.event_type == TYPE_CONNECTION_PUBKEY_SHARED
 
 
 def is_wire_connection_request_envelope(data: bytes) -> bool:
@@ -2500,9 +2508,9 @@ def encode_channel_wire_event(
     signed_by_b64: str,
     signer_type: str,
     created_at_ms: int,
-    key_data: dict[str, Any],
     private_key: bytes,
 ) -> bytes:
+    """Encode a channel wire event (signed, unencrypted in sender key model)."""
     group_id = crypto.b64decode(group_id_b64)
     signer_id = crypto.b64decode(signed_by_b64)
     admin_grant_id = crypto.b64decode(admin_grant_b64) if admin_grant_b64 else None
@@ -2517,7 +2525,7 @@ def encode_channel_wire_event(
     header = WireHeader(
         version=1,
         event_type=TYPE_CHANNEL,
-        flags=FLAG_ENCRYPTED,
+        flags=0,  # No encryption - sender key model uses unencrypted channel metadata
         signer_type=signer_type_from_str(signer_type),
         count=0,
         created_at_ms=created_at_ms,
@@ -2526,7 +2534,8 @@ def encode_channel_wire_event(
     )
     signed_bytes = _signing_bytes(header, plaintext)
     signature = crypto.sign(signed_bytes, private_key)
-    payload = _encrypt_channel_payload(plaintext, key_data)
+    # Unencrypted: just pad the plaintext
+    payload = _pad_payload(plaintext)
     return build_envelope(header, payload, signature)
 
 
@@ -3065,16 +3074,16 @@ def decode_channel_update_wire_event(
 def encode_group_wire_event(
     *,
     name: str,
-    key_id_b64: str,
     is_main: int | bool,
     network_id_b64: str | None,
     signed_by_b64: str,
     signer_type: str,
     created_at_ms: int,
-    key_data: dict[str, Any],
     private_key: bytes,
 ) -> bytes:
-    key_id = crypto.b64decode(key_id_b64)
+    """Encode a group wire event (signed, unencrypted in sender key model)."""
+    # In sender key model, groups have no key_id - use all zeros as placeholder
+    key_id = b"\x00" * 16
     network_id = crypto.b64decode(network_id_b64) if network_id_b64 else None
     signer_id = crypto.b64decode(signed_by_b64)
     plaintext = encode_group_plaintext(
@@ -3086,7 +3095,7 @@ def encode_group_wire_event(
     header = WireHeader(
         version=1,
         event_type=TYPE_GROUP,
-        flags=FLAG_ENCRYPTED,
+        flags=0,  # No encryption - sender key model uses unencrypted groups
         signer_type=signer_type_from_str(signer_type),
         count=0,
         created_at_ms=created_at_ms,
@@ -3095,7 +3104,8 @@ def encode_group_wire_event(
     )
     signed_bytes = _signing_bytes(header, plaintext)
     signature = crypto.sign(signed_bytes, private_key)
-    payload = _encrypt_group_payload(plaintext, key_data)
+    # Unencrypted: just pad the plaintext
+    payload = _pad_payload(plaintext)
     return build_envelope(header, payload, signature)
 
 
@@ -3143,9 +3153,9 @@ def encode_group_member_wire_event(
     signed_by_b64: str,
     signer_type: str,
     created_at_ms: int,
-    key_data: dict[str, Any],
     private_key: bytes,
 ) -> bytes:
+    """Encode a group_member wire event (signed, unencrypted in sender key model)."""
     group_id = crypto.b64decode(group_id_b64)
     user_id = crypto.b64decode(user_id_b64)
     added_by = crypto.b64decode(added_by_b64)
@@ -3160,7 +3170,7 @@ def encode_group_member_wire_event(
     header = WireHeader(
         version=1,
         event_type=TYPE_GROUP_MEMBER,
-        flags=FLAG_ENCRYPTED,
+        flags=0,  # No encryption - sender key model uses unencrypted membership metadata
         signer_type=signer_type_from_str(signer_type),
         count=0,
         created_at_ms=created_at_ms,
@@ -3169,7 +3179,8 @@ def encode_group_member_wire_event(
     )
     signed_bytes = _signing_bytes(header, plaintext)
     signature = crypto.sign(signed_bytes, private_key)
-    payload = _encrypt_group_member_payload(plaintext, key_data)
+    # Unencrypted: just pad the plaintext
+    payload = _pad_payload(plaintext)
     return build_envelope(header, payload, signature)
 
 
@@ -3394,7 +3405,7 @@ def decode_group_prekey_shared_wire_event(data: bytes) -> dict[str, Any]:
     }
 
 
-def encode_connection_prekey_wire_event(
+def encode_connection_pubkey_wire_event(
     *,
     public_key: bytes,
     private_key: bytes,
@@ -3402,10 +3413,10 @@ def encode_connection_prekey_wire_event(
     created_at_ms: int,
 ) -> bytes:
     signer_id = crypto.b64decode(signed_by_b64)
-    plaintext = encode_connection_prekey_plaintext(public_key=public_key, private_key=private_key)
+    plaintext = encode_connection_pubkey_plaintext(public_key=public_key, private_key=private_key)
     header = WireHeader(
         version=1,
-        event_type=TYPE_CONNECTION_PREKEY,
+        event_type=TYPE_CONNECTION_PUBKEY,
         flags=FLAG_UNSIGNED,
         signer_type=SIGNER_PEER,
         count=0,
@@ -3418,14 +3429,14 @@ def encode_connection_prekey_wire_event(
     return build_envelope(header, payload, signature)
 
 
-def decode_connection_prekey_wire_event(data: bytes) -> dict[str, Any]:
+def decode_connection_pubkey_wire_event(data: bytes) -> dict[str, Any]:
     header, payload, _signature = parse_envelope(data)
-    if header.event_type != TYPE_CONNECTION_PREKEY:
-        raise ValueError("unexpected event type for connection_prekey")
-    plaintext = payload[:CONNECTION_PREKEY_PLAINTEXT_SIZE]
-    decoded = decode_connection_prekey_plaintext(plaintext)
+    if header.event_type != TYPE_CONNECTION_PUBKEY:
+        raise ValueError("unexpected event type for connection_pubkey")
+    plaintext = payload[:CONNECTION_PUBKEY_PLAINTEXT_SIZE]
+    decoded = decode_connection_pubkey_plaintext(plaintext)
     return {
-        "type": "connection_prekey",
+        "type": "connection_pubkey",
         "public_key": crypto.b64encode(decoded["public_key"]),
         "private_key": crypto.b64encode(decoded["private_key"]),
         "signed_by": crypto.b64encode(header.signer_id),
@@ -3434,9 +3445,9 @@ def decode_connection_prekey_wire_event(data: bytes) -> dict[str, Any]:
     }
 
 
-def encode_connection_prekey_shared_wire_event(
+def encode_connection_pubkey_shared_wire_event(
     *,
-    connection_prekey_id_b64: str,
+    connection_pubkey_id_b64: str,
     peer_id_b64: str,
     public_key_b64: str,
     signed_by_b64: str,
@@ -3444,18 +3455,18 @@ def encode_connection_prekey_shared_wire_event(
     created_at_ms: int,
     private_key: bytes,
 ) -> bytes:
-    connection_prekey_id = crypto.b64decode(connection_prekey_id_b64)
+    connection_pubkey_id = crypto.b64decode(connection_pubkey_id_b64)
     peer_id = crypto.b64decode(peer_id_b64)
     public_key = crypto.b64decode(public_key_b64)
     signer_id = crypto.b64decode(signed_by_b64)
-    plaintext = encode_connection_prekey_shared_plaintext(
-        connection_prekey_id=connection_prekey_id,
+    plaintext = encode_connection_pubkey_shared_plaintext(
+        connection_pubkey_id=connection_pubkey_id,
         peer_id=peer_id,
         public_key=public_key,
     )
     header = WireHeader(
         version=1,
-        event_type=TYPE_CONNECTION_PREKEY_SHARED,
+        event_type=TYPE_CONNECTION_PUBKEY_SHARED,
         flags=0,
         signer_type=signer_type_from_str(signer_type),
         count=0,
@@ -3469,15 +3480,15 @@ def encode_connection_prekey_shared_wire_event(
     return build_envelope(header, payload, signature)
 
 
-def decode_connection_prekey_shared_wire_event(data: bytes) -> dict[str, Any]:
+def decode_connection_pubkey_shared_wire_event(data: bytes) -> dict[str, Any]:
     header, payload, signature = parse_envelope(data)
-    if header.event_type != TYPE_CONNECTION_PREKEY_SHARED:
-        raise ValueError("unexpected event type for connection_prekey_shared")
-    plaintext = payload[:CONNECTION_PREKEY_SHARED_PLAINTEXT_SIZE]
-    decoded = decode_connection_prekey_shared_plaintext(plaintext)
+    if header.event_type != TYPE_CONNECTION_PUBKEY_SHARED:
+        raise ValueError("unexpected event type for connection_pubkey_shared")
+    plaintext = payload[:CONNECTION_PUBKEY_SHARED_PLAINTEXT_SIZE]
+    decoded = decode_connection_pubkey_shared_plaintext(plaintext)
     return {
-        "type": "connection_prekey_shared",
-        "connection_prekey_id": crypto.b64encode(decoded["connection_prekey_id"]),
+        "type": "connection_pubkey_shared",
+        "connection_pubkey_id": crypto.b64encode(decoded["connection_pubkey_id"]),
         "peer_id": crypto.b64encode(decoded["peer_id"]),
         "public_key": crypto.b64encode(decoded["public_key"]),
         "signed_by": crypto.b64encode(header.signer_id),
@@ -4179,7 +4190,7 @@ def encode_invite_wire_event(
     *,
     mode: str,
     invite_pubkey_b64: str,
-    invite_prekey_id_b64: str | None,
+    invite_pubkey_id_b64: str | None,
     group_id_b64: str | None,
     channel_id_b64: str | None,
     key_id_b64: str | None,
@@ -4203,7 +4214,7 @@ def encode_invite_wire_event(
         raise ValueError("invite mode must be 'user' or 'peer'")
 
     invite_pubkey = crypto.b64decode(invite_pubkey_b64)
-    invite_prekey_id = crypto.b64decode(invite_prekey_id_b64) if invite_prekey_id_b64 else None
+    invite_pubkey_id = crypto.b64decode(invite_pubkey_id_b64) if invite_pubkey_id_b64 else None
     group_id = crypto.b64decode(group_id_b64) if group_id_b64 else None
     channel_id = crypto.b64decode(channel_id_b64) if channel_id_b64 else None
     key_id = crypto.b64decode(key_id_b64) if key_id_b64 else None
@@ -4219,7 +4230,7 @@ def encode_invite_wire_event(
     plaintext = encode_invite_plaintext(
         mode=mode_value,
         invite_pubkey=invite_pubkey,
-        invite_prekey_id=invite_prekey_id,
+        invite_pubkey_id=invite_pubkey_id,
         group_id=group_id,
         channel_id=channel_id,
         key_id=key_id,
@@ -4271,8 +4282,8 @@ def decode_invite_wire_event(data: bytes) -> dict[str, Any]:
         "_wire_signature": signature,
         "_wire_signed_bytes": _signing_bytes(header, plaintext),
     }
-    if decoded["invite_prekey_id"]:
-        event_data["invite_prekey_id"] = crypto.b64encode(decoded["invite_prekey_id"])
+    if decoded["invite_pubkey_id"]:
+        event_data["invite_pubkey_id"] = crypto.b64encode(decoded["invite_pubkey_id"])
     if decoded["group_id"]:
         event_data["group_id"] = crypto.b64encode(decoded["group_id"])
     if decoded["channel_id"]:
@@ -4299,15 +4310,15 @@ def decode_invite_wire_event(data: bytes) -> dict[str, Any]:
 def encode_invite_accepted_wire_event(
     *,
     invite_id_b64: str,
-    invite_prekey_id_b64: str | None,
+    invite_pubkey_id_b64: str | None,
     invite_private_key: bytes,
     inviter_peer_shared_id_b64: str | None,
     network_id_b64: str | None,
     channel_id_b64: str | None,
     key_id_b64: str | None,
-    inviter_connection_prekey_public_key_b64: str | None,
-    inviter_connection_prekey_shared_id_b64: str | None,
-    inviter_connection_prekey_id_b64: str | None,
+    inviter_connection_pubkey_public_key_b64: str | None,
+    inviter_connection_pubkey_shared_id_b64: str | None,
+    inviter_connection_pubkey_id_b64: str | None,
     inviter_ip: str | None,
     inviter_port: int | None,
     link_user_id_b64: str | None,
@@ -4316,25 +4327,25 @@ def encode_invite_accepted_wire_event(
     signed_by_b64: str | None,
 ) -> bytes:
     invite_id = crypto.b64decode(invite_id_b64)
-    invite_prekey_id = crypto.b64decode(invite_prekey_id_b64) if invite_prekey_id_b64 else None
+    invite_pubkey_id = crypto.b64decode(invite_pubkey_id_b64) if invite_pubkey_id_b64 else None
     inviter_peer_shared_id = (
         crypto.b64decode(inviter_peer_shared_id_b64) if inviter_peer_shared_id_b64 else None
     )
     network_id = crypto.b64decode(network_id_b64) if network_id_b64 else None
     channel_id = crypto.b64decode(channel_id_b64) if channel_id_b64 else None
     key_id = crypto.b64decode(key_id_b64) if key_id_b64 else None
-    inviter_connection_prekey_public_key = (
-        crypto.b64decode(inviter_connection_prekey_public_key_b64)
-        if inviter_connection_prekey_public_key_b64
+    inviter_connection_pubkey_public_key = (
+        crypto.b64decode(inviter_connection_pubkey_public_key_b64)
+        if inviter_connection_pubkey_public_key_b64
         else None
     )
-    inviter_connection_prekey_shared_id = (
-        crypto.b64decode(inviter_connection_prekey_shared_id_b64)
-        if inviter_connection_prekey_shared_id_b64
+    inviter_connection_pubkey_shared_id = (
+        crypto.b64decode(inviter_connection_pubkey_shared_id_b64)
+        if inviter_connection_pubkey_shared_id_b64
         else None
     )
-    inviter_connection_prekey_id = (
-        crypto.b64decode(inviter_connection_prekey_id_b64) if inviter_connection_prekey_id_b64 else None
+    inviter_connection_pubkey_id = (
+        crypto.b64decode(inviter_connection_pubkey_id_b64) if inviter_connection_pubkey_id_b64 else None
     )
     link_user_id = crypto.b64decode(link_user_id_b64) if link_user_id_b64 else None
     inviter_peer_shared_blob_id = (
@@ -4344,15 +4355,15 @@ def encode_invite_accepted_wire_event(
 
     plaintext = encode_invite_accepted_plaintext(
         invite_id=invite_id,
-        invite_prekey_id=invite_prekey_id,
+        invite_pubkey_id=invite_pubkey_id,
         invite_private_key=invite_private_key,
         inviter_peer_shared_id=inviter_peer_shared_id,
         network_id=network_id,
         channel_id=channel_id,
         key_id=key_id,
-        inviter_connection_prekey_public_key=inviter_connection_prekey_public_key,
-        inviter_connection_prekey_shared_id=inviter_connection_prekey_shared_id,
-        inviter_connection_prekey_id=inviter_connection_prekey_id,
+        inviter_connection_pubkey_public_key=inviter_connection_pubkey_public_key,
+        inviter_connection_pubkey_shared_id=inviter_connection_pubkey_shared_id,
+        inviter_connection_pubkey_id=inviter_connection_pubkey_id,
         inviter_ip=inviter_ip,
         inviter_port=inviter_port,
         link_user_id=link_user_id,
@@ -4383,8 +4394,8 @@ def decode_invite_accepted_wire_event(data: bytes) -> dict[str, Any]:
         "invite_id": crypto.b64encode(decoded["invite_id"]),
         "invite_private_key": crypto.b64encode(decoded["invite_private_key"]),
     }
-    if decoded["invite_prekey_id"]:
-        invite_link_data["invite_prekey_id"] = crypto.b64encode(decoded["invite_prekey_id"])
+    if decoded["invite_pubkey_id"]:
+        invite_link_data["invite_pubkey_id"] = crypto.b64encode(decoded["invite_pubkey_id"])
     if decoded["inviter_peer_shared_id"]:
         invite_link_data["inviter_peer_shared_id"] = crypto.b64encode(decoded["inviter_peer_shared_id"])
     if decoded["network_id"]:
@@ -4393,17 +4404,17 @@ def decode_invite_accepted_wire_event(data: bytes) -> dict[str, Any]:
         invite_link_data["channel_id"] = crypto.b64encode(decoded["channel_id"])
     if decoded["key_id"]:
         invite_link_data["key_id"] = crypto.b64encode(decoded["key_id"])
-    if decoded["inviter_connection_prekey_public_key"]:
-        invite_link_data["inviter_connection_prekey_public_key"] = crypto.b64encode(
-            decoded["inviter_connection_prekey_public_key"]
+    if decoded["inviter_connection_pubkey_public_key"]:
+        invite_link_data["inviter_connection_pubkey_public_key"] = crypto.b64encode(
+            decoded["inviter_connection_pubkey_public_key"]
         )
-    if decoded["inviter_connection_prekey_shared_id"]:
-        invite_link_data["inviter_connection_prekey_shared_id"] = crypto.b64encode(
-            decoded["inviter_connection_prekey_shared_id"]
+    if decoded["inviter_connection_pubkey_shared_id"]:
+        invite_link_data["inviter_connection_pubkey_shared_id"] = crypto.b64encode(
+            decoded["inviter_connection_pubkey_shared_id"]
         )
-    if decoded["inviter_connection_prekey_id"]:
-        invite_link_data["inviter_connection_prekey_id"] = crypto.b64encode(
-            decoded["inviter_connection_prekey_id"]
+    if decoded["inviter_connection_pubkey_id"]:
+        invite_link_data["inviter_connection_pubkey_id"] = crypto.b64encode(
+            decoded["inviter_connection_pubkey_id"]
         )
     if decoded["inviter_ip"] is not None:
         invite_link_data["ip"] = decoded["inviter_ip"]
@@ -4754,6 +4765,7 @@ def decode_negentropy_wire_event(data: bytes) -> dict[str, Any]:
 # =============================================================================
 
 def is_wire_pubkey_envelope(data: bytes) -> bool:
+    """Check if data is a local pubkey envelope (stores keypair)."""
     if len(data) != WIRE_SIZE:
         return False
     try:
@@ -4761,6 +4773,17 @@ def is_wire_pubkey_envelope(data: bytes) -> bool:
     except ValueError:
         return False
     return header.version == 1 and header.event_type == TYPE_PUBKEY
+
+
+def is_wire_pubkey_shared_envelope(data: bytes) -> bool:
+    """Check if data is a pubkey_shared envelope (shareable public key)."""
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_PUBKEY_SHARED
 
 
 def is_wire_secret_envelope(data: bytes) -> bool:
@@ -4848,43 +4871,113 @@ def is_wire_treekem_secret_shared_envelope(data: bytes) -> bool:
 
 
 # =============================================================================
-# TreeKEM Phase 1: Pubkey (signed, shareable)
+# TreeKEM Phase 1: Pubkey (local-only keypair storage)
+# Pattern: pubkey (local, SHAREABLE=False) + pubkey_shared (shareable, SHAREABLE=True)
 # =============================================================================
 
-def encode_pubkey_plaintext(*, public_key: bytes, removal_epoch_id: bytes | None) -> bytes:
-    """Encode pubkey plaintext: public_key (32) + removal_epoch_id (16, nullable)."""
-    public_key = _require_len("public_key", public_key, 32)
-    removal_epoch_id = removal_epoch_id or b"\x00" * 16
-    removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
-    return public_key + removal_epoch_id
+def encode_pubkey_local_plaintext(*, public_key: bytes, private_key: bytes) -> bytes:
+    """Encode pubkey local plaintext: public_key (32) + private_key (32)."""
+    _require_len("public_key", public_key, 32)
+    _require_len("private_key", private_key, 32)
+    payload = bytearray(PUBKEY_LOCAL_PLAINTEXT_SIZE)
+    payload[0:32] = public_key
+    payload[32:64] = private_key
+    return bytes(payload)
 
 
-def decode_pubkey_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode pubkey plaintext."""
-    public_key = data[:32]
-    removal_epoch_id = data[32:48]
+def decode_pubkey_local_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode pubkey local plaintext."""
     return {
-        "public_key": public_key,
-        "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
+        "public_key": data[0:32],
+        "private_key": data[32:64],
     }
 
 
-def encode_pubkey_wire_event(
+def encode_pubkey_local_event(*, public_key: bytes, private_key: bytes) -> bytes:
+    """Encode a deterministic local pubkey event (stores keypair)."""
+    plaintext = encode_pubkey_local_plaintext(public_key=public_key, private_key=private_key)
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_PUBKEY,
+        flags=FLAG_UNSIGNED,
+        signer_type=SIGNER_NONE,
+        count=0,
+        created_at_ms=0,  # Deterministic: same key material = same event ID
+        ttl_ms=0,
+        signer_id=b"\x00" * SIGNER_ID_SIZE,
+    )
+    payload = _pad_payload(plaintext)
+    signature = b"\x00" * SIGNATURE_SIZE
+    return build_envelope(header, payload, signature)
+
+
+def decode_pubkey_local_event(data: bytes) -> dict[str, Any]:
+    """Decode a local pubkey event."""
+    header, payload, _signature = parse_envelope(data)
+    if header.event_type != TYPE_PUBKEY:
+        raise ValueError("unexpected event type for pubkey")
+    plaintext = payload[:PUBKEY_LOCAL_PLAINTEXT_SIZE]
+    decoded = decode_pubkey_local_plaintext(plaintext)
+    return {
+        "type": "pubkey",
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "private_key": crypto.b64encode(decoded["private_key"]),
+        "created_at": header.created_at_ms,
+    }
+
+
+# =============================================================================
+# TreeKEM Phase 1: Pubkey Shared (shareable public key)
+# =============================================================================
+
+def encode_pubkey_shared_plaintext(
     *,
+    pubkey_id: bytes,
+    owner_peer_id: bytes,
     public_key: bytes,
-    removal_epoch_id_b64: str | None,
+) -> bytes:
+    """Encode pubkey_shared plaintext: pubkey_id (16) + owner_peer_id (16) + public_key (32)."""
+    _require_len("pubkey_id", pubkey_id, 16)
+    _require_len("owner_peer_id", owner_peer_id, 16)
+    _require_len("public_key", public_key, 32)
+    payload = bytearray(PUBKEY_SHARED_PLAINTEXT_SIZE)
+    payload[0:16] = pubkey_id
+    payload[16:32] = owner_peer_id
+    payload[32:64] = public_key
+    return bytes(payload)
+
+
+def decode_pubkey_shared_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode pubkey_shared plaintext."""
+    return {
+        "pubkey_id": data[0:16],
+        "owner_peer_id": data[16:32],
+        "public_key": data[32:64],
+    }
+
+
+def encode_pubkey_shared_wire_event(
+    *,
+    pubkey_id_b64: str,
+    owner_peer_id_b64: str,
+    public_key: bytes,
     signed_by_b64: str,
     signer_type: str,
     created_at_ms: int,
     private_key: bytes,
 ) -> bytes:
-    """Encode a signed pubkey wire event."""
-    removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
+    """Encode a signed pubkey_shared wire event."""
+    pubkey_id = crypto.b64decode(pubkey_id_b64)
+    owner_peer_id = crypto.b64decode(owner_peer_id_b64)
     signer_id = crypto.b64decode(signed_by_b64)
-    plaintext = encode_pubkey_plaintext(public_key=public_key, removal_epoch_id=removal_epoch_id)
+    plaintext = encode_pubkey_shared_plaintext(
+        pubkey_id=pubkey_id,
+        owner_peer_id=owner_peer_id,
+        public_key=public_key,
+    )
     header = WireHeader(
         version=1,
-        event_type=TYPE_PUBKEY,
+        event_type=TYPE_PUBKEY_SHARED,
         flags=0,
         signer_type=signer_type_from_str(signer_type),
         count=0,
@@ -4898,17 +4991,18 @@ def encode_pubkey_wire_event(
     return build_envelope(header, payload, signature)
 
 
-def decode_pubkey_wire_event(data: bytes) -> dict[str, Any]:
-    """Decode a pubkey wire event."""
+def decode_pubkey_shared_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a pubkey_shared wire event."""
     header, payload, signature = parse_envelope(data)
-    if header.event_type != TYPE_PUBKEY:
-        raise ValueError("unexpected event type for pubkey")
-    plaintext = payload[:PUBKEY_PLAINTEXT_SIZE]
-    decoded = decode_pubkey_plaintext(plaintext)
+    if header.event_type != TYPE_PUBKEY_SHARED:
+        raise ValueError("unexpected event type for pubkey_shared")
+    plaintext = payload[:PUBKEY_SHARED_PLAINTEXT_SIZE]
+    decoded = decode_pubkey_shared_plaintext(plaintext)
     return {
-        "type": "pubkey",
+        "type": "pubkey_shared",
+        "pubkey_id": crypto.b64encode(decoded["pubkey_id"]),
+        "owner_peer_id": crypto.b64encode(decoded["owner_peer_id"]),
         "public_key": crypto.b64encode(decoded["public_key"]),
-        "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,
@@ -5003,9 +5097,12 @@ def _encrypt_secret_shared_payload(plaintext: bytes, recipient_pubkey: dict[str,
 
 def _decrypt_secret_shared_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
     """Decrypt secret_shared payload."""
-    # Find the actual encrypted length by removing padding
-    # sealed_box overhead is 48 bytes (32 ephemeral pubkey + 16 tag)
-    encrypted = payload[16:]
+    # Payload format: key_id (16) || sealed_data || padding
+    # Sealed format: ephemeral_pubkey (32) || nonce (24) || ciphertext (plaintext_len + 16 mac)
+    # Plaintext is 64 bytes (secret_id + symmetric_key + recipient_pubkey_id)
+    # So sealed_len = 32 + 24 + (64 + 16) = 136 bytes
+    SEALED_LEN = 32 + 24 + 64 + 16  # 136 bytes
+    encrypted = payload[16:16 + SEALED_LEN]
     private_key = key_data["private_key"]
     return crypto.unseal(encrypted, private_key)
 
@@ -5412,6 +5509,202 @@ def decode_treekem_pubkey_wire_event(data: bytes) -> dict[str, Any]:
 
 
 # =============================================================================
+# TreeKEM Phase 2: treekem_pubkey_local (local-only keypair storage)
+# Pattern: treekem_pubkey (local) + treekem_pubkey_shared (shareable)
+# =============================================================================
+
+def encode_treekem_pubkey_local_plaintext(*, public_key: bytes, private_key: bytes) -> bytes:
+    """Encode treekem_pubkey local plaintext: public_key (32) + private_key (32)."""
+    _require_len("public_key", public_key, 32)
+    _require_len("private_key", private_key, 32)
+    payload = bytearray(TREEKEM_PUBKEY_LOCAL_PLAINTEXT_SIZE)
+    payload[0:32] = public_key
+    payload[32:64] = private_key
+    return bytes(payload)
+
+
+def decode_treekem_pubkey_local_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode treekem_pubkey local plaintext."""
+    return {
+        "public_key": data[0:32],
+        "private_key": data[32:64],
+    }
+
+
+def encode_treekem_pubkey_local_event(*, public_key: bytes, private_key: bytes) -> bytes:
+    """Encode a deterministic local treekem_pubkey event (stores keypair)."""
+    plaintext = encode_treekem_pubkey_local_plaintext(public_key=public_key, private_key=private_key)
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TREEKEM_PUBKEY_LOCAL,
+        flags=FLAG_UNSIGNED,
+        signer_type=SIGNER_NONE,
+        count=0,
+        created_at_ms=0,  # Deterministic: same key material = same event ID
+        ttl_ms=0,
+        signer_id=b"\x00" * SIGNER_ID_SIZE,
+    )
+    payload = _pad_payload(plaintext)
+    signature = b"\x00" * SIGNATURE_SIZE
+    return build_envelope(header, payload, signature)
+
+
+def decode_treekem_pubkey_local_event(data: bytes) -> dict[str, Any]:
+    """Decode a local treekem_pubkey event."""
+    header, payload, _signature = parse_envelope(data)
+    if header.event_type != TYPE_TREEKEM_PUBKEY_LOCAL:
+        raise ValueError("unexpected event type for treekem_pubkey_local")
+    plaintext = payload[:TREEKEM_PUBKEY_LOCAL_PLAINTEXT_SIZE]
+    decoded = decode_treekem_pubkey_local_plaintext(plaintext)
+    return {
+        "type": "treekem_pubkey",
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "private_key": crypto.b64encode(decoded["private_key"]),
+        "created_at": header.created_at_ms,
+    }
+
+
+def is_wire_treekem_pubkey_local_envelope(data: bytes) -> bool:
+    """Check if data is a treekem_pubkey_local envelope."""
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TREEKEM_PUBKEY_LOCAL
+
+
+# =============================================================================
+# TreeKEM Phase 2: treekem_pubkey_shared (shareable tree node public key)
+# =============================================================================
+
+def encode_treekem_pubkey_shared_plaintext(
+    *,
+    treekem_pubkey_id: bytes,
+    depth: int,
+    path_prefix: bytes,
+    public_key: bytes,
+    parent_pubkey_id: bytes | None,
+    removal_epoch_id: bytes | None,
+) -> bytes:
+    """Encode treekem_pubkey_shared plaintext.
+
+    Layout:
+    - treekem_pubkey_id (16) - reference to local treekem_pubkey event
+    - depth (1) - tree depth
+    - path_prefix (16) - padded path prefix
+    - public_key (32)
+    - parent_pubkey_id (16) - or zeros if None
+    - removal_epoch_id (16) - or zeros if None
+    """
+    if depth < 0 or depth > 255:
+        raise ValueError("depth must be 0-255")
+    _require_len("treekem_pubkey_id", treekem_pubkey_id, 16)
+    path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
+    _require_len("public_key", public_key, 32)
+    parent_pubkey_id = parent_pubkey_id or b"\x00" * 16
+    _require_len("parent_pubkey_id", parent_pubkey_id, 16)
+    removal_epoch_id = removal_epoch_id or b"\x00" * 16
+    _require_len("removal_epoch_id", removal_epoch_id, 16)
+    return treekem_pubkey_id + bytes([depth]) + path_prefix_padded + public_key + parent_pubkey_id + removal_epoch_id
+
+
+def decode_treekem_pubkey_shared_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode treekem_pubkey_shared plaintext."""
+    treekem_pubkey_id = data[0:16]
+    depth = data[16]
+    path_prefix = data[17:33]
+    public_key = data[33:65]
+    parent_pubkey_id = data[65:81]
+    removal_epoch_id = data[81:97]
+    return {
+        "treekem_pubkey_id": treekem_pubkey_id,
+        "depth": depth,
+        "path_prefix": path_prefix,
+        "public_key": public_key,
+        "parent_pubkey_id": parent_pubkey_id if parent_pubkey_id != b"\x00" * 16 else None,
+        "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
+    }
+
+
+def encode_treekem_pubkey_shared_wire_event(
+    *,
+    treekem_pubkey_id_b64: str,
+    depth: int,
+    path_prefix: bytes,
+    public_key: bytes,
+    parent_pubkey_id_b64: str | None,
+    removal_epoch_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed treekem_pubkey_shared wire event."""
+    treekem_pubkey_id = crypto.b64decode(treekem_pubkey_id_b64)
+    parent_pubkey_id = crypto.b64decode(parent_pubkey_id_b64) if parent_pubkey_id_b64 else None
+    removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_treekem_pubkey_shared_plaintext(
+        treekem_pubkey_id=treekem_pubkey_id,
+        depth=depth,
+        path_prefix=path_prefix,
+        public_key=public_key,
+        parent_pubkey_id=parent_pubkey_id,
+        removal_epoch_id=removal_epoch_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_TREEKEM_PUBKEY_SHARED,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_treekem_pubkey_shared_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a treekem_pubkey_shared wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_TREEKEM_PUBKEY_SHARED:
+        raise ValueError("unexpected event type for treekem_pubkey_shared")
+    plaintext = payload[:TREEKEM_PUBKEY_SHARED_PLAINTEXT_SIZE]
+    decoded = decode_treekem_pubkey_shared_plaintext(plaintext)
+    return {
+        "type": "treekem_pubkey_shared",
+        "treekem_pubkey_id": crypto.b64encode(decoded["treekem_pubkey_id"]),
+        "depth": decoded["depth"],
+        "path_prefix": crypto.b64encode(decoded["path_prefix"]),
+        "public_key": crypto.b64encode(decoded["public_key"]),
+        "parent_pubkey_id": crypto.b64encode(decoded["parent_pubkey_id"]) if decoded["parent_pubkey_id"] else None,
+        "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }
+
+
+def is_wire_treekem_pubkey_shared_envelope(data: bytes) -> bool:
+    """Check if data is a treekem_pubkey_shared envelope."""
+    if len(data) != WIRE_SIZE:
+        return False
+    try:
+        header = WireHeader.unpack(data[:HEADER_SIZE])
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_TREEKEM_PUBKEY_SHARED
+
+
+# =============================================================================
 # TreeKEM Phase 2: treekem_update (signed, shareable)
 # =============================================================================
 
@@ -5651,3 +5944,105 @@ def decode_treekem_secret_shared_wire_event(
         "_wire_signature": signature,
         "_wire_signed_bytes": _signing_bytes(header, plaintext),
     }, []
+
+
+# ============================================================================
+# key_announce wire format
+# ============================================================================
+
+def encode_key_announce_plaintext(
+    *,
+    key_id: bytes,
+    group_id: bytes,
+    removal_epoch_id: bytes | None,
+) -> bytes:
+    """Encode key_announce plaintext."""
+    key_id = _require_len("key_id", key_id, 16)
+    group_id = _require_len("group_id", group_id, 16)
+    # removal_epoch_id: 16 bytes or all zeros if None
+    if removal_epoch_id is None:
+        removal_epoch_id = bytes(16)
+    else:
+        removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
+    return key_id + group_id + removal_epoch_id
+
+
+def decode_key_announce_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode key_announce plaintext."""
+    key_id = data[:16]
+    group_id = data[16:32]
+    removal_epoch_id_raw = data[32:48]
+    # All zeros means None
+    removal_epoch_id = None if removal_epoch_id_raw == bytes(16) else removal_epoch_id_raw
+    return {
+        "key_id": key_id,
+        "group_id": group_id,
+        "removal_epoch_id": removal_epoch_id,
+    }
+
+
+def is_wire_key_announce_envelope(data: bytes) -> bool:
+    """Check if data is a key_announce wire envelope."""
+    try:
+        header, _, _ = parse_envelope(data)
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_KEY_ANNOUNCE
+
+
+def encode_key_announce_wire_event(
+    *,
+    key_id_b64: str,
+    group_id_b64: str,
+    removal_epoch_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    private_key: bytes,
+) -> bytes:
+    """Encode a signed key_announce wire event."""
+    key_id = crypto.b64decode(key_id_b64)
+    group_id = crypto.b64decode(group_id_b64)
+    removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_key_announce_plaintext(
+        key_id=key_id,
+        group_id=group_id,
+        removal_epoch_id=removal_epoch_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_KEY_ANNOUNCE,
+        flags=0,
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _pad_payload(plaintext)
+    return build_envelope(header, payload, signature)
+
+
+def decode_key_announce_wire_event(data: bytes) -> dict[str, Any]:
+    """Decode a key_announce wire event."""
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_KEY_ANNOUNCE:
+        raise ValueError("unexpected event type for key_announce")
+    plaintext = payload[:KEY_ANNOUNCE_PLAINTEXT_SIZE]
+    decoded = decode_key_announce_plaintext(plaintext)
+    # removal_epoch_id is None if it was all zeros (no removal epoch)
+    removal_epoch_id = crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None
+    return {
+        "type": "key_announce",
+        "key_id": crypto.b64encode(decoded["key_id"]),
+        "group_id": crypto.b64encode(decoded["group_id"]),
+        "removal_epoch_id": removal_epoch_id,
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }

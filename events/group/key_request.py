@@ -126,6 +126,13 @@ def create(peer_id: str, peer_shared_id: str, requested_key_id: str,
 def fulfill_request(request_id: str, peer_id: str, t_ms: int, db: Any) -> str | None:
     """Attempt to fulfill a key request by creating a secret_shared event.
 
+    SECURITY: Keys are bound to removal_epochs. Before fulfilling a request, we check
+    if the requester is removed in the key's removal_epoch. This ensures that:
+    - If we have the key, we must have received its removal_epoch
+    - A removed user cannot obtain keys created after their removal
+    - This works even if we don't "know" we're denying a removed user - if we have
+      the key, we have its epoch, which contains the removal
+
     Args:
         request_id: The key request ID
         peer_id: Local peer ID
@@ -162,6 +169,22 @@ def fulfill_request(request_id: str, peer_id: str, t_ms: int, db: Any) -> str | 
         log.info(f"key_request.fulfill_request() we don't have secret: {requested_key_id}")
         return None
 
+    # SECURITY CHECK: Get the removal epoch for this key and check if requester is removed
+    # This is the critical security property: keys created after a removal reference
+    # that removal's epoch, so we can't share them with the removed user.
+    from events.group import key_announce
+    from events.identity import removal_epoch
+    key_removal_epoch_id = key_announce.get_removal_epoch_for_key(requested_key_id, peer_id, db)
+
+    if key_removal_epoch_id is not None:
+        # Check if the requester is removed in this epoch
+        if removal_epoch.is_removed(requester_peer_id, key_removal_epoch_id, peer_id, db):
+            log.warning(
+                f"key_request.fulfill_request() DENIED - requester {requester_peer_id[:20]}... "
+                f"is removed in key's epoch {key_removal_epoch_id[:20]}..."
+            )
+            return None
+
     # Get requester's pubkey for wrapping
     from events.group import pubkey
     recipient_pubkey = pubkey.get_pubkey_by_id(requester_pubkey_id, peer_id, db)
@@ -172,10 +195,12 @@ def fulfill_request(request_id: str, peer_id: str, t_ms: int, db: Any) -> str | 
     # Create secret_shared event for the requester
     from events.group import secret_shared
     try:
-        secret_shared_id = secret_shared.create(
+        secret_shared_id = secret_shared.create_to_pubkey(
             secret_id=requested_key_id,
             peer_id=peer_id,
+            peer_shared_id=peer_id,  # Use peer_id as signer (we're local)
             recipient_pubkey_id=requester_pubkey_id,
+            removal_epoch_id=key_removal_epoch_id,
             t_ms=t_ms,
             db=db
         )
