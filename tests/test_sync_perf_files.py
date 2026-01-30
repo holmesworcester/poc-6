@@ -21,6 +21,7 @@ import time
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from tests.utils import tick_helper
+from tests.utils.tick_helper import TestClock
 from core import tick
 
 
@@ -35,19 +36,20 @@ def _create_file_data(size_bytes: int) -> bytes:
 def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expected_max_rounds: int):
     """Run a file sync test and report performance metrics."""
     db = fresh_db
+    clock = TestClock()
     size_name = f"{file_size_bytes // (1024*1024)}MB" if file_size_bytes >= 1024*1024 else f"{file_size_bytes // 1024}KB"
 
     print(f"\n{'='*60}")
     print(f"File Sync Performance Test: {size_name} ({file_size_bytes:,} bytes)")
     print(f"{'='*60}")
 
-    # Setup: Alice creates network, Bob joins
+    # Setup: Alice creates network, Bob joins (using realistic timestamps for time-based keys)
     print("\n[Setup] Creating network...")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Initial sync
