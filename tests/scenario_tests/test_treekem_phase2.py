@@ -118,10 +118,10 @@ class TestTreeKEMPubkeyEvent:
         db.commit()
 
         # Create a treekem_pubkey at depth 0 (root)
-        pubkey_id, private_key = treekem_pubkey.create(
+        pubkey_id, pubkey_shared_id, private_key = treekem_pubkey.create(
             depth=0,
             path_prefix=b'',
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -162,7 +162,7 @@ class TestTreeKEMPubkeyEvent:
             depth=3,
             path_prefix=b'\xE0',
             public_key=public_key,
-            parent_pubkey_id_b64=None,
+            parent_pubkey_shared_id_b64=None,
             removal_epoch_id_b64=None,
             signed_by_b64=alice['peer_shared_id'],
             signer_type="peer_shared",
@@ -191,10 +191,10 @@ class TestTreeKEMUpdateEvent:
         db.commit()
 
         # First create a root pubkey
-        root_pubkey_id, _ = treekem_pubkey.create(
+        root_pubkey_id, root_pubkey_id_shared, _ = treekem_pubkey.create(
             depth=0,
             path_prefix=b'',
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -205,7 +205,7 @@ class TestTreeKEMUpdateEvent:
 
         # Create an update
         update_id = treekem_update.create(
-            root_pubkey_id=root_pubkey_id,
+            leaf_pubkey_shared_id=root_pubkey_id_shared,
             removal_epoch_id=None,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -220,7 +220,7 @@ class TestTreeKEMUpdateEvent:
         # Verify we can retrieve the update
         update = treekem_update.get_update(update_id, alice['peer_id'], db)
         assert update is not None
-        assert update['root_pubkey_id'] == root_pubkey_id
+        assert update['leaf_pubkey_shared_id'] == root_pubkey_id_shared
         assert update['author_peer_id'] == alice['peer_shared_id']
 
     def test_concurrent_updates_lowest_wins(self, fresh_db):
@@ -230,13 +230,13 @@ class TestTreeKEMUpdateEvent:
         db.commit()
 
         # Create root pubkeys for two "concurrent" updates
-        root_pubkey_a, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+        root_pubkey_a, root_pubkey_a_shared, _ = treekem_pubkey.create(
+            depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
             peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
             t_ms=2000, db=db
         )
-        root_pubkey_b, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+        root_pubkey_b, root_pubkey_b_shared, _ = treekem_pubkey.create(
+            depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
             peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
             t_ms=2001, db=db
         )
@@ -244,7 +244,7 @@ class TestTreeKEMUpdateEvent:
 
         # Create two "concurrent" updates (same base_update_id=None, same removal_epoch_id=None)
         update_a = treekem_update.create(
-            root_pubkey_id=root_pubkey_a,
+            leaf_pubkey_shared_id=root_pubkey_a_shared,
             removal_epoch_id=None,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -253,7 +253,7 @@ class TestTreeKEMUpdateEvent:
             db=db
         )
         update_b = treekem_update.create(
-            root_pubkey_id=root_pubkey_b,
+            leaf_pubkey_shared_id=root_pubkey_b_shared,
             removal_epoch_id=None,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -289,7 +289,7 @@ class TestTreeKEMUpdateEvent:
             author_peer_id_b64=alice['peer_shared_id'],
             removal_epoch_id_b64=None,
             base_update_id_b64=None,
-            root_pubkey_id_b64=root_pubkey_id,
+            leaf_pubkey_shared_id_b64=root_pubkey_id,
             signed_by_b64=alice['peer_shared_id'],
             signer_type="peer_shared",
             created_at_ms=2000,
@@ -302,7 +302,7 @@ class TestTreeKEMUpdateEvent:
         decoded = wire_format.decode_treekem_update_wire_event(blob)
         assert decoded['type'] == 'treekem_update'
         assert decoded['author_peer_id'] == alice['peer_shared_id']
-        assert decoded['root_pubkey_id'] == root_pubkey_id
+        assert decoded['leaf_pubkey_shared_id'] == root_pubkey_id
         assert decoded['base_update_id'] is None
         assert decoded['removal_epoch_id'] is None
 
@@ -384,10 +384,10 @@ class TestIntegrationWithRemovalEpoch:
         db.commit()
 
         # Create root pubkey under this epoch
-        root_pubkey_id, _ = treekem_pubkey.create(
+        root_pubkey_id, root_pubkey_id_shared, _ = treekem_pubkey.create(
             depth=0,
             path_prefix=b'',
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=epoch_id,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -398,7 +398,7 @@ class TestIntegrationWithRemovalEpoch:
 
         # Create update under this epoch
         update_id = treekem_update.create(
-            root_pubkey_id=root_pubkey_id,
+            leaf_pubkey_shared_id=root_pubkey_id_shared,
             removal_epoch_id=epoch_id,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -425,8 +425,8 @@ class TestConcurrentUpdateTiebreaker:
         # Create three root pubkeys
         pubkeys = []
         for i in range(3):
-            pk_id, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=2000 + i, db=db
             )
@@ -437,7 +437,7 @@ class TestConcurrentUpdateTiebreaker:
         updates = []
         for i, pk_id in enumerate(pubkeys):
             update_id = treekem_update.create(
-                root_pubkey_id=pk_id,
+                leaf_pubkey_shared_id=pk_shared_id,
                 removal_epoch_id=None,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -475,13 +475,13 @@ class TestConcurrentUpdateTiebreaker:
         # Create pubkeys and updates
         updates = []
         for i in range(4):
-            pk_id, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=2000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk_id,
+                leaf_pubkey_shared_id=pk_shared_id,
                 removal_epoch_id=None,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -513,13 +513,13 @@ class TestConcurrentUpdateTiebreaker:
         # Create two concurrent updates
         updates = []
         for i in range(2):
-            pk_id, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=2000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk_id,
+                leaf_pubkey_shared_id=pk_shared_id,
                 removal_epoch_id=None,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -545,13 +545,13 @@ class TestConcurrentUpdateTiebreaker:
         # Create several updates
         updates = []
         for i in range(5):
-            pk_id, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=2000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk_id,
+                leaf_pubkey_shared_id=pk_shared_id,
                 removal_epoch_id=None,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -588,13 +588,13 @@ class TestUpdateChaining:
         db.commit()
 
         # Create first update (no base)
-        pk1, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+        pk1, pk1_shared, _ = treekem_pubkey.create(
+            depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
             peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
             t_ms=2000, db=db
         )
         update1 = treekem_update.create(
-            root_pubkey_id=pk1,
+            leaf_pubkey_shared_id=pk1_shared,
             removal_epoch_id=None,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -605,13 +605,13 @@ class TestUpdateChaining:
         db.commit()
 
         # Create second update building on first
-        pk2, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+        pk2, pk2_shared, _ = treekem_pubkey.create(
+            depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
             peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
             t_ms=4000, db=db
         )
         update2 = treekem_update.create(
-            root_pubkey_id=pk2,
+            leaf_pubkey_shared_id=pk2_shared,
             removal_epoch_id=None,
             base_update_id=update1,
             peer_id=alice['peer_id'],
@@ -622,13 +622,13 @@ class TestUpdateChaining:
         db.commit()
 
         # Create third update building on second
-        pk3, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+        pk3, pk3_shared, _ = treekem_pubkey.create(
+            depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
             peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
             t_ms=6000, db=db
         )
         update3 = treekem_update.create(
-            root_pubkey_id=pk3,
+            leaf_pubkey_shared_id=pk3_shared,
             removal_epoch_id=None,
             base_update_id=update2,
             peer_id=alice['peer_id'],
@@ -654,13 +654,13 @@ class TestUpdateChaining:
         db.commit()
 
         # Create base update
-        pk_base, _ = treekem_pubkey.create(
-            depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+        pk_base, pk_base_shared, _ = treekem_pubkey.create(
+            depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
             peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
             t_ms=2000, db=db
         )
         base_update = treekem_update.create(
-            root_pubkey_id=pk_base,
+            leaf_pubkey_shared_id=pk_base_shared,
             removal_epoch_id=None,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -673,13 +673,13 @@ class TestUpdateChaining:
         # Create two concurrent updates branching from base
         branches = []
         for i in range(2):
-            pk, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk, pk_shared, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=4000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk,
+                leaf_pubkey_shared_id=pk_shared,
                 removal_epoch_id=None,
                 base_update_id=base_update,
                 peer_id=alice['peer_id'],
@@ -718,13 +718,13 @@ class TestUpdateChaining:
         # Create two independent base updates
         base_updates = []
         for i in range(2):
-            pk, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk, pk_shared, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=2000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk,
+                leaf_pubkey_shared_id=pk_shared,
                 removal_epoch_id=None,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -738,13 +738,13 @@ class TestUpdateChaining:
         # Create child update for each base
         children = []
         for i, base in enumerate(base_updates):
-            pk, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=None,
+            pk, pk_shared, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=None,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=4000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk,
+                leaf_pubkey_shared_id=pk_shared,
                 removal_epoch_id=None,
                 base_update_id=base,
                 peer_id=alice['peer_id'],
@@ -791,10 +791,10 @@ class TestSecretSharing:
         db.commit()
 
         # Create a treekem_pubkey (recipient)
-        recipient_pk_id, _ = treekem_pubkey.create(
+        recipient_pk_id, pk_shared_id, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=b'\x80',
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -840,10 +840,10 @@ class TestSecretSharing:
         # Create multiple recipient pubkeys at different tree positions
         recipient_pubkeys = []
         for i, prefix in enumerate([b'\x80', b'\x40', b'\x20']):
-            pk_id, _ = treekem_pubkey.create(
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
                 depth=1,
                 path_prefix=prefix,
-                parent_pubkey_id=None,
+                parent_pubkey_shared_id=None,
                 removal_epoch_id=None,
                 peer_id=alice['peer_id'],
                 peer_shared_id=alice['peer_shared_id'],
@@ -952,10 +952,10 @@ class TestEndToEndUpdatePath:
             t_ms=2000,
             db=db
         )
-        root_pubkey_id, _ = treekem_pubkey.create(
+        root_pubkey_id, root_pubkey_id_shared, _ = treekem_pubkey.create(
             depth=0,
             path_prefix=b'',
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -965,20 +965,20 @@ class TestEndToEndUpdatePath:
         db.commit()
 
         # Step 2: Create child pubkeys for copath (simulating other peers' nodes)
-        left_child_pk, _ = treekem_pubkey.create(
+        left_child_pk, left_child_pk_shared, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=b'\x00',
-            parent_pubkey_id=root_pubkey_id,
+            parent_pubkey_shared_id=root_pubkey_id,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             t_ms=2002,
             db=db
         )
-        right_child_pk, _ = treekem_pubkey.create(
+        right_child_pk, right_child_pk_shared, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=b'\x80',
-            parent_pubkey_id=root_pubkey_id,
+            parent_pubkey_shared_id=root_pubkey_id,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -989,7 +989,7 @@ class TestEndToEndUpdatePath:
 
         # Step 3: Create update
         update_id = treekem_update.create(
-            root_pubkey_id=root_pubkey_id,
+            leaf_pubkey_shared_id=root_pubkey_id_shared,
             removal_epoch_id=None,
             base_update_id=None,
             peer_id=alice['peer_id'],
@@ -1014,7 +1014,7 @@ class TestEndToEndUpdatePath:
         # Verify complete update path
         update = treekem_update.get_update(update_id, alice['peer_id'], db)
         assert update is not None
-        assert update['root_pubkey_id'] == root_pubkey_id
+        assert update['leaf_pubkey_shared_id'] == root_pubkey_id_shared
 
         # Verify we shared to both children
         assert len(shared_ids) == 2
@@ -1027,8 +1027,8 @@ class TestEndToEndUpdatePath:
         assert root_pk['depth'] == 0
         assert left_pk['depth'] == 1
         assert right_pk['depth'] == 1
-        assert left_pk['parent_pubkey_id'] == root_pubkey_id
-        assert right_pk['parent_pubkey_id'] == root_pubkey_id
+        assert left_pk['parent_pubkey_shared_id'] == root_pubkey_id
+        assert right_pk['parent_pubkey_shared_id'] == root_pubkey_id
 
 
 class TestEdgeCases:
@@ -1091,13 +1091,13 @@ class TestEdgeCases:
         updates_epoch2 = []
 
         for i in range(2):
-            pk, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=epoch1,
+            pk, pk_shared, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=epoch1,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=3000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk,
+                leaf_pubkey_shared_id=pk_shared,
                 removal_epoch_id=epoch1,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -1108,13 +1108,13 @@ class TestEdgeCases:
             updates_epoch1.append(update_id)
 
         for i in range(2):
-            pk, _ = treekem_pubkey.create(
-                depth=0, path_prefix=b'', parent_pubkey_id=None, removal_epoch_id=epoch2,
+            pk, pk_shared, _ = treekem_pubkey.create(
+                depth=0, path_prefix=b'', parent_pubkey_shared_id=None, removal_epoch_id=epoch2,
                 peer_id=alice['peer_id'], peer_shared_id=alice['peer_shared_id'],
                 t_ms=5000 + i, db=db
             )
             update_id = treekem_update.create(
-                root_pubkey_id=pk,
+                leaf_pubkey_shared_id=pk_shared,
                 removal_epoch_id=epoch2,
                 base_update_id=None,
                 peer_id=alice['peer_id'],
@@ -1196,10 +1196,10 @@ class TestRemovedUserKeySharing:
         t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
 
         # Bob creates his own treekem_pubkey (from Bob's perspective)
-        bob_pubkey_id, _ = treekem_pubkey.create(
+        bob_pubkey_id, bob_pubkey_id_shared, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=treekem.get_path_prefix(bob['peer_shared_id'], 1),
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=bob['peer_id'],
             peer_shared_id=bob['peer_shared_id'],
@@ -1332,10 +1332,10 @@ class TestLeafFallback:
         db.commit()
 
         # Alice creates a pubkey at depth=1, prefix=0x00
-        alice_pk, _ = treekem_pubkey.create(
+        alice_pk, alice_pk_shared, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=b'\x00',
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -1374,10 +1374,10 @@ class TestMultiPeerKeyDistribution:
         db.commit()
 
         # Alice creates her treekem_pubkey
-        alice_pk_id, _ = treekem_pubkey.create(
+        alice_pk_id, pk_shared_id, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=treekem.get_path_prefix(alice['peer_shared_id'], 1),
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -1403,10 +1403,10 @@ class TestMultiPeerKeyDistribution:
         t_ms = assert_eventually(bob_in_network, db=db, start_t_ms=None)
 
         # Bob creates his treekem_pubkey
-        bob_pk_id, _ = treekem_pubkey.create(
+        bob_pk_id, pk_shared_id, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=treekem.get_path_prefix(bob['peer_shared_id'], 1),
-            parent_pubkey_id=None,
+            parent_pubkey_shared_id=None,
             removal_epoch_id=None,
             peer_id=bob['peer_id'],
             peer_shared_id=bob['peer_shared_id'],

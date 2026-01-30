@@ -202,10 +202,10 @@ class TestSenderKeyDistribution:
         # These simulate other peers having published their treekem_pubkeys
         copath_pubkey_ids = []
         for i, prefix in enumerate([b'\x80', b'\x40']):
-            pk_id, _ = treekem_pubkey.create(
+            pk_id, _, _ = treekem_pubkey.create(
                 depth=1,
                 path_prefix=prefix,
-                parent_pubkey_id=None,
+                parent_pubkey_shared_id=None,
                 removal_epoch_id=None,
                 peer_id=alice['peer_id'],
                 peer_shared_id=alice['peer_shared_id'],

@@ -5416,7 +5416,7 @@ def encode_treekem_pubkey_plaintext(
     depth: int,
     path_prefix: bytes,
     public_key: bytes,
-    parent_pubkey_id: bytes | None,
+    parent_pubkey_shared_id: bytes | None,
     removal_epoch_id: bytes | None,
 ) -> bytes:
     """Encode treekem_pubkey plaintext."""
@@ -5424,11 +5424,11 @@ def encode_treekem_pubkey_plaintext(
         raise ValueError("depth must be 0-255")
     path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
     public_key = _require_len("public_key", public_key, 32)
-    parent_pubkey_id = parent_pubkey_id or b"\x00" * 16
-    parent_pubkey_id = _require_len("parent_pubkey_id", parent_pubkey_id, 16)
+    parent_pubkey_shared_id = parent_pubkey_shared_id or b"\x00" * 16
+    parent_pubkey_shared_id = _require_len("parent_pubkey_shared_id", parent_pubkey_shared_id, 16)
     removal_epoch_id = removal_epoch_id or b"\x00" * 16
     removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
-    return bytes([depth]) + path_prefix_padded + public_key + parent_pubkey_id + removal_epoch_id
+    return bytes([depth]) + path_prefix_padded + public_key + parent_pubkey_shared_id + removal_epoch_id
 
 
 def decode_treekem_pubkey_plaintext(data: bytes) -> dict[str, Any]:
@@ -5436,13 +5436,13 @@ def decode_treekem_pubkey_plaintext(data: bytes) -> dict[str, Any]:
     depth = data[0]
     path_prefix = data[1:17]
     public_key = data[17:49]
-    parent_pubkey_id = data[49:65]
+    parent_pubkey_shared_id = data[49:65]
     removal_epoch_id = data[65:81]
     return {
         "depth": depth,
         "path_prefix": path_prefix,
         "public_key": public_key,
-        "parent_pubkey_id": parent_pubkey_id if parent_pubkey_id != b"\x00" * 16 else None,
+        "parent_pubkey_shared_id": parent_pubkey_shared_id if parent_pubkey_shared_id != b"\x00" * 16 else None,
         "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
     }
 
@@ -5452,7 +5452,7 @@ def encode_treekem_pubkey_wire_event(
     depth: int,
     path_prefix: bytes,
     public_key: bytes,
-    parent_pubkey_id_b64: str | None,
+    parent_pubkey_shared_id_b64: str | None,
     removal_epoch_id_b64: str | None,
     signed_by_b64: str,
     signer_type: str,
@@ -5460,14 +5460,14 @@ def encode_treekem_pubkey_wire_event(
     private_key: bytes,
 ) -> bytes:
     """Encode a signed treekem_pubkey wire event."""
-    parent_pubkey_id = crypto.b64decode(parent_pubkey_id_b64) if parent_pubkey_id_b64 else None
+    parent_pubkey_shared_id = crypto.b64decode(parent_pubkey_shared_id_b64) if parent_pubkey_shared_id_b64 else None
     removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
     signer_id = crypto.b64decode(signed_by_b64)
     plaintext = encode_treekem_pubkey_plaintext(
         depth=depth,
         path_prefix=path_prefix,
         public_key=public_key,
-        parent_pubkey_id=parent_pubkey_id,
+        parent_pubkey_shared_id=parent_pubkey_shared_id,
         removal_epoch_id=removal_epoch_id,
     )
     header = WireHeader(
@@ -5498,7 +5498,7 @@ def decode_treekem_pubkey_wire_event(data: bytes) -> dict[str, Any]:
         "depth": decoded["depth"],
         "path_prefix": crypto.b64encode(decoded["path_prefix"]),
         "public_key": crypto.b64encode(decoded["public_key"]),
-        "parent_pubkey_id": crypto.b64encode(decoded["parent_pubkey_id"]) if decoded["parent_pubkey_id"] else None,
+        "parent_pubkey_shared_id": crypto.b64encode(decoded["parent_pubkey_shared_id"]) if decoded["parent_pubkey_shared_id"] else None,
         "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": signer_type_to_str(header.signer_type),
@@ -5585,7 +5585,7 @@ def encode_treekem_pubkey_shared_plaintext(
     depth: int,
     path_prefix: bytes,
     public_key: bytes,
-    parent_pubkey_id: bytes | None,
+    parent_pubkey_shared_id: bytes | None,
     removal_epoch_id: bytes | None,
 ) -> bytes:
     """Encode treekem_pubkey_shared plaintext.
@@ -5595,7 +5595,7 @@ def encode_treekem_pubkey_shared_plaintext(
     - depth (1) - tree depth
     - path_prefix (16) - padded path prefix
     - public_key (32)
-    - parent_pubkey_id (16) - or zeros if None
+    - parent_pubkey_shared_id (16) - or zeros if None
     - removal_epoch_id (16) - or zeros if None
     """
     if depth < 0 or depth > 255:
@@ -5603,11 +5603,11 @@ def encode_treekem_pubkey_shared_plaintext(
     _require_len("treekem_pubkey_id", treekem_pubkey_id, 16)
     path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
     _require_len("public_key", public_key, 32)
-    parent_pubkey_id = parent_pubkey_id or b"\x00" * 16
-    _require_len("parent_pubkey_id", parent_pubkey_id, 16)
+    parent_pubkey_shared_id = parent_pubkey_shared_id or b"\x00" * 16
+    _require_len("parent_pubkey_shared_id", parent_pubkey_shared_id, 16)
     removal_epoch_id = removal_epoch_id or b"\x00" * 16
     _require_len("removal_epoch_id", removal_epoch_id, 16)
-    return treekem_pubkey_id + bytes([depth]) + path_prefix_padded + public_key + parent_pubkey_id + removal_epoch_id
+    return treekem_pubkey_id + bytes([depth]) + path_prefix_padded + public_key + parent_pubkey_shared_id + removal_epoch_id
 
 
 def decode_treekem_pubkey_shared_plaintext(data: bytes) -> dict[str, Any]:
@@ -5616,14 +5616,14 @@ def decode_treekem_pubkey_shared_plaintext(data: bytes) -> dict[str, Any]:
     depth = data[16]
     path_prefix = data[17:33]
     public_key = data[33:65]
-    parent_pubkey_id = data[65:81]
+    parent_pubkey_shared_id = data[65:81]
     removal_epoch_id = data[81:97]
     return {
         "treekem_pubkey_id": treekem_pubkey_id,
         "depth": depth,
         "path_prefix": path_prefix,
         "public_key": public_key,
-        "parent_pubkey_id": parent_pubkey_id if parent_pubkey_id != b"\x00" * 16 else None,
+        "parent_pubkey_shared_id": parent_pubkey_shared_id if parent_pubkey_shared_id != b"\x00" * 16 else None,
         "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
     }
 
@@ -5634,7 +5634,7 @@ def encode_treekem_pubkey_shared_wire_event(
     depth: int,
     path_prefix: bytes,
     public_key: bytes,
-    parent_pubkey_id_b64: str | None,
+    parent_pubkey_shared_id_b64: str | None,
     removal_epoch_id_b64: str | None,
     signed_by_b64: str,
     signer_type: str,
@@ -5643,7 +5643,7 @@ def encode_treekem_pubkey_shared_wire_event(
 ) -> bytes:
     """Encode a signed treekem_pubkey_shared wire event."""
     treekem_pubkey_id = crypto.b64decode(treekem_pubkey_id_b64)
-    parent_pubkey_id = crypto.b64decode(parent_pubkey_id_b64) if parent_pubkey_id_b64 else None
+    parent_pubkey_shared_id = crypto.b64decode(parent_pubkey_shared_id_b64) if parent_pubkey_shared_id_b64 else None
     removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
     signer_id = crypto.b64decode(signed_by_b64)
     plaintext = encode_treekem_pubkey_shared_plaintext(
@@ -5651,7 +5651,7 @@ def encode_treekem_pubkey_shared_wire_event(
         depth=depth,
         path_prefix=path_prefix,
         public_key=public_key,
-        parent_pubkey_id=parent_pubkey_id,
+        parent_pubkey_shared_id=parent_pubkey_shared_id,
         removal_epoch_id=removal_epoch_id,
     )
     header = WireHeader(
@@ -5683,7 +5683,7 @@ def decode_treekem_pubkey_shared_wire_event(data: bytes) -> dict[str, Any]:
         "depth": decoded["depth"],
         "path_prefix": crypto.b64encode(decoded["path_prefix"]),
         "public_key": crypto.b64encode(decoded["public_key"]),
-        "parent_pubkey_id": crypto.b64encode(decoded["parent_pubkey_id"]) if decoded["parent_pubkey_id"] else None,
+        "parent_pubkey_shared_id": crypto.b64encode(decoded["parent_pubkey_shared_id"]) if decoded["parent_pubkey_shared_id"] else None,
         "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": signer_type_to_str(header.signer_type),
@@ -5713,7 +5713,7 @@ def encode_treekem_update_plaintext(
     author_peer_id: bytes,
     removal_epoch_id: bytes | None,
     base_update_id: bytes | None,
-    root_pubkey_id: bytes,
+    leaf_pubkey_shared_id: bytes,
 ) -> bytes:
     """Encode treekem_update plaintext."""
     author_peer_id = _require_len("author_peer_id", author_peer_id, 16)
@@ -5721,8 +5721,8 @@ def encode_treekem_update_plaintext(
     removal_epoch_id = _require_len("removal_epoch_id", removal_epoch_id, 16)
     base_update_id = base_update_id or b"\x00" * 16
     base_update_id = _require_len("base_update_id", base_update_id, 16)
-    root_pubkey_id = _require_len("root_pubkey_id", root_pubkey_id, 16)
-    return author_peer_id + removal_epoch_id + base_update_id + root_pubkey_id
+    leaf_pubkey_shared_id = _require_len("leaf_pubkey_shared_id", leaf_pubkey_shared_id, 16)
+    return author_peer_id + removal_epoch_id + base_update_id + leaf_pubkey_shared_id
 
 
 def decode_treekem_update_plaintext(data: bytes) -> dict[str, Any]:
@@ -5730,12 +5730,12 @@ def decode_treekem_update_plaintext(data: bytes) -> dict[str, Any]:
     author_peer_id = data[:16]
     removal_epoch_id = data[16:32]
     base_update_id = data[32:48]
-    root_pubkey_id = data[48:64]
+    leaf_pubkey_shared_id = data[48:64]
     return {
         "author_peer_id": author_peer_id,
         "removal_epoch_id": removal_epoch_id if removal_epoch_id != b"\x00" * 16 else None,
         "base_update_id": base_update_id if base_update_id != b"\x00" * 16 else None,
-        "root_pubkey_id": root_pubkey_id,
+        "leaf_pubkey_shared_id": leaf_pubkey_shared_id,
     }
 
 
@@ -5744,7 +5744,7 @@ def encode_treekem_update_wire_event(
     author_peer_id_b64: str,
     removal_epoch_id_b64: str | None,
     base_update_id_b64: str | None,
-    root_pubkey_id_b64: str,
+    leaf_pubkey_shared_id_b64: str,
     signed_by_b64: str,
     signer_type: str,
     created_at_ms: int,
@@ -5754,13 +5754,13 @@ def encode_treekem_update_wire_event(
     author_peer_id = crypto.b64decode(author_peer_id_b64)
     removal_epoch_id = crypto.b64decode(removal_epoch_id_b64) if removal_epoch_id_b64 else None
     base_update_id = crypto.b64decode(base_update_id_b64) if base_update_id_b64 else None
-    root_pubkey_id = crypto.b64decode(root_pubkey_id_b64)
+    leaf_pubkey_shared_id = crypto.b64decode(leaf_pubkey_shared_id_b64)
     signer_id = crypto.b64decode(signed_by_b64)
     plaintext = encode_treekem_update_plaintext(
         author_peer_id=author_peer_id,
         removal_epoch_id=removal_epoch_id,
         base_update_id=base_update_id,
-        root_pubkey_id=root_pubkey_id,
+        leaf_pubkey_shared_id=leaf_pubkey_shared_id,
     )
     header = WireHeader(
         version=1,
@@ -5790,7 +5790,7 @@ def decode_treekem_update_wire_event(data: bytes) -> dict[str, Any]:
         "author_peer_id": crypto.b64encode(decoded["author_peer_id"]),
         "removal_epoch_id": crypto.b64encode(decoded["removal_epoch_id"]) if decoded["removal_epoch_id"] else None,
         "base_update_id": crypto.b64encode(decoded["base_update_id"]) if decoded["base_update_id"] else None,
-        "root_pubkey_id": crypto.b64encode(decoded["root_pubkey_id"]),
+        "leaf_pubkey_shared_id": crypto.b64encode(decoded["leaf_pubkey_shared_id"]),
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,

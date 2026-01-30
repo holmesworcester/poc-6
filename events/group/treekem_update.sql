@@ -1,11 +1,11 @@
 -- TreeKEM Phase 2: treekem_updates (update orchestration events)
--- Each update ties together an update path with root pubkey reference
+-- Each update ties together an update path with leaf pubkey reference for atomicity
 CREATE TABLE IF NOT EXISTS treekem_updates (
     treekem_update_id TEXT NOT NULL,
-    author_peer_id TEXT NOT NULL,        -- peer_shared_id of the update author
-    root_pubkey_id TEXT NOT NULL,        -- Root pubkey for this update path
-    removal_epoch_id TEXT,               -- Removal epoch for forward secrecy (NULL = initial)
-    base_update_id TEXT,                 -- Previous update this builds on (NULL = first)
+    author_peer_id TEXT NOT NULL,            -- peer_shared_id of the update author
+    leaf_pubkey_shared_id TEXT NOT NULL,     -- Leaf pubkey_shared for this update (for atomicity)
+    removal_epoch_id TEXT,                   -- Removal epoch for forward secrecy (NULL = initial)
+    base_update_id TEXT,                     -- Previous update this builds on (NULL = first)
     created_at INTEGER NOT NULL,
     recorded_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,

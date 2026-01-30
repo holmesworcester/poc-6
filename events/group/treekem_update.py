@@ -1,12 +1,16 @@
 """TreeKEM Phase 2: treekem_update event type (update orchestration event).
 
 This is the orchestration event that ties together an update path:
-- References the author's new root pubkey
+- References the author's leaf pubkey (for atomicity via transitive deps)
 - Links to parent update for ordering
 - Provides removal_epoch_id for forward secrecy
 
 For concurrent updates, the update with the lowest treekem_update_id wins,
 providing deterministic convergence across all peers.
+
+ATOMICITY: The update depends on leaf_pubkey_shared_id, which transitively
+depends on all parent pubkeys up to the root. This ensures the entire
+update path is present before the update becomes valid.
 """
 
 # Registry metadata
@@ -33,7 +37,17 @@ EVENT_SPEC = {
         'type_field': 'signer_type',
     },
     'requires': {},
-    'optional': {},
+    'optional': {
+        # Leaf pubkey dependency - creates transitive dependency chain
+        # update → leaf → ... → root (ensures entire path exists)
+        'leaf_pubkey': {
+            'source': 'table',
+            'key_from': 'leaf_pubkey_shared_id',
+            'key': 'treekem_pubkey_shared_id',
+            'table': 'treekem_pubkeys_shared',
+            'required_if_present': True,  # Block until leaf (and ancestors) valid
+        },
+    },
     'cascade_on_delete': [],
 }
 
@@ -50,13 +64,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     author_peer_id = event_data.get('author_peer_id')
-    root_pubkey_id = event_data.get('root_pubkey_id')
+    leaf_pubkey_shared_id = event_data.get('leaf_pubkey_shared_id')
     signed_by = event_data.get('signed_by')
     created_at = event_data.get('created_at')
     removal_epoch_id = event_data.get('removal_epoch_id')
     base_update_id = event_data.get('base_update_id')
 
-    if not author_peer_id or not root_pubkey_id or not signed_by or created_at is None:
+    if not author_peer_id or not leaf_pubkey_shared_id or not signed_by or created_at is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     # Insert the update record
@@ -67,7 +81,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
             values={
                 'treekem_update_id': ctx.event_id,
                 'author_peer_id': author_peer_id,
-                'root_pubkey_id': root_pubkey_id,
+                'leaf_pubkey_shared_id': leaf_pubkey_shared_id,
                 'removal_epoch_id': removal_epoch_id,
                 'base_update_id': base_update_id,
                 'created_at': created_at,
@@ -85,7 +99,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
 
 def create(
-    root_pubkey_id: str,
+    leaf_pubkey_shared_id: str,
     removal_epoch_id: str | None,
     base_update_id: str | None,
     peer_id: str,
@@ -96,7 +110,10 @@ def create(
     """Create a new treekem_update event.
 
     Args:
-        root_pubkey_id: The root pubkey ID for this update
+        leaf_pubkey_shared_id: The leaf pubkey_shared ID for this update path.
+            This is the SHAREABLE event ID at the bottom of the path.
+            The update depends on this, which transitively depends on all
+            ancestors up to the root (ensuring atomicity).
         removal_epoch_id: Current removal epoch (for forward secrecy)
         base_update_id: Previous update this builds on (None for first)
         peer_id: Local peer ID (for signing)
@@ -107,7 +124,7 @@ def create(
     Returns:
         treekem_update_id: The update event ID
     """
-    log.info(f"treekem_update.create() peer_id={peer_id}, root_pubkey_id={root_pubkey_id[:20]}...")
+    log.info(f"treekem_update.create() peer_id={peer_id}, leaf_pubkey_shared_id={leaf_pubkey_shared_id[:20]}...")
 
     # Get private key for signing
     from events.identity import peer
@@ -118,7 +135,7 @@ def create(
         author_peer_id_b64=peer_shared_id,
         removal_epoch_id_b64=removal_epoch_id,
         base_update_id_b64=base_update_id,
-        root_pubkey_id_b64=root_pubkey_id,
+        leaf_pubkey_shared_id_b64=leaf_pubkey_shared_id,
         signed_by_b64=peer_shared_id,
         signer_type="peer_shared",
         created_at_ms=t_ms,
@@ -145,7 +162,7 @@ def get_update(treekem_update_id: str, recorded_by: str, db: Any) -> dict[str, A
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query_one(
-        """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+        """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                   removal_epoch_id, base_update_id, created_at
            FROM treekem_updates
            WHERE treekem_update_id = ? AND recorded_by = ?""",
@@ -202,7 +219,7 @@ def get_latest_update(
 
     if removal_epoch_id is not None:
         return safedb.query_one(
-            """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+            """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                       removal_epoch_id, base_update_id, created_at
                FROM treekem_updates
                WHERE removal_epoch_id = ? AND recorded_by = ?
@@ -211,7 +228,7 @@ def get_latest_update(
         )
     else:
         return safedb.query_one(
-            """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+            """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                       removal_epoch_id, base_update_id, created_at
                FROM treekem_updates
                WHERE removal_epoch_id IS NULL AND recorded_by = ?
@@ -241,7 +258,7 @@ def get_concurrent_updates(
 
     if base_update_id is None and removal_epoch_id is None:
         updates = safedb.query(
-            """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+            """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                       removal_epoch_id, base_update_id, created_at
                FROM treekem_updates
                WHERE base_update_id IS NULL AND removal_epoch_id IS NULL AND recorded_by = ?
@@ -250,7 +267,7 @@ def get_concurrent_updates(
         )
     elif base_update_id is None:
         updates = safedb.query(
-            """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+            """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                       removal_epoch_id, base_update_id, created_at
                FROM treekem_updates
                WHERE base_update_id IS NULL AND removal_epoch_id = ? AND recorded_by = ?
@@ -259,7 +276,7 @@ def get_concurrent_updates(
         )
     elif removal_epoch_id is None:
         updates = safedb.query(
-            """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+            """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                       removal_epoch_id, base_update_id, created_at
                FROM treekem_updates
                WHERE base_update_id = ? AND removal_epoch_id IS NULL AND recorded_by = ?
@@ -268,7 +285,7 @@ def get_concurrent_updates(
         )
     else:
         updates = safedb.query(
-            """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+            """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                       removal_epoch_id, base_update_id, created_at
                FROM treekem_updates
                WHERE base_update_id = ? AND removal_epoch_id = ? AND recorded_by = ?
@@ -291,7 +308,7 @@ def list_updates(peer_id: str, db: Any) -> list[dict[str, Any]]:
     """
     safedb = create_safe_db(db, recorded_by=peer_id)
     return list(safedb.query(
-        """SELECT treekem_update_id, author_peer_id, root_pubkey_id,
+        """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
                   removal_epoch_id, base_update_id, created_at
            FROM treekem_updates WHERE recorded_by = ?
            ORDER BY created_at DESC""",
@@ -322,3 +339,36 @@ def is_winning_update(treekem_update_id: str, recorded_by: str, db: Any) -> bool
     )
 
     return winning is not None and winning['treekem_update_id'] == treekem_update_id
+
+
+def get_root_pubkey_shared_id(treekem_update_id: str, recorded_by: str, db: Any) -> str | None:
+    """Get the root pubkey_shared_id for an update by walking up from the leaf.
+
+    Args:
+        treekem_update_id: The update event ID
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        The root treekem_pubkey_shared_id or None if not found
+    """
+    update = get_update(treekem_update_id, recorded_by, db)
+    if not update:
+        return None
+
+    leaf_id = update['leaf_pubkey_shared_id']
+    if not leaf_id:
+        return None
+
+    # Walk up the parent chain to find the root
+    from events.group import treekem_pubkey_shared
+    current_id = leaf_id
+    while True:
+        pubkey = treekem_pubkey_shared.get_pubkey_by_id(current_id, recorded_by, db)
+        if not pubkey:
+            return None
+        parent_id = pubkey.get('parent_pubkey_shared_id')
+        if not parent_id:
+            # No parent = this is the root
+            return current_id
+        current_id = parent_id
