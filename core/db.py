@@ -72,11 +72,14 @@ SUBJECTIVE_TABLES = {
     'removal_epoch_parents',       # Removal epoch parent links (peer-scoped)
     'key_requests',                # Key healing requests (peer-scoped)
     'key_announces',               # Key announcements for groups (peer-scoped)
-    # TreeKEM Phase 2 tables (treekem_secret/treekem_secret_shared removed - use secret/secret_shared)
+    # TreeKEM Phase 2 tables
     'treekem_pubkeys',             # TreeKEM tree node pubkeys with keypairs (peer-scoped, local-only)
     'treekem_pubkeys_shared',      # TreeKEM tree node pubkeys shared (peer-scoped, shareable)
     'treekem_updates',             # TreeKEM update orchestration (peer-scoped)
     'treekem_tree_state',          # TreeKEM winning state cache (peer-scoped)
+    'treekem_secrets',             # TreeKEM path secrets (peer-scoped, local-only)
+    'treekem_secrets_shared',      # TreeKEM path secrets shared to copath (peer-scoped, shareable)
+    'secrets_broadcast',           # O(1) sender key distribution via root secret (peer-scoped, shareable)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

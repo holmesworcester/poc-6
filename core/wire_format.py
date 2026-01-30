@@ -88,6 +88,7 @@ TREEKEM_PUBKEY_LOCAL_PLAINTEXT_SIZE = 344   # Local: public_key (32) + private_k
 TREEKEM_PUBKEY_SHARED_PLAINTEXT_SIZE = 344  # Shared: treekem_pubkey_id (16) + depth (1) + path_prefix (16) + public_key (32) + parent_id (16) + epoch_id (16)
 TREEKEM_UPDATE_PLAINTEXT_SIZE = 344
 TREEKEM_SECRET_SHARED_PLAINTEXT_SIZE = 344
+SECRET_BROADCAST_PLAINTEXT_SIZE = 344
 
 # Flags
 FLAG_ENCRYPTED = 1 << 0
@@ -156,6 +157,7 @@ TYPE_TREEKEM_SECRET_SHARED = 0x48
 TYPE_KEY_ANNOUNCE = 0x49
 TYPE_TREEKEM_PUBKEY_LOCAL = 0x4B   # Local-only keypair storage
 TYPE_TREEKEM_PUBKEY_SHARED = 0x4C  # Shareable tree position + public key
+TYPE_SECRET_BROADCAST = 0x4D  # O(1) sender key wrapped to root secret
 
 INVITE_MODE_USER = 0
 INVITE_MODE_PEER = 1
@@ -5810,8 +5812,15 @@ def encode_treekem_secret_shared_plaintext(
     recipient_pubkey_id: bytes,
     source_update_id: bytes | None,
     depth: int,
+    path_prefix: bytes,
 ) -> bytes:
-    """Encode treekem_secret_shared plaintext."""
+    """Encode treekem_secret_shared plaintext.
+
+    Layout: treekem_secret_id (16) + symmetric_key (32) + recipient_pubkey_id (16)
+            + source_update_id (16) + depth (1) + path_prefix (16) = 97 bytes
+
+    The path_prefix is required for recipients to derive ancestor secrets using KDF.
+    """
     treekem_secret_id = _require_len("treekem_secret_id", treekem_secret_id, 16)
     symmetric_key = _require_len("symmetric_key", symmetric_key, 32)
     recipient_pubkey_id = _require_len("recipient_pubkey_id", recipient_pubkey_id, 16)
@@ -5819,22 +5828,31 @@ def encode_treekem_secret_shared_plaintext(
     source_update_id = _require_len("source_update_id", source_update_id, 16)
     if depth < 0 or depth > 255:
         raise ValueError("depth must be 0-255")
-    return treekem_secret_id + symmetric_key + recipient_pubkey_id + source_update_id + bytes([depth])
+    # Pad path_prefix to 16 bytes
+    path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
+    return treekem_secret_id + symmetric_key + recipient_pubkey_id + source_update_id + bytes([depth]) + path_prefix_padded
 
 
 def decode_treekem_secret_shared_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode treekem_secret_shared plaintext."""
+    """Decode treekem_secret_shared plaintext.
+
+    Layout: treekem_secret_id (16) + symmetric_key (32) + recipient_pubkey_id (16)
+            + source_update_id (16) + depth (1) + path_prefix (16) = 97 bytes
+    """
     treekem_secret_id = data[:16]
     symmetric_key = data[16:48]
     recipient_pubkey_id = data[48:64]
     source_update_id = data[64:80]
     depth = data[80] if len(data) > 80 else 0
+    # path_prefix added for KDF derivation (bytes 81-97)
+    path_prefix = data[81:97] if len(data) > 81 else b"\x00" * 16
     return {
         "treekem_secret_id": treekem_secret_id,
         "symmetric_key": symmetric_key,
         "recipient_pubkey_id": recipient_pubkey_id,
         "source_update_id": source_update_id if source_update_id != b"\x00" * 16 else None,
         "depth": depth,
+        "path_prefix": path_prefix,
     }
 
 
@@ -5852,11 +5870,11 @@ def _encrypt_treekem_secret_shared_payload(plaintext: bytes, recipient_pubkey: d
 
 def _decrypt_treekem_secret_shared_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
     """Decrypt treekem_secret_shared payload."""
-    # Plaintext is 81 bytes (16+32+16+16+1)
-    # Sealed format: ephemeral_public (32) + nonce (24) + ciphertext (81) + MAC (16) = 153 bytes
-    PLAINTEXT_SIZE = 81
+    # Plaintext is 97 bytes (16+32+16+16+1+16) - includes path_prefix for KDF derivation
+    # Sealed format: ephemeral_public (32) + nonce (24) + ciphertext (97) + MAC (16) = 169 bytes
+    PLAINTEXT_SIZE = 97
     SEALED_OVERHEAD = 32 + 24 + 16  # ephemeral key + nonce + MAC
-    SEALED_SIZE = PLAINTEXT_SIZE + SEALED_OVERHEAD  # 153 bytes
+    SEALED_SIZE = PLAINTEXT_SIZE + SEALED_OVERHEAD  # 169 bytes
     encrypted = payload[16:16 + SEALED_SIZE]
     private_key = key_data["private_key"]
     return crypto.unseal(encrypted, private_key)
@@ -5869,6 +5887,7 @@ def encode_treekem_secret_shared_wire_event(
     recipient_pubkey_id_b64: str,
     source_update_id_b64: str | None,
     depth: int,
+    path_prefix: bytes,
     signed_by_b64: str,
     signer_type: str,
     created_at_ms: int,
@@ -5887,6 +5906,7 @@ def encode_treekem_secret_shared_wire_event(
         recipient_pubkey_id=recipient_pubkey_id,
         source_update_id=source_update_id,
         depth=depth,
+        path_prefix=path_prefix,
     )
     header = WireHeader(
         version=1,
@@ -5938,6 +5958,184 @@ def decode_treekem_secret_shared_wire_event(
         "recipient_pubkey_id": crypto.b64encode(decoded["recipient_pubkey_id"]),
         "source_update_id": crypto.b64encode(decoded["source_update_id"]) if decoded["source_update_id"] else None,
         "depth": decoded["depth"],
+        "path_prefix": crypto.b64encode(decoded["path_prefix"]),
+        "signed_by": crypto.b64encode(header.signer_id),
+        "signer_type": signer_type_to_str(header.signer_type),
+        "created_at": header.created_at_ms,
+        "_wire_signature": signature,
+        "_wire_signed_bytes": _signing_bytes(header, plaintext),
+    }, []
+
+
+# ============================================================================
+# secret_broadcast wire format (O(1) sender key via symmetric root secret)
+# ============================================================================
+
+def encode_secret_broadcast_plaintext(
+    *,
+    secret_id: bytes,
+    symmetric_key: bytes,
+    source_update_id: bytes | None,
+) -> bytes:
+    """Encode secret_broadcast plaintext.
+
+    Layout: secret_id (16) + symmetric_key (32) + source_update_id (16) = 64 bytes
+
+    This event wraps a sender key with the root secret from a TreeKEM update.
+    The root secret is known to all peers who have converged on the same tree state.
+    """
+    secret_id = _require_len("secret_id", secret_id, 16)
+    symmetric_key = _require_len("symmetric_key", symmetric_key, 32)
+    source_update_id = source_update_id or b"\x00" * 16
+    source_update_id = _require_len("source_update_id", source_update_id, 16)
+    return secret_id + symmetric_key + source_update_id
+
+
+def decode_secret_broadcast_plaintext(data: bytes) -> dict[str, Any]:
+    """Decode secret_broadcast plaintext."""
+    secret_id = data[:16]
+    symmetric_key = data[16:48]
+    source_update_id = data[48:64]
+    return {
+        "secret_id": secret_id,
+        "symmetric_key": symmetric_key,
+        "source_update_id": source_update_id if source_update_id != b"\x00" * 16 else None,
+    }
+
+
+def _encrypt_secret_broadcast_payload(plaintext: bytes, root_key: dict[str, Any]) -> bytes:
+    """Encrypt secret_broadcast payload with symmetric root secret.
+
+    Unlike other *_shared events which use asymmetric encryption to recipient pubkeys,
+    this uses symmetric encryption with the root secret. This is the O(1) optimization:
+    one encryption that all tree members can decrypt.
+    """
+    key_id = root_key["id"]
+    key = root_key["key"]
+    # Derive deterministic nonce from key_id and plaintext
+    nonce = crypto.deterministic_nonce(key_id, plaintext)
+    ciphertext = crypto.encrypt(plaintext, key, nonce)
+    # Result: key_id (16) + nonce (24) + ciphertext (64 + 16 MAC = 80)
+    result = key_id + nonce + ciphertext
+    # Pad to PAYLOAD_SIZE
+    if len(result) < PAYLOAD_SIZE:
+        result = result + b"\x00" * (PAYLOAD_SIZE - len(result))
+    return result
+
+
+def _decrypt_secret_broadcast_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
+    """Decrypt secret_broadcast payload with symmetric root secret."""
+    # Layout: key_id (16) + nonce (24) + ciphertext (64 + 16 MAC)
+    PLAINTEXT_SIZE = 64
+    NONCE_SIZE = 24
+    MAC_SIZE = 16
+    CIPHERTEXT_SIZE = PLAINTEXT_SIZE + MAC_SIZE
+    nonce = payload[16:16 + NONCE_SIZE]
+    ciphertext = payload[16 + NONCE_SIZE:16 + NONCE_SIZE + CIPHERTEXT_SIZE]
+    key = key_data["key"]
+    return crypto.decrypt(ciphertext, key, nonce)
+
+
+def is_wire_secret_broadcast_envelope(data: bytes) -> bool:
+    """Check if data is a secret_broadcast wire envelope."""
+    try:
+        header, _, _ = parse_envelope(data)
+    except ValueError:
+        return False
+    return header.version == 1 and header.event_type == TYPE_SECRET_BROADCAST
+
+
+def encode_secret_broadcast_wire_event(
+    *,
+    secret_id_b64: str,
+    symmetric_key_b64: str,
+    source_update_id_b64: str | None,
+    signed_by_b64: str,
+    signer_type: str,
+    created_at_ms: int,
+    root_key: dict[str, Any],
+    private_key: bytes,
+) -> bytes:
+    """Encode an encrypted secret_broadcast wire event.
+
+    This event uses SYMMETRIC encryption (FLAG_ENCRYPTED without FLAG_WRAP_ASYM)
+    to wrap a sender key with the root secret from a TreeKEM update.
+
+    Args:
+        secret_id_b64: The sender key ID being distributed
+        symmetric_key_b64: The sender key material
+        source_update_id_b64: The treekem_update whose root secret was used
+        signed_by_b64: Signer identity
+        signer_type: Type of signer
+        created_at_ms: Creation timestamp
+        root_key: Root secret key_data dict with 'id' and 'key'
+        private_key: Private key for signing
+    """
+    secret_id = crypto.b64decode(secret_id_b64)
+    symmetric_key = crypto.b64decode(symmetric_key_b64)
+    source_update_id = crypto.b64decode(source_update_id_b64) if source_update_id_b64 else None
+    signer_id = crypto.b64decode(signed_by_b64)
+    plaintext = encode_secret_broadcast_plaintext(
+        secret_id=secret_id,
+        symmetric_key=symmetric_key,
+        source_update_id=source_update_id,
+    )
+    header = WireHeader(
+        version=1,
+        event_type=TYPE_SECRET_BROADCAST,
+        flags=FLAG_ENCRYPTED,  # Symmetric encryption, NOT FLAG_WRAP_ASYM
+        signer_type=signer_type_from_str(signer_type),
+        count=0,
+        created_at_ms=created_at_ms,
+        ttl_ms=0,
+        signer_id=_require_len("signer_id", signer_id, SIGNER_ID_SIZE),
+    )
+    signed_bytes = _signing_bytes(header, plaintext)
+    signature = crypto.sign(signed_bytes, private_key)
+    payload = _encrypt_secret_broadcast_payload(plaintext, root_key)
+    return build_envelope(header, payload, signature)
+
+
+def decode_secret_broadcast_wire_event(
+    data: bytes,
+    recorded_by: str,
+    db: Any,
+    key_cache: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Decode an encrypted secret_broadcast wire event.
+
+    Decrypts using the root secret (symmetric key) from the treekem_secrets table.
+    """
+    header, payload, signature = parse_envelope(data)
+    if header.event_type != TYPE_SECRET_BROADCAST:
+        return None, []
+    if header.flags & FLAG_ENCRYPTED:
+        key_id = payload[:16]
+        key_id_b64 = crypto.b64encode(key_id)
+        key_data = None
+        if key_cache:
+            key_data = key_cache.get(key_id_b64)
+        if not key_data:
+            # Look up root secret in treekem_secrets table
+            from events.group import treekem_secret
+            key_data = treekem_secret.get_root_secret_key_data(recorded_by, db)
+            # If the key_id doesn't match, try direct lookup by ID
+            if key_data and crypto.b64encode(key_data['id']) != key_id_b64:
+                key_data = None
+        if not key_data:
+            return None, [key_id_b64]
+        try:
+            plaintext = _decrypt_secret_broadcast_payload(payload, key_data)
+        except Exception:
+            return None, [key_id_b64]
+    else:
+        plaintext = payload[:SECRET_BROADCAST_PLAINTEXT_SIZE]
+    decoded = decode_secret_broadcast_plaintext(plaintext)
+    return {
+        "type": "secret_broadcast",
+        "secret_id": crypto.b64encode(decoded["secret_id"]),
+        "symmetric_key": crypto.b64encode(decoded["symmetric_key"]),
+        "source_update_id": crypto.b64encode(decoded["source_update_id"]) if decoded["source_update_id"] else None,
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,

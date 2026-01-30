@@ -341,6 +341,108 @@ def is_winning_update(treekem_update_id: str, recorded_by: str, db: Any) -> bool
     return winning is not None and winning['treekem_update_id'] == treekem_update_id
 
 
+def get_winning_chain(
+    removal_epoch_id: str | None,
+    recorded_by: str,
+    db: Any,
+) -> list[dict[str, Any]]:
+    """Get the full winning chain of updates for a removal epoch.
+
+    Walks from the tip (latest winning update) back through base_update_id
+    to build the complete chain of winning updates.
+
+    Args:
+        removal_epoch_id: Current removal epoch (or None)
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        List of updates in the winning chain, from tip to root (oldest first reversed)
+    """
+    chain = []
+
+    # Start with no base (initial updates)
+    base_update_id = None
+
+    while True:
+        # Get winning update at this level
+        winning = get_winning_update(removal_epoch_id, base_update_id, recorded_by, db)
+        if not winning:
+            break
+
+        chain.append(winning)
+        base_update_id = winning['treekem_update_id']
+
+        # Check if there are more updates building on this one
+        next_updates = get_concurrent_updates(base_update_id, removal_epoch_id, recorded_by, db)
+        if not next_updates:
+            break
+
+    return chain
+
+
+def get_represented_peers(
+    removal_epoch_id: str | None,
+    recorded_by: str,
+    db: Any,
+) -> set[str]:
+    """Get all peers represented in the winning tree state.
+
+    A peer is "represented" if they authored an update in the winning chain.
+    These peers are covered by the tree; others need leaf fallback.
+
+    Args:
+        removal_epoch_id: Current removal epoch (or None)
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        Set of peer_shared_ids represented in the winning tree
+    """
+    chain = get_winning_chain(removal_epoch_id, recorded_by, db)
+    return {update['author_peer_id'] for update in chain}
+
+
+def get_tree_cover_for_sender(
+    sender_peer_id: str,
+    represented_peers: set[str],
+    recorded_by: str,
+    db: Any,
+) -> list[str]:
+    """Get treekem_pubkey IDs that cover all represented peers except sender.
+
+    Uses the copath algorithm: for each depth, if the sibling subtree
+    contains any represented peers, include that copath node's pubkey.
+
+    Args:
+        sender_peer_id: The sending peer's peer_shared_id
+        represented_peers: Set of peer_shared_ids represented in tree
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        List of treekem_pubkey IDs for the tree cover
+    """
+    from core import treekem
+
+    # Filter to peers other than sender
+    other_peers = [p for p in represented_peers if p != sender_peer_id]
+    if not other_peers:
+        return []
+
+    # Compute copath for sender
+    copath = treekem.compute_copath_for_sender(sender_peer_id, list(represented_peers))
+
+    # Get pubkeys at copath positions
+    pubkey_ids = []
+    for depth, path_prefix in copath:
+        pk = treekem_pubkey.get_pubkey_at_position(depth, path_prefix, recorded_by, db)
+        if pk:
+            pubkey_ids.append(crypto.b64encode(pk['id']))
+
+    return pubkey_ids
+
+
 def get_root_pubkey_shared_id(treekem_update_id: str, recorded_by: str, db: Any) -> str | None:
     """Get the root pubkey_shared_id for an update by walking up from the leaf.
 
@@ -372,3 +474,173 @@ def get_root_pubkey_shared_id(treekem_update_id: str, recorded_by: str, db: Any)
             # No parent = this is the root
             return current_id
         current_id = parent_id
+
+
+def create_update_path(
+    peer_id: str,
+    peer_shared_id: str,
+    removal_epoch_id: str | None,
+    base_update_id: str | None,
+    copath_pubkey_ids: list[str],
+    t_ms: int,
+    db: Any,
+) -> dict[str, Any]:
+    """Create a complete TreeKEM update path with derived secrets.
+
+    This is the main entry point for creating TreeKEM updates. It:
+    1. Computes leaf position from peer_shared_id bits
+    2. Creates a random secret at LEAF only
+    3. Derives all parent secrets using KDF chain (leaf → root)
+    4. For each depth, shares path secret to copath node pubkey
+    5. Creates treekem_update event referencing leaf
+
+    The KDF derivation ensures all recipients can derive the same root secret:
+    - Alice creates leaf secret K_leaf (random)
+    - Alice derives: K2 = K_leaf, K1 = KDF(K2), K0 = KDF(K1)
+    - Bob receives K1 via treekem_secret_shared
+    - Bob derives: K0 = KDF(K1) - same as Alice's K0!
+
+    The copath_pubkey_ids should be pre-computed by the caller based on their
+    view of which peers are in the group and which copath positions have pubkeys.
+
+    Args:
+        peer_id: Local peer ID (owner)
+        peer_shared_id: Public peer ID (signer identity)
+        removal_epoch_id: Current removal epoch (for forward secrecy) or None
+        base_update_id: Previous update this builds on (None for first)
+        copath_pubkey_ids: List of copath node treekem_pubkey IDs to share secrets to.
+                          Order: depth=1 first, increasing depth. Empty list means
+                          no copath sharing (e.g., single member group).
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Dict with:
+        - treekem_update_id: The update event ID
+        - path_secrets: List of (treekem_secret_id, depth, path_prefix) tuples
+        - path_pubkeys: List of (treekem_pubkey_id, treekem_pubkey_shared_id, depth) tuples
+        - shared_ids: List of treekem_secret_shared event IDs
+    """
+    from core import treekem
+    from events.group import treekem_pubkey, treekem_secret, treekem_secret_shared
+
+    log.info(f"treekem_update.create_update_path() peer={peer_shared_id[:20]}..., "
+             f"copath_count={len(copath_pubkey_ids)}")
+
+    # Determine path depth from copath pubkey count
+    # With n copath nodes, we create secrets at depths 1..n+1 (plus root at 0)
+    path_depth = len(copath_pubkey_ids) + 1 if copath_pubkey_ids else 1
+
+    # Step 1: Create path secrets with KDF derivation from leaf to root
+    # Key insight: Create random secret at LEAF, derive parents via KDF
+    path_secrets: list[tuple[str, int, bytes]] = []
+
+    # Generate random secret at leaf depth
+    leaf_secret = crypto.generate_secret()
+    current_secret = leaf_secret
+
+    for depth in range(path_depth, -1, -1):  # From leaf depth down to root (0)
+        path_prefix = treekem.get_path_prefix(peer_shared_id, depth)
+
+        # Create secret with the current key material (random at leaf, derived at parents)
+        secret_id = treekem_secret.create_with_material(
+            depth=depth,
+            path_prefix=path_prefix,
+            key_material=current_secret,
+            peer_id=peer_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        path_secrets.append((secret_id, depth, path_prefix))
+        t_ms += 1
+
+        # Derive parent secret for next iteration (if not already at root)
+        if depth > 0:
+            current_secret = crypto.derive_path_secret(current_secret, depth, path_prefix)
+
+    # Reverse so depth=0 is first (root to leaf order)
+    path_secrets.reverse()
+
+    # Step 2: Create path pubkeys from root to leaf
+    path_pubkeys: list[tuple[str, str, int]] = []
+    parent_pubkey_shared_id: str | None = None
+
+    for secret_id, depth, path_prefix in path_secrets:
+        # Create pubkey at this depth
+        pubkey_id, pubkey_shared_id, _ = treekem_pubkey.create(
+            depth=depth,
+            path_prefix=path_prefix,
+            parent_pubkey_shared_id=parent_pubkey_shared_id,
+            removal_epoch_id=removal_epoch_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        path_pubkeys.append((pubkey_id, pubkey_shared_id, depth))
+        parent_pubkey_shared_id = pubkey_shared_id
+        t_ms += 1
+
+    # Step 3: Share path secrets to copath nodes
+    # For each copath pubkey, share the corresponding path secret
+    # copath_pubkey_ids[i] gets secret at depth i+1
+    shared_ids: list[str] = []
+
+    if copath_pubkey_ids:
+        # Get secrets to share (skip root at depth=0)
+        secrets_to_share = [(sid, d, p) for sid, d, p in path_secrets if d > 0]
+
+        # Match secrets to copath pubkeys by depth
+        # copath_pubkey_ids[0] -> depth 1, copath_pubkey_ids[1] -> depth 2, etc.
+        for copath_pubkey_id in copath_pubkey_ids:
+            # Find the secret at the corresponding depth
+            copath_idx = copath_pubkey_ids.index(copath_pubkey_id)
+            target_depth = copath_idx + 1
+
+            matching_secret = None
+            for sid, d, p in secrets_to_share:
+                if d == target_depth:
+                    matching_secret = (sid, d, p)
+                    break
+
+            if matching_secret:
+                try:
+                    shared_id = treekem_secret_shared.create(
+                        treekem_secret_id=matching_secret[0],
+                        recipient_pubkey_id=copath_pubkey_id,
+                        source_update_id=None,  # Will be set after update is created
+                        peer_id=peer_id,
+                        peer_shared_id=peer_shared_id,
+                        t_ms=t_ms,
+                        db=db,
+                    )
+                    shared_ids.append(shared_id)
+                    t_ms += 1
+                except Exception as e:
+                    log.warning(f"create_update_path: failed to share secret at depth {target_depth}: {e}")
+
+    # Step 4: Create the update event
+    # The leaf pubkey is the last one created (deepest depth)
+    leaf_pubkey_shared_id = path_pubkeys[-1][1] if path_pubkeys else None
+
+    if not leaf_pubkey_shared_id:
+        raise ValueError("No leaf pubkey created - cannot create update")
+
+    update_id = create(
+        leaf_pubkey_shared_id=leaf_pubkey_shared_id,
+        removal_epoch_id=removal_epoch_id,
+        base_update_id=base_update_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
+    log.info(f"treekem_update.create_update_path() created update_id={update_id[:20]}...")
+
+    return {
+        'treekem_update_id': update_id,
+        'path_secrets': path_secrets,
+        'path_pubkeys': path_pubkeys,
+        'shared_ids': shared_ids,
+    }

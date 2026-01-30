@@ -50,6 +50,37 @@ def kdf(secret: bytes, salt: bytes, size: int = SECRET_SIZE) -> bytes:
     return nacl.hash.blake2b(secret, salt=salt, digest_size=size, encoder=nacl.encoding.RawEncoder)
 
 
+def derive_path_secret(child_secret: bytes, depth: int, path_prefix: bytes) -> bytes:
+    """Derive parent secret from child secret in TreeKEM path.
+
+    In TreeKEM, path secrets form a chain: leaf → parent → ... → root.
+    Given child secret at depth D, derive parent at depth D-1.
+
+    Uses deterministic KDF so all recipients derive the same root.
+    The context includes depth and path_prefix to ensure domain separation.
+
+    Construction: BLAKE2b(context || child_secret)
+    - context = "treekem_path_derive" || depth (1 byte) || path_prefix
+    - Single hash, context-in-message pattern (standard, auditable)
+
+    Args:
+        child_secret: The secret at the child depth (32 bytes)
+        depth: The child's depth (used in context, not the derived depth)
+        path_prefix: The path prefix at the child's depth
+
+    Returns:
+        Parent secret (32 bytes) at depth-1
+    """
+    # Domain-separated KDF: hash(context || secret)
+    # Context includes domain tag + depth + path_prefix for uniqueness
+    context = b"treekem_path_derive" + depth.to_bytes(1, 'big') + path_prefix
+    return nacl.hash.blake2b(
+        context + child_secret,
+        digest_size=SECRET_SIZE,
+        encoder=nacl.encoding.RawEncoder
+    )
+
+
 def sign(message: bytes, private_key: bytes) -> bytes:
     """Sign a message with Ed25519."""
     signing_key = nacl.signing.SigningKey(private_key)

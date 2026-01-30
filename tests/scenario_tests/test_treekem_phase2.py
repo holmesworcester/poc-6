@@ -1483,5 +1483,799 @@ class TestCopathKeyDistributionSecurity:
                 f"Copath for {n} peers should be <= {expected_max}, got {len(copath)}"
 
 
+class TestTreeKEMSecretEvent:
+    """Test treekem_secret event creation and projection."""
+
+    def test_create_treekem_secret(self, fresh_db):
+        """Create a treekem_secret event and verify projection."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        # Create a treekem_secret at depth 0 (root)
+        secret_id = treekem_secret.create(
+            depth=0,
+            path_prefix=b'',
+            peer_id=alice['peer_id'],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        assert len(secret_id) == 24
+
+        # Verify we can retrieve the secret
+        retrieved = treekem_secret.get_secret(secret_id, alice['peer_id'], db)
+        assert retrieved is not None
+        assert retrieved['depth'] == 0
+        assert len(retrieved['key']) == 32
+
+        # Verify get_key_bytes works
+        key_bytes = treekem_secret.get_key_bytes(secret_id, alice['peer_id'], db)
+        assert key_bytes is not None
+        assert len(key_bytes) == 32
+
+    def test_create_treekem_secret_with_material(self, fresh_db):
+        """Create treekem_secret with provided key material."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        # Create known key material
+        key_material = crypto.generate_secret()
+
+        secret_id = treekem_secret.create_with_material(
+            depth=1,
+            path_prefix=b'\x80',
+            key_material=key_material,
+            peer_id=alice['peer_id'],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        # Verify key matches
+        retrieved_key = treekem_secret.get_key_bytes(secret_id, alice['peer_id'], db)
+        assert retrieved_key == key_material
+
+    def test_treekem_secret_at_various_depths(self, fresh_db):
+        """Create treekem_secrets at different tree depths."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        # Create secrets at depths 0, 1, 2, 3
+        secrets = []
+        for depth in range(4):
+            path_prefix = treekem.get_path_prefix(alice['peer_shared_id'], depth)
+            secret_id = treekem_secret.create(
+                depth=depth,
+                path_prefix=path_prefix,
+                peer_id=alice['peer_id'],
+                t_ms=2000 + depth,
+                db=db
+            )
+            secrets.append((secret_id, depth, path_prefix))
+        db.commit()
+
+        # Verify all secrets created correctly
+        for secret_id, depth, path_prefix in secrets:
+            retrieved = treekem_secret.get_secret(secret_id, alice['peer_id'], db)
+            assert retrieved is not None
+            assert retrieved['depth'] == depth
+
+    def test_treekem_secret_wire_format(self, fresh_db):
+        """Test treekem_secret wire encoding/decoding roundtrip."""
+        db = fresh_db
+
+        key = crypto.generate_secret()
+        depth = 3
+        path_prefix = b'\xE0'
+
+        blob = wire_format.encode_treekem_secret_wire_event(
+            depth=depth,
+            path_prefix=path_prefix,
+            key=key,
+            created_at_ms=0,  # Deterministic
+        )
+
+        assert len(blob) == 512
+        assert wire_format.is_wire_treekem_secret_envelope(blob)
+
+        decoded = wire_format.decode_treekem_secret_wire_event(blob)
+        assert decoded['type'] == 'treekem_secret'
+        assert decoded['depth'] == depth
+        assert crypto.b64decode(decoded['key']) == key
+
+
+class TestTreeKEMSecretSharedEvent:
+    """Test treekem_secret_shared event creation and projection."""
+
+    def test_share_treekem_secret_to_pubkey(self, fresh_db):
+        """Share a treekem_secret to a treekem_pubkey recipient."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret, treekem_secret_shared
+
+        # Create a treekem_secret
+        secret_id = treekem_secret.create(
+            depth=1,
+            path_prefix=b'\x00',
+            peer_id=alice['peer_id'],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        # Create a recipient treekem_pubkey
+        recipient_pk_id, pk_shared_id, _ = treekem_pubkey.create(
+            depth=1,
+            path_prefix=b'\x80',
+            parent_pubkey_shared_id=None,
+            removal_epoch_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        # Share the secret to the pubkey
+        shared_id = treekem_secret_shared.create(
+            treekem_secret_id=secret_id,
+            recipient_pubkey_id=recipient_pk_id,
+            source_update_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=4000,
+            db=db
+        )
+        db.commit()
+
+        assert len(shared_id) == 24
+
+        # Verify we can list shared secrets
+        shared_list = treekem_secret_shared.list_shared(alice['peer_id'], db)
+        assert len(shared_list) >= 1
+
+    def test_share_to_multiple_copath_nodes(self, fresh_db):
+        """Share secrets to multiple copath recipients."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret, treekem_secret_shared
+
+        # Create secrets at different depths
+        secrets = []
+        for i, (depth, prefix) in enumerate([(1, b'\x00'), (2, b'\x00'), (3, b'\x00')]):
+            secret_id = treekem_secret.create(
+                depth=depth,
+                path_prefix=prefix,
+                peer_id=alice['peer_id'],
+                t_ms=2000 + i,
+                db=db
+            )
+            secrets.append((secret_id, depth, prefix))
+        db.commit()
+
+        # Create copath recipient pubkeys at corresponding positions
+        copath_pubkeys = []
+        for i, (depth, prefix) in enumerate([(1, b'\x80'), (2, b'\x40'), (3, b'\x20')]):
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
+                depth=depth,
+                path_prefix=prefix,
+                parent_pubkey_shared_id=None,
+                removal_epoch_id=None,
+                peer_id=alice['peer_id'],
+                peer_shared_id=alice['peer_shared_id'],
+                t_ms=3000 + i,
+                db=db
+            )
+            copath_pubkeys.append(pk_id)
+        db.commit()
+
+        # Share using share_path_secrets_to_copath
+        shared_ids = treekem_secret_shared.share_path_secrets_to_copath(
+            path_secrets=secrets,
+            copath_pubkey_ids=copath_pubkeys,
+            source_update_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=4000,
+            db=db
+        )
+        db.commit()
+
+        assert len(shared_ids) == 3
+
+
+class TestFullUpdatePathWithSecrets:
+    """Test complete update flow with secrets."""
+
+    def test_create_update_path_single_member(self, fresh_db):
+        """Create update path for single member (no copath sharing needed)."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        # Create update path with no copath pubkeys
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[],  # No other members
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        assert result['treekem_update_id'] is not None
+        assert len(result['path_secrets']) >= 1
+        assert len(result['path_pubkeys']) >= 1
+        assert len(result['shared_ids']) == 0  # No sharing to empty copath
+
+        # Verify update exists
+        update = treekem_update.get_update(result['treekem_update_id'], alice['peer_id'], db)
+        assert update is not None
+
+    def test_create_update_path_with_copath(self, fresh_db):
+        """Create update path with copath sharing."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        # First create some copath recipient pubkeys (simulating Bob's tree nodes)
+        copath_pubkeys = []
+        for i, (depth, prefix) in enumerate([(1, b'\x80'), (2, b'\x40')]):
+            pk_id, pk_shared_id, _ = treekem_pubkey.create(
+                depth=depth,
+                path_prefix=prefix,
+                parent_pubkey_shared_id=None,
+                removal_epoch_id=None,
+                peer_id=alice['peer_id'],
+                peer_shared_id=alice['peer_shared_id'],
+                t_ms=2000 + i,
+                db=db
+            )
+            copath_pubkeys.append(pk_id)
+        db.commit()
+
+        # Create update path with copath sharing
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=copath_pubkeys,
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        assert result['treekem_update_id'] is not None
+        # With 2 copath nodes, should have depths 0,1,2 = 3 secrets
+        assert len(result['path_secrets']) >= 3
+        assert len(result['path_pubkeys']) >= 3
+        # Should have shared to 2 copath nodes
+        assert len(result['shared_ids']) == 2
+
+    def test_update_path_creates_valid_tree_structure(self, fresh_db):
+        """Verify update path creates valid parent-child relationships."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_pubkey_shared
+
+        # Create single copath node
+        copath_pk_id, _, _ = treekem_pubkey.create(
+            depth=1,
+            path_prefix=b'\x80',
+            parent_pubkey_shared_id=None,
+            removal_epoch_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[copath_pk_id],
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        # Verify parent-child chain
+        # Last pubkey (leaf) should have parent, eventually reaching root
+        path_pubkeys = result['path_pubkeys']
+        assert len(path_pubkeys) >= 2
+
+        # Check that non-root pubkeys have parents
+        for pk_id, pk_shared_id, depth in path_pubkeys:
+            if depth > 0:
+                pk_data = treekem_pubkey.get_pubkey_by_id(pk_id, alice['peer_id'], db)
+                # The shared record tracks parent_pubkey_shared_id
+                shared_data = treekem_pubkey_shared.get_pubkey_by_id(pk_id, alice['peer_id'], db)
+                if shared_data:
+                    assert shared_data.get('parent_pubkey_shared_id') is not None or depth == 0
+
+
+class TestCopathMemberReceivesSecret:
+    """Test that copath members can receive and use shared secrets."""
+
+    def test_shared_secret_projection(self, fresh_db):
+        """Verify shared secret is correctly projected."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret, treekem_secret_shared
+
+        # Create a secret
+        original_secret_id = treekem_secret.create(
+            depth=1,
+            path_prefix=b'\x00',
+            peer_id=alice['peer_id'],
+            t_ms=2000,
+            db=db
+        )
+        original_key = treekem_secret.get_key_bytes(original_secret_id, alice['peer_id'], db)
+        db.commit()
+
+        # Create recipient pubkey
+        recipient_pk_id, _, _ = treekem_pubkey.create(
+            depth=1,
+            path_prefix=b'\x80',
+            parent_pubkey_shared_id=None,
+            removal_epoch_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        # Share the secret
+        shared_id = treekem_secret_shared.create(
+            treekem_secret_id=original_secret_id,
+            recipient_pubkey_id=recipient_pk_id,
+            source_update_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=4000,
+            db=db
+        )
+        db.commit()
+
+        # Verify the shared record exists
+        shared_list = treekem_secret_shared.list_shared(alice['peer_id'], db)
+        assert any(s['treekem_secret_shared_id'] == shared_id for s in shared_list)
+
+
+class TestPathSecretTreeKEMIntegration:
+    """Integration tests for path secret sharing in TreeKEM updates."""
+
+    def test_update_path_secrets_match_pubkey_positions(self, fresh_db):
+        """Path secrets should be created at the same positions as pubkeys."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        # Create copath nodes at depths 1 and 2
+        copath_pubkeys = []
+        for depth, prefix in [(1, b'\x80'), (2, b'\x40')]:
+            pk_id, _, _ = treekem_pubkey.create(
+                depth=depth,
+                path_prefix=prefix,
+                parent_pubkey_shared_id=None,
+                removal_epoch_id=None,
+                peer_id=alice['peer_id'],
+                peer_shared_id=alice['peer_shared_id'],
+                t_ms=2000,
+                db=db
+            )
+            copath_pubkeys.append(pk_id)
+        db.commit()
+
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=copath_pubkeys,
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        # Extract depths from secrets and pubkeys
+        secret_depths = {d for _, d, _ in result['path_secrets']}
+        pubkey_depths = {d for _, _, d in result['path_pubkeys']}
+
+        # Should have same depths
+        assert secret_depths == pubkey_depths
+
+        # Verify each secret exists
+        for secret_id, depth, path_prefix in result['path_secrets']:
+            secret_data = treekem_secret.get_secret(secret_id, alice['peer_id'], db)
+            assert secret_data is not None
+            assert secret_data['depth'] == depth
+
+    def test_o_log_n_secret_sharing(self, fresh_db):
+        """Verify O(log n) secret sharing to copath nodes."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        # Create copath nodes for a tree with ~16 potential peers
+        # With 4 depths, copath has 4 nodes
+        copath_pubkeys = []
+        for depth in range(1, 5):
+            copath_prefix = treekem.get_copath_prefix(alice['peer_shared_id'], depth)
+            pk_id, _, _ = treekem_pubkey.create(
+                depth=depth,
+                path_prefix=copath_prefix,
+                parent_pubkey_shared_id=None,
+                removal_epoch_id=None,
+                peer_id=alice['peer_id'],
+                peer_shared_id=alice['peer_shared_id'],
+                t_ms=2000 + depth,
+                db=db
+            )
+            copath_pubkeys.append(pk_id)
+        db.commit()
+
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=copath_pubkeys,
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        # With 4 copath nodes, should share 4 secrets (O(log n))
+        # Each copath node gets one secret
+        assert len(result['shared_ids']) <= len(copath_pubkeys)
+
+        # Total events created should be O(log n), not O(n)
+        total_events = (
+            len(result['path_secrets']) +
+            len(result['path_pubkeys']) +
+            len(result['shared_ids']) +
+            1  # The update event itself
+        )
+        # With 4 depths: ~5 secrets + ~5 pubkeys + ~4 shared + 1 update = ~15 events
+        # Much less than O(n) for a 16-peer group
+        assert total_events < 20
+
+
+class TestPathSecretDerivation:
+    """Test KDF-based path secret derivation for root convergence."""
+
+    def test_derive_path_secret_deterministic(self, fresh_db):
+        """KDF derivation is deterministic - same inputs produce same output."""
+        child_secret = crypto.generate_secret()
+        depth = 2
+        path_prefix = b'\xAB'
+
+        # Derive twice - should be identical
+        derived1 = crypto.derive_path_secret(child_secret, depth, path_prefix)
+        derived2 = crypto.derive_path_secret(child_secret, depth, path_prefix)
+
+        assert derived1 == derived2
+        assert len(derived1) == 32
+
+    def test_derive_path_secret_different_context(self, fresh_db):
+        """Different context (depth/prefix) produces different secrets."""
+        child_secret = crypto.generate_secret()
+
+        # Same secret, different depths
+        derived_d1 = crypto.derive_path_secret(child_secret, 1, b'\x00')
+        derived_d2 = crypto.derive_path_secret(child_secret, 2, b'\x00')
+        assert derived_d1 != derived_d2
+
+        # Same secret, different prefixes
+        derived_p1 = crypto.derive_path_secret(child_secret, 1, b'\x00')
+        derived_p2 = crypto.derive_path_secret(child_secret, 1, b'\x80')
+        assert derived_p1 != derived_p2
+
+    def test_create_update_path_uses_derived_secrets(self, fresh_db):
+        """create_update_path creates derived secret chain from leaf to root."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[],  # Single member, no copath
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        # Should have secrets at multiple depths (root + leaf at minimum)
+        path_secrets = result['path_secrets']
+        assert len(path_secrets) >= 2
+
+        # Verify the secrets form a derivable chain
+        # Get secrets by depth
+        secrets_by_depth = {}
+        for secret_id, depth, path_prefix in path_secrets:
+            secret_data = treekem_secret.get_secret(secret_id, alice['peer_id'], db)
+            assert secret_data is not None
+            secrets_by_depth[depth] = (secret_data['key'], path_prefix)
+
+        # Verify derivation: child -> parent via KDF
+        max_depth = max(secrets_by_depth.keys())
+        for depth in range(max_depth, 0, -1):
+            child_key, child_prefix = secrets_by_depth[depth]
+            parent_key, _ = secrets_by_depth[depth - 1]
+
+            # Derive parent from child
+            derived_parent = crypto.derive_path_secret(child_key, depth, child_prefix)
+            assert derived_parent == parent_key, f"Derivation mismatch at depth {depth}"
+
+
+class TestRootSecretConvergence:
+    """Test that peers converge to the same root secret via KDF derivation."""
+
+    def test_kdf_derivation_produces_same_root(self, fresh_db):
+        """Given the same child secret at depth D, both parties derive same root via KDF."""
+        # This tests the core mathematical property: deterministic KDF derivation
+        # If Alice shares her secret at depth=1 to Bob, Bob can derive depth=0 (root)
+        # using the same KDF chain Alice used.
+
+        # Alice creates secrets: leaf -> d2 -> d1 -> d0 (root)
+        leaf_secret = crypto.generate_secret()
+        alice_path_prefix_d2 = b'\xAB\x00'  # Some prefix at depth 2
+        alice_path_prefix_d1 = b'\xAB'      # Parent prefix at depth 1
+        alice_path_prefix_d0 = b''          # Root prefix
+
+        # Alice's derivation chain
+        alice_d2 = leaf_secret
+        alice_d1 = crypto.derive_path_secret(alice_d2, 2, alice_path_prefix_d2)
+        alice_d0 = crypto.derive_path_secret(alice_d1, 1, alice_path_prefix_d1)
+
+        # Alice shares her d1 secret to Bob
+        # Bob receives d1 and derives d0
+        bob_received_d1 = alice_d1  # This is what treekem_secret_shared would decrypt
+        bob_d0 = crypto.derive_path_secret(bob_received_d1, 1, alice_path_prefix_d1)
+
+        # The key convergence property:
+        assert alice_d0 == bob_d0, "Both should derive the same root secret"
+
+    def test_treekem_secret_shared_derives_to_root(self, fresh_db):
+        """treekem_secret_shared.project_pure emits secrets at all depths to root."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        # Create an update path which creates derived secrets
+        result = treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[],  # No copath for single member
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        # Verify secrets at multiple depths were created
+        root_secret = treekem_secret.get_root_secret(alice['peer_id'], db)
+        assert root_secret is not None, "Root secret should exist"
+
+        # Get all secrets
+        all_secrets = treekem_secret.list_secrets(alice['peer_id'], db)
+        depths = {s['depth'] for s in all_secrets}
+
+        # Should have at least root (0) and leaf
+        assert 0 in depths, "Should have root secret at depth 0"
+        assert len(depths) >= 2, "Should have secrets at multiple depths"
+
+    def test_multiple_derivation_chains_converge(self, fresh_db):
+        """Different peers sharing at different depths all converge to same root."""
+        # This demonstrates the key property: regardless of which depth you receive
+        # a secret from, you can always derive up to root and get the same value.
+
+        # Start with same leaf secret
+        leaf_secret = crypto.generate_secret()
+
+        # Alice's full path (depth 3 -> 2 -> 1 -> 0)
+        prefix_d3 = b'\xAB\xCD\xE0'
+        prefix_d2 = b'\xAB\xC0'
+        prefix_d1 = b'\xA0'
+        prefix_d0 = b''
+
+        d3 = leaf_secret
+        d2 = crypto.derive_path_secret(d3, 3, prefix_d3)
+        d1 = crypto.derive_path_secret(d2, 2, prefix_d2)
+        d0 = crypto.derive_path_secret(d1, 1, prefix_d1)
+
+        # Bob receives at depth 2 and derives to root
+        bob_from_d2 = d2
+        bob_d1 = crypto.derive_path_secret(bob_from_d2, 2, prefix_d2)
+        bob_d0 = crypto.derive_path_secret(bob_d1, 1, prefix_d1)
+        assert bob_d0 == d0, "Bob derives same root from d2"
+
+        # Carol receives at depth 1 and derives to root
+        carol_from_d1 = d1
+        carol_d0 = crypto.derive_path_secret(carol_from_d1, 1, prefix_d1)
+        assert carol_d0 == d0, "Carol derives same root from d1"
+
+        # All converge to same root
+        assert bob_d0 == carol_d0 == d0
+
+
+class TestO1RootBroadcast:
+    """Test O(1) sender key distribution via root secret broadcast."""
+
+    def test_root_secret_key_data_format(self, fresh_db):
+        """get_root_secret_key_data returns correct format for crypto operations."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+
+        # Create an update to establish root secret
+        treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        root_key = treekem_secret.get_root_secret_key_data(alice['peer_id'], db)
+
+        assert root_key is not None
+        assert 'id' in root_key
+        assert 'key' in root_key
+        assert root_key['type'] == 'symmetric'
+        assert len(root_key['id']) == 16
+        assert len(root_key['key']) == 32
+
+    def test_secret_broadcast_wire_format(self, fresh_db):
+        """secret_broadcast wire format encode/decode roundtrip."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import treekem_secret
+        from events.identity import peer as peer_module
+
+        # Create root secret
+        treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        # Create a sender key to distribute
+        sender_key = crypto.generate_secret()
+        secret_blob = wire_format.encode_secret_wire_event(
+            key=sender_key,
+            created_at_ms=0,
+        )
+        secret_id = crypto.b64encode(crypto.hash(secret_blob))
+
+        # Get root key and signing key
+        root_key = treekem_secret.get_root_secret_key_data(alice['peer_id'], db)
+        signing_key = peer_module.get_private_key(alice['peer_id'], alice['peer_id'], db)
+
+        # Encode
+        blob = wire_format.encode_secret_broadcast_wire_event(
+            secret_id_b64=secret_id,
+            symmetric_key_b64=crypto.b64encode(sender_key),
+            source_update_id_b64=None,
+            signed_by_b64=alice['peer_shared_id'],
+            signer_type="peer_shared",
+            created_at_ms=3000,
+            root_key=root_key,
+            private_key=signing_key,
+        )
+
+        assert len(blob) == 512  # Standard wire size
+        assert wire_format.is_wire_secret_broadcast_envelope(blob)
+
+        # Decode (need root key available)
+        # Store the root secret so decoder can find it
+        decoded, missing = wire_format.decode_secret_broadcast_wire_event(
+            blob, alice['peer_id'], db
+        )
+
+        assert decoded is not None
+        assert decoded['type'] == 'secret_broadcast'
+        assert decoded['secret_id'] == secret_id
+        assert decoded['symmetric_key'] == crypto.b64encode(sender_key)
+
+    def test_secret_broadcast_create_and_project(self, fresh_db):
+        """secret_broadcast.create() and projection work correctly."""
+        db = fresh_db
+        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        db.commit()
+
+        from events.group import secret as secret_module, secret_broadcast, treekem_secret
+
+        # Create root secret via update path
+        treekem_update.create_update_path(
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            removal_epoch_id=None,
+            base_update_id=None,
+            copath_pubkey_ids=[],
+            t_ms=2000,
+            db=db
+        )
+        db.commit()
+
+        # Create a sender key using create_with_material (doesn't require group_id)
+        sender_key = crypto.generate_secret()
+        sender_key_id = secret_module.create_with_material(
+            key_material=sender_key,
+            peer_id=alice['peer_id'],
+            t_ms=3000,
+            db=db
+        )
+        db.commit()
+
+        # Broadcast via root secret
+        broadcast_id = secret_broadcast.create(
+            secret_id=sender_key_id,
+            source_update_id=None,
+            peer_id=alice['peer_id'],
+            peer_shared_id=alice['peer_shared_id'],
+            t_ms=4000,
+            db=db,
+        )
+        db.commit()
+
+        # Verify broadcast was created
+        assert broadcast_id is not None
+
+        # Verify it's in the tracking table
+        broadcast = secret_broadcast.get_broadcast(broadcast_id, alice['peer_id'], db)
+        assert broadcast is not None
+        assert broadcast['secret_id'] == sender_key_id
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

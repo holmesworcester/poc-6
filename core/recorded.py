@@ -520,7 +520,7 @@ def _decode_event_blob(
         event_data = wire_format.decode_key_request_wire_event(event_blob)
     elif wire_format.is_wire_key_announce_envelope(event_blob):
         event_data = wire_format.decode_key_announce_wire_event(event_blob)
-    # TreeKEM Phase 2 event types (treekem_secret/treekem_secret_shared removed - use secret/secret_shared)
+    # TreeKEM Phase 2 event types
     elif wire_format.is_wire_treekem_pubkey_envelope(event_blob):
         # Old shareable format (deprecated, for backward compat)
         event_data = wire_format.decode_treekem_pubkey_wire_event(event_blob)
@@ -530,6 +530,16 @@ def _decode_event_blob(
         event_data = wire_format.decode_treekem_pubkey_shared_wire_event(event_blob)
     elif wire_format.is_wire_treekem_update_envelope(event_blob):
         event_data = wire_format.decode_treekem_update_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_secret_envelope(event_blob):
+        event_data = wire_format.decode_treekem_secret_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_secret_shared_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_treekem_secret_shared_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_secret_broadcast_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_secret_broadcast_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
     else:
         if event_blob and event_blob[:1] in (b'{', b'['):
             raise ValueError("JSON event blobs are no longer supported")

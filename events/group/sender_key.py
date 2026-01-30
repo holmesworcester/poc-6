@@ -161,9 +161,12 @@ def distribute_key_to_group(
     t_ms: int,
     db: Any,
 ) -> list[str]:
-    """Distribute a key to all group members via TreeKEM copath.
+    """Distribute a key to all group members via O(1) root broadcast, tree cover, or leaf fallback.
 
-    Uses the TreeKEM optimization to achieve O(log n) key distribution.
+    Distribution strategy (in order of preference):
+    1. O(1) ROOT BROADCAST: If we have the root secret, use single symmetric encryption
+    2. O(log n) TREE COVER: Encrypt to copath pubkeys for represented peers
+    3. O(# inactive) LEAF FALLBACK: Direct encryption to non-represented peers
 
     Args:
         secret_id: Secret to distribute
@@ -175,8 +178,10 @@ def distribute_key_to_group(
         db: Database connection
 
     Returns:
-        List of secret_shared event IDs created
+        List of event IDs created (secret_broadcast or secret_shared)
     """
+    from events.group import treekem_update, treekem_secret, secret_broadcast
+
     log.info(f"sender_key.distribute_key_to_group() secret={secret_id[:20]}..., group={group_id[:20]}..., epoch={removal_epoch_id}")
 
     # Get all group members' peer_shared_ids
@@ -186,40 +191,82 @@ def distribute_key_to_group(
         log.warning(f"sender_key.distribute_key_to_group() no members found for group")
         return []
 
-    # Compute copath for sender
-    copath = treekem.compute_copath_for_sender(peer_shared_id, member_peer_ids)
-
-    if not copath:
-        log.info(f"sender_key.distribute_key_to_group() empty copath (only sender in group)")
+    other_members = [m for m in member_peer_ids if m != peer_shared_id]
+    if not other_members:
+        log.info(f"sender_key.distribute_key_to_group() only sender in group")
         return []
 
-    # Get pubkeys for copath positions
-    copath_pubkey_ids = get_copath_pubkeys(copath, peer_id, db)
+    # Get peers represented in the winning tree (authors of updates in winning chain)
+    represented_peers = treekem_update.get_represented_peers(removal_epoch_id, peer_id, db)
+    log.info(f"sender_key.distribute_key_to_group() represented_peers={len(represented_peers)}, members={len(member_peer_ids)}")
 
-    if not copath_pubkey_ids:
-        # Fallback to leaf distribution (O(n)) if no copath pubkeys available
-        log.info(f"sender_key.distribute_key_to_group() falling back to leaf distribution")
-        return distribute_to_leaves(
+    # --- O(1) ROOT BROADCAST: Check if we have root secret for all represented peers ---
+    # This is the optimal case: all other members are in the tree and we have the root secret
+    non_represented = [m for m in other_members if m not in represented_peers]
+
+    if not non_represented and represented_peers:
+        # All other members are represented in the tree
+        # Check if we have the root secret
+        root_key = treekem_secret.get_root_secret_key_data(peer_id, db)
+        if root_key:
+            # O(1) BROADCAST - single symmetric encryption!
+            log.info(f"sender_key.distribute_key_to_group() O(1) BROADCAST - all {len(other_members)} members in tree")
+            try:
+                broadcast_id = secret_broadcast.create(
+                    secret_id=secret_id,
+                    source_update_id=None,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=t_ms,
+                    db=db,
+                )
+                return [broadcast_id]
+            except Exception as e:
+                log.warning(f"sender_key.distribute_key_to_group() root broadcast failed: {e}, falling back to tree cover")
+
+    # --- FALLBACK: O(log n) tree cover + O(# inactive) leaf distribution ---
+    shared_ids: list[str] = []
+
+    # --- TREE COVER: O(log n) for represented peers ---
+    if represented_peers:
+        # Get tree cover pubkeys (copath nodes covering represented peers)
+        tree_cover_pubkey_ids = treekem_update.get_tree_cover_for_sender(
+            sender_peer_id=peer_shared_id,
+            represented_peers=represented_peers,
+            recorded_by=peer_id,
+            db=db,
+        )
+
+        if tree_cover_pubkey_ids:
+            log.info(f"sender_key.distribute_key_to_group() tree cover: {len(tree_cover_pubkey_ids)} pubkeys")
+            tree_shared_ids = secret_shared.share_secret_with_pubkeys(
+                secret_id=secret_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                recipient_pubkey_ids=tree_cover_pubkey_ids,
+                removal_epoch_id=removal_epoch_id,
+                t_ms=t_ms,
+                db=db,
+            )
+            shared_ids.extend(tree_shared_ids)
+            t_ms += len(tree_shared_ids)
+
+    # --- LEAF FALLBACK: O(# inactive) for non-represented peers ---
+    if non_represented:
+        log.info(f"sender_key.distribute_key_to_group() leaf fallback: {len(non_represented)} peers")
+        leaf_shared_ids = distribute_to_leaves(
             secret_id=secret_id,
-            member_peer_ids=[m for m in member_peer_ids if m != peer_shared_id],
+            member_peer_ids=non_represented,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
             removal_epoch_id=removal_epoch_id,
             t_ms=t_ms,
             db=db,
         )
+        shared_ids.extend(leaf_shared_ids)
 
-    # Distribute to copath pubkeys (O(log n))
-    log.info(f"sender_key.distribute_key_to_group() distributing to {len(copath_pubkey_ids)} copath nodes")
-    return secret_shared.share_secret_with_pubkeys(
-        secret_id=secret_id,
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        recipient_pubkey_ids=copath_pubkey_ids,
-        removal_epoch_id=removal_epoch_id,
-        t_ms=t_ms,
-        db=db,
-    )
+    log.info(f"sender_key.distribute_key_to_group() total shared: {len(shared_ids)}")
+    return shared_ids
 
 
 def distribute_to_leaves(
