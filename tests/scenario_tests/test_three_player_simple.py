@@ -8,22 +8,23 @@ Demonstrates the clean testing pattern:
 """
 from events.identity import user, invite, peer
 from events.content import message
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_three_player_messaging_simple(fresh_db):
     """Alice and Bob share network, Charlie is separate."""
     db = fresh_db
+    clock = TestClock()
 
     # === Setup ===
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
 
-    charlie = user.new_network(name='Charlie', t_ms=3000, db=db)
+    charlie = user.new_network(name='Charlie', t_ms=clock.tick(), db=db)
 
     db.commit()
 

@@ -25,28 +25,30 @@ from core import crypto
 
 def test_two_party_file_attachment_and_sync(fresh_db):
     """Complete file attachment flow with two peers and sync."""
+    from tests.utils.tick_helper import TestClock
 
     # Setup: Initialize in-memory database
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
     print("\n=== Setup: Create networks and invite ===")
 
     # Alice creates network and channel
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"✓ Alice created network")
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"✓ Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     print(f"✓ Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
@@ -64,7 +66,7 @@ def test_two_party_file_attachment_and_sync(fresh_db):
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='Check out this file!',
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']
@@ -82,7 +84,7 @@ def test_two_party_file_attachment_and_sync(fresh_db):
         file_data=file_data,
         filename='test_file.txt',
         mime_type='text/plain',
-        t_ms=4000,
+        t_ms=clock.tick(),
         db=db
     )
     file_id = file_result['file_id']

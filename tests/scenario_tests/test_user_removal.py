@@ -15,22 +15,23 @@ from events.identity import user, invite, peer, network
 from events.identity import user_removed, peer_removed
 from events.group import group, group_member
 from events.content import message
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
     """Test that removing a user blocks future sync but preserves their message history."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     # Alice creates an invite for Bob
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for Bob to join
@@ -83,16 +84,17 @@ def test_user_removal_blocks_sync_but_preserves_history(fresh_db):
 def test_authorization_rules(fresh_db):
     """Test authorization rules for peer and user removal."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
 
-    _, charlie_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2500, db=db)
-    charlie_peer_id = peer.create(t_ms=3000, db=db)
-    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
+    _, charlie_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    charlie_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for sync
@@ -176,12 +178,13 @@ def test_authorization_rules(fresh_db):
 def test_user_removal_rotates_group_keys(fresh_db):
     """Test that user removal triggers group key rotation."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for sync
@@ -219,12 +222,13 @@ def test_user_removal_rotates_group_keys(fresh_db):
 def test_peer_removal_last_device_rotates_keys(fresh_db):
     """Test that peer removal triggers group key rotation."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for sync
@@ -262,12 +266,13 @@ def test_peer_removal_last_device_rotates_keys(fresh_db):
 def test_removed_peer_cannot_sync_messages(fresh_db):
     """Verify that a removed peer cannot sync messages."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for sync
@@ -337,12 +342,13 @@ def test_removed_peer_cannot_sync_messages(fresh_db):
 def test_removed_user_cannot_send_messages(fresh_db):
     """Test that a removed user cannot send messages (local enforcement)."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for sync
@@ -398,16 +404,17 @@ def test_removed_user_cannot_send_messages(fresh_db):
 def test_removed_user_not_in_user_list(fresh_db):
     """Test that a removed user does not appear in the user list."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
 
-    _, charlie_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2500, db=db)
-    charlie_peer_id = peer.create(t_ms=3000, db=db)
-    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=3000, db=db)
+    _, charlie_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    charlie_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    charlie = user.join(peer_id=charlie_peer_id, invite_link=charlie_invite_link, name='Charlie', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for sync

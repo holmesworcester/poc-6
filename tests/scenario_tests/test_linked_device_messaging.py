@@ -17,7 +17,7 @@ from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
 from events.content import message
-from tests.utils.tick_helper import assert_eventually, run_ticks
+from tests.utils.tick_helper import assert_eventually, run_ticks, TestClock
 
 
 def test_linked_devices_bidirectional_messaging(fresh_db):
@@ -25,11 +25,12 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
 
     # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network ===")
 
     # Alice creates network
-    alice_device1 = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_device1 = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"Alice created network on device 1")
     print(f"  user_id={alice_device1['user_id'][:20]}...")
     db.commit()
@@ -41,7 +42,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         name='Test Group',
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Created Test Group: {group_id[:20]}...")
@@ -50,7 +51,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         user_id=alice_device1['user_id'],
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=1501,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -60,15 +61,15 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
 
     invite_id, invite_link, _ = invite.create(
         peer_id=alice_device1['peer_id'],
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_device1['user_id']
     )
     db.commit()
 
-    alice_device2_peer_id = peer.create(t_ms=4000, db=db)
-    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=4001, db=db)
+    alice_device2_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=clock.tick(), db=db)
     assert accepted['mode'] == 'peer'
     alice_device2 = peer_shared.join(
         peer_id=alice_device2_peer_id,
@@ -76,7 +77,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
         prekey_id=accepted['invite_prekey_id'],
-        t_ms=4002,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Alice linked device 2")
@@ -118,7 +119,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         peer_id=alice_device1['peer_id'],
         channel_id=alice_device1['channel_id'],
         content="Message from device 1",
-        t_ms=6000,
+        t_ms=clock.tick(),
         db=db
     )
     msg1_id = msg1_result['id']
@@ -134,7 +135,7 @@ def test_linked_devices_bidirectional_messaging(fresh_db):
         peer_id=alice_device2['peer_id'],
         channel_id=alice_device1['channel_id'],  # Linked devices share channels
         content="Message from device 2",
-        t_ms=6500,
+        t_ms=clock.tick(),
         db=db
     )
     msg2_id = msg2_result['id']

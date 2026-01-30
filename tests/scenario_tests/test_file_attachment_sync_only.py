@@ -16,7 +16,7 @@ from core import schema
 from events.identity import user, invite, peer
 from events.content import channel, message, message_attachment
 from core import tick
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, run_ticks, TestClock
 
 
 def test_file_attachment_sync_only(fresh_db):
@@ -24,25 +24,26 @@ def test_file_attachment_sync_only(fresh_db):
 
     # Setup: Initialize in-memory database
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create networks and invite ===")
 
     # Alice creates network and channel
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"✓ Alice created network")
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"✓ Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     print(f"✓ Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
@@ -50,8 +51,7 @@ def test_file_attachment_sync_only(fresh_db):
 
     # Initial sync to converge (need multiple rounds for GKS events to propagate)
     print("\n=== Initial sync (bootstrap + GKS) ===")
-    for i in range(15):
-        tick.tick(t_ms=2100 + i*200, db=db)
+    run_ticks(db, None, 15)
 
     print("✓ Initial sync completed")
 
@@ -73,7 +73,7 @@ def test_file_attachment_sync_only(fresh_db):
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content='File attachment test',
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']
@@ -117,7 +117,7 @@ def test_file_attachment_sync_only(fresh_db):
         file_data=file_data,
         filename='test.txt',
         mime_type='text/plain',
-        t_ms=5000,
+        t_ms=clock.tick(),
         db=db
     )
     file_id = file_result['file_id']
@@ -138,9 +138,9 @@ def test_file_attachment_sync_only(fresh_db):
 
     db.commit()
 
-    print("\n=== Sync file to Bob (3 rounds) ===")
+    print("\n=== Sync file to Bob (9 rounds) ===")
     for round_num in range(9):
-        tick.tick(t_ms=6000 + round_num * 100, db=db)
+        run_ticks(db, None, 1)
 
         # Check progress using API (what frontends would use)
         progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)

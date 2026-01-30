@@ -11,14 +11,77 @@ from core import tick as tick_module
 # 500 rounds = 50 seconds of simulated time at 100ms intervals
 DEFAULT_MAX_ROUNDS = 500
 
+# Realistic base timestamp for tests (2025-01-02 00:00:00 UTC)
+# This is one day after EPOCH_MS (2025-01-01) to ensure events get proper
+# bucket distribution with time-based unified keys in negentropy sync.
+TEST_BASE_TIME_MS = 1735776000000
+
 # Monotonic test clock to prevent backwards time across helpers
-_TEST_CLOCK_MS = 0
+_TEST_CLOCK_MS = TEST_BASE_TIME_MS
+
+
+class Clock:
+    """A test clock for managing timestamps without magic numbers.
+
+    Usage:
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+        invite = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+        bob = user.join(..., t_ms=clock.tick(), db=db)
+
+    Each call to tick() returns the current time and advances by default_step_ms.
+    Use tick(step=N) to advance by a custom amount.
+    """
+
+    def __init__(self, start_ms: int = TEST_BASE_TIME_MS, default_step_ms: int = 1000):
+        """Initialize the clock.
+
+        Args:
+            start_ms: Starting timestamp (default: TEST_BASE_TIME_MS)
+            default_step_ms: Default step size for tick() (default: 1 second)
+        """
+        self.t_ms = start_ms
+        self.default_step_ms = default_step_ms
+
+    def tick(self, step: int = None) -> int:
+        """Get current time and advance the clock.
+
+        Args:
+            step: How much to advance after returning current time.
+                  If None, uses default_step_ms.
+
+        Returns:
+            Current timestamp (before advancing)
+        """
+        current = self.t_ms
+        self.t_ms += step if step is not None else self.default_step_ms
+        return current
+
+    def now(self) -> int:
+        """Get current time without advancing."""
+        return self.t_ms
+
+    def advance(self, step_ms: int) -> int:
+        """Advance time and return new current time.
+
+        Args:
+            step_ms: How much to advance
+
+        Returns:
+            New current timestamp (after advancing)
+        """
+        self.t_ms += step_ms
+        return self.t_ms
+
+
+# Alias for backwards compatibility (TestClock is a clearer name in test code)
+TestClock = Clock
 
 
 def reset_test_clock() -> None:
     """Reset the monotonic test clock (called by test fixtures)."""
     global _TEST_CLOCK_MS
-    _TEST_CLOCK_MS = 0
+    _TEST_CLOCK_MS = TEST_BASE_TIME_MS
 
 
 def _coerce_start_t_ms(db: Any, start_t_ms: int | None, interval_ms: int) -> int:

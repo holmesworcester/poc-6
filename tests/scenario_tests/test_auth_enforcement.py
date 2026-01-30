@@ -13,15 +13,16 @@ from events.identity import user_removed as user_removed_module
 from events.identity import peer_removed as peer_removed_module
 from events.content import message, message_reaction
 from events.group import group as group_module
-from tests.utils.tick_helper import initial_sync, assert_eventually
+from tests.utils.tick_helper import initial_sync, assert_eventually, TestClock
 
 
 def _setup_alice_bob(db):
-    alice = user.new_network(name="Alice", t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice["peer_id"], t_ms=1500, db=db)
+    clock = TestClock()
+    alice = user.new_network(name="Alice", t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice["peer_id"], t_ms=clock.tick(), db=db)
 
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name="Bob", t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name="Bob", t_ms=clock.now(), db=db)
     db.commit()
 
     t_ms = initial_sync(db, start_t_ms=None)

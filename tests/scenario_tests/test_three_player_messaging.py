@@ -16,7 +16,7 @@ from events.identity import user, invite, peer
 from events.identity import invite as invite_module
 from events.content import message
 from events.network import connection_request as conn_module
-from tests.utils.tick_helper import run_ticks, assert_eventually
+from tests.utils.tick_helper import run_ticks, assert_eventually, TestClock
 from core import tick
 
 
@@ -25,30 +25,31 @@ def test_three_player_messaging(fresh_db):
 
     # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create networks and invite ===")
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"Alice created network, key_id: {alice['key_id'][:20]}...")
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     # Charlie creates his own separate network
-    charlie = user.new_network(name='Charlie', t_ms=3000, db=db)
+    charlie = user.new_network(name='Charlie', t_ms=clock.tick(), db=db)
     print(f"Charlie created separate network")
 
     db.commit()
@@ -433,7 +434,7 @@ def test_three_player_messaging(fresh_db):
         peer_id=alice['peer_id'],
         channel_id=alice_channel_id,
         content="Hello from Alice!",
-        t_ms=5000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -444,7 +445,7 @@ def test_three_player_messaging(fresh_db):
         peer_id=bob['peer_id'],
         channel_id=bob_channel_id,
         content="Hello from Bob!",
-        t_ms=5100,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -455,7 +456,7 @@ def test_three_player_messaging(fresh_db):
         peer_id=charlie['peer_id'],
         channel_id=charlie_channel_id,
         content="Hello from Charlie!",
-        t_ms=5200,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()

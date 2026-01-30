@@ -122,8 +122,10 @@ def fresh_db_with_alice(fresh_db):
             # Use alice['peer_id'], alice['channel_id'], etc.
     """
     from events.identity import user
+    from tests.utils.tick_helper import TestClock
     db = fresh_db
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    clock = TestClock()
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
     return db, alice
 
@@ -141,18 +143,19 @@ def fresh_db_with_alice_and_bob(fresh_db_with_alice):
     from events.identity import user as user_module
     from events.identity import invite as invite_module
     from events.identity import peer as peer_module
-    from tests.utils.tick_helper import run_ticks
+    from tests.utils.tick_helper import run_ticks, TestClock
 
     db, alice = fresh_db_with_alice
+    clock = TestClock()  # Fresh clock for this fixture's additional setup
 
     invite_id, invite_link, invite_data = invite_module.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
 
-    bob_peer_id = peer_module.create(t_ms=2000, db=db)
-    bob = user_module.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer_module.create(t_ms=clock.tick(), db=db)
+    bob = user_module.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Sync to converge - 15 rounds is enough for 2-peer connection

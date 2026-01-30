@@ -166,17 +166,19 @@ def test_delete_and_rekey_message(fresh_db_with_alice):
 
 def test_forward_secrecy_multi_peer(fresh_db_with_alice):
     """Test forward secrecy with multiple peers."""
+    from tests.utils.tick_helper import TestClock
     db, alice = fresh_db_with_alice
+    clock = TestClock()  # Manages timestamps
 
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
 
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
 
@@ -186,7 +188,7 @@ def test_forward_secrecy_multi_peer(fresh_db_with_alice):
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Multi-peer test message",
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']

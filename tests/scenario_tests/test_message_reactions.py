@@ -13,22 +13,23 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_deletion, message_reaction
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_message_reactions_basic_two_peer(fresh_db):
     """Test basic message reactions with two peers: Alice and Bob."""
     db = fresh_db
+    clock = TestClock()
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     # Alice creates an invite for Bob
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     channel_id = alice['channel_id']
@@ -65,11 +66,12 @@ def test_message_reactions_basic_two_peer(fresh_db):
 def test_message_reactions_single_emoji(fresh_db):
     """Test: Alice adds one emoji reaction to a message."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     channel_id = alice['channel_id']
@@ -135,11 +137,12 @@ def test_message_reactions_single_emoji(fresh_db):
 def test_message_reactions_multiple_emoji(fresh_db):
     """Test: Alice and Bob add different emoji reactions to same message."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     channel_id = alice['channel_id']
@@ -221,11 +224,12 @@ def test_message_reactions_multiple_emoji(fresh_db):
 def test_message_reactions_removal(fresh_db):
     """Test: Alice removes her reaction and peers converge."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     channel_id = alice['channel_id']
@@ -312,11 +316,12 @@ def test_message_reactions_removal(fresh_db):
 def test_message_reactions_cascade_deletion(fresh_db):
     """Test: Deleting message cascade-deletes all reactions."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     channel_id = alice['channel_id']

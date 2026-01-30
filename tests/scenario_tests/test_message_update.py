@@ -5,7 +5,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer
 from events.content import message, message_update
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_edit_own_message():
@@ -55,22 +55,23 @@ def test_edit_own_message():
 def test_cannot_edit_others_message(fresh_db):
     """User cannot edit another user's message."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name="alice", t_ms=1000, db=db)
+    alice = user.new_network(name="alice", t_ms=clock.tick(), db=db)
     channel_id = alice['channel_id']
 
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="alice's message",
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']
 
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=3000, db=db)
-    bob_peer_id = peer.create(t_ms=4000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name="bob", t_ms=4000, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name="bob", t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for bob to see the message
@@ -167,13 +168,14 @@ def test_edit_history():
 def test_edit_syncs_to_other_peer(fresh_db):
     """Edits sync to other peers."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name="alice", t_ms=1000, db=db)
+    alice = user.new_network(name="alice", t_ms=clock.tick(), db=db)
     channel_id = alice['channel_id']
 
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2000, db=db)
-    bob_peer_id = peer.create(t_ms=3000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name="bob", t_ms=3000, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name="bob", t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for bob to join and see channel

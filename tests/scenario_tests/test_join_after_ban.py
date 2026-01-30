@@ -21,31 +21,32 @@ from core.db import create_safe_db
 from events.identity import user, invite, peer, user_removed, network
 from events.content import message
 from events.group import group_member
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_new_user_joins_after_ban(fresh_db):
     """Test that a new user can join and see messages after another user was banned."""
     db = fresh_db
+    clock = TestClock()  # Manages timestamps
 
-    holmes = user.new_network(name='Holmes', t_ms=1000, db=db)
+    holmes = user.new_network(name='Holmes', t_ms=clock.tick(), db=db)
 
     # Holmes sends first message
     holmes_msg1 = message.create(
         peer_id=holmes['peer_id'],
         channel_id=holmes['channel_id'],
         content='yo',
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
 
     # Holmes creates invite for Bob
-    _, invite1_link, _ = invite.create(peer_id=holmes['peer_id'], t_ms=3000, db=db)
+    _, invite1_link, _ = invite.create(peer_id=holmes['peer_id'], t_ms=clock.tick(), db=db)
 
     # Bob joins
-    bob_peer_id = peer.create(t_ms=4000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=4000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for Bob to see channel
@@ -137,16 +138,17 @@ def test_new_user_joins_after_ban(fresh_db):
 def test_three_users_join_sequentially(fresh_db):
     """Test corner case: three users joining sequentially."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
     # Alice creates invite for Bob
-    _, invite1_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2000, db=db)
+    _, invite1_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
     # Bob joins
-    bob_peer_id = peer.create(t_ms=3000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=3000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for Bob to join
@@ -184,14 +186,15 @@ def test_three_users_join_sequentially(fresh_db):
 def test_user_joins_after_two_bans(fresh_db):
     """Test corner case: user joins after two users were banned."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
     # Bob joins
-    _, invite1_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2000, db=db)
-    bob_peer_id = peer.create(t_ms=3000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=3000, db=db)
+    _, invite1_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for Bob
@@ -279,22 +282,19 @@ def test_user_joins_after_two_bans(fresh_db):
 def test_rapid_join_ban_join_cycle(fresh_db):
     """Test corner case: rapid cycle of join, ban, join."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
-
-    t_ms = 2000
 
     # Multiple cycles of invite->join->ban
     for i in range(3):
         # Create invite
-        _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-        t_ms += 100
+        _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
         # User joins
-        user_peer_id = peer.create(t_ms=t_ms, db=db)
-        joined_user = user.join(peer_id=user_peer_id, invite_link=invite_link, name=f'User{i}', t_ms=t_ms, db=db)
-        t_ms += 100
+        user_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        joined_user = user.join(peer_id=user_peer_id, invite_link=invite_link, name=f'User{i}', t_ms=clock.now(), db=db)
         db.commit()
 
         # Wait for user to join
@@ -305,14 +305,14 @@ def test_rapid_join_ban_join_cycle(fresh_db):
             )
             assert len(channels) >= 1
 
-        t_ms = assert_eventually(user_joined, db=db, start_t_ms=t_ms)
+        assert_eventually(user_joined, db=db, start_t_ms=None)
 
         # Ban the user
         user_removed.create(
             removed_user_id=joined_user['user_id'],
             removed_by_peer_id=alice['peer_shared_id'],
             removed_by_local_peer_id=alice['peer_id'],
-            t_ms=t_ms,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()
@@ -323,14 +323,13 @@ def test_rapid_join_ban_join_cycle(fresh_db):
             members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
             assert u['user_id'] not in [m['user_id'] for m in members]
 
-        t_ms = assert_eventually(user_banned, db=db, start_t_ms=t_ms)
+        assert_eventually(user_banned, db=db, start_t_ms=None)
 
     # Now final user joins
-    _, final_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=t_ms, db=db)
-    t_ms += 100
+    _, final_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
-    final_peer_id = peer.create(t_ms=t_ms, db=db)
-    final_user = user.join(peer_id=final_peer_id, invite_link=final_invite_link, name='FinalUser', t_ms=t_ms, db=db)
+    final_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    final_user = user.join(peer_id=final_peer_id, invite_link=final_invite_link, name='FinalUser', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for final user to see correct state
@@ -345,4 +344,4 @@ def test_rapid_join_ban_join_cycle(fresh_db):
         for i in range(3):
             assert f'User{i}' not in member_names, f"FinalUser should NOT see banned User{i}"
 
-    assert_eventually(final_user_sees_correct_state, db=db, start_t_ms=t_ms)
+    assert_eventually(final_user_sees_correct_state, db=db, start_t_ms=None)

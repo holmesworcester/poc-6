@@ -19,7 +19,7 @@ from core import schema
 from events.identity import user, invite, peer, admin
 from events.content import message
 from events.content import message_deletion
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_message_deletion_self():
@@ -93,11 +93,12 @@ def test_message_deletion_self():
 def test_message_deletion_admin(fresh_db):
     """Test admin deletion: admin deletes another user's message."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for Bob to see channel
@@ -186,13 +187,14 @@ def test_message_deletion_admin(fresh_db):
 def test_message_deletion_unauthorized(fresh_db):
     """Test that non-admin cannot delete other's messages."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     # Bob joins (will be admin)
-    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=2000, db=db)
+    _, bob_invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=bob_invite_link, name='Bob', t_ms=clock.now(), db=db)
     db.commit()
 
     # Wait for Bob to see channel
