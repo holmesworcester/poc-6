@@ -33,6 +33,48 @@ log = logging.getLogger(__name__)
 CONNECTION_TTL_MS = 300_000
 
 
+# ============================================================================
+# Connection limiting configuration
+# ============================================================================
+# Rate limit + natural attrition approach:
+# - Rate limit creation: Create at most `rate` new connections per tick
+# - Don't renew excess: When connection approaches expiry, only renew if count < k
+# - Natural attrition: Excess connections expire naturally (TTL = 5 minutes)
+# - Result: Sparse random graph with ~k connections per peer
+
+_max_connections_per_peer: int | None = 20  # Target k (None = unlimited)
+_connection_creation_rate: int = 5  # Max new connections per tick per peer
+
+
+def set_max_connections_per_peer(k: int | None) -> None:
+    """Set target connections per peer. None = unlimited."""
+    global _max_connections_per_peer
+    _max_connections_per_peer = k
+
+
+def get_max_connections_per_peer() -> int | None:
+    """Get target connections per peer. None = unlimited."""
+    return _max_connections_per_peer
+
+
+def set_connection_creation_rate(rate: int) -> None:
+    """Set max new connections created per tick per peer."""
+    global _connection_creation_rate
+    _connection_creation_rate = rate
+
+
+def get_connection_creation_rate() -> int:
+    """Get max new connections created per tick per peer."""
+    return _connection_creation_rate
+
+
+def reset_connection_limits() -> None:
+    """Reset connection limits to defaults. For testing."""
+    global _max_connections_per_peer, _connection_creation_rate
+    _max_connections_per_peer = 20
+    _connection_creation_rate = 5
+
+
 # v2 event specification
 EVENT_SPEC = {
     'encrypted': False,
@@ -651,7 +693,22 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
         # NORMAL MODE: Have peer_self, can connect to all known peers
 
+        # Connection limiting setup - needed for both pending requests and new connections
+        creation_rate = get_connection_creation_rate()
+        target_k = get_max_connections_per_peer()
+
+        # Count ALL active connections (pending + established) toward the limit
+        current_count = 0
+        if target_k is not None:
+            count_row = safedb.query_one("""
+                SELECT COUNT(*) as cnt FROM connections
+                WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?
+            """, (peer_id, t_ms))
+            current_count = count_row['cnt'] if count_row else 0
+
         # First, process any pending connection requests that we couldn't ack earlier
+        # Always respond to incoming requests - connection limiting only applies
+        # to outgoing connection creation. This ensures new peers can always join.
         pending_requests = safedb.query_all("""
             SELECT request_id, remote_peer_shared_id, remote_invite_id, their_key, received_at
             FROM pending_connection_requests WHERE recorded_by = ?
@@ -689,6 +746,9 @@ def send_to_all(t_ms: int, db: Any) -> None:
             all_peer_ids.add(invite_row['inviter_peer_shared_id'])
             log.debug(f"connection_request.send_to_all: added inviter {invite_row['inviter_peer_shared_id'][:20]}... from invite_accepteds")
 
+        # Rate limit counter for new outgoing connections
+        new_connections_this_tick = 0
+
         # Send to each peer
         for to_peer_shared_id in all_peer_ids:
             if to_peer_shared_id == peer_shared_id:
@@ -706,6 +766,16 @@ def send_to_all(t_ms: int, db: Any) -> None:
                 log.debug(f"connection_request.send_to_all: skipping {to_peer_shared_id[:20]}... (connection exists)")
                 continue
 
+            # Connection limiting: check if at/over target k
+            if target_k is not None and current_count >= target_k:
+                log.debug(f"connection_request.send_to_all: at connection limit ({current_count}/{target_k}), skipping new connections")
+                break  # Stop creating new connections when at limit
+
+            # Rate limiting: stop after creating `rate` new connections this tick
+            if new_connections_this_tick >= creation_rate:
+                log.debug(f"connection_request.send_to_all: rate limit reached ({creation_rate}), stopping for this tick")
+                break
+
             try:
                 _send_request(
                     to_peer_shared_id=to_peer_shared_id,
@@ -715,6 +785,8 @@ def send_to_all(t_ms: int, db: Any) -> None:
                     t_ms=t_ms,
                     db=db
                 )
+                new_connections_this_tick += 1
+                current_count += 1  # Track for k limit (pending counts toward limit)
             except Exception as e:
                 log.warning(f"connection_request.send_to_all: error sending to {to_peer_shared_id[:20]}...: {e}")
 
@@ -1340,12 +1412,18 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
 
     Sends a connection ack in response to a connection request.
     Looks up the reply_addr from packet_metadata (stored during receive).
+
+    Note: We always respond to incoming requests - connection limiting only
+    applies to outgoing connection creation. This ensures new peers can always
+    join even when existing peers are at their connection limit. Excess
+    connections will expire naturally via TTL (natural attrition).
     """
     from events.network import connection_ack
 
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Look up reply_addr from packet_metadata staging table
     # This was stored by store_incoming() when the request arrived
-    safedb = create_safe_db(db, recorded_by=recorded_by)
     from_addr_row = safedb.query_one("""
         SELECT from_addr_ip, from_addr_port FROM packet_metadata
         WHERE event_id = ? AND recorded_by = ?
