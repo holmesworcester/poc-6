@@ -1,4 +1,8 @@
-"""Group member event type (shareable, encrypted) - represents group membership."""
+"""Group member event type (shareable, signed) - represents group membership.
+
+In sender key model, group_member events are signed but not encrypted.
+Membership metadata is public; messages are encrypted with sender keys.
+"""
 
 # Registry metadata
 EVENT_TYPE = 'group_member'
@@ -14,14 +18,15 @@ from events.group import group
 from events.identity import peer_shared, network, peer
 from core.db import create_safe_db, create_unsafe_db
 from core import queues
-from core.projection.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
 
-# v2 event specification - signed by peer_shared, encrypted
+# v2 event specification - signed by peer_shared, unencrypted in sender key model
 EVENT_SPEC = {
-    'encrypted': True,
+    'encrypted': False,  # Sender key model: membership metadata is public
     'signer': {
         'id_field': 'signed_by',
         'type_field': 'signer_type',
@@ -122,7 +127,18 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     )
 
-    return ProjectorResult(writes=writes, valid_event=True)
+    # Command to distribute our sender keys to the new member
+    commands = (
+        Command(
+            command_type='distribute_sender_keys_to_new_member',
+            args={
+                'group_id': group_id,
+                'new_member_user_id': user_id,
+            }
+        ),
+    )
+
+    return ProjectorResult(writes=writes, valid_event=True, commands=commands)
 
 
 def _wire_shadow_group_member(
@@ -201,7 +217,6 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     _wire_shadow_group_member(group_id, user_id, peer_shared_id, admin_grant_id)
 
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(group_id, peer_id, db)
     blob = wire_format.encode_group_member_wire_event(
         group_id_b64=group_id,
         user_id_b64=user_id,
@@ -210,59 +225,16 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         signed_by_b64=peer_shared_id,
         signer_type="peer_shared",
         created_at_ms=t_ms,
-        key_data=key_data,
         private_key=private_key,
     )
     member_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group_member.create() created member_id={member_id}")
 
-    # Share group key with new member
-    # Get the new member's peer_shared_id from peers_shared (user→peer is one-to-many)
-    member_peer = peer_shared.get_for_user(user_id, peer_id, db)
-
-    if member_peer:
-        from events.group import group_key_shared
-        try:
-            group_key_shared.create(
-                key_id=group_row['key_id'],
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                recipient_peer_id=member_peer['peer_shared_id'],
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            log.info(f"group_member.create() shared key with new member {user_id}")
-        except Exception as e:
-            log.warning(f"group_member.create() failed to share key with {user_id}: {e}")
-
-    # Per design doc: Share key to all active device links for this user
-    # Any new group memberships must be sealed to all active device links
-    # This ensures all devices of a user can decrypt groups they're added to
-    from events.group import group_key_shared
-
-    # Get all active device links for this user (peer_shared entries with matching user_id)
-    other_devices = safedb.query(
-        """SELECT peer_shared_id FROM peers_shared
-           WHERE user_id = ? AND recorded_by = ? AND peer_shared_id != ?""",
-        (user_id, peer_id, member_peer['peer_shared_id'] if member_peer else None)
-    )
-
-    for device_row in other_devices:
-        other_peer_shared_id = device_row['peer_shared_id']
-        try:
-            # Share key with other device by creating group_key_shared sealed to their identity
-            group_key_shared.create(
-                key_id=group_row['key_id'],
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                recipient_peer_id=other_peer_shared_id,
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            log.info(f"group_member.create() shared key to device link {other_peer_shared_id[:20]}...")
-        except Exception as e:
-            log.warning(f"group_member.create() failed to share key to device link {other_peer_shared_id[:20]}...: {e}")
+    # NOTE: In sender key model, group keys are not shared here.
+    # Sender keys are distributed via TreeKEM to the new member.
+    # The new member will receive sender keys from existing senders
+    # as those senders continue sending messages to the group.
 
     return member_id
 
@@ -318,3 +290,100 @@ def list_members(group_id: str, recorded_by: str, db: Any) -> list[dict[str, Any
            ORDER BY gm.created_at ASC""",
         (group_id, recorded_by)
     )
+
+
+def _handle_distribute_sender_keys_to_new_member(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Distribute our sender keys to a newly visible group member.
+
+    Called when a group_member event is projected. This ensures that when
+    we see a new member join (via sync), we share our existing sender keys
+    with them so they can decrypt our messages.
+    """
+    from events.group import sender_key, pubkey_shared
+
+    group_id = args['group_id']
+    new_member_user_id = args['new_member_user_id']
+
+    # Unwrap db if needed
+    raw_db = db._db if hasattr(db, '_db') else db
+    safedb = create_safe_db(raw_db, recorded_by=recorded_by)
+
+    # Get our peer_shared_id
+    peer_self = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (recorded_by, recorded_by)
+    )
+    if not peer_self:
+        return
+
+    our_peer_shared_id = peer_self['peer_shared_id']
+
+    # Get the new member's peer_shared_id
+    new_member_peer_shared = safedb.query_one(
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
+        (new_member_user_id, recorded_by)
+    )
+    if not new_member_peer_shared:
+        log.debug(f"distribute_sender_keys: no peer_shared for new member {new_member_user_id[:20]}...")
+        return
+
+    new_member_peer_shared_id = new_member_peer_shared['peer_shared_id']
+
+    # Don't distribute to ourselves
+    if new_member_peer_shared_id == our_peer_shared_id:
+        return
+
+    # SECURITY GATE: Don't distribute keys to removed users
+    # This prevents leaking keys to users who were removed (even if membership event arrives late)
+    is_removed = safedb.query_one(
+        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ?",
+        (new_member_user_id, recorded_by)
+    )
+    if is_removed:
+        log.info(f"distribute_sender_keys: BLOCKED - user {new_member_user_id[:20]}... was removed, not sharing keys")
+        return
+
+    # Get all our sender keys for this group
+    our_keys = safedb.query(
+        """SELECT DISTINCT ka.key_id FROM key_announces ka
+           INNER JOIN secrets s ON s.secret_id = ka.key_id AND s.recorded_by = ka.recorded_by
+           WHERE ka.group_id = ? AND ka.signed_by = ? AND ka.recorded_by = ?""",
+        (group_id, our_peer_shared_id, recorded_by)
+    )
+
+    if not our_keys:
+        log.debug(f"distribute_sender_keys: no keys to distribute for group {group_id[:20]}...")
+        return
+
+    # Get the new member's pubkey
+    new_member_pubkey = pubkey_shared.get_pubkey_for_peer(new_member_peer_shared_id, recorded_by, raw_db)
+    if not new_member_pubkey:
+        log.warning(f"distribute_sender_keys: no pubkey for new member {new_member_peer_shared_id[:20]}...")
+        return
+
+    from events.group import secret_shared
+    from core import crypto
+
+    recipient_pubkey_id = crypto.b64encode(new_member_pubkey['id'])
+
+    log.info(f"distribute_sender_keys: sharing {len(our_keys)} keys to new member {new_member_peer_shared_id[:20]}...")
+
+    for i, key_row in enumerate(our_keys):
+        key_id = key_row['key_id']
+        try:
+            secret_shared.create_to_pubkey(
+                secret_id=key_id,
+                peer_id=recorded_by,
+                peer_shared_id=our_peer_shared_id,
+                recipient_pubkey_id=recipient_pubkey_id,
+                removal_epoch_id=None,
+                t_ms=recorded_at + i,
+                db=raw_db,
+            )
+            log.debug(f"distribute_sender_keys: shared key {key_id[:20]}... to {new_member_peer_shared_id[:20]}...")
+        except Exception as e:
+            log.warning(f"distribute_sender_keys: failed to share {key_id[:20]}...: {e}")
+
+
+# Register the command handler
+register_command_handler('distribute_sender_keys_to_new_member', _handle_distribute_sender_keys_to_new_member)

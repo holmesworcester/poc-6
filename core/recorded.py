@@ -271,29 +271,32 @@ def _build_key_cache_by_peer(
 
         for chunk in _chunked(list(key_ids), chunk_size):
             placeholders = ",".join("?" for _ in chunk)
+
+            # Look in secrets table for sender keys (symmetric)
             params = (*chunk, recorded_by)
             rows = safedb.query(
-                f"SELECT key_id, key FROM group_keys "
-                f"WHERE key_id IN ({placeholders}) AND recorded_by = ?",
+                f"SELECT secret_id, key FROM secrets "
+                f"WHERE secret_id IN ({placeholders}) AND recorded_by = ?",
                 params,
             )
             for row in rows:
-                key_cache[row['key_id']] = {
-                    'id': crypto.b64decode(row['key_id']),
+                key_cache[row['secret_id']] = {
+                    'id': crypto.b64decode(row['secret_id']),
                     'key': row['key'],
                     'type': 'symmetric',
                 }
 
+            # Look in pubkeys table for asymmetric keys (local-only, has private_key)
             params = (*chunk, recorded_by, recorded_by)
             rows = safedb.query(
-                f"SELECT prekey_id, private_key FROM group_prekeys "
-                f"WHERE prekey_id IN ({placeholders}) AND owner_peer_id = ? AND recorded_by = ?",
+                f"SELECT pubkey_id, private_key FROM pubkeys "
+                f"WHERE pubkey_id IN ({placeholders}) AND owner_peer_id = ? AND recorded_by = ?",
                 params,
             )
             for row in rows:
                 if row['private_key']:
-                    key_cache[row['prekey_id']] = {
-                        'id': crypto.b64decode(row['prekey_id']),
+                    key_cache[row['pubkey_id']] = {
+                        'id': crypto.b64decode(row['pubkey_id']),
                         'private_key': row['private_key'],
                         'type': 'asymmetric',
                     }
@@ -451,20 +454,11 @@ def _decode_event_blob(
         event_data, missing_key_ids = wire_format.decode_group_member_wire_event(
             event_blob, recorded_by, db, key_cache=key_cache
         )
-    elif wire_format.is_wire_group_key_envelope(event_blob):
-        event_data = wire_format.decode_group_key_wire_event(event_blob)
-    elif wire_format.is_wire_group_key_shared_envelope(event_blob):
-        event_data, missing_key_ids = wire_format.decode_group_key_shared_wire_event(
-            event_blob, recorded_by, db, key_cache=key_cache
-        )
-    elif wire_format.is_wire_group_prekey_envelope(event_blob):
-        event_data = wire_format.decode_group_prekey_wire_event(event_blob)
-    elif wire_format.is_wire_group_prekey_shared_envelope(event_blob):
-        event_data = wire_format.decode_group_prekey_shared_wire_event(event_blob)
-    elif wire_format.is_wire_connection_prekey_envelope(event_blob):
-        event_data = wire_format.decode_connection_prekey_wire_event(event_blob)
-    elif wire_format.is_wire_connection_prekey_shared_envelope(event_blob):
-        event_data = wire_format.decode_connection_prekey_shared_wire_event(event_blob)
+    # NOTE: group_key, group_key_shared, group_prekey, group_prekey_shared removed - use sender keys
+    elif wire_format.is_wire_connection_pubkey_envelope(event_blob):
+        event_data = wire_format.decode_connection_pubkey_wire_event(event_blob)
+    elif wire_format.is_wire_connection_pubkey_shared_envelope(event_blob):
+        event_data = wire_format.decode_connection_pubkey_shared_wire_event(event_blob)
     elif wire_format.is_wire_connection_request_envelope(event_blob):
         event_data = wire_format.decode_connection_request_wire_event(event_blob)
     elif wire_format.is_wire_connection_ack_envelope(event_blob):
@@ -511,7 +505,9 @@ def _decode_event_blob(
         event_data = wire_format.decode_negentropy_wire_event(event_blob)
     # TreeKEM Phase 1 event types
     elif wire_format.is_wire_pubkey_envelope(event_blob):
-        event_data = wire_format.decode_pubkey_wire_event(event_blob)
+        event_data = wire_format.decode_pubkey_local_event(event_blob)
+    elif wire_format.is_wire_pubkey_shared_envelope(event_blob):
+        event_data = wire_format.decode_pubkey_shared_wire_event(event_blob)
     elif wire_format.is_wire_secret_envelope(event_blob):
         event_data = wire_format.decode_secret_wire_event(event_blob)
     elif wire_format.is_wire_secret_shared_envelope(event_blob):
@@ -522,17 +518,18 @@ def _decode_event_blob(
         event_data = wire_format.decode_removal_epoch_wire_event(event_blob)
     elif wire_format.is_wire_key_request_envelope(event_blob):
         event_data = wire_format.decode_key_request_wire_event(event_blob)
-    # TreeKEM Phase 2 event types
-    elif wire_format.is_wire_treekem_secret_envelope(event_blob):
-        event_data = wire_format.decode_treekem_secret_wire_event(event_blob)
+    elif wire_format.is_wire_key_announce_envelope(event_blob):
+        event_data = wire_format.decode_key_announce_wire_event(event_blob)
+    # TreeKEM Phase 2 event types (treekem_secret/treekem_secret_shared removed - use secret/secret_shared)
     elif wire_format.is_wire_treekem_pubkey_envelope(event_blob):
+        # Old shareable format (deprecated, for backward compat)
         event_data = wire_format.decode_treekem_pubkey_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_pubkey_local_envelope(event_blob):
+        event_data = wire_format.decode_treekem_pubkey_local_event(event_blob)
+    elif wire_format.is_wire_treekem_pubkey_shared_envelope(event_blob):
+        event_data = wire_format.decode_treekem_pubkey_shared_wire_event(event_blob)
     elif wire_format.is_wire_treekem_update_envelope(event_blob):
         event_data = wire_format.decode_treekem_update_wire_event(event_blob)
-    elif wire_format.is_wire_treekem_secret_shared_envelope(event_blob):
-        event_data, missing_key_ids = wire_format.decode_treekem_secret_shared_wire_event(
-            event_blob, recorded_by, db, key_cache=key_cache
-        )
     else:
         if event_blob and event_blob[:1] in (b'{', b'['):
             raise ValueError("JSON event blobs are no longer supported")

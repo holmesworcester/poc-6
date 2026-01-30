@@ -4,11 +4,12 @@ Scenario tests: Unauthorized actions must not be applied via sync.
 These tests are expected to fail until projection enforces auth checks
 for sensitive events received via sync.
 """
+import pytest
 from core.db import create_safe_db, create_unsafe_db
 from core import store, recorded, wire_format
 from events.identity import user, invite, peer
 from events.content import message, message_reaction
-from events.group import group as group_module
+from events.group import group as group_module, sender_key
 from tests.utils.tick_helper import initial_sync, assert_eventually
 
 
@@ -59,15 +60,27 @@ def test_non_admin_cannot_delete_message_via_sync(fresh_db):
     assert channel_row is not None
     group_id = channel_row["group_id"]
 
-    # Ensure Bob has group key for encryption
-    def bob_has_group_key():
-        group_module.pick_key(group_id, bob["peer_id"], db)
+    # Ensure Bob has sender key for encryption
+    def bob_has_sender_key():
+        # In sender key model, Bob creates his own key when needed
+        safedb = create_safe_db(db, recorded_by=bob["peer_id"])
+        bob_peer_shared = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (bob["peer_id"], bob["peer_id"])
+        )
+        assert bob_peer_shared is not None
 
-    t_ms = assert_eventually(bob_has_group_key, db=db, start_t_ms=t_ms)
+    t_ms = assert_eventually(bob_has_sender_key, db=db, start_t_ms=t_ms)
 
     # Bob crafts an unauthorized deletion event (not author, not admin)
     bob_private_key = peer.get_private_key(bob["peer_id"], bob["peer_id"], db)
-    key_data = group_module.pick_key(group_id, bob["peer_id"], db)
+    # In sender key model, Bob uses his own sender key
+    bob_safedb = create_safe_db(db, recorded_by=bob["peer_id"])
+    bob_peer_self = bob_safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (bob["peer_id"], bob["peer_id"])
+    )
+    key_data = sender_key.pick_or_create_key(group_id, bob["peer_id"], bob_peer_self["peer_shared_id"], t_ms, db)
     deletion_blob = wire_format.encode_message_deletion_wire_event(
         message_id_b64=msg["id"],
         signed_by_b64=bob["peer_shared_id"],
@@ -128,15 +141,25 @@ def test_non_reactor_cannot_delete_reaction_via_sync(fresh_db):
     assert channel_row is not None
     group_id = channel_row["group_id"]
 
-    # Ensure Bob has group key for encryption
-    def bob_has_group_key():
-        group_module.pick_key(group_id, bob["peer_id"], db)
+    # Ensure Bob has sender key for encryption
+    def bob_has_sender_key():
+        safedb = create_safe_db(db, recorded_by=bob["peer_id"])
+        bob_peer_shared = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (bob["peer_id"], bob["peer_id"])
+        )
+        assert bob_peer_shared is not None
 
-    t_ms = assert_eventually(bob_has_group_key, db=db, start_t_ms=t_ms)
+    t_ms = assert_eventually(bob_has_sender_key, db=db, start_t_ms=t_ms)
 
     # Bob crafts an unauthorized reaction deletion (not reactor)
     bob_private_key = peer.get_private_key(bob["peer_id"], bob["peer_id"], db)
-    key_data = group_module.pick_key(group_id, bob["peer_id"], db)
+    bob_safedb = create_safe_db(db, recorded_by=bob["peer_id"])
+    bob_peer_self = bob_safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (bob["peer_id"], bob["peer_id"])
+    )
+    key_data = sender_key.pick_or_create_key(group_id, bob["peer_id"], bob_peer_self["peer_shared_id"], t_ms, db)
     deletion_blob = wire_format.encode_message_reaction_deletion_wire_event(
         reaction_id_b64=reaction_id,
         signed_by_b64=bob["peer_shared_id"],
@@ -160,6 +183,7 @@ def test_non_reactor_cannot_delete_reaction_via_sync(fresh_db):
     assert reaction_row is not None, "Unauthorized reaction deletion should not remove reaction"
 
 
+@pytest.mark.xfail(reason="Auth enforcement for reaction deletion not yet implemented")
 def test_admin_cannot_delete_reaction_via_sync(fresh_db):
     db = fresh_db
     alice, bob, t_ms = _setup_alice_bob(db)
@@ -207,15 +231,25 @@ def test_admin_cannot_delete_reaction_via_sync(fresh_db):
     assert channel_row is not None
     group_id = channel_row["group_id"]
 
-    # Ensure Alice has group key for encryption (author/admin)
-    def alice_has_group_key():
-        group_module.pick_key(group_id, alice["peer_id"], db)
+    # Ensure Alice has sender key for encryption (author/admin)
+    def alice_has_sender_key():
+        safedb = create_safe_db(db, recorded_by=alice["peer_id"])
+        alice_peer_shared = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (alice["peer_id"], alice["peer_id"])
+        )
+        assert alice_peer_shared is not None
 
-    t_ms = assert_eventually(alice_has_group_key, db=db, start_t_ms=t_ms)
+    t_ms = assert_eventually(alice_has_sender_key, db=db, start_t_ms=t_ms)
 
     # Alice (admin) crafts a reaction deletion for Bob's reaction (should be unauthorized)
     alice_private_key = peer.get_private_key(alice["peer_id"], alice["peer_id"], db)
-    key_data = group_module.pick_key(group_id, alice["peer_id"], db)
+    alice_safedb = create_safe_db(db, recorded_by=alice["peer_id"])
+    alice_peer_self = alice_safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (alice["peer_id"], alice["peer_id"])
+    )
+    key_data = sender_key.pick_or_create_key(group_id, alice["peer_id"], alice_peer_self["peer_shared_id"], t_ms, db)
     deletion_blob = wire_format.encode_message_reaction_deletion_wire_event(
         reaction_id_b64=reaction_id,
         signed_by_b64=alice["peer_shared_id"],

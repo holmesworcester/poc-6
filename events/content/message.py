@@ -216,8 +216,17 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Get key_data for encryption (group.pick_key uses peer_id for access control)
-    key_data = group.pick_key(group_id, peer_id, db)
+    # Get/create sender key for encryption
+    # Sender keys provide O(log n) distribution when TreeKEM is available,
+    # with O(n) leaf fallback when only pubkeys exist
+    from events.group import sender_key
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
 
     blob = wire_format.encode_message_wire_event(
         channel_id_b64=channel_id,
@@ -334,7 +343,16 @@ def batch_create(peer_id: str, channel_id: str, contents: list[str], start_t_ms:
 
     # Cache crypto keys
     private_key = peer_module.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(group_id, peer_id, db)
+
+    # Get/create sender key for encryption
+    from events.group import sender_key
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=start_t_ms,
+        db=db,
+    )
 
     # Build all event blobs
     event_blobs = []

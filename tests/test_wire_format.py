@@ -268,14 +268,14 @@ def test_admin_payload_roundtrip():
 
 def test_invite_payload_roundtrip():
     invite_pubkey = b"\x2e" * wire_format.PUBKEY_SIZE
-    invite_prekey_id = b"\x2f" * 16
+    invite_pubkey_id = b"\x2f" * 16
     group_id = b"\x30" * 16
     inviter_peer_shared_id = b"\x31" * 16
     inviter_user_id = b"\x32" * 16
     encoded = wire_format.encode_invite_plaintext(
         mode=wire_format.INVITE_MODE_USER,
         invite_pubkey=invite_pubkey,
-        invite_prekey_id=invite_prekey_id,
+        invite_pubkey_id=invite_pubkey_id,
         group_id=group_id,
         channel_id=None,
         key_id=None,
@@ -290,7 +290,7 @@ def test_invite_payload_roundtrip():
     decoded = wire_format.decode_invite_plaintext(encoded)
     assert decoded["mode"] == wire_format.INVITE_MODE_USER
     assert decoded["invite_pubkey"] == invite_pubkey
-    assert decoded["invite_prekey_id"] == invite_prekey_id
+    assert decoded["invite_pubkey_id"] == invite_pubkey_id
     assert decoded["group_id"] == group_id
     assert decoded["inviter_peer_shared_id"] == inviter_peer_shared_id
     assert decoded["inviter_user_id"] == inviter_user_id
@@ -301,15 +301,15 @@ def test_invite_payload_roundtrip():
 def test_invite_accepted_payload_roundtrip():
     encoded = wire_format.encode_invite_accepted_plaintext(
         invite_id=b"\x33" * 16,
-        invite_prekey_id=b"\x34" * 16,
+        invite_pubkey_id=b"\x34" * 16,
         invite_private_key=b"\x35" * wire_format.PRIVKEY_SIZE,
         inviter_peer_shared_id=b"\x36" * 16,
         network_id=b"\x37" * 16,
         channel_id=None,
         key_id=None,
-        inviter_connection_prekey_public_key=b"\x38" * wire_format.PUBKEY_SIZE,
-        inviter_connection_prekey_shared_id=b"\x39" * 16,
-        inviter_connection_prekey_id=b"\x3a" * 16,
+        inviter_connection_pubkey_public_key=b"\x38" * wire_format.PUBKEY_SIZE,
+        inviter_connection_pubkey_shared_id=b"\x39" * 16,
+        inviter_connection_pubkey_id=b"\x3a" * 16,
         inviter_ip="198.51.100.10",
         inviter_port=9000,
         link_user_id=b"\x3b" * 16,
@@ -317,12 +317,12 @@ def test_invite_accepted_payload_roundtrip():
     )
     decoded = wire_format.decode_invite_accepted_plaintext(encoded)
     assert decoded["invite_id"] == b"\x33" * 16
-    assert decoded["invite_prekey_id"] == b"\x34" * 16
+    assert decoded["invite_pubkey_id"] == b"\x34" * 16
     assert decoded["invite_private_key"] == b"\x35" * wire_format.PRIVKEY_SIZE
     assert decoded["inviter_peer_shared_id"] == b"\x36" * 16
     assert decoded["network_id"] == b"\x37" * 16
-    assert decoded["inviter_connection_prekey_shared_id"] == b"\x39" * 16
-    assert decoded["inviter_connection_prekey_id"] == b"\x3a" * 16
+    assert decoded["inviter_connection_pubkey_shared_id"] == b"\x39" * 16
+    assert decoded["inviter_connection_pubkey_id"] == b"\x3a" * 16
     assert decoded["inviter_ip"] == "198.51.100.10"
     assert decoded["inviter_port"] == 9000
     assert decoded["link_user_id"] == b"\x3b" * 16
@@ -560,72 +560,47 @@ def test_group_member_payload_roundtrip():
     assert decoded["admin_grant_id"] == admin_grant_id
 
 
+# NOTE: group_key, group_key_shared, group_prekey, group_prekey_shared removed in sender key model
+@pytest.mark.skip(reason="group_key removed in sender key model - use sender_key instead")
 def test_group_key_payload_roundtrip():
-    key = b"\x54" * wire_format.SECRET_SIZE
-    encoded = wire_format.encode_group_key_plaintext(key=key)
-    decoded = wire_format.decode_group_key_plaintext(encoded)
-    assert decoded["key"] == key
+    pass
 
 
+@pytest.mark.skip(reason="group_key_shared removed in sender key model - use sender_key instead")
 def test_group_key_shared_payload_roundtrip():
-    key_id = b"\x55" * 16
-    symmetric_key = b"\x56" * wire_format.SECRET_SIZE
-    recipient_prekey_id = b"\x57" * 16
-    encoded = wire_format.encode_group_key_shared_plaintext(
-        key_id=key_id,
-        symmetric_key=symmetric_key,
-        recipient_prekey_id=recipient_prekey_id,
-    )
-    decoded = wire_format.decode_group_key_shared_plaintext(encoded)
-    assert decoded["key_id"] == key_id
-    assert decoded["symmetric_key"] == symmetric_key
-    assert decoded["recipient_prekey_id"] == recipient_prekey_id
+    pass
 
 
+@pytest.mark.skip(reason="group_prekey removed in sender key model - use pubkey instead")
 def test_group_prekey_payload_roundtrip():
-    public_key = b"\x58" * wire_format.PUBKEY_SIZE
-    private_key = b"\x59" * wire_format.PRIVKEY_SIZE
-    encoded = wire_format.encode_group_prekey_plaintext(public_key=public_key, private_key=private_key)
-    decoded = wire_format.decode_group_prekey_plaintext(encoded)
-    assert decoded["public_key"] == public_key
-    assert decoded["private_key"] == private_key
+    pass
 
 
+@pytest.mark.skip(reason="group_prekey_shared removed in sender key model - use pubkey_shared instead")
 def test_group_prekey_shared_payload_roundtrip():
-    group_prekey_id = b"\x5a" * 16
-    peer_id = b"\x5b" * 16
-    public_key = b"\x5c" * wire_format.PUBKEY_SIZE
-    encoded = wire_format.encode_group_prekey_shared_plaintext(
-        group_prekey_id=group_prekey_id,
-        peer_id=peer_id,
-        public_key=public_key,
-    )
-    decoded = wire_format.decode_group_prekey_shared_plaintext(encoded)
-    assert decoded["group_prekey_id"] == group_prekey_id
-    assert decoded["peer_id"] == peer_id
-    assert decoded["public_key"] == public_key
+    pass
 
 
-def test_connection_prekey_payload_roundtrip():
+def test_connection_pubkey_payload_roundtrip():
     public_key = b"\x5d" * wire_format.PUBKEY_SIZE
     private_key = b"\x5e" * wire_format.PRIVKEY_SIZE
-    encoded = wire_format.encode_connection_prekey_plaintext(public_key=public_key, private_key=private_key)
-    decoded = wire_format.decode_connection_prekey_plaintext(encoded)
+    encoded = wire_format.encode_connection_pubkey_plaintext(public_key=public_key, private_key=private_key)
+    decoded = wire_format.decode_connection_pubkey_plaintext(encoded)
     assert decoded["public_key"] == public_key
     assert decoded["private_key"] == private_key
 
 
-def test_connection_prekey_shared_payload_roundtrip():
-    connection_prekey_id = b"\x5f" * 16
+def test_connection_pubkey_shared_payload_roundtrip():
+    connection_pubkey_id = b"\x5f" * 16
     peer_id = b"\x60" * 16
     public_key = b"\x61" * wire_format.PUBKEY_SIZE
-    encoded = wire_format.encode_connection_prekey_shared_plaintext(
-        connection_prekey_id=connection_prekey_id,
+    encoded = wire_format.encode_connection_pubkey_shared_plaintext(
+        connection_pubkey_id=connection_pubkey_id,
         peer_id=peer_id,
         public_key=public_key,
     )
-    decoded = wire_format.decode_connection_prekey_shared_plaintext(encoded)
-    assert decoded["connection_prekey_id"] == connection_prekey_id
+    decoded = wire_format.decode_connection_pubkey_shared_plaintext(encoded)
+    assert decoded["connection_pubkey_id"] == connection_pubkey_id
     assert decoded["peer_id"] == peer_id
     assert decoded["public_key"] == public_key
 

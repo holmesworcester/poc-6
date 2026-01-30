@@ -40,7 +40,7 @@ from core.projection.types import ProjectorResult, WriteOp, Command
 from core.projection.apply import register_command_handler, cascade_delete_from_valid_events
 from events.content import message
 from events.identity import peer_shared, peer
-from events.group import group as group_module
+from events.group import group as group_module, sender_key
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -369,8 +369,16 @@ def create(peer_id: str, message_id: str, t_ms: int, db: Any) -> str:
 
     _wire_shadow_message_deletion(message_id)
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=message_group_id,
+        peer_id=peer_id,
+        peer_shared_id=deleter_peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group_module.pick_key(message_group_id, peer_id, db)
     blob = wire_format.encode_message_deletion_wire_event(
         message_id_b64=message_id,
         signed_by_b64=deleter_peer_shared_id,
@@ -442,7 +450,7 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
 
     # Import here to avoid circular dependency (message_rekey imports message_deletion)
     from events.content import message_rekey
-    from events.group import group_key
+    from events.group import sender_key
 
     # For each key marked for purging, rekey all messages that used it
     for purge_key_row in purge_keys:
@@ -463,7 +471,7 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
             log.info(f"message_deletion.run_message_purge_cycle() no messages found using key {purge_key_id[:20]}...")
             # Still purge the key even if no messages use it
             safedb.execute(
-                "DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+                "DELETE FROM secrets WHERE secret_id = ? AND recorded_by = ?",
                 (purge_key_id, peer_id)
             )
             safedb.execute(
@@ -477,7 +485,7 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
 
         # Get a clean key to rekey these messages with
         try:
-            # Need group_id - extract from one of the messages
+            # Need group_id and peer_shared_id - extract from one of the messages
             msg_row = safedb.query_one(
                 "SELECT group_id FROM messages WHERE message_id = ? AND recorded_by = ? LIMIT 1",
                 (messages_using_purge_key[0], peer_id)
@@ -489,7 +497,29 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
                 continue
 
             group_id = msg_row['group_id']
-            clean_key_id = group_key.get_or_create_clean_key(group_id, peer_id, t_ms, db)
+
+            # Get peer_shared_id for this peer
+            ps_row = safedb.query_one(
+                "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ? LIMIT 1",
+                (peer_id,)
+            )
+            if not ps_row:
+                error = f"Could not find peer_shared_id for peer {peer_id[:20]}..."
+                log.warning(f"message_deletion.run_message_purge_cycle() {error}")
+                stats['errors'].append(error)
+                continue
+
+            peer_shared_id = ps_row['peer_shared_id']
+
+            # In sender key model, create a new sender key for rekeying
+            clean_key_data = sender_key.pick_or_create_key(
+                group_id=group_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms,
+                db=db,
+            )
+            clean_key_id = crypto.b64encode(clean_key_data['id'])
             log.info(f"message_deletion.run_message_purge_cycle() using clean key {clean_key_id[:20]}... for rekeying")
         except Exception as e:
             error = f"Failed to get clean key: {e}"
@@ -510,9 +540,9 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
                 stats['errors'].append(error)
                 continue
 
-        # Purge the old key
+        # Purge the old key (secrets table in sender key model)
         safedb.execute(
-            "DELETE FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+            "DELETE FROM secrets WHERE secret_id = ? AND recorded_by = ?",
             (purge_key_id, peer_id)
         )
         safedb.execute(
@@ -522,39 +552,40 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
         log.info(f"message_deletion.run_message_purge_cycle() purged key {purge_key_id[:20]}...")
         stats['keys_purged'] += 1
 
-    # After purging group_keys, check for prekeys that can be purged
-    # A prekey can be purged if ALL group_keys shared via it are now purged
-    prekeys_purged = []
+    # After purging secrets, check for pubkeys that can be purged
+    # A pubkey can be purged if ALL secrets shared via it are now purged
+    pubkeys_purged = []
 
-    # Find prekeys where all their group_keys are gone
-    orphaned_prekeys = safedb.query(
-        """SELECT DISTINCT gks.recipient_prekey_id as prekey_id
-           FROM group_keys_shared gks
-           WHERE gks.recorded_by = ?
+    # Find pubkeys where all their secrets are gone
+    # In sender key model: secrets_shared.recipient_pubkey_id references pubkeys
+    orphaned_pubkeys = safedb.query(
+        """SELECT DISTINCT ss.recipient_pubkey_id as pubkey_id
+           FROM secrets_shared ss
+           WHERE ss.recorded_by = ?
            AND NOT EXISTS (
-               SELECT 1 FROM group_keys gk
-               WHERE gk.key_id = gks.original_key_id AND gk.recorded_by = ?
+               SELECT 1 FROM secrets s
+               WHERE s.secret_id = ss.secret_id AND s.recorded_by = ?
            )
            AND NOT EXISTS (
-               SELECT 1 FROM group_keys_shared gks2
-               JOIN group_keys gk ON gks2.original_key_id = gk.key_id AND gk.recorded_by = gks2.recorded_by
-               WHERE gks2.recipient_prekey_id = gks.recipient_prekey_id AND gks2.recorded_by = ?
+               SELECT 1 FROM secrets_shared ss2
+               JOIN secrets s ON ss2.secret_id = s.secret_id AND s.recorded_by = ss2.recorded_by
+               WHERE ss2.recipient_pubkey_id = ss.recipient_pubkey_id AND ss2.recorded_by = ?
            )""",
         (peer_id, peer_id, peer_id)
     )
 
-    for row in orphaned_prekeys:
-        prekey_id = row['prekey_id']
-        # Delete private key from group_prekeys
+    for row in orphaned_pubkeys:
+        pubkey_id = row['pubkey_id']
+        # Delete private key from pubkeys
         safedb.execute(
-            "DELETE FROM group_prekeys WHERE prekey_id = ? AND recorded_by = ?",
-            (prekey_id, peer_id)
+            "DELETE FROM pubkeys WHERE pubkey_id = ? AND recorded_by = ?",
+            (pubkey_id, peer_id)
         )
-        prekeys_purged.append(prekey_id)
-        log.info(f"message_deletion.run_message_purge_cycle() purged prekey {prekey_id[:20]}...")
+        pubkeys_purged.append(pubkey_id)
+        log.info(f"message_deletion.run_message_purge_cycle() purged pubkey {pubkey_id[:20]}...")
 
-    stats['prekeys_purged'] = len(prekeys_purged)
-    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged, {stats['prekeys_purged']} prekeys purged")
+    stats['pubkeys_purged'] = len(pubkeys_purged)
+    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged, {stats['pubkeys_purged']} pubkeys purged")
     return stats
 
 

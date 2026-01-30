@@ -11,7 +11,7 @@ from core import store
 from core import global_counter
 from core import wire_format
 from events.content import message
-from events.group import group
+from events.group import group, sender_key
 from events.identity import peer_shared, peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
@@ -143,8 +143,16 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     # Get global count from framework (Lamport clock)
     global_count = global_counter.get_next_global_count(peer_id, db)
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=message_group_id,
+        peer_id=peer_id,
+        peer_shared_id=reactor_peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(message_group_id, peer_id, db)
     blob = wire_format.encode_message_reaction_wire_event(
         message_id_b64=message_id,
         reactor_id_b64=reactor_user_id,
@@ -221,8 +229,16 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
 
     message_group_id = message_row['group_id']
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=message_group_id,
+        peer_id=peer_id,
+        peer_shared_id=remover_peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(message_group_id, peer_id, db)
     blob = wire_format.encode_message_reaction_deletion_wire_event(
         reaction_id_b64=reaction_id,
         signed_by_b64=remover_peer_shared_id,

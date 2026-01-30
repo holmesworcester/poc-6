@@ -103,8 +103,8 @@ def queue_incoming(
             key_map.setdefault(key_id, []).append((recorded_by, key_data))
 
         prekey_rows = db._conn.execute(
-            f"SELECT connection_prekey_id, owner_peer_id, private_key "
-            f"FROM connection_prekeys WHERE connection_prekey_id IN ({placeholders})",
+            f"SELECT connection_pubkey_id, owner_peer_id, private_key "
+            f"FROM connection_pubkeys WHERE connection_pubkey_id IN ({placeholders})",
             params,
         ).fetchall()
         for key_id, owner_peer_id, private_key in prekey_rows:
@@ -216,18 +216,15 @@ def _event_type_from_envelope(event_blob: bytes) -> str | None:
         return "group"
     if wire_format.is_wire_group_member_envelope(event_blob):
         return "group_member"
-    if wire_format.is_wire_group_key_envelope(event_blob):
-        return "group_key"
-    if wire_format.is_wire_group_key_shared_envelope(event_blob):
-        return "group_key_shared"
-    if wire_format.is_wire_group_prekey_envelope(event_blob):
-        return "group_prekey"
-    if wire_format.is_wire_group_prekey_shared_envelope(event_blob):
-        return "group_prekey_shared"
-    if wire_format.is_wire_connection_prekey_envelope(event_blob):
-        return "connection_prekey"
-    if wire_format.is_wire_connection_prekey_shared_envelope(event_blob):
-        return "connection_prekey_shared"
+    # NOTE: group_key, group_key_shared, group_prekey, group_prekey_shared removed - use sender keys
+    if wire_format.is_wire_pubkey_envelope(event_blob):
+        return "pubkey"
+    if wire_format.is_wire_pubkey_shared_envelope(event_blob):
+        return "pubkey_shared"
+    if wire_format.is_wire_connection_pubkey_envelope(event_blob):
+        return "connection_pubkey"
+    if wire_format.is_wire_connection_pubkey_shared_envelope(event_blob):
+        return "connection_pubkey_shared"
     if wire_format.is_wire_connection_request_envelope(event_blob):
         return "connection_request"
     if wire_format.is_wire_connection_ack_envelope(event_blob):
@@ -266,6 +263,11 @@ def _event_type_from_envelope(event_blob: bytes) -> str | None:
         return "network_intro"
     if wire_format.is_wire_negentropy_envelope(event_blob):
         return "negentropy"
+    # TreeKEM pubkey types
+    if wire_format.is_wire_treekem_pubkey_local_envelope(event_blob):
+        return "treekem_pubkey"
+    if wire_format.is_wire_treekem_pubkey_shared_envelope(event_blob):
+        return "treekem_pubkey_shared"
     return None
 
 

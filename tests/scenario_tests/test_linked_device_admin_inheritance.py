@@ -64,7 +64,7 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        prekey_id=accepted['invite_prekey_id'],
+        # prekey_id removed in sender key model
         t_ms=3002,
         db=db
     )

@@ -10,7 +10,7 @@ from core import store
 from core import wire_format
 from events.content import message
 from events.identity import peer_shared, peer
-from events.group import group as group_module
+from events.group import group as group_module, sender_key
 from core import global_counter
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
@@ -160,8 +160,16 @@ def create(
         new_content=new_content,
     )
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group_module.pick_key(group_id, peer_id, db)
     blob = wire_format.encode_message_update_wire_event(
         message_id_b64=message_id,
         group_id_b64=group_id,

@@ -1,4 +1,9 @@
-"""Group event type (shareable, encrypted)."""
+"""Group event type (shareable, signed).
+
+Note: In the sender key model, groups no longer have a group_key. Each sender
+has their own key (secret) for their messages. Group events are signed but
+not encrypted - group membership metadata is public.
+"""
 from __future__ import annotations
 
 # Registry metadata
@@ -11,25 +16,18 @@ import logging
 from core import crypto
 from core import store
 from core import wire_format
-from events.group import group_key
 from events.identity import peer
-from core.db import create_safe_db, create_unsafe_db
+from core.db import create_safe_db
 from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 
 EVENT_SPEC = {
-    'encrypted': True,
+    'encrypted': False,  # Sender key model: group metadata is public, messages use sender keys
     'signer': {
         'id_field': 'signed_by',
         'type_field': 'signer_type',
     },
-    'requires': {
-        'group_key': {
-            'source': 'table',
-            'table': 'group_keys',
-            'key': 'key_id',
-            'fields': ['key_id'],
-        },
-    },
+    'requires': {},  # No group_key dependency in sender key model
     'optional': {
         'network': {
             'source': 'table',
@@ -49,11 +47,11 @@ log = logging.getLogger(__name__)
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            is_main: bool = False, network_id: str | None = None,
-           signer_id: str | None = None, signer_private_key: bytes | None = None) -> tuple[str, str]:
-    """Create a shareable, encrypted group event.
+           signer_id: str | None = None, signer_private_key: bytes | None = None) -> tuple[str, str | None]:
+    """Create a shareable, signed group event.
 
-    Groups own their encryption keys. The key is created internally and its id stored
-    in the group event for later retrieval.
+    In the sender key model, groups are unencrypted - group membership metadata is public.
+    Messages within the group use sender keys for encryption.
 
     Note: peer_id (local) signs and sees the event; peer_shared_id (public) is the creator identity.
 
@@ -71,15 +69,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
                             If not provided, uses peer's private key
 
     Returns:
-        (group_id, key_id): The group event ID and its encryption key ID
+        (group_id, None): The group event ID and None (no key_id in sender key model)
     """
-    # Create the group's encryption key
-    key_id = group_key.create(peer_id=peer_id, t_ms=t_ms, db=db)
-
     # Determine signer - either explicit (network) or default (peer_shared)
     actual_signer_id = signer_id if signer_id else peer_shared_id
 
-    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, key_id={key_id}, is_main={is_main}, signed_by={actual_signer_id}")
+    log.info(f"group.create() creating group name='{name}', peer_id={peer_id}, is_main={is_main}, signed_by={actual_signer_id}")
 
     signer_type = 'network' if signer_id and network_id and signer_id == network_id else 'peer_shared'
 
@@ -89,26 +84,21 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     else:
         private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Get key_data for encryption
-    key_data = group_key.get_key(key_id, peer_id, db)
-
     blob = wire_format.encode_group_wire_event(
         name=name,
-        key_id_b64=key_id,
         is_main=is_main,
         network_id_b64=network_id,
         signed_by_b64=actual_signer_id,
         signer_type=signer_type,
         created_at_ms=t_ms,
-        key_data=key_data,
         private_key=private_key,
     )
 
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)
 
-    log.info(f"group.create() created group_id={event_id}, key_id={key_id}")
-    return (event_id, key_id)
+    log.info(f"group.create() created group_id={event_id}")
+    return (event_id, None)
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
@@ -120,23 +110,22 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     name = event_data.get('name')
     signed_by = event_data.get('signed_by')
-    key_id = event_data.get('key_id')
     created_at = event_data.get('created_at')
 
-    if not name or not signed_by or not key_id or created_at is None:
+    # In sender key model, key_id is not required (will be zero-encoded placeholder)
+    if not name or not signed_by or created_at is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     is_main = event_data.get('is_main', 0)
     network_id = event_data.get('network_id') or ''
 
-    _wire_shadow_group(name, key_id, is_main, network_id)
+    _wire_shadow_group(name, is_main, network_id)
 
     values = {
         'group_id': ctx.event_id,
         'name': name,
         'signed_by': signed_by,
         'created_at': created_at,
-        'key_id': key_id,
         'is_main': is_main,
         'network_id': network_id,
         'recorded_at': ctx.recorded_at,
@@ -166,45 +155,40 @@ def project_pure(ctx: Any) -> ProjectorResult:
     return ProjectorResult(writes=writes, valid_event=True, commands=commands)
 
 
-def _wire_shadow_group(name: str, key_id: str, is_main: int, network_id: str | None) -> None:
+def _wire_shadow_group(name: str, is_main: int, network_id: str | None) -> None:
     """Validate group fields against the fixed-size wire payload layout."""
+    # In sender key model, key_id is a zero placeholder
+    key_id_bytes = b"\x00" * 16
     plaintext = wire_format.encode_group_plaintext(
         name=name,
-        key_id=crypto.b64decode(key_id),
+        key_id=key_id_bytes,
         is_main=is_main,
         network_id=crypto.b64decode(network_id) if network_id else None,
     )
-    decoded = wire_format.decode_group_plaintext(plaintext)
-    if decoded["key_id"] != crypto.b64decode(key_id):
-        raise ValueError("wire shadow decode key_id mismatch")
+    # Validate round-trip encoding
+    wire_format.decode_group_plaintext(plaintext)
 
 
-def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
-    """Get the key_data for a group.
+def verify_access(group_id: str, recorded_by: str, db: Any) -> bool:
+    """Verify a peer has access to a group.
+
+    In sender key model, groups don't have encryption keys.
+    Messages use sender keys for encryption.
 
     Args:
-        group_id: Group ID to get key for
-        recorded_by: Peer ID requesting access (for access control)
-        db: Database connection
+        group_id: Group ID to check access for
+        recorded_by: Peer ID requesting access
 
     Returns:
-        Key dict for crypto operations
-
-    Raises:
-        ValueError: If group not found or peer doesn't have access
+        True if peer has access, False otherwise
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Query groups table for key_id, verifying peer has access
     row = safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT group_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
         (group_id, recorded_by)
     )
-    if not row:
-        raise ValueError(f"group not found or access denied: {group_id} for peer {recorded_by}")
-
-    # Get key_data from key (with access control)
-    return group_key.get_key(row['key_id'], recorded_by, db)
+    return row is not None
 
 
 def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
@@ -225,11 +209,11 @@ def get(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
         db: Database connection
 
     Returns:
-        Group dict with group_id, name, key_id, signed_by, etc., or None if not found
+        Group dict with group_id, name, signed_by, etc., or None if not found
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query_one(
-        "SELECT group_id, name, key_id, signed_by, created_at FROM groups WHERE group_id = ? AND recorded_by = ?",
+        "SELECT group_id, name, signed_by, created_at FROM groups WHERE group_id = ? AND recorded_by = ?",
         (group_id, recorded_by)
     )
 
@@ -242,29 +226,104 @@ def get_main(recorded_by: str, db: Any) -> dict[str, Any] | None:
         db: Database connection
 
     Returns:
-        Group dict with group_id, key_id, etc., or None if not found
+        Group dict with group_id, name, signed_by, etc., or None if not found
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     return safedb.query_one(
-        "SELECT group_id, name, key_id, signed_by, created_at FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
+        "SELECT group_id, name, signed_by, created_at FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
         (recorded_by,)
     )
 
 
-def get_current_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
-    """Get the current key ID for a group.
+def _handle_retry_pending_name_updates(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Retry creating name update events that were waiting for key/group availability.
 
-    Args:
-        group_id: Group ID
-        recorded_by: Peer ID requesting access
-        db: Database connection
-
-    Returns:
-        Dict with key_id, or None if group not found
+    Called when a group is projected, which may make the main group available
+    for pending name updates that couldn't be created during join.
     """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    row = safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (group_id, recorded_by)
+    from events.identity import username_update, peer_name_update, network_name_update
+
+    # Unwrap db if it's already a SafeDB or UnsafeDB wrapper
+    raw_db = db._db if hasattr(db, '_db') else db
+    safedb = create_safe_db(raw_db, recorded_by=recorded_by)
+
+    # Find all pending items waiting for key
+    # Note: safedb.query() already returns a list
+    pending_items = safedb.query(
+        """SELECT id, type, entity_id, name, peer_id, peer_shared_id, created_at
+           FROM pending_name_updates
+           WHERE status = 'waiting_for_key' AND recorded_by = ?""",
+        (recorded_by,)
     )
-    return row
+
+    if not pending_items:
+        return
+
+    log.info(f"retry_pending_name_updates: found {len(pending_items)} pending items")
+
+    for item in pending_items:
+        item_id = item['id']
+        item_type = item['type']
+        entity_id = item['entity_id']
+        name = item['name']
+        peer_id = item['peer_id']
+        peer_shared_id = item['peer_shared_id']
+        created_at = item['created_at']
+
+        try:
+            if item_type == 'username':
+                username_update.create(
+                    user_id=entity_id,
+                    name=name,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=created_at,
+                    db=raw_db,
+                )
+            elif item_type == 'peer_name':
+                peer_name_update.create(
+                    peer_target_id=entity_id,
+                    name=name,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=created_at,
+                    db=raw_db,
+                )
+            elif item_type == 'network_name':
+                network_name_update.create(
+                    network_id=entity_id,
+                    name=name,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=created_at,
+                    db=raw_db,
+                )
+            else:
+                log.warning(f"retry_pending_name_updates: unknown type '{item_type}' for {item_id}")
+                continue
+
+            # Mark as created
+            safedb.execute(
+                "UPDATE pending_name_updates SET status = 'created' WHERE id = ? AND recorded_by = ?",
+                (item_id, recorded_by)
+            )
+            log.info(f"retry_pending_name_updates: created {item_type} for entity {entity_id[:20]}...")
+
+        except username_update.KeyNotAvailableError:
+            # Still not ready, keep waiting
+            log.debug(f"retry_pending_name_updates: still waiting for key for {item_type} {entity_id[:20]}...")
+        except peer_name_update.KeyNotAvailableError:
+            log.debug(f"retry_pending_name_updates: still waiting for key for {item_type} {entity_id[:20]}...")
+        except network_name_update.KeyNotAvailableError:
+            log.debug(f"retry_pending_name_updates: still waiting for key for {item_type} {entity_id[:20]}...")
+        except Exception as e:
+            # Mark as failed with error
+            safedb.execute(
+                "UPDATE pending_name_updates SET status = 'failed', error = ? WHERE id = ? AND recorded_by = ?",
+                (str(e), item_id, recorded_by)
+            )
+            log.warning(f"retry_pending_name_updates: failed to create {item_type} for {entity_id[:20]}...: {e}")
+
+
+# Register the command handler at module load time
+register_command_handler('retry_pending_name_updates', _handle_retry_pending_name_updates)

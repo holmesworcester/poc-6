@@ -1,9 +1,11 @@
--- TreeKEM pubkeys (shareable public keys for key distribution)
--- Each peer has their own view of pubkeys they can use for wrapping
+-- TreeKEM pubkeys (local-only keypair storage for sender key distribution)
+-- Each peer stores their own keypairs here (private keys survive replay)
+-- Pattern: pubkey (local) + pubkey_shared (shareable)
 CREATE TABLE IF NOT EXISTS pubkeys (
     pubkey_id TEXT NOT NULL,
-    public_key BLOB NOT NULL,
-    owner_peer_id TEXT NOT NULL,  -- peer_shared_id who created this pubkey
+    owner_peer_id TEXT NOT NULL,  -- peer_id who owns this keypair
+    public_key BLOB NOT NULL,     -- 32-byte Ed25519 public key
+    private_key BLOB NOT NULL,    -- 32-byte Ed25519 private key
     created_at INTEGER NOT NULL,
     recorded_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
@@ -12,12 +14,3 @@ CREATE TABLE IF NOT EXISTS pubkeys (
 
 CREATE INDEX IF NOT EXISTS idx_pubkeys_owner
 ON pubkeys(owner_peer_id, recorded_by, created_at DESC);
-
--- Local-only secret storage for pubkey private keys
--- Only the owner has access to these (not synced)
-CREATE TABLE IF NOT EXISTS pubkey_secrets (
-    pubkey_id TEXT NOT NULL,
-    private_key BLOB NOT NULL,
-    recorded_by TEXT NOT NULL,
-    PRIMARY KEY (pubkey_id, recorded_by)
-);

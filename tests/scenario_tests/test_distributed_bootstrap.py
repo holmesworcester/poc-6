@@ -81,12 +81,12 @@ def test_device_link_without_remote_invite_blob(fresh_db):
     # Patch store.get for the duration of peer_shared.join()
     with mock.patch.object(store, 'get', side_effect=patched_store_get):
         # Complete the peer linking
+        # Note: prekey_id removed in sender key model (group_prekey replaced by pubkey)
         alice_laptop = peer_shared.join(
             peer_id=alice_laptop_peer_id,
             peer_invite_id=accepted['invite_id'],
             peer_invite_private_key=accepted['invite_private_key'],
             user_id=accepted['user_id'],
-            prekey_id=accepted['invite_prekey_id'],
             t_ms=3002,
             db=db,
             device_name='Laptop',
@@ -258,12 +258,12 @@ def test_invite_accepteds_stores_user_id_for_device_link(fresh_db):
     accepted = invite.accept(laptop_peer_id, link_url, t_ms=3001, db=db)
 
     # Join with the invite
+    # Note: prekey_id removed in sender key model (group_prekey replaced by pubkey)
     laptop = peer_shared.join(
         peer_id=laptop_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        prekey_id=accepted['invite_prekey_id'],
         t_ms=3002,
         db=db,
         device_name='Laptop',

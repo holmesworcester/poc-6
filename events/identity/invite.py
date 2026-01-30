@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 def _wire_shadow_invite(
     mode: str,
     invite_pubkey_b64: str,
-    invite_prekey_id: str | None,
+    invite_pubkey_id: str | None,
     group_id: str | None,
     channel_id: str | None,
     key_id: str | None,
@@ -43,7 +43,7 @@ def _wire_shadow_invite(
     plaintext = wire_format.encode_invite_plaintext(
         mode=mode_value,
         invite_pubkey=crypto.b64decode(invite_pubkey_b64),
-        invite_prekey_id=crypto.b64decode(invite_prekey_id) if invite_prekey_id else None,
+        invite_pubkey_id=crypto.b64decode(invite_pubkey_id) if invite_pubkey_id else None,
         group_id=crypto.b64decode(group_id) if group_id else None,
         channel_id=crypto.b64decode(channel_id) if channel_id else None,
         key_id=crypto.b64decode(key_id) if key_id else None,
@@ -144,7 +144,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     _wire_shadow_invite(
         mode=mode,
         invite_pubkey_b64=invite_pubkey,
-        invite_prekey_id=event_data.get('invite_prekey_id'),
+        invite_pubkey_id=event_data.get('invite_pubkey_id'),
         group_id=group_id,
         channel_id=event_data.get('channel_id'),
         key_id=event_data.get('key_id'),
@@ -291,13 +291,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         # This shouldn't happen if is_admin() passed, but warn just in case
         log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
 
-    # Get key from all_users group
-    group_row = group.get_current_key(all_users_group_id, peer_id, db)
-    if not group_row:
-        raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
-
-    key_id = group_row['key_id']
-
     # Get main channel
     channel_row = safedb.query_one(
         "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
@@ -308,76 +301,66 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     channel_id = channel_row['channel_id']
 
-    # Create a group_prekey (generates keypair) then share it via group_prekey_shared
-    # The invite_prekey_id is the local group_prekey_id (for crypto hint lookup)
-    # The group_prekey_shared is created for sync/sharing but its ID is not used as hint
-    from events.group import group_prekey, group_prekey_shared
+    # Create a pubkey (generates keypair) then share it via pubkey_shared
+    # The invite_pubkey_id is the local pubkey_id (for crypto hint lookup)
+    from events.group import pubkey, pubkey_shared
 
-    # Create local prekey with keypair
-    local_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms, db)  # No offset needed
+    # Create local pubkey with keypair
+    local_pubkey_id, invite_private_key = pubkey.create(peer_id=peer_id, t_ms=t_ms, db=db)
 
-    # Get the public key from the created prekey for the invite event
-    prekey_blob = store.get(local_prekey_id, unsafedb)
-    if not wire_format.is_wire_group_prekey_envelope(prekey_blob):
-        raise ValueError("invite requires wire group_prekey event")
-    prekey_data = wire_format.decode_group_prekey_wire_event(prekey_blob)
-    invite_pubkey_b64 = prekey_data['public_key']
+    # Get the public key from the created pubkey for the invite event
+    invite_pubkey = pubkey.get_public_key(local_pubkey_id, peer_id, db)
+    invite_pubkey_b64 = crypto.b64encode(invite_pubkey)
 
-    # Create shareable prekey event for sync
-    # Context depends on mode:
-    # - mode='user': group context (all_users_group)
-    # - mode='peer': user context (user_id being linked to)
-    if mode == 'peer':
-        # Device linking: context is the user being linked to
-        group_prekey_shared.create(
-            prekey_id=local_prekey_id,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-            db=db,
-            user_id=user_id  # User context for device linking
-        )
-    else:
-        # User invite: context is the all_users group
-        group_prekey_shared.create(
-            prekey_id=local_prekey_id,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-            db=db,
-            group_id=all_users_group_id,
-            key_id=key_id
-        )
+    # Create shareable pubkey event for sync
+    pubkey_shared.create(
+        pubkey_id=local_pubkey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
 
-    # Use local_prekey_id as invite_prekey_id (consistent with transit_prekey pattern)
-    # This is the ID the recipient uses to look up the private key for decryption
-    invite_prekey_id = local_prekey_id
+    # Use local_pubkey_id as invite_pubkey_id (for crypto hint lookup)
+    invite_pubkey_id = local_pubkey_id
+
+    # Share all known sender keys to the invite pubkey
+    # This allows the invitee to decrypt all past messages from all senders
+    from events.group import sender_key
+    sender_key.share_all_keys_to_pubkey(
+        group_id=all_users_group_id,
+        recipient_pubkey_id=invite_pubkey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms + 1,  # Offset to ensure ordering
+        db=db,
+    )
 
     # Get inviter's prekey for Bob to send sync requests
-    # Query prekey from connection_prekeys table
+    # Query prekey from connection_pubkeys table
     inviter_prekey_row = unsafedb.query_one(
-        "SELECT connection_prekey_id, public_key FROM connection_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT connection_pubkey_id, public_key FROM connection_pubkeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_row:
         raise ValueError(f"No prekey found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_prekey_id = inviter_prekey_row['connection_prekey_id']
+    inviter_prekey_id = inviter_prekey_row['connection_pubkey_id']
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
-    # Get prekey_shared_id from connection_prekeys_shared table
+    # Get prekey_shared_id from connection_pubkeys_shared table
     # Query by recorded_by only since peer_id may be old peer_shared_id after linking
     inviter_prekey_shared_row = safedb.query_one(
-        "SELECT connection_prekey_shared_id, created_at FROM connection_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT connection_pubkey_shared_id, created_at FROM connection_pubkeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_shared_row:
         raise ValueError(f"No prekey_shared found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_connection_prekey_shared_id = inviter_prekey_shared_row['connection_prekey_shared_id']
-    inviter_connection_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
+    inviter_connection_pubkey_shared_id = inviter_prekey_shared_row['connection_pubkey_shared_id']
+    inviter_connection_pubkey_shared_created_at = inviter_prekey_shared_row['created_at']
 
     # Address info: use passed parameters or fall back to defaults
     # For production, this should come from self_address discovery
@@ -389,7 +372,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     _wire_shadow_invite(
         mode=mode,
         invite_pubkey_b64=invite_pubkey_b64,
-        invite_prekey_id=invite_prekey_id,
+        invite_pubkey_id=invite_pubkey_id,
         group_id=all_users_group_id,
         channel_id=None,
         key_id=None,
@@ -405,7 +388,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     invite_blob = wire_format.encode_invite_wire_event(
         mode=mode,
         invite_pubkey_b64=invite_pubkey_b64,
-        invite_prekey_id_b64=invite_prekey_id,
+        invite_pubkey_id_b64=invite_pubkey_id,
         group_id_b64=all_users_group_id,
         channel_id_b64=None,
         key_id_b64=None,
@@ -423,90 +406,25 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     )
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
-    # Create group_key_shared sealed to invite proof prekey
-    # The create_for_invite function will extract the prekey from the invite event
-    from events.group import group_key_shared
-
-    # Share ALL historical keys for the all_users group, not just the current key
-    # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
-    # and all historical content that may have been encrypted with older keys
-    all_group_keys = safedb.query(
-        "SELECT key_id FROM group_keys WHERE recorded_by = ?",
-        (peer_id,)
-    )
-
-    keys_shared = 0
-    for key_row in all_group_keys:
-        historical_key_id = key_row['key_id']
-        try:
-            group_key_shared.create_for_invite(
-                key_id=historical_key_id,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            keys_shared += 1
-        except Exception as e:
-            log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
-
-    log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
-
-    # For mode='peer', share keys for ALL groups this user is a member of
-    # This ensures the new device can decrypt all groups the user belongs to
-    if mode == 'peer':
-        log.info(f"invite.create() mode='peer' - sharing keys for user {user_id[:20]}...'s group memberships")
-
-        # Query groups that THIS USER is a member of (not all groups peer knows about)
-        # Join group_members with groups to get both group_id and key_id
-        group_rows = safedb.query(
-            """SELECT DISTINCT g.group_id, g.key_id
-               FROM group_members gm
-               JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
-               WHERE gm.user_id = ? AND gm.recorded_by = ?
-               ORDER BY g.group_id""",
-            (user_id, peer_id)
-        )
-
-        log.info(f"invite.create() found {len(group_rows)} groups for user {user_id[:20]}...")
-
-        for group_row in group_rows:
-            group_id = group_row['group_id']
-            key_id_for_group = group_row['key_id']
-
-            # Skip if we already created it above (all_users)
-            if key_id_for_group == key_id:
-                continue
-
-            # Create group_key_shared sealed to invite_prekey
-            group_key_shared_id = group_key_shared.create_for_invite(
-                key_id=key_id_for_group,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
+    # NOTE: In sender key model, keys are already shared to invite pubkey
+    # via sender_key.share_all_keys_to_pubkey() call above
 
     # Build invite link - metadata + keys for connection
     import base64
 
     invite_link_data = {
         'invite_id': invite_id,
-        'invite_prekey_id': invite_prekey_id,
+        'invite_pubkey_id': invite_pubkey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': peer_shared_id,
         'network_id': network_id,
         'channel_id': channel_id,
-        'key_id': key_id,
         'ip': inviter_ip,
         'port': inviter_port,
         # Transit prekey for encrypting initial sync_connect to Alice
-        'inviter_connection_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
-        'inviter_connection_prekey_shared_id': inviter_connection_prekey_shared_id,
-        'inviter_connection_prekey_id': inviter_prekey_id,
+        'inviter_connection_pubkey_public_key': crypto.b64encode(inviter_prekey_public_key),
+        'inviter_connection_pubkey_shared_id': inviter_connection_pubkey_shared_id,
+        'inviter_connection_pubkey_id': inviter_prekey_id,
     }
 
     # For mode='peer', include user_id so acceptor knows which user to link to
@@ -523,7 +441,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     url_prefix = "link" if mode == "peer" else "invite"
     invite_link = f"quiet://{url_prefix}/{invite_code}"
 
-    log.info(f"invite.create() invite link created (mode={mode}) with invite_prekey_id={invite_prekey_id[:20]}...")
+    log.info(f"invite.create() invite link created (mode={mode}) with invite_pubkey_id={invite_pubkey_id[:20]}...")
 
     return (invite_id, invite_link, invite_link_data)
 
@@ -565,7 +483,7 @@ def create_peer_invite(
     _wire_shadow_invite(
         mode="peer",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id=None,
+        invite_pubkey_id=None,
         group_id=None,
         channel_id=None,
         key_id=None,
@@ -581,7 +499,7 @@ def create_peer_invite(
     blob = wire_format.encode_invite_wire_event(
         mode="peer",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id_b64=None,
+        invite_pubkey_id_b64=None,
         group_id_b64=None,
         channel_id_b64=None,
         key_id_b64=None,
@@ -641,7 +559,7 @@ def create_bootstrap_user_invite(
     _wire_shadow_invite(
         mode="user",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id=None,
+        invite_pubkey_id=None,
         group_id=group_id,
         channel_id=channel_id,
         key_id=key_id,
@@ -657,7 +575,7 @@ def create_bootstrap_user_invite(
     blob = wire_format.encode_invite_wire_event(
         mode="user",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id_b64=None,
+        invite_pubkey_id_b64=None,
         group_id_b64=group_id,
         channel_id_b64=channel_id,
         key_id_b64=key_id,
@@ -698,7 +616,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
         - invite_id: Projected invite ID
         - user_id: (For mode='peer' only) Target user to link to
         - inviter_peer_shared_id: Inviter's peer_shared ID (projected locally)
-        - invite_prekey_id: Crypto hint for GKS decryption
+        - invite_pubkey_id: Crypto hint for GKS decryption
         - invite_private_key: For proof signing
         - Other invite/inviter metadata
 
@@ -739,7 +657,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
 
     # Extract link data (no blobs - those sync after connection)
     invite_id = link_data['invite_id']
-    invite_prekey_id = link_data['invite_prekey_id']
+    invite_pubkey_id = link_data['invite_pubkey_id']
     invite_private_key = crypto.b64decode(link_data['invite_private_key'])
     inviter_peer_shared_id = link_data['inviter_peer_shared_id']
 
@@ -758,7 +676,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     result = {
         'mode': mode,
         'invite_id': invite_id,
-        'invite_prekey_id': invite_prekey_id,
+        'invite_pubkey_id': invite_pubkey_id,
         'invite_private_key': invite_private_key,
         'inviter_peer_shared_id': inviter_peer_shared_id,
     }

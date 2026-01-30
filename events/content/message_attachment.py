@@ -36,7 +36,7 @@ from core import store
 from core import wire_format
 from core.projection.types import ProjectorResult, WriteOp
 from events.identity import peer_shared, peer
-from events.group import group
+from events.group import group, sender_key
 from events.content import file_slice, message
 from core.db import create_safe_db, create_unsafe_db
 
@@ -262,8 +262,16 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     # Step 6: Compute root_hash
     root_hash = crypto.compute_root_hash(slice_ciphertexts)
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(group_id, peer_id, db)
     blob = wire_format.encode_message_attachment_wire_event(
         message_id_b64=message_id,
         file_id_b64=file_id,
@@ -480,11 +488,17 @@ def create_from_file(peer_id: str, message_id: str, file_path: str,
             pass
 
     # ===== Create message_attachment event =====
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     # Sign the event
     private_key = peer.get_private_key(peer_id, peer_id, db)
-
-    # Get group key for encryption
-    key_data = group.pick_key(group_id, peer_id, db)
 
     blob = wire_format.encode_message_attachment_wire_event(
         message_id_b64=message_id,

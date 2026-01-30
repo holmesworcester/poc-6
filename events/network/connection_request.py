@@ -140,19 +140,12 @@ def create(
 def _get_invite_private_key(peer_id: str, invite_id: str, db: Any) -> bytes | None:
     """Get the invite private key for signing bootstrap connection events.
 
-    Looks in both group_prekeys (inviter's case) and invite_accepteds (joiner's case).
+    The invite_private_key is stored in invite_accepteds when a peer accepts an invite.
+    This is used by joiners to sign their initial connection_request with the invite key.
     """
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # First try group_prekeys (inviter's case - we created the invite)
-    invite_key_row = safedb.query_one(
-        "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if invite_key_row and invite_key_row['private_key']:
-        return invite_key_row['private_key']
-
-    # Then try invite_accepteds (joiner's case - we accepted an invite)
+    # Get invite_private_key from invite_accepteds (joiner's case - we accepted an invite)
     ia_row = safedb.query_one(
         "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
         (invite_id, peer_id)
@@ -588,7 +581,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
         t_ms: Current timestamp in milliseconds
         db: Database connection
     """
-    from events.network import connection_ack, connection_prekey
+    from events.network import connection_ack, connection_pubkey
 
     unsafedb = create_unsafe_db(db)
     local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -610,7 +603,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
         # Check this FIRST because bootstrap mode needs it even without peer_self
         invite_row = safedb.query_one(
             """SELECT invite_id, inviter_peer_shared_id,
-                      inviter_connection_prekey_id, inviter_connection_prekey_public_key
+                      inviter_connection_pubkey_id, inviter_connection_pubkey_public_key
                FROM invite_accepteds WHERE recorded_by = ? LIMIT 1""",
             (peer_id,)
         )
@@ -634,11 +627,11 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
                 if not existing:
                     # Build transit prekey dict from invite_accepteds
-                    inviter_connection_prekey = None
-                    if invite_row.get('inviter_connection_prekey_public_key'):
-                        inviter_connection_prekey = {
-                            'id': crypto.b64decode(invite_row['inviter_connection_prekey_id']),
-                            'public_key': invite_row['inviter_connection_prekey_public_key'],
+                    inviter_connection_pubkey = None
+                    if invite_row.get('inviter_connection_pubkey_public_key'):
+                        inviter_connection_pubkey = {
+                            'id': crypto.b64decode(invite_row['inviter_connection_pubkey_id']),
+                            'public_key': invite_row['inviter_connection_pubkey_public_key'],
                             'type': 'asymmetric'
                         }
 
@@ -650,7 +643,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
                             invite_id=invite_id,
                             t_ms=t_ms,
                             db=db,
-                            inviter_connection_prekey=inviter_connection_prekey,
+                            inviter_connection_pubkey=inviter_connection_pubkey,
                         )
                     except Exception as e:
                         log.warning(f"connection_request.send_to_all: bootstrap error: {e}")
@@ -678,15 +671,15 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
         # Two types of connections:
         # 1. peers_shared: actual synced peers (peer_shared auth, permanent)
-        # 2. connection_prekeys_shared: includes predicted IDs from invites (invite auth, expires)
+        # 2. connection_pubkeys_shared: includes predicted IDs from invites (invite auth, expires)
         all_peer_ids = set()
 
         for row in safedb.query("SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?", (peer_id,)):
             all_peer_ids.add(row['peer_shared_id'])
 
-        # Also include peers we have connection_prekeys_shared for (may include predicted invite IDs)
+        # Also include peers we have connection_pubkeys_shared for (may include predicted invite IDs)
         for row in safedb.query(
-            "SELECT peer_id FROM connection_prekeys_shared WHERE recorded_by = ?",
+            "SELECT peer_id FROM connection_pubkeys_shared WHERE recorded_by = ?",
             (peer_id,)
         ):
             all_peer_ids.add(row['peer_id'])
@@ -733,7 +726,7 @@ def _send_request(
     invite_id: str | None,
     t_ms: int,
     db: Any,
-    inviter_connection_prekey: dict | None = None,
+    inviter_connection_pubkey: dict | None = None,
 ) -> None:
     """Send a connection request to a specific peer.
 
@@ -744,9 +737,9 @@ def _send_request(
         invite_id: Invite ID for bootstrap auth
         t_ms: Timestamp
         db: Database connection
-        inviter_connection_prekey: Pre-fetched transit prekey dict (for bootstrap mode)
+        inviter_connection_pubkey: Pre-fetched transit prekey dict (for bootstrap mode)
     """
-    from events.network import connection_prekey
+    from events.network import connection_pubkey
 
     # Create request
     connection_id, symmetric_key = create(
@@ -773,31 +766,31 @@ def _send_request(
         t_ms, t_ms, CONNECTION_TTL_MS
     ))
 
-    # Get recipient's connection_prekey - try multiple sources
+    # Get recipient's connection_pubkey - try multiple sources
     to_key = None
 
     # 1. Pre-passed transit prekey (bootstrap mode with prekey from invite_accepteds)
-    if inviter_connection_prekey:
-        to_key = inviter_connection_prekey
+    if inviter_connection_pubkey:
+        to_key = inviter_connection_pubkey
         log.debug(f"connection_request._send_request: using pre-passed transit prekey")
 
-    # 2. Look up from connection_prekeys_shared table (normal mode)
+    # 2. Look up from connection_pubkeys_shared table (normal mode)
     if not to_key:
-        to_key = connection_prekey.get_connection_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+        to_key = connection_pubkey.get_connection_pubkey_for_peer(to_peer_shared_id, from_peer_id, db)
 
     # 3. BOOTSTRAP FALLBACK: Check invite_accepteds for inviter's transit prekey
     if not to_key:
         inviter_row = safedb.query_one("""
-            SELECT inviter_connection_prekey_id, inviter_connection_prekey_public_key
+            SELECT inviter_connection_pubkey_id, inviter_connection_pubkey_public_key
             FROM invite_accepteds
             WHERE inviter_peer_shared_id = ? AND recorded_by = ?
             LIMIT 1
         """, (to_peer_shared_id, from_peer_id))
 
-        if inviter_row and inviter_row['inviter_connection_prekey_public_key']:
+        if inviter_row and inviter_row['inviter_connection_pubkey_public_key']:
             to_key = {
-                'id': crypto.b64decode(inviter_row['inviter_connection_prekey_id']),
-                'public_key': inviter_row['inviter_connection_prekey_public_key'],
+                'id': crypto.b64decode(inviter_row['inviter_connection_pubkey_id']),
+                'public_key': inviter_row['inviter_connection_pubkey_public_key'],
                 'type': 'asymmetric'
             }
             log.info(f"connection_request._send_request: using inviter transit prekey from invite_accepteds for {to_peer_shared_id[:20]}...")

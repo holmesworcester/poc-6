@@ -387,7 +387,7 @@ def get_for_peer(peer_id: str, recorded_by: str, db: Any) -> dict[str, Any] | No
 
 
 def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
-         user_id: str | None, prekey_id: str | None, t_ms: int, db: Any,
+         user_id: str | None, t_ms: int, db: Any,
          device_name: str = "Device", network_id: str | None = None) -> dict[str, Any]:
     """Join/link a peer via peer invite (first peer or linking device).
 
@@ -399,7 +399,6 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         peer_invite_id: Peer invite ID (mode='peer')
         peer_invite_private_key: Private key from peer invite URL
         user_id: User being linked to (extracted from invite)
-        prekey_id: Optional group_prekey_shared_id from invite URL
         t_ms: Base timestamp
         db: Database connection
         device_name: Device name (e.g., "Phone", "Desktop")
@@ -410,30 +409,17 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
             'peer_id': str,
             'peer_shared_id': str,
             'user_id': str,
-            'prekey_id': str | None,
-            'connection_prekey_id': str,
-            'connection_prekey_shared_id': str,
+            'pubkey_id': str,
+            'pubkey_shared_id': str,
+            'connection_pubkey_id': str,
+            'connection_pubkey_shared_id': str,
         }
     """
     log.info(f"peer_shared.join() peer_id={peer_id}, peer_invite_id={peer_invite_id[:20]}..., user_id={user_id[:20] if user_id else 'None'}..., device_name={device_name}")
 
-    # 0. Store invite prekey for decrypting group_key_shared events
-    # For device linking, GKS events are sealed to the invite prekey.
-    # Since group_prekey blobs are deterministic (same key material = same hash),
-    # this produces the SAME prekey_id that the inviting device created.
-    if prekey_id:
-        from nacl.signing import SigningKey
-        from events.group import group_prekey
-        signing_key = SigningKey(peer_invite_private_key)
-        invite_pubkey = bytes(signing_key.verify_key)
-        created_prekey_id = group_prekey.create_from_material(
-            public_key=invite_pubkey,
-            private_key=peer_invite_private_key,
-            peer_id=peer_id,
-            t_ms=t_ms,
-            db=db
-        )
-        log.info(f"peer_shared.join() stored invite prekey: {created_prekey_id[:20]}... (expected: {prekey_id[:20]}...)")
+    # NOTE: group_prekey/group_key are removed. Sender keys are distributed via
+    # pubkey/pubkey_shared events. New members receive sender keys opportunistically
+    # as existing senders re-distribute their keys.
 
     # 1. Create invite_accepted FIRST - stores invite_private_key in invite_accepteds
     # This MUST happen before peer_shared.create() so peer_shared.project() can
@@ -441,7 +427,7 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     from events.identity import invite_accepted
     peer_invite_link_data = {
         'invite_id': peer_invite_id,
-        'invite_prekey_id': prekey_id,
+        # NOTE: invite_pubkey_id removed - group_prekey removed in sender key model
         'invite_private_key': crypto.b64encode(peer_invite_private_key),
         'user_id': user_id,  # User being linked to (for device linking)
         'network_id': network_id,  # Required for trust anchoring (network is ALWAYS the trust anchor)
@@ -465,22 +451,41 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     )
     log.info(f"peer_shared.join() created peer_shared: {peer_shared_id[:20]}...")
 
+    # 2b. Auto-create pubkey (local) + pubkey_shared (shareable) for sender key distribution
+    # This enables sender key distribution to this peer
+    from events.group import pubkey, pubkey_shared
+    pubkey_id, _pubkey_private = pubkey.create(
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db,
+    )
+    log.info(f"peer_shared.join() created local pubkey: {pubkey_id[:20]}...")
+
+    pubkey_shared_id = pubkey_shared.create(
+        pubkey_id=pubkey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+    log.info(f"peer_shared.join() created pubkey_shared: {pubkey_shared_id[:20]}...")
+
     # 3. Auto-create transit_prekey + transit_prekey_shared for sync
-    from events.network import connection_prekey, connection_prekey_shared
-    connection_prekey_id, transit_prekey_private = connection_prekey.create(
+    from events.network import connection_pubkey, connection_pubkey_shared
+    connection_pubkey_id, transit_prekey_private = connection_pubkey.create(
         peer_id=peer_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
 
-    connection_prekey_shared_id = connection_prekey_shared.create(
-        prekey_id=connection_prekey_id,
+    connection_pubkey_shared_id = connection_pubkey_shared.create(
+        pubkey_id=connection_pubkey_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
-    log.info(f"peer_shared.join() created transit prekey_shared: {connection_prekey_shared_id[:20]}...")
+    log.info(f"peer_shared.join() created connection_pubkey_shared: {connection_pubkey_shared_id[:20]}...")
 
     # 4. Project peer_shared immediately (establishes peer↔user link, updates peer_self)
     from core import recorded
@@ -489,9 +494,8 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
     log.info(f"peer_shared.join() projected peer_shared, peer_self updated with user_id")
 
     # invite_accepted.project() will be called by recorded.project_ids() which will:
-    # - Store invite_private_key in group_prekeys (for GKS decryption)
+    # - Store invite metadata for trust anchoring
     # - Call notify_event_valid(peer_invite_id) - unblocks dependent events
-    # - Call notify_event_valid(prekey_id) - unblocks group_key_shared events sealed to this prekey
     # This is the "unblock cascade" that drives the joining flow
 
     # Try to create peer_name_update event for device name (encrypted)
@@ -527,8 +531,9 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
         'user_id': user_id,
-        'prekey_id': prekey_id,
-        'connection_prekey_id': connection_prekey_id,
-        'connection_prekey_shared_id': connection_prekey_shared_id,
+        'pubkey_id': pubkey_id,
+        'pubkey_shared_id': pubkey_shared_id,
+        'connection_pubkey_id': connection_pubkey_id,
+        'connection_pubkey_shared_id': connection_pubkey_shared_id,
         'invite_accepted_id': invite_accepted_id,
     }

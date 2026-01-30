@@ -173,9 +173,14 @@ def test_authorization_rules(fresh_db):
     db.commit()
 
 
-def test_user_removal_rotates_group_keys(fresh_db):
-    """Test that user removal triggers group key rotation."""
+def test_user_removal_recorded_in_removed_users(fresh_db):
+    """Test that user removal is recorded in removed_users table.
+
+    In sender key model, user removal is tracked in removed_users table.
+    Forward secrecy is handled via TreeKEM and sender-specific keys.
+    """
     db = fresh_db
+    from core.db import create_safe_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
@@ -194,10 +199,13 @@ def test_user_removal_rotates_group_keys(fresh_db):
 
     t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
-    # Get original key
-    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
-    original_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
-    original_key_id = original_key['key_id']
+    # Verify Bob is NOT in removed_users before removal
+    safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    removed_before = safedb.query_one(
+        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ?",
+        (bob['user_id'], alice['peer_id'])
+    )
+    assert removed_before is None, "Bob should not be in removed_users before removal"
 
     # Alice removes Bob
     user_removed.create(
@@ -209,16 +217,22 @@ def test_user_removal_rotates_group_keys(fresh_db):
     )
     db.commit()
 
-    # Verify key was rotated
-    new_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
-    new_key_id = new_key['key_id']
+    # Verify Bob IS in removed_users after removal
+    removed_after = safedb.query_one(
+        "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ?",
+        (bob['user_id'], alice['peer_id'])
+    )
+    assert removed_after is not None, "Bob should be in removed_users after removal"
 
-    assert new_key_id != original_key_id, "Key should be rotated when user is removed"
 
+def test_peer_removal_recorded_in_removed_peers(fresh_db):
+    """Test that peer removal is recorded in removed_peers table.
 
-def test_peer_removal_last_device_rotates_keys(fresh_db):
-    """Test that peer removal triggers group key rotation."""
+    In sender key model, peer removal is tracked in removed_peers table.
+    Forward secrecy is handled via TreeKEM and sender-specific keys.
+    """
     db = fresh_db
+    from core.db import create_unsafe_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
 
@@ -237,10 +251,13 @@ def test_peer_removal_last_device_rotates_keys(fresh_db):
 
     t_ms = assert_eventually(bob_joined, db=db, start_t_ms=None)
 
-    # Get original key
-    all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
-    original_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
-    original_key_id = original_key['key_id']
+    # Verify Bob's peer is NOT in removed_peers before removal (unsafedb for device-wide table)
+    unsafedb = create_unsafe_db(db)
+    removed_before = unsafedb.query_one(
+        "SELECT 1 FROM removed_peers WHERE peer_shared_id = ?",
+        (bob['peer_shared_id'],)
+    )
+    assert removed_before is None, "Bob's peer should not be in removed_peers before removal"
 
     # Alice removes Bob's peer
     peer_removed.create(
@@ -252,11 +269,12 @@ def test_peer_removal_last_device_rotates_keys(fresh_db):
     )
     db.commit()
 
-    # Verify key was rotated
-    new_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
-    new_key_id = new_key['key_id']
-
-    assert new_key_id != original_key_id, "Key should be rotated when peer is removed"
+    # Verify Bob's peer IS in removed_peers after removal
+    removed_after = unsafedb.query_one(
+        "SELECT 1 FROM removed_peers WHERE peer_shared_id = ?",
+        (bob['peer_shared_id'],)
+    )
+    assert removed_after is not None, "Bob's peer should be in removed_peers after removal"
 
 
 def test_removed_peer_cannot_sync_messages(fresh_db):

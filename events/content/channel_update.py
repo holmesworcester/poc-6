@@ -15,7 +15,7 @@ from core import crypto
 from core import store
 from core import wire_format
 from events.content import channel
-from events.group import group
+from events.group import group, sender_key
 from events.identity import invite as invite_module, peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
@@ -189,8 +189,16 @@ def create(
 
     _wire_shadow_channel_update(channel_id, group_id, peer_shared_id, new_channel_name, new_disappearing_time_ms)
 
+    # Get or create sender key for the channel's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(group_id, peer_id, db)
     blob = wire_format.encode_channel_update_wire_event(
         channel_id_b64=channel_id,
         group_id_b64=group_id,

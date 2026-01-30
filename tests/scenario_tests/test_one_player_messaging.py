@@ -28,9 +28,10 @@ def test_alice_sends_to_herself(fresh_db):
     # Verify all components were created
     assert len(alice['peer_id']) == 24
     assert len(alice['peer_shared_id']) == 24
-    assert len(alice['prekey_id']) == 24
-    assert len(alice['connection_prekey_shared_id']) == 24
-    assert len(alice['key_id']) == 24
+    assert len(alice['connection_pubkey_id']) == 24
+    assert len(alice['connection_pubkey_shared_id']) == 24
+    # Note: key_id is None in sender key model (groups don't have encryption keys)
+    assert alice['key_id'] is None
     assert len(alice['group_id']) == 24
     assert len(alice['channel_id']) == 24
     assert len(alice['user_id']) == 24
@@ -72,7 +73,6 @@ def test_alice_sends_to_herself(fresh_db):
         group_id=alice['group_id'],
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        key_id=alice['key_id'],
         t_ms=4000,
         db=db
     )

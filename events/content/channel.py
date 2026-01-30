@@ -1,4 +1,8 @@
-"""Channel event type (shareable, encrypted)."""
+"""Channel event type (shareable, signed).
+
+Note: In sender key model, channels are signed but not encrypted.
+Messages use sender keys for encryption.
+"""
 from __future__ import annotations
 
 # Registry metadata
@@ -11,7 +15,7 @@ import logging
 from core import crypto
 from core import store
 from core import wire_format
-from events.group import group_key, group as group_module, group_member
+from events.group import group as group_module, group_member
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
@@ -20,9 +24,10 @@ log = logging.getLogger(__name__)
 
 
 
-# v2 event specification - signed by peer_shared, encrypted
+# v2 event specification - signed by peer_shared
+# NOTE: encrypted=False in sender key model - messages use sender keys
 EVENT_SPEC = {
-    'encrypted': True,
+    'encrypted': False,
     'signer': {
         'id_field': 'signed_by',
         'type_field': 'signer_type',
@@ -32,7 +37,7 @@ EVENT_SPEC = {
             'source': 'table',
             'table': 'groups',
             'key': 'group_id',
-            'fields': ['group_id', 'key_id'],
+            'fields': ['group_id'],  # Removed key_id - no group_key in sender key model
         },
     },
     'optional': {
@@ -157,9 +162,12 @@ def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            group_id: str | None = None, member_user_ids: list[str] | None = None,
-           key_id: str | None = None, is_main: bool = False,
+           is_main: bool = False,
            disappearing_time_ms: int = 0, admin_grant: str | None = None) -> str:
-    """Create a shareable, encrypted channel event.
+    """Create a shareable, signed channel event.
+
+    In sender key model, channels are signed but not encrypted - they're group metadata.
+    Messages within the channel are encrypted with sender keys.
 
     Only admins can create channels (except during initial network setup where group_id is explicitly provided).
     Channels can be:
@@ -181,7 +189,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         db: Database connection
         group_id: Optional explicit group ID (if None and no member_user_ids, will use main group)
         member_user_ids: If provided, create private channel for these members (creates new group)
-        key_id: Optional explicit key_id (only used if group_id provided, otherwise derived)
         is_main: True if this is the main channel for a group
         disappearing_time_ms: Messages expire after this duration in ms (0 = permanent, >0 = milliseconds)
         admin_grant: Optional admin_id that grants authority to create channels.
@@ -237,7 +244,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         log.info(f"channel.create() creating PRIVATE channel name='{name}', peer_id={peer_id}, members={len(member_user_ids)}")
 
         # Create group for the private channel
-        private_group_id, private_key_id = group_module.create(
+        private_group_id, _ = group_module.create(
             name=f"private_channel_{name}",
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
@@ -247,7 +254,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         )
 
         group_id = private_group_id
-        key_id = private_key_id
 
         # First, ensure the creator is added to the private channel group
         # Get creator's user_id from peers_shared (user→peer relationship stored there)
@@ -322,22 +328,20 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         if not group_id:
             # Find the main group
             main_group = safedb.query_one(
-                "SELECT group_id, key_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
+                "SELECT group_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
                 (peer_id,)
             )
             if not main_group:
                 raise ValueError("No main group found - cannot create public channel")
             group_id = main_group['group_id']
-            key_id = main_group['key_id']
-        elif not key_id:
-            # If group_id provided but no key_id, look it up
+        else:
+            # Verify group exists
             group_row = safedb.query_one(
-                "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
+                "SELECT group_id FROM groups WHERE group_id = ? AND recorded_by = ?",
                 (group_id, peer_id)
             )
             if not group_row:
                 raise ValueError(f"Group {group_id} not found")
-            key_id = group_row['key_id']
 
         log.info(f"channel.create() creating PUBLIC channel name='{name}', group_id={group_id}, peer_id={peer_id}, is_main={is_main}")
 
@@ -352,9 +356,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Get key_data for encryption
-    key_data = group_key.get_key(key_id, peer_id, db)
-
     blob = wire_format.encode_channel_wire_event(
         group_id_b64=group_id,
         name=name,
@@ -364,7 +365,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         signed_by_b64=peer_shared_id,
         signer_type="peer_shared",
         created_at_ms=t_ms,
-        key_data=key_data,
         private_key=private_key,
     )
 
@@ -428,17 +428,18 @@ def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
 
 
 def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List all channels with their current group keys.
+    """List all channels.
 
-    Returns channel info plus the current key_id from the associated group,
-    avoiding N+1 queries when displaying key state.
+    In the sender key model, groups don't have encryption keys. Each sender
+    has their own key for messages. This function returns channel info without
+    key_id (which no longer exists).
 
     Args:
         recorded_by: Peer perspective for queries
         db: Database connection
 
     Returns:
-        List of dicts with channel_id, name, group_id, key_id, etc.
+        List of dicts with channel_id, name, group_id, etc.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     name_subquery = (
@@ -453,16 +454,15 @@ def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
         "AND cu.new_disappearing_time_ms IS NOT NULL "
         "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
     )
+    # Note: In sender key model, groups don't have key_id
     return safedb.query(
         f"""SELECT c.channel_id,
                   COALESCE(({name_subquery}), c.name) AS name,
                   c.group_id,
                   c.signed_by,
                   c.created_at,
-                  COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms,
-                  g.key_id
+                  COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
            FROM channels c
-           LEFT JOIN groups g ON c.group_id = g.group_id AND c.recorded_by = g.recorded_by
            WHERE c.recorded_by = ?
            ORDER BY c.created_at DESC""",
         (recorded_by,)

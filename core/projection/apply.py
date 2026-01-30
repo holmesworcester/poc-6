@@ -118,6 +118,14 @@ def _apply_emit_events(
                 key=crypto.b64decode(key_b64),
                 created_at_ms=0,
             )
+        elif emit.event_type == "secret":
+            key_b64 = event_data.get("key")
+            if not key_b64:
+                raise ValueError("secret emit missing key material")
+            blob = wire_format.encode_secret_wire_event(
+                key=crypto.b64decode(key_b64),
+                created_at_ms=0,
+            )
         else:
             raise ValueError(f"emit_event unsupported without wire encoder: {emit.event_type}")
         event_id = store.event(blob, peer_id, recorded_at, db)

@@ -374,58 +374,28 @@ class TransitPrekeyReplenishmentJob(Job):
         if not super().should_run(t_ms, last_run_at, db):
             return False
 
-        # Additional check: only run if prekeys actually low
-        from events.network.connection_prekey import MIN_TRANSIT_PREKEYS
+        # Additional check: only run if pubkeys actually low
+        from events.network.connection_pubkey import MIN_CONNECTION_PUBKEYS
         unsafedb = create_unsafe_db(db)
 
         peers = unsafedb.query("SELECT peer_id FROM local_peers")
         for peer in peers:
             count = unsafedb.query_one(
-                "SELECT COUNT(*) as c FROM connection_prekeys WHERE owner_peer_id = ? AND ttl_ms > ?",
+                "SELECT COUNT(*) as c FROM connection_pubkeys WHERE owner_peer_id = ? AND ttl_ms > ?",
                 (peer['peer_id'], t_ms)
             )
-            if count and count['c'] < MIN_TRANSIT_PREKEYS:
+            if count and count['c'] < MIN_CONNECTION_PUBKEYS:
                 return True  # At least one peer needs replenishment
 
-        return False  # All peers have enough prekeys
+        return False  # All peers have enough pubkeys
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import connection_prekey
-        return connection_prekey.replenish_for_all_peers(t_ms, db)
+        from events.network import connection_pubkey
+        return connection_pubkey.replenish_for_all_peers(t_ms, db)
 
 
-class GroupPrekeyReplenishmentJob(Job):
-    """Replenish group prekeys when running low (smart conditional)."""
-
-    def __init__(self):
-        super().__init__('group_prekey_replenishment', every_ms=3_600_000, budget_ms=200)
-
-    def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
-        """Run if interval elapsed AND at least one peer has low prekeys."""
-        # First check time interval
-        if not super().should_run(t_ms, last_run_at, db):
-            return False
-
-        # Additional check: only run if prekeys actually low
-        from events.group.group_prekey import MIN_GROUP_PREKEYS
-        from .db import create_safe_db
-        unsafedb = create_unsafe_db(db)
-
-        peers = unsafedb.query("SELECT peer_id FROM local_peers")
-        for peer in peers:
-            safedb = create_safe_db(db, recorded_by=peer['peer_id'])
-            count = safedb.query_one(
-                "SELECT COUNT(*) as c FROM group_prekeys WHERE recorded_by = ? AND ttl_ms > ?",
-                (peer['peer_id'], t_ms)
-            )
-            if count and count['c'] < MIN_GROUP_PREKEYS:
-                return True  # At least one peer needs replenishment
-
-        return False  # All peers have enough prekeys
-
-    def run(self, t_ms: int, db: Any) -> dict:
-        from events.group import group_prekey
-        return group_prekey.replenish_for_all_peers(t_ms, db)
+# NOTE: GroupPrekeyReplenishmentJob removed - group_prekey/group_prekey_shared removed
+# Sender keys (pubkey/pubkey_shared) are created on join, not replenished periodically
 
 
 class ConnectionSendJob(Job):
@@ -562,8 +532,8 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
     # Auth / membership / routing
     "connection_request",
     "connection_ack",
-    "connection_prekey",
-    "connection_prekey_shared",
+    "connection_pubkey",
+    "connection_pubkey_shared",
     "network_intro",
     "self_address",
     "invite",
@@ -579,11 +549,11 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
     "group_member",
     "channel",
     "channel_update",
-    # Keys
-    "group_key",
-    "group_key_shared",
-    "group_prekey",
-    "group_prekey_shared",
+    # Keys (sender keys)
+    "pubkey",
+    "pubkey_shared",
+    "secret",
+    "secret_shared",
     # Messages
     "message",
     "message_update",
@@ -629,5 +599,5 @@ JOBS = [
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),
     TransitPrekeyReplenishmentJob(),
-    GroupPrekeyReplenishmentJob(),
+    # NOTE: GroupPrekeyReplenishmentJob removed - group_prekey/group_prekey_shared removed
 ]

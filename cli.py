@@ -92,7 +92,8 @@ from core import tick
 from events.identity import user, peer, invite, network, user_removed, peer_shared
 from events.content import channel, message, message_deletion, message_reaction, message_update, channel_update, message_attachment
 from core import purge_expired
-from events.group import group_member, group_key, group_prekey, group
+from events.group import group_member, group
+# NOTE: group_key, group_prekey removed - using sender keys
 import os
 from core import network_config
 from events.network import connection_request
@@ -1353,7 +1354,6 @@ def cmd_link_device(session: CLISession, devicename: str, invite_ref: str):
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=user_id,
-        prekey_id=accepted['invite_prekey_id'],
         t_ms=session.current_time_ms,
         db=session.db,
         device_name=devicename

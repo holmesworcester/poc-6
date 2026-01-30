@@ -26,7 +26,7 @@ from core import store
 from core import wire_format
 from core.projection.types import ProjectorResult, WriteOp, Command
 from core.projection.apply import register_command_handler
-from events.group import group_key
+from events.group import sender_key  # Updated from group_key for sender key model
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
@@ -120,18 +120,15 @@ def _handle_replace_message_blob(args: dict, recorded_by: str, recorded_at: int,
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafedb = create_unsafe_db(db)
 
-    # Get new key to validate
-    new_key_row = safedb.query_one(
-        "SELECT key FROM group_keys WHERE key_id = ? AND recorded_by = ? LIMIT 1",
-        (new_key_id, recorded_by)
-    )
-    if not new_key_row:
+    # Get new key to validate (using sender key model - keys are in secrets table)
+    new_key_data = sender_key.get_key_for_decryption(new_key_id, recorded_by, db)
+    if not new_key_data:
         log.warning(f"message_rekey: new key {new_key_id[:20]}... not found, skipping blob replacement")
         return
 
     # Validate decryption works
     try:
-        new_key = new_key_row['key']
+        new_key = new_key_data['key']
         rekeyed_plaintext = crypto.decrypt(new_ciphertext, new_key, nonce)
         log.info(f"message_rekey: verified rekeyed plaintext, size={len(rekeyed_plaintext)}B")
     except Exception as e:
@@ -204,12 +201,12 @@ def create(original_message_id: str, new_key_id: str, peer_id: str, t_ms: int, d
 
     log.info(f"message_rekey.create() decrypted original message, plaintext_size={len(plaintext)}B")
 
-    # Get the new key from group_keys table
-    new_key_row = group_key.get_key(new_key_id, peer_id, db)
-    if not new_key_row:
+    # Get the new key from secrets table (sender key model)
+    new_key_data = sender_key.get_key_for_decryption(new_key_id, peer_id, db)
+    if not new_key_data:
         raise ValueError(f"New key {new_key_id} not found for peer {peer_id}")
 
-    new_key = new_key_row['key']
+    new_key = new_key_data['key']
     log.info(f"message_rekey.create() found new key {new_key_id[:20]}...")
 
     # Re-encrypt with deterministic nonce

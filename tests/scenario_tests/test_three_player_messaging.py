@@ -30,7 +30,7 @@ def test_three_player_messaging(fresh_db):
 
     # Alice creates a network
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    print(f"Alice created network, key_id: {alice['key_id'][:20]}...")
+    print(f"Alice created network: {alice['network_id'][:20]}...")
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(

@@ -56,7 +56,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     port = invite_link_data.get('port')
     network_id = invite_link_data.get('network_id')
     link_user_id = invite_link_data.get('user_id')
-    inviter_connection_prekey_id = invite_link_data.get('inviter_connection_prekey_id')
+    inviter_connection_pubkey_id = invite_link_data.get('inviter_connection_pubkey_id')
 
     # Decode invite_private_key if present
     invite_private_key_b64 = invite_link_data.get('invite_private_key')
@@ -70,9 +70,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
         invite_pubkey_b64 = crypto.b64encode(bytes(signing_key.verify_key))
 
     # Decode inviter transit prekey if present
-    inviter_connection_prekey_public_key = None
-    if invite_link_data.get('inviter_connection_prekey_public_key'):
-        inviter_connection_prekey_public_key = crypto.b64decode(invite_link_data['inviter_connection_prekey_public_key'])
+    inviter_connection_pubkey_public_key = None
+    if invite_link_data.get('inviter_connection_pubkey_public_key'):
+        inviter_connection_pubkey_public_key = crypto.b64decode(invite_link_data['inviter_connection_pubkey_public_key'])
 
     writes = [
         WriteOp(
@@ -85,8 +85,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'port': port,
                 'network_id': network_id,
                 'user_id': link_user_id,
-                'inviter_connection_prekey_id': inviter_connection_prekey_id,
-                'inviter_connection_prekey_public_key': inviter_connection_prekey_public_key,
+                'inviter_connection_pubkey_id': inviter_connection_pubkey_id,
+                'inviter_connection_pubkey_public_key': inviter_connection_pubkey_public_key,
                 'invite_private_key': invite_private_key,
                 'invite_pubkey': invite_pubkey_b64,
                 'created_at': event_data.get('created_at'),
@@ -142,7 +142,7 @@ def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
         invite_link_data: Invite link data dictionary containing:
             - invite_id: ID of the invite event (syncs separately)
             - invite_private_key: For prekey and signing
-            - invite_prekey_id: Crypto hint for prekey ID
+            - invite_pubkey_id: Crypto hint for prekey ID
             - network_id: Network being joined (trust anchor)
             - inviter_peer_shared_id: Inviter's peer_shared_id
             - inviter_peer_shared_blob: Inviter's peer_shared blob (base64 urlsafe)
@@ -161,14 +161,14 @@ def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
     if not invite_id or not invite_private_key_b64:
         raise ValueError("invite_id and invite_private_key required for wire invite_accepted")
 
-    invite_prekey_id = invite_link_data.get('invite_prekey_id')
+    invite_pubkey_id = invite_link_data.get('invite_pubkey_id')
     inviter_peer_shared_id = invite_link_data.get('inviter_peer_shared_id')
     network_id = invite_link_data.get('network_id')
     channel_id = invite_link_data.get('channel_id')
     key_id = invite_link_data.get('key_id')
-    inviter_connection_prekey_public_key = invite_link_data.get('inviter_connection_prekey_public_key')
-    inviter_connection_prekey_shared_id = invite_link_data.get('inviter_connection_prekey_shared_id')
-    inviter_connection_prekey_id = invite_link_data.get('inviter_connection_prekey_id')
+    inviter_connection_pubkey_public_key = invite_link_data.get('inviter_connection_pubkey_public_key')
+    inviter_connection_pubkey_shared_id = invite_link_data.get('inviter_connection_pubkey_shared_id')
+    inviter_connection_pubkey_id = invite_link_data.get('inviter_connection_pubkey_id')
     inviter_ip = invite_link_data.get('ip')
     inviter_port = invite_link_data.get('port')
     link_user_id = invite_link_data.get('user_id')
@@ -185,15 +185,15 @@ def create(invite_link_data: dict, peer_id: str, t_ms: int, db: Any) -> str:
 
     blob = wire_format.encode_invite_accepted_wire_event(
         invite_id_b64=invite_id,
-        invite_prekey_id_b64=invite_prekey_id,
+        invite_pubkey_id_b64=invite_pubkey_id,
         invite_private_key=crypto.b64decode(invite_private_key_b64),
         inviter_peer_shared_id_b64=inviter_peer_shared_id,
         network_id_b64=network_id,
         channel_id_b64=channel_id,
         key_id_b64=key_id,
-        inviter_connection_prekey_public_key_b64=inviter_connection_prekey_public_key,
-        inviter_connection_prekey_shared_id_b64=inviter_connection_prekey_shared_id,
-        inviter_connection_prekey_id_b64=inviter_connection_prekey_id,
+        inviter_connection_pubkey_public_key_b64=inviter_connection_pubkey_public_key,
+        inviter_connection_pubkey_shared_id_b64=inviter_connection_pubkey_shared_id,
+        inviter_connection_pubkey_id_b64=inviter_connection_pubkey_id,
         inviter_ip=inviter_ip,
         inviter_port=inviter_port,
         link_user_id_b64=link_user_id,
