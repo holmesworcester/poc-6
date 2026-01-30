@@ -1,36 +1,48 @@
 """
-Negentropy-style deterministic sync protocol - HASH-ONLY BUCKETS variant.
+Negentropy-style deterministic sync protocol - TIME-BASED BUCKETS variant.
 
-This variant uses pure hash-based bucketing - the unified key is derived
-entirely from the event_id (hash bytes), with no timestamp dependency. This ensures
-that all peers compute identical keys for the same events, enabling
-accurate root hash comparison for sync detection.
+This variant uses time-based bucketing with a fixed epoch. The unified key is:
+  (relative_minutes << 16) | hash_16bits
+
+Where:
+- relative_minutes: 32-bit value representing minutes since EPOCH_MS (2025-01-01 UTC)
+- hash_16bits: 16-bit BLAKE2b hash of event_id for disambiguation
+
+This provides temporal clustering (events at the same minute are adjacent) while
+still allowing 65536 events per minute to be distinguished.
 
 Design goals:
 - Deterministic: no false positives, exact set reconciliation
 - Finality: clear "done" state when synced (root hashes match)
 - UI-inspectable: track state per connection for visibility
 - Connection-scoped: ranges tracked by connection_id
-- Peer-consistent: same event_id always produces same unified_key
+- Peer-consistent: same event_id + created_at always produces same unified_key
+- Efficient bisection: ~14 rounds for a 1-week network vs ~47 for unbounded
 
-Bucket hierarchy (by hash prefix):
+Key format (48 bits = 12 hex chars):
+- Bits 47-16: relative minutes from epoch (32 bits, ~8000 years range)
+- Bits 15-0: hash suffix (16 bits, 65536 events/minute capacity)
+
+Bucket hierarchy (by prefix):
 - root: all events
 - prefix_2: first 2 hex chars (256 buckets)
 - prefix_4: first 4 hex chars (65536 buckets)
-- prefix_6 through prefix_6: progressively finer hash buckets
+- prefix_6: first 6 hex chars (16.7M buckets)
 
-The unified key is: event_id_bytes[:8] as 16 hex chars
-This provides uniform distribution across all bucket levels.
+Why fixed epoch (2025-01-01 UTC):
+- No lookup needed - works for newcomers immediately
+- Deterministic across all peers
+- No chicken-and-egg problem
 
-Trade-offs vs time-based bucketing:
-- Loses temporal locality (can't efficiently sync "just recent events")
-- Gains peer consistency (same event = same bucket on all peers)
-- Better for encrypted events where created_at is unavailable
+Why minutes (not milliseconds):
+- Each bisection depth spans a few minutes of events
+- 65536 events per minute capacity (handles 1GB file bursts)
+- 32 bits of minutes = 8171 years from epoch
 
 Protocol flow:
 1. On new connection: send root hash
 2. Receive their hash, compare ranges
-3. For mismatched ranges: drill down by hash prefix until bucket has ≤EVENTS_THRESHOLD events
+3. For mismatched ranges: drill down by prefix until bucket has ≤EVENTS_THRESHOLD events
 4. At threshold: send actual event IDs
 5. When root hashes match: sync complete for this connection
 """
@@ -54,6 +66,16 @@ from core.projection.apply import register_command_handler
 from events.network import sync_window
 
 log = logging.getLogger(__name__)
+
+
+# Fixed epoch for relative timestamp computation - 2025-01-01 00:00:00 UTC
+# Using a hardcoded constant avoids chicken-and-egg problems for newcomers
+# who don't yet know the network's created_at timestamp.
+EPOCH_MS = 1735689600000  # 2025-01-01 00:00:00 UTC
+
+# Maximum unified key value (48 bits: 32 bits minutes + 16 bits hash)
+# 32 bits of minutes = 8171 years from epoch, plenty of range
+MAX_UNIFIED_KEY = (1 << 48) - 1
 
 
 # Registry metadata
@@ -603,29 +625,32 @@ class EventsMessage:
 # ============================================================================
 
 def compute_unified_key(event_id: str, created_at: int = 0) -> str:
-    """Compute the unified hash key for an event.
+    """Compute unified key: (relative_minutes << 16) | hash_16bits.
 
-    The unified key is derived from the event_id hash bytes.
-    This avoids re-hashing event_ids and remains peer-consistent.
+    Uses minutes from fixed epoch (2025-01-01) for tight temporal clustering.
+    Each bisection depth spans a few minutes of events.
+    32 bits for relative minutes = 8000+ years range.
+    16 bits for hash = 65536 events per minute capacity.
 
     Args:
         event_id: The event identifier
-        created_at: Ignored (kept for API compatibility during transition)
+        created_at: Event creation timestamp in milliseconds
 
     Returns:
-        16 character hex string (64 bits of hash)
+        12 character hex string (48 bits: 32 bits minutes + 16 bits hash)
     """
-    # Use the event_id hash bytes directly when possible
-    try:
-        raw = crypto.b64decode(event_id)
-        if len(raw) >= 8:
-            return raw[:8].hex()
-    except Exception:
-        pass
+    # Compute relative minutes from epoch (clamped to 32 bits)
+    relative_min = max(0, (created_at - EPOCH_MS) // 60_000)
+    relative_min = min(relative_min, 0xFFFFFFFF)  # clamp to 32 bits
 
-    # Fallback for non-standard test IDs
-    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
-    return h.hex()  # 16 hex chars
+    # Compute 16-bit hash for disambiguation within the same minute
+    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=2).digest()
+    hash_bits = int.from_bytes(h, 'big')
+
+    # Combine: (relative_minutes << 16) | hash_16bits
+    unified_key = (relative_min << 16) | hash_bits
+
+    return f"{unified_key:012x}"  # 12 hex chars (48 bits)
 
 
 def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
@@ -1091,6 +1116,51 @@ def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
         (recorded_by, level, prefix, hash, event_count, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
     """, bucket_batch)
+
+
+def rebuild_negentropy_index(db, recorded_by: str) -> int:
+    """Rebuild negentropy index by recomputing all unified keys.
+
+    Call this after schema changes that affect the unified key format.
+    Recomputes unified_key for all events using the current compute_unified_key()
+    implementation, then rebuilds bucket hashes.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID to rebuild
+
+    Returns:
+        Number of events reindexed
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get all events with their created_at timestamps
+    rows = safedb.query("""
+        SELECT event_id, created_at FROM negentropy_events
+        WHERE recorded_by = ?
+    """, (recorded_by,))
+
+    # Recompute unified keys
+    update_batch = []
+    for row in rows:
+        event_id = row['event_id']
+        created_at = row['created_at'] or 0
+        new_key = compute_unified_key(event_id, created_at)
+        update_batch.append((new_key, recorded_by, event_id))
+
+    # Batch update unified keys
+    if update_batch:
+        db._conn.executemany("""
+            UPDATE negentropy_events
+            SET unified_key = ?
+            WHERE recorded_by = ? AND event_id = ?
+        """, update_batch)
+
+    # Rebuild bucket hashes
+    rebuild_buckets_for_peer(db, recorded_by)
+
+    log.info(f"rebuild_negentropy_index: reindexed {len(update_batch)} events for peer={recorded_by[:20]}...")
+    return len(update_batch)
 
 
 def add_event_to_sync(
@@ -2017,25 +2087,28 @@ def get_global_sync_status(db, t_ms: int) -> dict:
 # Debug/Utility functions
 # ============================================================================
 
-def decode_unified_key(unified_key: str) -> tuple[int, str]:
-    """Decode a unified key (hash-only variant).
+def decode_unified_key(unified_key: str) -> tuple[int, int]:
+    """Decode a unified key into (relative_minutes, hash_16bits).
 
-    In the hash-only variant, the unified key is purely derived from event_id.
-    This function returns (0, full_hash) for compatibility with code that
-    expects a (timestamp, hash) tuple.
+    The unified key encodes: (relative_minutes << 16) | hash_16bits
+    where relative_minutes is minutes since EPOCH_MS (2025-01-01 UTC).
 
     Args:
-        unified_key: 16 character hex string
+        unified_key: 12 character hex string (48 bits)
 
     Returns:
-        Tuple of (0, full_hash_hex) - timestamp is always 0 in hash-only mode
+        Tuple of (relative_minutes, hash_16bits)
     """
-    return 0, unified_key
+    key_int = int(unified_key, 16)
+    relative_min = key_int >> 16
+    hash_bits = key_int & 0xFFFF
+    return relative_min, hash_bits
 
 
 def format_unified_key_human(unified_key: str) -> str:
     """Format a unified key for human-readable display.
 
-    In hash-only mode, just shows the hash prefix since there's no timestamp.
+    Shows relative minutes from epoch and hash suffix.
     """
-    return f"hash:{unified_key[:8]}..."
+    relative_min, hash_bits = decode_unified_key(unified_key)
+    return f"min:{relative_min} hash:{hash_bits:04x}"

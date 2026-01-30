@@ -1,6 +1,6 @@
 """Tests for negentropy-style deterministic sync protocol.
 
-Tests the hash-only prefix-based bucketing system.
+Tests the time-based prefix bucketing system with relative minutes from epoch.
 """
 import pytest
 import sqlite3
@@ -19,41 +19,79 @@ def db():
 
 
 class TestUnifiedKey:
-    """Test unified key computation (hash-only variant)."""
+    """Test unified key computation (time-based variant)."""
 
     def test_unified_key_format(self):
-        """Unified key is 16 hex chars (64 bits)."""
+        """Unified key is 12 hex chars (48 bits)."""
         event_id = 'test_event_abc123'
-        key = negentropy.compute_unified_key(event_id)
-        assert len(key) == 16
+        # Use a timestamp after the epoch
+        ts_ms = negentropy.EPOCH_MS + 60_000  # 1 minute after epoch
+        key = negentropy.compute_unified_key(event_id, ts_ms)
+        assert len(key) == 12
         assert all(c in '0123456789abcdef' for c in key)
 
-    def test_unified_key_ignores_timestamp(self):
-        """Timestamp is ignored - same event_id always produces same key."""
+    def test_unified_key_uses_timestamp(self):
+        """Different timestamps produce different keys (different minutes)."""
         event_id = 'test_event'
-        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # With timestamp
-        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Different timestamp
-        key3 = negentropy.compute_unified_key(event_id)  # No timestamp
-        assert key1 == key2 == key3  # All same because only event_id matters
+        # Two timestamps 2 minutes apart (well into different minute buckets)
+        ts1 = negentropy.EPOCH_MS + 60_000      # 1 minute after epoch
+        ts2 = negentropy.EPOCH_MS + 180_000     # 3 minutes after epoch
+        key1 = negentropy.compute_unified_key(event_id, ts1)
+        key2 = negentropy.compute_unified_key(event_id, ts2)
+        assert key1 != key2  # Different minutes = different keys
+
+    def test_unified_key_same_minute_same_event(self):
+        """Same event in same minute produces same key."""
+        event_id = 'test_event'
+        ts1 = negentropy.EPOCH_MS + 60_000      # 1 min after epoch
+        ts2 = negentropy.EPOCH_MS + 60_000 + 30_000  # 1.5 min after epoch (same minute bucket)
+        key1 = negentropy.compute_unified_key(event_id, ts1)
+        key2 = negentropy.compute_unified_key(event_id, ts2)
+        assert key1 == key2  # Same minute bucket, same event = same key
 
     def test_unified_key_deterministic(self):
-        """Same event_id produces same key."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt1')
+        """Same event_id and timestamp produces same key."""
+        ts_ms = negentropy.EPOCH_MS + 60_000
+        key1 = negentropy.compute_unified_key('evt1', ts_ms)
+        key2 = negentropy.compute_unified_key('evt1', ts_ms)
         assert key1 == key2
 
-    def test_unified_key_different_events(self):
-        """Different events produce different keys."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt2')
-        assert key1 != key2
+    def test_unified_key_different_events_same_minute(self):
+        """Different events in same minute produce different keys (hash differs)."""
+        ts_ms = negentropy.EPOCH_MS + 60_000
+        key1 = negentropy.compute_unified_key('evt1', ts_ms)
+        key2 = negentropy.compute_unified_key('evt2', ts_ms)
+        assert key1 != key2  # Hash part differs
 
     def test_decode_unified_key(self):
-        """Decode returns (0, full_hash) in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
-        decoded_ts, hash_hex = negentropy.decode_unified_key(key)
-        assert decoded_ts == 0  # No timestamp in hash-only mode
-        assert hash_hex == key  # Full hash returned
+        """Decode returns (relative_minutes, hash_16bits)."""
+        ts_ms = negentropy.EPOCH_MS + 120_000  # 2 minutes after epoch
+        key = negentropy.compute_unified_key('evt1', ts_ms)
+        relative_min, hash_bits = negentropy.decode_unified_key(key)
+        assert relative_min == 2  # 2 minutes from epoch
+        assert 0 <= hash_bits <= 0xFFFF  # 16-bit hash
+
+    def test_unified_key_clamps_to_zero_before_epoch(self):
+        """Timestamps before epoch are clamped to 0."""
+        ts_ms = negentropy.EPOCH_MS - 1_000_000  # Before epoch
+        key = negentropy.compute_unified_key('evt1', ts_ms)
+        relative_min, _ = negentropy.decode_unified_key(key)
+        assert relative_min == 0  # Clamped to 0
+
+
+class TestEpochConstant:
+    """Test the epoch constant."""
+
+    def test_epoch_is_2025_01_01(self):
+        """EPOCH_MS is 2025-01-01 00:00:00 UTC."""
+        # 2025-01-01 00:00:00 UTC = 1735689600 seconds
+        expected_ms = 1735689600 * 1000
+        assert negentropy.EPOCH_MS == expected_ms
+
+    def test_max_unified_key_is_48_bits(self):
+        """MAX_UNIFIED_KEY is 2^48 - 1."""
+        expected = (1 << 48) - 1
+        assert negentropy.MAX_UNIFIED_KEY == expected
 
 
 class TestPrefixLevels:
@@ -67,7 +105,7 @@ class TestPrefixLevels:
     def test_get_prefix_for_level(self):
         """Get correct prefix length at each level."""
         event_id = 'evt1'
-        ts_ms = 1718451045000
+        ts_ms = negentropy.EPOCH_MS + 60_000  # 1 minute after epoch
         unified_key = negentropy.compute_unified_key(event_id, ts_ms)
 
         assert negentropy.get_prefix_for_level(event_id, ts_ms, 'root') == ''
@@ -99,11 +137,13 @@ class TestFormatHuman:
     """Test human-readable unified key formatting."""
 
     def test_format_unified_key_human(self):
-        """Format shows hash prefix in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
+        """Format shows relative minutes and hash."""
+        ts_ms = negentropy.EPOCH_MS + 120_000  # 2 minutes after epoch
+        key = negentropy.compute_unified_key('evt1', ts_ms)
         formatted = negentropy.format_unified_key_human(key)
+        assert 'min:' in formatted
         assert 'hash:' in formatted
-        assert key[:8] in formatted  # Shows hash prefix
+        assert '2' in formatted  # 2 minutes
 
 
 class TestXORFingerprinting:
@@ -164,7 +204,7 @@ class TestEventTracking:
         """Adding event creates bucket entries."""
         peer_id = 'peer1'
         event_id = 'evt1'
-        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
+        ts_ms = negentropy.EPOCH_MS + 60_000  # 1 minute after epoch
 
         negentropy.add_event_to_sync(db, peer_id, event_id, ts_ms)
 
@@ -181,7 +221,8 @@ class TestEventTracking:
     def test_add_event_creates_bucket_hierarchy(self, db):
         """Adding event marks buckets as needing recompute."""
         peer_id = 'peer1'
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1718451045000)
+        ts_ms = negentropy.EPOCH_MS + 60_000
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
 
         # Check buckets were created at each level
         for level in negentropy.LEVELS:
@@ -198,7 +239,7 @@ class TestXORBucketHashes:
     def test_bucket_hash_is_xor_of_fingerprints(self, db):
         """Bucket hash equals XOR of event fingerprints in that bucket."""
         peer_id = 'peer1'
-        ts_ms = 1718451045000
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
         negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms)
@@ -221,15 +262,44 @@ class TestXORBucketHashes:
         """Get all hashes at a level."""
         peer_id = 'peer1'
 
-        # Add events at different times
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1704067200000)  # 2024-01-01
-        negentropy.add_event_to_sync(db, peer_id, 'evt2', 1735689600000)  # 2025-01-01
+        # Add events at different times (different minute buckets)
+        ts1 = negentropy.EPOCH_MS + 60_000    # 1 minute after epoch
+        ts2 = negentropy.EPOCH_MS + 180_000   # 3 minutes after epoch
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts1)
+        negentropy.add_event_to_sync(db, peer_id, 'evt2', ts2)
 
         # Get hashes at prefix_2 level (coarse enough to see multiple buckets)
         prefix_2_hashes = negentropy.get_hashes_at_level(db, peer_id, 'prefix_2')
 
         # Should have at least one non-empty bucket
         assert any(h != b'' for h in prefix_2_hashes.values())
+
+
+class TestTemporalClustering:
+    """Test that time-based keys cluster events by time."""
+
+    def test_events_at_same_minute_share_time_prefix(self, db):
+        """Events at the same minute share the same time prefix in unified key."""
+        ts_ms = negentropy.EPOCH_MS + 60_000  # 1 minute after epoch
+
+        key1 = negentropy.compute_unified_key('evt1', ts_ms)
+        key2 = negentropy.compute_unified_key('evt2', ts_ms)
+        key3 = negentropy.compute_unified_key('evt3', ts_ms + 30_000)  # +30s, same minute
+
+        # First 8 hex chars encode the 32-bit minute value
+        # All events in same minute should share this prefix
+        assert key1[:8] == key2[:8] == key3[:8]
+
+    def test_events_at_different_minutes_differ_in_time_prefix(self, db):
+        """Events at different minutes have different time prefixes."""
+        ts1 = negentropy.EPOCH_MS + 60_000   # 1 minute
+        ts2 = negentropy.EPOCH_MS + 120_000  # 2 minutes
+
+        key1 = negentropy.compute_unified_key('evt1', ts1)
+        key2 = negentropy.compute_unified_key('evt1', ts2)
+
+        # First 8 hex chars should differ (different minutes)
+        assert key1[:8] != key2[:8]
 
 
 class TestSyncProtocol:
@@ -239,8 +309,9 @@ class TestSyncProtocol:
         """Initializing sync creates range requests starting at root."""
         peer_id = 'peer1'
         conn_id = 'conn1'
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1718451045000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
 
         requests = negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
 
@@ -256,7 +327,7 @@ class TestSyncProtocol:
         """When root hashes match, range is marked complete (checkpoint)."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        ts_ms = 1718451045000
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
 
@@ -283,12 +354,12 @@ class TestSyncProtocol:
         assert 'total_events' in responses[0]
 
     def test_sends_events_when_below_threshold(self, db):
-        """When bucket has few events (≤ EVENTS_THRESHOLD), send events directly."""
+        """When bucket has few events (<=EVENTS_THRESHOLD), send events directly."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        ts_ms = 1718451045000
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
-        # Add just 2 events - well below EVENTS_THRESHOLD (100)
+        # Add just 2 events - well below EVENTS_THRESHOLD
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
         negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 1000)
 
@@ -302,7 +373,7 @@ class TestSyncProtocol:
             'range_id': 'remote_1',
             'level': 'prefix_2',
             'prefix': prefix,
-            'hash': 'deadbeef',  # Different hash
+            'hash': 'deadbeefbeef',  # Different hash (12 chars)
         }
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
@@ -315,29 +386,19 @@ class TestSyncProtocol:
         """When bucket has many events (> EVENTS_THRESHOLD), drill down instead."""
         peer_id = 'peer1'
         conn_id = 'conn1'
+        # Use a timestamp that will produce a known prefix_2
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
-        # In hash-only mode, we need to find events that hash to the same prefix_2 bucket.
-        # Generate events and group by their prefix_2 bucket until we have > 100 in one bucket.
-        target_prefix = None
-        events_by_prefix: dict[str, list[str]] = {}
-        i = 0
-        while True:
+        # Add many events at the same minute - they'll share the same time prefix
+        # Since time prefix is first 8 hex chars and prefix_2 uses first 2 chars,
+        # events at the same minute will share the same prefix_2
+        for i in range(200):
             event_id = f'evt{i}'
-            unified_key = negentropy.compute_unified_key(event_id)
-            prefix = unified_key[:2]
-            if prefix not in events_by_prefix:
-                events_by_prefix[prefix] = []
-            events_by_prefix[prefix].append(event_id)
-            if len(events_by_prefix[prefix]) > 150:
-                target_prefix = prefix
-                break
-            i += 1
-            if i > 100000:  # Safety limit
-                pytest.skip("Could not find 150 events with same prefix_2 in reasonable iterations")
+            negentropy.add_event_to_sync(db, peer_id, event_id, ts_ms)
 
-        # Add the events that share the same prefix_2 bucket
-        for event_id in events_by_prefix[target_prefix]:
-            negentropy.add_event_to_sync(db, peer_id, event_id, 1000)
+        # Get the prefix_2 for these events
+        unified_key = negentropy.compute_unified_key('evt0', ts_ms)
+        target_prefix = unified_key[:2]
 
         # Receive request at prefix_2 level with different hash
         msg = {
@@ -345,11 +406,11 @@ class TestSyncProtocol:
             'range_id': 'remote_1',
             'level': 'prefix_2',
             'prefix': target_prefix,
-            'hash': 'deadbeef',  # Different hash
+            'hash': 'deadbeefbeef',  # Different hash (12 chars)
         }
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
-        # With > 100 events, should drill down to child level
+        # With > EVENTS_THRESHOLD events, should drill down to child level
         assert any(r['type'] == 'range_request' for r in responses)
         # Should NOT send events directly at this level
         assert not any(r['type'] == 'range_events' for r in responses)
@@ -365,8 +426,9 @@ class TestSyncStatus:
         """Sync status tracks range states."""
         peer_id = 'peer1'
         conn_id = 'conn1'
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1718451045000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
         negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
 
         status = negentropy.get_sync_status(db, peer_id, conn_id)
@@ -390,7 +452,7 @@ class TestCheckpoints:
         """Checkpoint is logged when root hashes match."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        ts_ms = 1718451045000
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
 
@@ -418,6 +480,41 @@ class TestCheckpoints:
         assert checkpoint['root_hash'] == root_hash
 
 
+class TestRebuildIndex:
+    """Test rebuilding negentropy index after key format changes."""
+
+    def test_rebuild_negentropy_index(self, db):
+        """rebuild_negentropy_index recomputes all unified keys."""
+        peer_id = 'peer1'
+        ts_ms = negentropy.EPOCH_MS + 60_000
+
+        # Add some events
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
+        negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 60_000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt3', ts_ms + 120_000)
+
+        # Get original unified keys
+        original_keys = {}
+        rows = db.query("""
+            SELECT event_id, unified_key FROM negentropy_events
+            WHERE recorded_by = ?
+        """, (peer_id,))
+        for row in rows:
+            original_keys[row['event_id']] = row['unified_key']
+
+        # Rebuild index
+        count = negentropy.rebuild_negentropy_index(db, peer_id)
+        assert count == 3
+
+        # Keys should still be the same (since we're using the same compute function)
+        rows = db.query("""
+            SELECT event_id, unified_key FROM negentropy_events
+            WHERE recorded_by = ?
+        """, (peer_id,))
+        for row in rows:
+            assert row['unified_key'] == original_keys[row['event_id']]
+
+
 class TestPublicAPI:
     """Test public API functions."""
 
@@ -432,7 +529,7 @@ class TestPublicAPI:
         """handle_incoming processes negentropy message envelope."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        ts_ms = 1718451045000
+        ts_ms = negentropy.EPOCH_MS + 60_000
 
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
 
@@ -449,7 +546,7 @@ class TestPublicAPI:
                 'range_id': 'remote_1',
                 'level': 'prefix_2',
                 'prefix': prefix,
-                'hash': 'deadbeef',
+                'hash': 'deadbeefbeef',  # 12 chars
             }
         }
 
