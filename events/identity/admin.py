@@ -185,6 +185,9 @@ def create(
 ) -> str:
     """Create an admin event granting admin status to a user.
 
+    SECURITY: Server relays cannot be granted admin status.
+    They don't have user_ids, so this check is defense in depth.
+
     Args:
         user_id: The user being granted admin
         network_id: The network this admin grant is for
@@ -197,7 +200,26 @@ def create(
 
     Returns:
         admin_id: The ID of the created admin event
+
+    Raises:
+        ValueError: If target user is associated with a server relay
     """
+    from events.identity import server_relay
+
+    # SECURITY: Check if the user is associated with a server relay
+    # Server relays have peer_shared but no user event, so this check
+    # is defense in depth - server relays shouldn't have user_ids
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    # User→peer relationship is in peers_shared table (user_id column)
+    user_peer = safedb.query_one(
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
+        (user_id, peer_id)
+    )
+    if user_peer and user_peer.get('peer_shared_id'):
+        # Check if this peer is a server relay
+        if server_relay.is_server_relay(user_peer['peer_shared_id'], peer_id, db):
+            raise ValueError("Cannot grant admin to server relay")
+
     _wire_shadow_admin(user_id, network_id, admin_grant)
 
     blob = encode_wire_event(
@@ -219,7 +241,12 @@ def create(
 
 
 def project_pure(ctx: Any) -> ProjectorResult:
-    """Pure projector for admin events."""
+    """Pure projector for admin events.
+
+    SECURITY: Server relays cannot be granted admin status.
+    They don't have user_ids (only peer_shared), so this is naturally
+    enforced by the user_id requirement. This check is defense in depth.
+    """
     event_data = ctx.event_data
 
     if event_data.get('type') != 'admin':

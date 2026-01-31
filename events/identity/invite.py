@@ -189,12 +189,13 @@ def encode_wire_event(
     private_key: bytes,
 ) -> bytes:
     """Encode a complete invite wire event."""
-    if mode == "user":
+    # 'server' mode uses same wire format as 'user' (distinction is logical)
+    if mode in ("user", "server"):
         mode_value = INVITE_MODE_USER
     elif mode == "peer":
         mode_value = INVITE_MODE_PEER
     else:
-        raise ValueError("invite mode must be 'user' or 'peer'")
+        raise ValueError("invite mode must be 'user', 'peer', or 'server'")
 
     invite_pubkey = crypto.b64decode(invite_pubkey_b64)
     invite_prekey_id = crypto.b64decode(invite_prekey_id_b64) if invite_prekey_id_b64 else None
@@ -307,9 +308,10 @@ def _wire_shadow_invite(
     port: int | None,
 ) -> None:
     """Validate invite fields against the fixed-size wire payload layout."""
-    if mode not in ("user", "peer"):
-        raise ValueError("invite mode must be 'user' or 'peer'")
-    mode_value = INVITE_MODE_USER if mode == "user" else INVITE_MODE_PEER
+    if mode not in ("user", "peer", "server"):
+        raise ValueError("invite mode must be 'user', 'peer', or 'server'")
+    # 'server' mode uses same wire format as 'user' (the distinction is logical)
+    mode_value = INVITE_MODE_USER if mode in ("user", "server") else INVITE_MODE_PEER
     plaintext = encode_plaintext(
         mode=mode_value,
         invite_pubkey=crypto.b64decode(invite_pubkey_b64),
@@ -484,7 +486,8 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 
 def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None,
-           address: str | None = None, port: int | None = None) -> tuple[str, str, dict[str, Any]]:
+           address: str | None = None, port: int | None = None,
+           server_address: str | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -499,10 +502,12 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         peer_id: Local peer ID of the inviter
         t_ms: Timestamp
         db: Database connection
-        mode: 'user' for network join invites, 'peer' for device linking invites
-        user_id: Required for mode='peer', target user to link to. Must be None for mode='user'.
+        mode: 'user' for network join invites, 'peer' for device linking invites,
+              'server' for server relay invites
+        user_id: Required for mode='peer', target user to link to. Must be None for mode='user'/'server'.
         address: Inviter's IP address (for connection bootstrapping)
         port: Inviter's port (for connection bootstrapping)
+        server_address: For mode='server', the server's public address (e.g., 'relay.example.com:5000')
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -514,8 +519,11 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     elif mode == 'peer':
         if user_id is None:
             raise ValueError("mode='peer' invites must have user_id set")
+    elif mode == 'server':
+        if user_id is not None:
+            raise ValueError("mode='server' invites cannot have user_id set")
     else:
-        raise ValueError(f"Invalid mode: {mode}. Must be 'user' or 'peer'")
+        raise ValueError(f"Invalid mode: {mode}. Must be 'user', 'peer', or 'server'")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
     unsafedb = create_unsafe_db(db)
@@ -543,6 +551,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # Authorization check depends on mode:
     # - mode='user' (network join invites): requires admin
     # - mode='peer' (device linking): any user can create for their OWN user_id
+    # - mode='server' (server relay invites): requires admin
     if mode == 'user':
         if not is_admin(peer_shared_id, peer_id, db):
             raise ValueError(f"Only admins can create network join invites. Peer {peer_id} is not an admin.")
@@ -550,6 +559,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         # Security: users can only create device link invites for themselves
         if user_id != inviter_user_id:
             raise ValueError(f"Cannot create device link invite for another user. You can only link your own devices.")
+    elif mode == 'server':
+        if not is_admin(peer_shared_id, peer_id, db):
+            raise ValueError(f"Only admins can create server relay invites. Peer {peer_id} is not an admin.")
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
@@ -695,33 +707,37 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Create group_key_shared sealed to invite proof prekey
     # The create_for_invite function will extract the prekey from the invite event
+    # IMPORTANT: Server relays (mode='server') do NOT receive group keys - they cannot decrypt messages
     from events.group import group_key_shared
 
-    # Share ALL historical keys for the all_users group, not just the current key
-    # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
-    # and all historical content that may have been encrypted with older keys
-    all_group_keys = safedb.query(
-        "SELECT key_id FROM group_keys WHERE recorded_by = ?",
-        (peer_id,)
-    )
+    if mode != 'server':
+        # Share ALL historical keys for the all_users group, not just the current key
+        # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
+        # and all historical content that may have been encrypted with older keys
+        all_group_keys = safedb.query(
+            "SELECT key_id FROM group_keys WHERE recorded_by = ?",
+            (peer_id,)
+        )
 
-    keys_shared = 0
-    for key_row in all_group_keys:
-        historical_key_id = key_row['key_id']
-        try:
-            group_key_shared.create_for_invite(
-                key_id=historical_key_id,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            keys_shared += 1
-        except Exception as e:
-            log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
+        keys_shared = 0
+        for key_row in all_group_keys:
+            historical_key_id = key_row['key_id']
+            try:
+                group_key_shared.create_for_invite(
+                    key_id=historical_key_id,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
+                    t_ms=t_ms,  # No offset needed - DAG deps handle ordering
+                    db=db
+                )
+                keys_shared += 1
+            except Exception as e:
+                log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
 
-    log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
+        log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
+    else:
+        log.info(f"invite.create() mode='server' - NOT sharing group keys (server relays cannot decrypt)")
 
     # For mode='peer', share keys for ALL groups this user is a member of
     # This ensures the new device can decrypt all groups the user belongs to
@@ -783,6 +799,19 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     if mode == 'peer':
         invite_link_data['user_id'] = user_id
 
+    # For mode='server', include server_address in the link
+    if mode == 'server':
+        invite_link_data['server_address'] = server_address
+        invite_link_data['mode'] = 'server'
+
+    # For mode='user', include server_address if network has a server relay configured
+    # This allows new members to know where to connect for star topology sync
+    if mode == 'user':
+        from events.identity import network_settings
+        relay_info = network_settings.get_server_relay(network_id, peer_id, db)
+        if relay_info and relay_info.get('address'):
+            invite_link_data['server_address'] = relay_info['address']
+
     # Encode invite link as base64-urlsafe JSON
     import base64
     invite_json = json.dumps(invite_link_data, separators=(',', ':'), sort_keys=True)
@@ -790,7 +819,12 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Use different URL prefix based on mode
     # Note: URL prefix "link" is kept for backward compatibility with mode='peer'
-    url_prefix = "link" if mode == "peer" else "invite"
+    if mode == "peer":
+        url_prefix = "link"
+    elif mode == "server":
+        url_prefix = "server"
+    else:
+        url_prefix = "invite"
     invite_link = f"quiet://{url_prefix}/{invite_code}"
 
     log.info(f"invite.create() invite link created (mode={mode}) with invite_prekey_id={invite_prekey_id[:20]}...")

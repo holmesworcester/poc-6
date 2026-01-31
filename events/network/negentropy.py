@@ -1867,11 +1867,18 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     Sync is initiated for ALL established connections, even if our root hash
     hasn't changed - the remote peer may have new events we need to pull.
 
+    In STAR topology mode:
+    - Clients sync ONLY with the server relay
+    - Server relay syncs with everyone
+
     Returns:
         Stats dict with counts
     """
     from core.db import create_unsafe_db
     from events.network import connection_request as conn_module
+    from events.network import server_connection
+    from events.identity import network as network_module
+    from events.identity.peer_shared import get_self
 
     unsafedb = create_unsafe_db(db)
     local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -1881,6 +1888,13 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
 
     for peer_row in local_peers:
         peer_id = peer_row['peer_id']
+
+        # Get our peer_shared_id for star topology filtering
+        identity = get_self(peer_id, db)
+        our_peer_shared_id = identity.get('peer_shared_id') if identity else None
+
+        # Get network_id for topology check
+        network_id = network_module.get_network_id(peer_id, db)
 
         # With XOR fingerprinting, root hash is always current - just read it
         our_root_hash = get_root_hash(db, peer_id)
@@ -1897,6 +1911,19 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
             # But allow bootstrap connections (have invite_id even if peer_shared_id is NULL)
             if not conn.peer_shared_id and not conn.invite_id:
                 continue
+
+            # STAR TOPOLOGY: Filter connections based on network sync mode
+            # Skip this connection if star topology says we shouldn't sync with this peer
+            if network_id and our_peer_shared_id and conn.peer_shared_id:
+                if not server_connection.should_sync_with_peer(
+                    our_peer_id=peer_id,
+                    our_peer_shared_id=our_peer_shared_id,
+                    target_peer_shared_id=conn.peer_shared_id,
+                    network_id=network_id,
+                    db=db
+                ):
+                    log.debug(f"Star topology: skipping sync with {conn.peer_shared_id[:16]}... (not server relay)")
+                    continue
 
             total_connections += 1
 

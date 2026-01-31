@@ -66,6 +66,8 @@ SUBJECTIVE_TABLES = {
     'negentropy_sync_state',       # Negentropy sync: per-connection sync state (peer-scoped)
     'negentropy_checkpoints',      # Negentropy sync: completion checkpoints (peer-scoped)
     'trust_anchors',               # Trust anchors: network_ids pre-approved by invite_accepted (peer-scoped)
+    'server_relays',               # Server relay peers (peer-scoped)
+    'network_settings',            # Network settings for star topology (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

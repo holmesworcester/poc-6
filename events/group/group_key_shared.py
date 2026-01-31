@@ -511,6 +511,9 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
                                    exclude_user_id: str | None = None) -> list[str]:
     """Create key_shared events for all members of a group.
 
+    IMPORTANT: Server relays are automatically excluded from key distribution.
+    They can sync events but cannot decrypt messages.
+
     Args:
         key_id: The symmetric key to share
         group_id: Group whose members should receive the key
@@ -523,43 +526,57 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
     Returns:
         List of key_shared event IDs created
     """
+    from events.identity import server_relay
+
     log.info(f"key_shared.share_key_with_group_members() key={key_id[:20]}..., group={group_id[:20]}..., exclude={exclude_user_id[:20] + '...' if exclude_user_id else None}")
 
     # Get all members of the group (excluding self and optionally excluded user)
+    # NOTE: User-to-peer relationship is in peers_shared table (user_id column)
     safedb = create_safe_db(db, recorded_by=peer_id)
     if exclude_user_id:
         members = safedb.query(
-            """SELECT DISTINCT u.peer_id
+            """SELECT DISTINCT ps.peer_shared_id
                FROM group_members gm
-               JOIN users u ON gm.user_id = u.user_id AND u.recorded_by = gm.recorded_by
-               WHERE gm.group_id = ? AND u.peer_id != ? AND gm.user_id != ? AND gm.recorded_by = ?""",
+               JOIN peers_shared ps ON gm.user_id = ps.user_id AND ps.recorded_by = gm.recorded_by
+               WHERE gm.group_id = ? AND ps.peer_shared_id != ? AND gm.user_id != ? AND gm.recorded_by = ?""",
             (group_id, peer_shared_id, exclude_user_id, peer_id)
         )
     else:
         members = safedb.query(
-            """SELECT DISTINCT u.peer_id
+            """SELECT DISTINCT ps.peer_shared_id
                FROM group_members gm
-               JOIN users u ON gm.user_id = u.user_id AND u.recorded_by = gm.recorded_by
-               WHERE gm.group_id = ? AND u.peer_id != ? AND gm.recorded_by = ?""",
+               JOIN peers_shared ps ON gm.user_id = ps.user_id AND ps.recorded_by = gm.recorded_by
+               WHERE gm.group_id = ? AND ps.peer_shared_id != ? AND gm.recorded_by = ?""",
             (group_id, peer_shared_id, peer_id)
         )
 
     key_shared_ids = []
+    skipped_relays = 0
     for i, member in enumerate(members):
-        recipient_peer_id = member['peer_id']
+        recipient_peer_shared_id = member['peer_shared_id']
+
+        # SECURITY: Never distribute keys to server relays
+        # Server relays can sync events but cannot decrypt messages
+        if server_relay.is_server_relay(recipient_peer_shared_id, peer_id, db):
+            log.info(f"key_shared.share_key_with_group_members() skipping server relay {recipient_peer_shared_id[:20]}...")
+            skipped_relays += 1
+            continue
 
         try:
             key_shared_id = create(
                 key_id=key_id,
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
-                recipient_peer_id=recipient_peer_id,
+                recipient_peer_id=recipient_peer_shared_id,
                 t_ms=t_ms + i + 1,  # Increment timestamp for each member
                 db=db
             )
             key_shared_ids.append(key_shared_id)
-            log.info(f"key_shared.share_key_with_group_members() created key_shared for {recipient_peer_id}")
+            log.info(f"key_shared.share_key_with_group_members() created key_shared for {recipient_peer_shared_id}")
         except Exception as e:
-            log.warning(f"key_shared.share_key_with_group_members() failed for {recipient_peer_id}: {e}")
+            log.warning(f"key_shared.share_key_with_group_members() failed for {recipient_peer_shared_id}: {e}")
+
+    if skipped_relays > 0:
+        log.info(f"key_shared.share_key_with_group_members() skipped {skipped_relays} server relay(s)")
 
     return key_shared_ids
