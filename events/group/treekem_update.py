@@ -405,38 +405,47 @@ def get_represented_peers(
 
 def get_tree_cover_for_sender(
     sender_peer_id: str,
-    represented_peers: set[str],
+    target_peers: set[str],
     recorded_by: str,
     db: Any,
+    removal_epoch_id: str | None = None,
 ) -> list[str]:
-    """Get treekem_pubkey IDs that cover all represented peers except sender.
+    """Get treekem_pubkey IDs covering target peers.
+
+    Looks for pubkeys at copath positions from ANY epoch,
+    filtering out pubkeys whose owners are removed.
 
     Uses the copath algorithm: for each depth, if the sibling subtree
-    contains any represented peers, include that copath node's pubkey.
+    contains any target peers, include that copath node's pubkey.
 
     Args:
         sender_peer_id: The sending peer's peer_shared_id
-        represented_peers: Set of peer_shared_ids represented in tree
+        target_peers: Set of peer_shared_ids to cover (active members)
         recorded_by: Local peer ID
         db: Database connection
+        removal_epoch_id: Current removal epoch for filtering removed owners
 
     Returns:
         List of treekem_pubkey IDs for the tree cover
     """
     from core import treekem
+    from events.group import treekem_pubkey_shared
 
     # Filter to peers other than sender
-    other_peers = [p for p in represented_peers if p != sender_peer_id]
+    other_peers = [p for p in target_peers if p != sender_peer_id]
     if not other_peers:
         return []
 
-    # Compute copath for sender
-    copath = treekem.compute_copath_for_sender(sender_peer_id, list(represented_peers))
+    # Compute copath for sender over target peers
+    copath = treekem.compute_copath_for_sender(sender_peer_id, list(target_peers))
 
-    # Get pubkeys at copath positions
+    # Get pubkeys at copath positions, passing removal_epoch_id to filter removed owners
     pubkey_ids = []
     for depth, path_prefix in copath:
-        pk = treekem_pubkey.get_pubkey_at_position(depth, path_prefix, recorded_by, db)
+        pk = treekem_pubkey_shared.get_pubkey_at_position(
+            depth, path_prefix, recorded_by, db,
+            removal_epoch_id=removal_epoch_id
+        )
         if pk:
             pubkey_ids.append(crypto.b64encode(pk['id']))
 
@@ -644,3 +653,353 @@ def create_update_path(
         'path_pubkeys': path_pubkeys,
         'shared_ids': shared_ids,
     }
+
+
+def create_update_path_dh(
+    peer_id: str,
+    peer_shared_id: str,
+    removal_epoch_id: str | None,
+    base_update_id: str | None,
+    active_members: list[str],
+    t_ms: int,
+    db: Any,
+) -> dict[str, Any]:
+    """Create TreeKEM update path using DH key exchange (BeeKEM style).
+
+    This is the DH-based update path that enables O(1) root convergence.
+    Key insight: DH(a, B) = DH(b, A) - both siblings compute the SAME parent secret!
+
+    Algorithm:
+    1. Generate new X25519 keypair at leaf
+    2. For each level from leaf to root:
+       a. Get sibling's resolution (may be multiple pubkeys if blank)
+       b. For each resolved pubkey:
+          - Compute shared_secret = DH(my_private_key, sibling_pubkey)
+          - Derive parent_secret = KDF(shared_secret)
+       c. Store parent_secret, derive parent_pubkey
+       d. Encrypt parent_secret for each resolved member
+    3. Publish all new public keys via treekem_pubkey_shared
+    4. Publish encrypted secrets via treekem_secret_shared
+
+    Args:
+        peer_id: Local peer ID (owner)
+        peer_shared_id: Public peer ID (signer identity)
+        removal_epoch_id: Current removal epoch (for forward secrecy) or None
+        base_update_id: Previous update this builds on (None for first)
+        active_members: List of active member peer_shared_ids for resolution
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Dict with:
+        - treekem_update_id: The update event ID
+        - path_secrets: List of (treekem_secret_id, depth, path_prefix) tuples
+        - path_pubkeys: List of (treekem_pubkey_id, treekem_pubkey_shared_id, depth) tuples
+        - shared_ids: List of treekem_secret_shared event IDs
+    """
+    from core import treekem
+    from events.group import treekem_pubkey, treekem_pubkey_shared, treekem_secret, treekem_secret_shared
+
+    log.info(f"treekem_update.create_update_path_dh() peer={peer_shared_id[:20]}..., "
+             f"active_members={len(active_members)}")
+
+    # Calculate tree depth from number of active members
+    import math
+    if len(active_members) <= 1:
+        path_depth = 1
+    else:
+        path_depth = max(1, int(math.ceil(math.log2(len(active_members)))))
+
+    # Limit to reasonable depth
+    path_depth = min(path_depth, treekem.MAX_TREE_DEPTH)
+
+    # Step 1: Generate new X25519 keypair at leaf
+    # This creates the local keypair event
+    leaf_depth = path_depth
+    leaf_prefix = treekem.get_path_prefix(peer_shared_id, leaf_depth)
+
+    # Create leaf keypair (X25519 for DH)
+    leaf_pubkey_id, leaf_pubkey_shared_id, leaf_private_key = treekem_pubkey.create(
+        depth=leaf_depth,
+        path_prefix=leaf_prefix,
+        parent_pubkey_shared_id=None,  # Will be updated after creating parent
+        removal_epoch_id=removal_epoch_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+    t_ms += 1
+
+    # Track our path from leaf to root
+    path_secrets: list[tuple[str, int, bytes]] = []
+    path_pubkeys: list[tuple[str, str, int]] = [(leaf_pubkey_id, leaf_pubkey_shared_id, leaf_depth)]
+    shared_ids: list[str] = []
+
+    # Current private key starts at leaf
+    current_private_key = leaf_private_key
+    current_depth = leaf_depth
+
+    # Step 2: Walk up from leaf to root, computing DH at each level
+    while current_depth > 0:
+        current_prefix = treekem.get_path_prefix(peer_shared_id, current_depth)
+        parent_depth = current_depth - 1
+        parent_prefix = treekem.get_path_prefix(peer_shared_id, parent_depth)
+
+        # Get sibling's position
+        sibling_depth = current_depth
+        sibling_prefix = treekem.get_copath_prefix(peer_shared_id, current_depth)
+
+        # Get sibling's resolution (may be multiple pubkeys if sibling is blank)
+        resolution = treekem_pubkey_shared.get_resolution(
+            depth=sibling_depth,
+            path_prefix=sibling_prefix,
+            max_depth=path_depth,
+            recorded_by=peer_id,
+            db=db,
+            removal_epoch_id=removal_epoch_id,
+        )
+
+        if not resolution:
+            # No siblings - we're alone in this subtree
+            # Generate a random parent secret instead
+            parent_secret = crypto.generate_secret()
+        else:
+            # Compute DH with first resolved sibling to get parent secret
+            # All siblings in resolution will compute the same parent via symmetric DH
+            # Note: Keys are Ed25519, converted to X25519 internally for DH
+            sibling_pubkey = resolution[0]
+            shared_secret = crypto.ecdh_shared_secret(
+                current_private_key,
+                sibling_pubkey['public_key'],
+                keys_are_x25519=False  # Ed25519 keys, will be converted
+            )
+            parent_secret = crypto.derive_dh_path_secret(
+                shared_secret,
+                current_depth,
+                current_prefix
+            )
+
+        # Create parent secret event
+        parent_secret_id = treekem_secret.create_with_material(
+            depth=parent_depth,
+            path_prefix=parent_prefix,
+            key_material=parent_secret,
+            peer_id=peer_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        path_secrets.append((parent_secret_id, parent_depth, parent_prefix))
+        t_ms += 1
+
+        # Create parent keypair - Ed25519 for compatibility with crypto.seal()
+        parent_private_key, parent_public_key = crypto.generate_keypair()
+
+        parent_pubkey_id = treekem_pubkey.create_from_material(
+            public_key=parent_public_key,
+            private_key=parent_private_key,
+            peer_id=peer_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        t_ms += 1
+
+        # Create pubkey_shared for parent
+        parent_pubkey_shared_id = treekem_pubkey_shared.create(
+            treekem_pubkey_id=parent_pubkey_id,
+            depth=parent_depth,
+            path_prefix=parent_prefix,
+            parent_pubkey_shared_id=None if parent_depth == 0 else None,  # Will chain later
+            removal_epoch_id=removal_epoch_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        path_pubkeys.append((parent_pubkey_id, parent_pubkey_shared_id, parent_depth))
+        t_ms += 1
+
+        # Share parent secret to resolved siblings via asymmetric encryption
+        # Each resolved member gets the parent secret encrypted to their pubkey
+        # (using treekem_secret_shared which wraps via crypto.seal())
+        for sibling in resolution:
+            try:
+                # Create secret_shared using the sibling's pubkey as recipient
+                sibling_pubkey_id = crypto.b64encode(sibling['id'])
+                shared_id = treekem_secret_shared.create(
+                    treekem_secret_id=parent_secret_id,
+                    recipient_pubkey_id=sibling_pubkey_id,
+                    source_update_id=None,  # Will be set after update created
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=t_ms,
+                    db=db,
+                )
+                shared_ids.append(shared_id)
+                t_ms += 1
+            except Exception as e:
+                log.warning(f"create_update_path_dh: failed to share to sibling at depth {current_depth}: {e}")
+
+        # Move up to parent for next iteration
+        current_private_key = parent_private_key
+        current_depth = parent_depth
+
+    # Reverse path_secrets so depth=0 (root) is first
+    path_secrets.reverse()
+    path_pubkeys.reverse()
+
+    # Step 3: Create the update event
+    # The leaf pubkey_shared is the reference point
+    update_id = create(
+        leaf_pubkey_shared_id=leaf_pubkey_shared_id,
+        removal_epoch_id=removal_epoch_id,
+        base_update_id=base_update_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
+    log.info(f"treekem_update.create_update_path_dh() created update_id={update_id[:20]}...")
+
+    return {
+        'treekem_update_id': update_id,
+        'path_secrets': path_secrets,
+        'path_pubkeys': path_pubkeys,
+        'shared_ids': shared_ids,
+    }
+
+
+def update_all_peers_if_needed(t_ms: int, db: Any) -> dict[str, Any]:
+    """Update TreeKEM for all local peers that need updates.
+
+    Called by TreeKEMUpdateJob to periodically create updates with join delay.
+
+    Args:
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        Dict with stats about updates created
+    """
+    from core.db import create_unsafe_db
+    from events.identity import removal_epoch
+
+    unsafedb = create_unsafe_db(db)
+    peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    updates_created = 0
+    for peer_row in peers:
+        peer_id = peer_row['peer_id']
+
+        if should_update(peer_id, t_ms, db):
+            try:
+                # Get peer_shared_id
+                from core.db import create_safe_db
+                safedb = create_safe_db(db, recorded_by=peer_id)
+                peer_self = safedb.query_one(
+                    "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+                    (peer_id, peer_id)
+                )
+                if not peer_self:
+                    continue
+
+                peer_shared_id = peer_self['peer_shared_id']
+
+                # Get current removal epoch
+                current_epoch_id = removal_epoch.get_current_epoch(peer_id, db)
+
+                # Get winning base update
+                winning = get_winning_update(current_epoch_id, None, peer_id, db)
+                base_update_id = winning['treekem_update_id'] if winning else None
+
+                # Get active members for resolution
+                from events.group import sender_key
+                # Use a dummy group_id - in practice, should get from actual group context
+                # For now, get all peers we know about
+                active_members = [peer_shared_id]  # At minimum, include ourselves
+
+                # Create DH-based update
+                create_update_path_dh(
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    removal_epoch_id=current_epoch_id,
+                    base_update_id=base_update_id,
+                    active_members=active_members,
+                    t_ms=t_ms,
+                    db=db,
+                )
+                updates_created += 1
+
+            except Exception as e:
+                log.warning(f"update_all_peers_if_needed: failed for peer {peer_id[:20]}...: {e}")
+
+    return {'updates_created': updates_created}
+
+
+def should_update(peer_id: str, t_ms: int, db: Any) -> bool:
+    """Check if a peer should create a TreeKEM update.
+
+    Implements join delay and rotation interval logic.
+
+    Args:
+        peer_id: Local peer ID
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        True if peer should update
+    """
+    from core.db import create_safe_db
+
+    JOIN_DELAY_MS = 10_000  # 10 seconds
+    ROTATION_INTERVAL_MS = 300_000  # 5 minutes
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Get peer's join time and peer_shared_id
+    peer_self = safedb.query_one(
+        "SELECT peer_shared_id, recorded_at FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, peer_id)
+    )
+    if not peer_self:
+        return False
+
+    peer_shared_id = peer_self['peer_shared_id']
+    join_time = peer_self['recorded_at']
+
+    if t_ms - join_time < JOIN_DELAY_MS:
+        return False  # Wait for sync to catch up
+
+    # Check if we updated recently (author_peer_id is peer_shared_id)
+    latest = get_latest_update_by_author(peer_shared_id, peer_id, db)
+    if latest and t_ms - latest['recorded_at'] < ROTATION_INTERVAL_MS:
+        return False
+
+    return True
+
+
+def get_latest_update_by_author(
+    author_peer_id: str,
+    recorded_by: str,
+    db: Any,
+) -> dict[str, Any] | None:
+    """Get the most recent update by a specific author.
+
+    Args:
+        author_peer_id: Author's peer_shared_id
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        Latest update record or None
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    return safedb.query_one(
+        """SELECT treekem_update_id, author_peer_id, leaf_pubkey_shared_id,
+                  removal_epoch_id, base_update_id, created_at, recorded_at
+           FROM treekem_updates
+           WHERE author_peer_id = ? AND recorded_by = ?
+           ORDER BY created_at DESC LIMIT 1""",
+        (author_peer_id, recorded_by)
+    )

@@ -169,47 +169,62 @@ def get_pubkey_at_position(
     db: Any,
     removal_epoch_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Get the most recent pubkey at a specific tree position.
+    """Get the most recent VALID pubkey at a specific tree position.
+
+    A pubkey is valid if:
+    1. It exists at the (depth, path_prefix) position
+    2. Its owner is NOT removed in the current removal_epoch
+
+    This enables reusing old pubkeys for efficient removal handling:
+    after a removal, we can still use pubkeys from non-removed members
+    that were created in previous epochs.
 
     Args:
         depth: Tree depth
         path_prefix: Path prefix bytes
         recorded_by: Local peer ID requesting
         db: Database connection
-        removal_epoch_id: Optional removal epoch filter
+        removal_epoch_id: Current removal epoch for filtering removed owners
 
     Returns:
-        Key dict with format {'id': bytes, 'public_key': bytes, 'type': 'asymmetric'}
+        Key dict with format {'id': bytes, 'public_key': bytes, 'owner_peer_id': str, 'type': 'asymmetric'}
         or None if not found
     """
+    from events.identity import removal_epoch as removal_epoch_module
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Pad path_prefix to 16 bytes to match wire format storage
     path_prefix_padded = (path_prefix + b"\x00" * 16)[:16]
 
-    if removal_epoch_id is not None:
-        result = safedb.query_one(
-            """SELECT treekem_pubkey_id, public_key FROM treekem_pubkeys_shared
-               WHERE depth = ? AND path_prefix = ? AND removal_epoch_id = ? AND recorded_by = ?
-               ORDER BY created_at DESC LIMIT 1""",
-            (depth, path_prefix_padded, removal_epoch_id, recorded_by)
-        )
-    else:
-        result = safedb.query_one(
-            """SELECT treekem_pubkey_id, public_key FROM treekem_pubkeys_shared
-               WHERE depth = ? AND path_prefix = ? AND removal_epoch_id IS NULL AND recorded_by = ?
-               ORDER BY created_at DESC LIMIT 1""",
-            (depth, path_prefix_padded, recorded_by)
-        )
+    # Get all pubkeys at this position (any epoch), most recent first
+    # We search across ALL epochs, not just the current one, to enable
+    # reusing old pubkeys from non-removed members
+    results = safedb.query(
+        """SELECT treekem_pubkey_id, public_key, owner_peer_id
+           FROM treekem_pubkeys_shared
+           WHERE depth = ? AND path_prefix = ? AND recorded_by = ?
+           ORDER BY created_at DESC""",
+        (depth, path_prefix_padded, recorded_by)
+    )
 
-    if not result:
-        return None
+    # Return first pubkey whose owner is NOT removed
+    for result in results:
+        owner = result['owner_peer_id']
 
-    return {
-        'id': crypto.b64decode(result['treekem_pubkey_id']),
-        'public_key': result['public_key'],
-        'type': 'asymmetric'
-    }
+        # Check if owner is removed in the current epoch
+        if removal_epoch_id is not None:
+            if removal_epoch_module.is_removed(owner, removal_epoch_id, recorded_by, db):
+                continue  # Skip pubkeys from removed owners
+
+        return {
+            'id': crypto.b64decode(result['treekem_pubkey_id']),
+            'public_key': result['public_key'],
+            'owner_peer_id': owner,
+            'type': 'asymmetric'
+        }
+
+    return None
 
 
 def get_pubkey_by_id(
@@ -277,3 +292,101 @@ def list_pubkeys(peer_id: str, db: Any) -> list[dict[str, Any]]:
            ORDER BY created_at DESC""",
         (peer_id,)
     ))
+
+
+def get_resolution(
+    depth: int,
+    path_prefix: bytes,
+    max_depth: int,
+    recorded_by: str,
+    db: Any,
+    removal_epoch_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Find resolution of a potentially blank node for DH-based TreeKEM.
+
+    In TreeKEM, when a sibling node is blank (no pubkey), we need to find
+    its "resolution" - the highest non-blank descendants.
+
+    Example tree:
+    ```
+           root (depth 0)
+          /    \\
+       d=1    d=1 [BLANK]
+       / \\     / \\
+      A   B   C   D   (leaves at depth 2)
+    ```
+
+    If A updates and sibling at (d=1, prefix=0x01) is BLANK:
+    - Resolution = [C, D] (highest non-blank under that subtree)
+    - A must do separate DH+encryption for C AND D
+
+    Args:
+        depth: Tree depth of the node to resolve
+        path_prefix: Path prefix bytes for this node
+        max_depth: Maximum tree depth (leaf level)
+        recorded_by: Local peer ID
+        db: Database connection
+        removal_epoch_id: Current removal epoch for filtering removed owners
+
+    Returns:
+        List of pubkey dicts for DH, each with 'id', 'public_key', 'owner_peer_id', 'type'
+        If node has pubkey, returns just that pubkey.
+        If blank, recursively finds highest non-blank descendants.
+    """
+    # Check if this node has a pubkey
+    pubkey = get_pubkey_at_position(depth, path_prefix, recorded_by, db, removal_epoch_id)
+    if pubkey:
+        return [pubkey]
+
+    # Node is blank - recurse to children
+    if depth >= max_depth:
+        return []  # Leaf is blank (member removed or never joined)
+
+    # Build child prefixes by extending with 0 or 1
+    # Child prefix = parent prefix with one more bit
+    # Since path_prefix is byte-aligned, we need to handle bit positions
+    child_depth = depth + 1
+
+    # For the left child (bit = 0), keep same prefix bytes
+    # For the right child (bit = 1), set the bit at position 'depth'
+    left_prefix = path_prefix
+
+    # Calculate which byte and bit to set for right child
+    # Bit position 'depth' means we're setting bit (7 - depth % 8) in byte (depth // 8)
+    byte_idx = depth // 8
+    bit_idx = 7 - (depth % 8)
+
+    # Extend path_prefix if needed
+    right_prefix_list = list(path_prefix) + [0] * (byte_idx + 1 - len(path_prefix))
+    right_prefix_list[byte_idx] |= (1 << bit_idx)
+    right_prefix = bytes(right_prefix_list)
+
+    left_resolution = get_resolution(
+        child_depth, left_prefix, max_depth, recorded_by, db, removal_epoch_id
+    )
+    right_resolution = get_resolution(
+        child_depth, right_prefix, max_depth, recorded_by, db, removal_epoch_id
+    )
+
+    return left_resolution + right_resolution
+
+
+def get_sibling_position(peer_shared_id: str, depth: int) -> tuple[int, bytes]:
+    """Get the sibling's tree position at a given depth.
+
+    Args:
+        peer_shared_id: The peer's shared ID (determines their path)
+        depth: The depth to get sibling at
+
+    Returns:
+        (sibling_depth, sibling_prefix) tuple
+    """
+    from core import treekem
+
+    # Get our path prefix at this depth
+    my_prefix = treekem.get_path_prefix(peer_shared_id, depth)
+
+    # Sibling has the same prefix but with the last bit flipped
+    sibling_prefix = treekem.get_copath_prefix(peer_shared_id, depth)
+
+    return (depth, sibling_prefix)

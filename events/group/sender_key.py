@@ -161,12 +161,21 @@ def distribute_key_to_group(
     t_ms: int,
     db: Any,
 ) -> list[str]:
-    """Distribute a key to all group members via O(1) root broadcast, tree cover, or leaf fallback.
+    """Distribute a key to all group members via O(1) root broadcast or fallback.
+
+    DH-Based TreeKEM Strategy:
+    With DH-based TreeKEM (BeeKEM style), root convergence happens naturally:
+    - All members compute DH(my_secret, sibling_pubkey) at each level
+    - Since DH is symmetric, both siblings get the SAME parent secret
+    - Everyone converges to the SAME root secret after seeing updates
+    - O(1) broadcast with root secret reaches everyone!
 
     Distribution strategy (in order of preference):
-    1. O(1) ROOT BROADCAST: If we have the root secret, use single symmetric encryption
-    2. O(log n) TREE COVER: Encrypt to copath pubkeys for represented peers
-    3. O(# inactive) LEAF FALLBACK: Direct encryption to non-represented peers
+    1. O(1) ROOT BROADCAST: Use root secret for single symmetric encryption
+       - This is the primary path with DH-based TreeKEM
+       - All members who have seen updates share the same root
+    2. O(log n) TREE COVER: Encrypt to copath pubkeys (fallback during transition)
+    3. O(# without pubkeys) LEAF FALLBACK: Direct encryption to members without coverage
 
     Args:
         secret_id: Secret to distribute
@@ -184,79 +193,78 @@ def distribute_key_to_group(
 
     log.info(f"sender_key.distribute_key_to_group() secret={secret_id[:20]}..., group={group_id[:20]}..., epoch={removal_epoch_id}")
 
-    # Get all group members' peer_shared_ids
-    member_peer_ids = get_group_member_peer_ids(group_id, peer_id, db)
+    # Get active members (excluding removed)
+    active_members = get_active_members(group_id, removal_epoch_id, peer_id, db)
 
-    if not member_peer_ids:
-        log.warning(f"sender_key.distribute_key_to_group() no members found for group")
+    if not active_members:
+        log.warning(f"sender_key.distribute_key_to_group() no active members found for group")
         return []
 
-    other_members = [m for m in member_peer_ids if m != peer_shared_id]
+    other_members = [m for m in active_members if m != peer_shared_id]
     if not other_members:
         log.info(f"sender_key.distribute_key_to_group() only sender in group")
         return []
 
-    # Get peers represented in the winning tree (authors of updates in winning chain)
-    represented_peers = treekem_update.get_represented_peers(removal_epoch_id, peer_id, db)
-    log.info(f"sender_key.distribute_key_to_group() represented_peers={len(represented_peers)}, members={len(member_peer_ids)}")
+    log.info(f"sender_key.distribute_key_to_group() active_members={len(active_members)}, other_members={len(other_members)}")
 
-    # --- O(1) ROOT BROADCAST: Check if we have root secret for all represented peers ---
-    # This is the optimal case: all other members are in the tree and we have the root secret
-    non_represented = [m for m in other_members if m not in represented_peers]
-
-    if not non_represented and represented_peers:
-        # All other members are represented in the tree
-        # Check if we have the root secret
-        root_key = treekem_secret.get_root_secret_key_data(peer_id, db)
-        if root_key:
-            # O(1) BROADCAST - single symmetric encryption!
-            log.info(f"sender_key.distribute_key_to_group() O(1) BROADCAST - all {len(other_members)} members in tree")
-            try:
-                broadcast_id = secret_broadcast.create(
-                    secret_id=secret_id,
-                    source_update_id=None,
-                    peer_id=peer_id,
-                    peer_shared_id=peer_shared_id,
-                    t_ms=t_ms,
-                    db=db,
-                )
-                return [broadcast_id]
-            except Exception as e:
-                log.warning(f"sender_key.distribute_key_to_group() root broadcast failed: {e}, falling back to tree cover")
-
-    # --- FALLBACK: O(log n) tree cover + O(# inactive) leaf distribution ---
-    shared_ids: list[str] = []
-
-    # --- TREE COVER: O(log n) for represented peers ---
-    if represented_peers:
-        # Get tree cover pubkeys (copath nodes covering represented peers)
-        tree_cover_pubkey_ids = treekem_update.get_tree_cover_for_sender(
-            sender_peer_id=peer_shared_id,
-            represented_peers=represented_peers,
-            recorded_by=peer_id,
-            db=db,
-        )
-
-        if tree_cover_pubkey_ids:
-            log.info(f"sender_key.distribute_key_to_group() tree cover: {len(tree_cover_pubkey_ids)} pubkeys")
-            tree_shared_ids = secret_shared.share_secret_with_pubkeys(
+    # --- O(1) ROOT BROADCAST: Primary path with DH-based TreeKEM ---
+    # With DH, all members converge to the same root secret naturally.
+    # This is the optimal case and should be the common path.
+    root_key = treekem_secret.get_root_secret_key_data(peer_id, db)
+    if root_key:
+        # O(1) BROADCAST - single symmetric encryption reaches everyone!
+        log.info(f"sender_key.distribute_key_to_group() O(1) BROADCAST - root secret covers {len(other_members)} members")
+        try:
+            broadcast_id = secret_broadcast.create(
                 secret_id=secret_id,
+                source_update_id=None,
                 peer_id=peer_id,
                 peer_shared_id=peer_shared_id,
-                recipient_pubkey_ids=tree_cover_pubkey_ids,
-                removal_epoch_id=removal_epoch_id,
                 t_ms=t_ms,
                 db=db,
             )
-            shared_ids.extend(tree_shared_ids)
-            t_ms += len(tree_shared_ids)
+            return [broadcast_id]
+        except Exception as e:
+            log.warning(f"sender_key.distribute_key_to_group() root broadcast failed: {e}, falling back to tree cover")
 
-    # --- LEAF FALLBACK: O(# inactive) for non-represented peers ---
-    if non_represented:
-        log.info(f"sender_key.distribute_key_to_group() leaf fallback: {len(non_represented)} peers")
+    # --- FALLBACK: O(log n) tree cover ---
+    # Used during transition or when not all members have converged yet
+    shared_ids: list[str] = []
+
+    tree_cover_pubkey_ids = treekem_update.get_tree_cover_for_sender(
+        sender_peer_id=peer_shared_id,
+        target_peers=set(active_members),
+        recorded_by=peer_id,
+        db=db,
+        removal_epoch_id=removal_epoch_id,
+    )
+
+    covered_members: set[str] = set()
+    if tree_cover_pubkey_ids:
+        log.info(f"sender_key.distribute_key_to_group() tree cover fallback: {len(tree_cover_pubkey_ids)} pubkeys")
+        tree_shared_ids = secret_shared.share_secret_with_pubkeys(
+            secret_id=secret_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            recipient_pubkey_ids=tree_cover_pubkey_ids,
+            removal_epoch_id=removal_epoch_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        shared_ids.extend(tree_shared_ids)
+        t_ms += len(tree_shared_ids)
+        covered_members = set(other_members)
+
+    # --- LEAF FALLBACK: O(n) for members without any coverage ---
+    uncovered_members = [m for m in other_members if m not in covered_members]
+    if not tree_cover_pubkey_ids:
+        uncovered_members = other_members
+
+    if uncovered_members:
+        log.info(f"sender_key.distribute_key_to_group() leaf fallback: {len(uncovered_members)} peers")
         leaf_shared_ids = distribute_to_leaves(
             secret_id=secret_id,
-            member_peer_ids=non_represented,
+            member_peer_ids=uncovered_members,
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
             removal_epoch_id=removal_epoch_id,
@@ -348,6 +356,40 @@ def get_group_member_peer_ids(group_id: str, recorded_by: str, db: Any) -> list[
     )
 
     return [row['peer_shared_id'] for row in rows]
+
+
+def get_active_members(
+    group_id: str,
+    removal_epoch_id: str | None,
+    recorded_by: str,
+    db: Any,
+) -> list[str]:
+    """Get all active group members (excluding removed users).
+
+    Returns peer_shared_ids of members who are NOT removed in this epoch.
+    This is used for computing the proper set of recipients after removals.
+
+    Args:
+        group_id: Group ID
+        removal_epoch_id: Current removal epoch (or None if no removals)
+        recorded_by: Local peer ID
+        db: Database connection
+
+    Returns:
+        List of peer_shared_ids of active (non-removed) members
+    """
+    all_members = get_group_member_peer_ids(group_id, recorded_by, db)
+
+    if removal_epoch_id is None:
+        return all_members
+
+    # Filter out removed members
+    active = []
+    for member_peer_id in all_members:
+        if not removal_epoch.is_removed(member_peer_id, removal_epoch_id, recorded_by, db):
+            active.append(member_peer_id)
+
+    return active
 
 
 def get_copath_pubkeys(

@@ -36,6 +36,102 @@ def generate_keypair() -> Tuple[bytes, bytes]:
     return bytes(signing_key), bytes(signing_key.verify_key)
 
 
+def generate_x25519_keypair() -> Tuple[bytes, bytes]:
+    """Generate X25519 keypair for DH key exchange.
+
+    X25519 is the Diffie-Hellman function over Curve25519.
+    Used for TreeKEM DH-based path secret derivation.
+
+    Returns:
+        (private_key, public_key): 32-byte raw key bytes each
+    """
+    private = PrivateKey.generate()
+    public = private.public_key
+    return bytes(private), bytes(public)
+
+
+def ed25519_to_x25519_private(ed25519_private: bytes) -> bytes:
+    """Convert an Ed25519 private key to X25519 for DH operations.
+
+    Args:
+        ed25519_private: Ed25519 private (signing) key (32 bytes)
+
+    Returns:
+        X25519 private key (32 bytes)
+    """
+    signing_key = nacl.signing.SigningKey(ed25519_private)
+    curve_private = signing_key.to_curve25519_private_key()
+    return bytes(curve_private)
+
+
+def ed25519_to_x25519_public(ed25519_public: bytes) -> bytes:
+    """Convert an Ed25519 public key to X25519 for DH operations.
+
+    Args:
+        ed25519_public: Ed25519 public (verify) key (32 bytes)
+
+    Returns:
+        X25519 public key (32 bytes)
+    """
+    verify_key = nacl.signing.VerifyKey(ed25519_public)
+    curve_public = verify_key.to_curve25519_public_key()
+    return bytes(curve_public)
+
+
+def ecdh_shared_secret(my_private_key: bytes, their_public_key: bytes, keys_are_x25519: bool = True) -> bytes:
+    """Compute ECDH shared secret between two keys.
+
+    This is the core DH operation for TreeKEM:
+    DH(a, B) = DH(b, A) - both sides compute the same shared secret.
+
+    Args:
+        my_private_key: Our private key (32 bytes)
+        their_public_key: Peer's public key (32 bytes)
+        keys_are_x25519: If True, keys are raw X25519. If False, keys are Ed25519
+                         and will be converted to X25519 for DH.
+
+    Returns:
+        32-byte shared secret suitable for key derivation
+    """
+    if keys_are_x25519:
+        private = PrivateKey(my_private_key)
+        public = PublicKey(their_public_key)
+    else:
+        # Convert Ed25519 to X25519
+        private = PrivateKey(ed25519_to_x25519_private(my_private_key))
+        public = PublicKey(ed25519_to_x25519_public(their_public_key))
+
+    # Box computes the X25519 DH operation
+    box = Box(private, public)
+    # Extract the shared key from the box (this is the DH result + hashing)
+    return box.shared_key()
+
+
+def derive_dh_path_secret(shared_secret: bytes, depth: int, path_prefix: bytes) -> bytes:
+    """Derive parent secret from DH shared secret in TreeKEM path.
+
+    Used after computing DH(my_secret_key, sibling_public_key) to get
+    the parent secret at depth-1.
+
+    The context includes depth and path_prefix for domain separation.
+
+    Args:
+        shared_secret: Output of ecdh_shared_secret() (32 bytes)
+        depth: The current depth (used in context)
+        path_prefix: The path prefix at current depth
+
+    Returns:
+        Parent secret (32 bytes) at depth-1
+    """
+    # Domain-separated KDF: hash(context || secret)
+    context = b"treekem_dh_path_derive" + depth.to_bytes(1, 'big') + path_prefix
+    return nacl.hash.blake2b(
+        context + shared_secret,
+        digest_size=SECRET_SIZE,
+        encoder=nacl.encoding.RawEncoder
+    )
+
+
 def hash(data: bytes, size: int = KEY_ID_SIZE) -> bytes:
     """BLAKE2b hash. Default 16 bytes (128 bits) for key IDs."""
     return nacl.hash.blake2b(data, digest_size=size, encoder=nacl.encoding.RawEncoder)
@@ -117,7 +213,7 @@ def decrypt(ciphertext: bytes, key: bytes, nonce: bytes) -> bytes:
     return box.decrypt(nonce + ciphertext)
 
 
-def seal(plaintext: bytes, public_key: bytes) -> bytes:
+def seal(plaintext: bytes, public_key: bytes, is_x25519: bool = False) -> bytes:
     """Deterministically seal a message to a public key.
 
     In a content-addressed system, identical content produces identical event IDs,
@@ -126,10 +222,20 @@ def seal(plaintext: bytes, public_key: bytes) -> bytes:
     to enable reproducible event creation.
 
     Output format is SealedBox-compatible: ephemeral_public_key || Box(plaintext)
+
+    Args:
+        plaintext: Data to encrypt
+        public_key: Recipient's public key (32 bytes)
+        is_x25519: If True, public_key is already X25519. If False, it's Ed25519
+                   and will be converted to X25519 for encryption.
     """
-    # Convert Ed25519 to X25519 for encryption
-    verify_key = nacl.signing.VerifyKey(public_key)
-    recipient_curve = verify_key.to_curve25519_public_key()
+    if is_x25519:
+        # Direct X25519 public key
+        recipient_curve = PublicKey(public_key)
+    else:
+        # Convert Ed25519 to X25519 for encryption
+        verify_key = nacl.signing.VerifyKey(public_key)
+        recipient_curve = verify_key.to_curve25519_public_key()
 
     # Derive ephemeral keypair deterministically from recipient + plaintext
     # This ensures: same recipient + same plaintext → same ciphertext → same event_id
@@ -149,14 +255,24 @@ def seal(plaintext: bytes, public_key: bytes) -> bytes:
     return bytes(ephemeral_public) + nonce + ciphertext
 
 
-def unseal(sealed_data: bytes, private_key: bytes) -> bytes:
+def unseal(sealed_data: bytes, private_key: bytes, is_x25519: bool = False) -> bytes:
     """Unseal a deterministically sealed message with a private key.
 
     Expects format: ephemeral_public (32) || nonce (24) || ciphertext
+
+    Args:
+        sealed_data: The encrypted data
+        private_key: Recipient's private key (32 bytes)
+        is_x25519: If True, private_key is already X25519. If False, it's Ed25519
+                   and will be converted to X25519 for decryption.
     """
-    # Convert Ed25519 to X25519 for decryption
-    signing_key = nacl.signing.SigningKey(private_key)
-    recipient_private = signing_key.to_curve25519_private_key()
+    if is_x25519:
+        # Direct X25519 private key
+        recipient_private = PrivateKey(private_key)
+    else:
+        # Convert Ed25519 to X25519 for decryption
+        signing_key = nacl.signing.SigningKey(private_key)
+        recipient_private = signing_key.to_curve25519_private_key()
 
     # Parse sealed format: ephemeral_public || nonce || ciphertext
     ephemeral_public = PublicKey(sealed_data[:32])

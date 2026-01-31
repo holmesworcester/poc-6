@@ -53,6 +53,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
     - Derive K_{D-1} = KDF(K_D, context)
     - Continue until K_0 (root)
     - Emit treekem_secret events at ALL depths
+
+    DH-Based Reception (BeeKEM style):
+    When receiving a DH-encrypted secret, the recipient:
+    1. Gets sender's new public key from treekem_pubkeys_shared
+    2. Computes shared_secret = DH(my_private_key, sender_pubkey)
+    3. Uses shared_secret as the decryption key
+    4. Derives all ancestors via KDF to reach the same root as sender
     """
     event_data = ctx.event_data
 
@@ -63,6 +70,9 @@ def project_pure(ctx: Any) -> ProjectorResult:
     source_update_id = event_data.get('source_update_id')  # Can be None
     depth = event_data.get('depth')
     path_prefix_b64 = event_data.get('path_prefix')
+
+    # Optional: sender's pubkey for DH computation (new DH-based field)
+    sender_pubkey_b64 = event_data.get('sender_pubkey')
 
     if not treekem_secret_id or not symmetric_key_b64 or not recipient_pubkey_id or depth is None:
         return ProjectorResult(writes=tuple(), valid_event=False)
@@ -122,16 +132,13 @@ def project_pure(ctx: Any) -> ProjectorResult:
             break  # Reached root
 
         # Derive parent secret using KDF
+        # Note: For DH-based TreeKEM, both sender and receiver use the same KDF
+        # to derive parent secrets from the DH shared secret
         current_key = crypto.derive_path_secret(current_key, current_depth, current_prefix)
         current_depth -= 1
-        # Truncate path_prefix for parent (remove last bit position)
-        # Path prefix at depth D-1 is the parent's prefix, which is the prefix at D
-        # with the last bit's byte contribution removed
-        # For simplicity, parent prefix is current_prefix truncated based on depth
-        # Actually, the path_prefix is always the same bytes but represents fewer bits at shallower depths
-        # We just store the same bytes but the depth tells us how many bits matter
-        # So we keep the same path_prefix bytes
-        current_prefix = current_prefix  # Same bytes, different semantic depth
+        # Parent prefix is the same bytes but represents fewer bits at shallower depths
+        # We keep the same path_prefix bytes (semantic meaning changes with depth)
+        current_prefix = current_prefix
 
     # Insert into treekem_secrets_shared tracking table
     writes = (
@@ -156,6 +163,91 @@ def project_pure(ctx: Any) -> ProjectorResult:
         valid_event=True,
         emit_events=tuple(emit_events),
     )
+
+
+def create_dh_encrypted(
+    parent_secret: bytes,
+    depth: int,
+    path_prefix: bytes,
+    recipient_pubkey_id: str,
+    dh_shared_secret: bytes,
+    source_update_id: str | None,
+    peer_id: str,
+    peer_shared_id: str,
+    t_ms: int,
+    db: Any,
+) -> str:
+    """Create a DH-encrypted treekem_secret_shared event.
+
+    This is for DH-based TreeKEM where the parent secret is encrypted
+    using the DH shared secret computed between sender and recipient.
+
+    Args:
+        parent_secret: The parent secret to share (32 bytes)
+        depth: Depth of the parent secret (depth of shared node)
+        path_prefix: Path prefix at the parent depth
+        recipient_pubkey_id: Recipient's treekem_pubkey ID
+        dh_shared_secret: The DH shared secret for encryption
+        source_update_id: The treekem_update this is part of (optional)
+        peer_id: Local peer ID
+        peer_shared_id: Public peer ID (for signing)
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        treekem_secret_shared_id: The stored event ID
+    """
+    log.info(f"treekem_secret_shared.create_dh_encrypted() depth={depth}, "
+             f"recipient={recipient_pubkey_id[:20]}...")
+
+    # Create a local treekem_secret for the parent
+    from events.group import treekem_secret
+    parent_secret_id = treekem_secret.create_with_material(
+        depth=depth,
+        path_prefix=path_prefix,
+        key_material=parent_secret,
+        peer_id=peer_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
+    # Get recipient's treekem_pubkey for wrapping
+    from events.group import treekem_pubkey
+    recipient_pk = treekem_pubkey.get_treekem_pubkey_by_id(recipient_pubkey_id, peer_id, db)
+
+    if not recipient_pk:
+        raise ValueError(f"No treekem_pubkey found: {recipient_pubkey_id}")
+
+    recipient_pubkey = {
+        'id': crypto.b64decode(recipient_pubkey_id),
+        'public_key': recipient_pk['public_key'],
+        'type': 'asymmetric'
+    }
+
+    # Get signing key
+    from events.identity import peer
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+
+    # Create signed wrapped event - the secret is already the DH-derived parent secret
+    blob = wire_format.encode_treekem_secret_shared_wire_event(
+        treekem_secret_id_b64=parent_secret_id,
+        symmetric_key_b64=crypto.b64encode(parent_secret),
+        recipient_pubkey_id_b64=recipient_pubkey_id,
+        source_update_id_b64=source_update_id,
+        depth=depth,
+        path_prefix=path_prefix,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        recipient_pubkey=recipient_pubkey,
+        private_key=private_key,
+    )
+
+    # Store event
+    treekem_secret_shared_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"treekem_secret_shared.create_dh_encrypted() created treekem_secret_shared_id={treekem_secret_shared_id[:20]}...")
+    return treekem_secret_shared_id
 
 
 def create(

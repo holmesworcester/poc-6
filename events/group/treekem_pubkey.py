@@ -135,7 +135,7 @@ def create(
     return treekem_pubkey_id, treekem_pubkey_shared_id, private_key
 
 
-def _create_local(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
+def _create_local(peer_id: str, t_ms: int, db: Any, use_x25519: bool = False) -> tuple[str, bytes]:
     """Create a new local treekem_pubkey event with a fresh keypair (internal).
 
     This creates the LOCAL event that stores the keypair. Called by create().
@@ -144,14 +144,26 @@ def _create_local(peer_id: str, t_ms: int, db: Any) -> tuple[str, bytes]:
         peer_id: Local peer ID (owner of this keypair)
         t_ms: Timestamp
         db: Database connection
+        use_x25519: If True, generate X25519 keypair for direct DH operations.
+                   If False (default), generate Ed25519 keypair for asymmetric
+                   encryption via crypto.seal(). Ed25519 keys can be converted
+                   to X25519 for DH operations.
 
     Returns:
         (treekem_pubkey_id, private_key): The treekem_pubkey event ID and private key bytes
     """
-    log.info(f"treekem_pubkey._create_local() creating keypair for peer_id={peer_id}, t_ms={t_ms}")
+    log.info(f"treekem_pubkey._create_local() creating keypair for peer_id={peer_id}, t_ms={t_ms}, x25519={use_x25519}")
 
-    # Generate Ed25519 keypair
-    private_key, public_key = crypto.generate_keypair()
+    # Generate keypair
+    # Ed25519 is the default because:
+    # 1. crypto.seal() expects Ed25519 and converts to X25519 internally
+    # 2. Ed25519 keys CAN be converted to X25519 for DH operations
+    # 3. Maintains backward compatibility with existing code
+    if use_x25519:
+        private_key, public_key = crypto.generate_x25519_keypair()
+    else:
+        # Ed25519 - can be converted to X25519 for DH via nacl
+        private_key, public_key = crypto.generate_keypair()
 
     # Create DETERMINISTIC event blob - only type and keys, created_at=0
     # This ensures same key material = same treekem_pubkey_id on all peers
