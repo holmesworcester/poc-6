@@ -548,10 +548,55 @@ class IntroProcessJob(Job):
 
 
 class NegentropySyncJob(Job):
-    """Send negentropy sync messages to all established connections."""
+    """Send negentropy sync messages to all established connections.
+
+    In star topology, negentropy runs slower (10s) since fanout handles
+    real-time delivery. Negentropy becomes a background consistency check.
+    """
+
+    # Interval in star mode (10 seconds - fanout handles real-time)
+    STAR_MODE_INTERVAL_MS = 10_000
+    # Interval in mesh mode (1 second - negentropy is primary sync)
+    MESH_MODE_INTERVAL_MS = 1_000
 
     def __init__(self):
-        super().__init__('negentropy_sync', every_ms=1_000, budget_ms=25)  # 1 second
+        super().__init__('negentropy_sync', every_ms=self.MESH_MODE_INTERVAL_MS, budget_ms=25)
+
+    def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
+        """Check if negentropy sync should run.
+
+        Uses slower interval in star mode since fanout handles real-time delivery.
+        """
+        # Determine effective interval based on network sync mode
+        effective_every_ms = self._get_effective_interval(db)
+        effective_interval = int(effective_every_ms * _frequency_multiplier)
+
+        # Always run on first tick
+        if last_run_at == 0:
+            return True
+
+        return t_ms - last_run_at >= effective_interval
+
+    def _get_effective_interval(self, db: Any) -> int:
+        """Get sync interval based on network topology.
+
+        Returns slower interval if ANY peer is in star mode.
+        """
+        from events.identity import network as network_module
+        from events.identity import network_settings
+
+        unsafedb = create_unsafe_db(db)
+        local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+        for peer_row in local_peers:
+            peer_id = peer_row['peer_id']
+            network_id = network_module.get_network_id(peer_id, db)
+            if network_id:
+                sync_mode = network_settings.get_sync_mode(network_id, peer_id, db)
+                if sync_mode == 'star':
+                    return self.STAR_MODE_INTERVAL_MS
+
+        return self.MESH_MODE_INTERVAL_MS
 
     def run(self, t_ms: int, db: Any) -> dict:
         from events.network import negentropy

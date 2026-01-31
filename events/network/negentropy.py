@@ -1184,6 +1184,63 @@ def add_event_to_sync(
 # ============================================================================
 
 
+def _fanout_new_events(
+    events: list[tuple[str, int, int]],  # List of (event_id, created_at, recorded_at)
+    peer_id: str,
+    db
+) -> int:
+    """Fanout new shareable events in star topology.
+
+    In star topology:
+    - Clients send events to server relay
+    - Server fans out events to all clients
+
+    This is called when events are marked as shareable. It provides
+    near-instant event delivery without waiting for negentropy sync.
+
+    Args:
+        events: List of (event_id, created_at, recorded_at) tuples
+        peer_id: The peer recording these events
+        db: Database connection
+
+    Returns:
+        Number of events fanned out
+    """
+    if not events:
+        return 0
+
+    from events.identity import network as network_module
+    from events.network import server_connection
+    from core.db import create_unsafe_db
+
+    # Get network_id to check sync mode
+    network_id = network_module.get_network_id(peer_id, db)
+    if not network_id:
+        return 0  # No network yet
+
+    # Get most recent recorded_at for timestamp
+    t_ms = max(e[2] for e in events)
+
+    unsafedb = create_unsafe_db(db)
+    fanned_out = 0
+
+    for event_id, created_at, recorded_at in events:
+        # Get event blob
+        event_blob = store.get(event_id, unsafedb)
+        if not event_blob:
+            continue
+
+        # Fanout (will check star mode internally)
+        sent = server_connection.fanout_event(event_blob, peer_id, network_id, t_ms, db)
+        if sent > 0:
+            fanned_out += 1
+
+    if fanned_out > 0:
+        log.debug(f"_fanout_new_events: fanned out {fanned_out}/{len(events)} events for peer={peer_id[:20]}...")
+
+    return fanned_out
+
+
 def add_shareable_events_batch(
     events: list[tuple[str, int, int]],  # List of (event_id, created_at, recorded_at)
     can_share_peer_id: str,
@@ -1229,6 +1286,9 @@ def add_shareable_events_batch(
     # Batch add to negentropy (unless skipped)
     if not skip_negentropy:
         add_events_to_sync_batch(db, can_share_peer_id, negentropy_events, defer_buckets=defer_buckets)
+
+    # Star topology fanout: immediately send new events to server/peers
+    _fanout_new_events(events, can_share_peer_id, db)
 
     log.debug(f"add_shareable_events_batch: added {len(events)} events for peer={can_share_peer_id[:20]}... (defer={defer_buckets})")
 

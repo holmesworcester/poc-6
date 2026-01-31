@@ -218,6 +218,102 @@ def get_sync_targets(peer_id: str, network_id: str, db: Any) -> list[str]:
     return [server_peer_shared_id]
 
 
+def fanout_event(event_blob: bytes, peer_id: str, network_id: str, t_ms: int, db: Any) -> int:
+    """Send event to server relay for fanout (star topology).
+
+    In star topology, when a peer creates an event, it sends directly
+    to the server relay. The server then fans out to all other peers.
+
+    Args:
+        event_blob: The event blob to send
+        peer_id: Local peer ID
+        network_id: Network context
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        Number of peers the event was sent to (0 if not in star mode)
+    """
+    from events.identity import network_settings
+    from events.identity.peer_shared import get_self
+
+    # Check if we're in star mode
+    sync_mode = network_settings.get_sync_mode(network_id, peer_id, db)
+    if sync_mode != 'star':
+        return 0  # Mesh mode - no fanout
+
+    relay_info = network_settings.get_server_relay(network_id, peer_id, db)
+    if not relay_info or not relay_info.get('peer_shared_id'):
+        return 0  # No server configured
+
+    server_peer_shared_id = relay_info['peer_shared_id']
+
+    # Check if WE are the server relay
+    identity = get_self(peer_id, db)
+    our_peer_shared_id = identity.get('peer_shared_id') if identity else None
+
+    if our_peer_shared_id == server_peer_shared_id:
+        # We ARE the server - fan out to all peers
+        return _server_fanout(event_blob, peer_id, network_id, t_ms, db)
+    else:
+        # We're a client - send to server
+        return _send_to_server(event_blob, peer_id, server_peer_shared_id, t_ms, db)
+
+
+def _send_to_server(event_blob: bytes, peer_id: str, server_peer_shared_id: str, t_ms: int, db: Any) -> int:
+    """Send event to server relay.
+
+    Args:
+        event_blob: Event to send
+        peer_id: Our peer ID
+        server_peer_shared_id: Server's peer_shared_id
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        1 if sent, 0 if failed
+    """
+    from events.network import connection_request
+
+    # Find connection to server
+    conns = connection_request.get_connections(peer_id, 0, db)
+    for conn in conns:
+        if conn.peer_shared_id == server_peer_shared_id and conn.key_id:
+            # Send event wrapped for this connection
+            if connection_request.send(peer_id, conn.key_id, event_blob, t_ms, db):
+                return 1
+
+    return 0
+
+
+def _server_fanout(event_blob: bytes, peer_id: str, network_id: str, t_ms: int, db: Any) -> int:
+    """Server fans out event to all connected peers.
+
+    Args:
+        event_blob: Event to fan out
+        peer_id: Server's peer ID
+        network_id: Network context
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        Number of peers sent to
+    """
+    from events.network import connection_request
+
+    # Get all connections
+    conns = connection_request.get_connections(peer_id, 0, db)
+
+    sent_count = 0
+    for conn in conns:
+        if conn.key_id:  # Only established connections
+            if connection_request.send(peer_id, conn.key_id, event_blob, t_ms, db):
+                sent_count += 1
+
+    log.debug(f"_server_fanout() sent event to {sent_count} peers")
+    return sent_count
+
+
 def should_sync_with_peer(
     our_peer_id: str,
     our_peer_shared_id: str,
