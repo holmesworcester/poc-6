@@ -319,12 +319,9 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         from events.network import negentropy
         # Build batch: (event_id, created_at, recorded_at)
         shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
-        # Defer bucket computation for efficiency - we'll rebuild once at the end
-        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=False)
-
-        # Rebuild all bucket hashes in one efficient pass (unless caller defers)
-        if not defer_bucket_rebuild:
-            negentropy.rebuild_buckets_for_peer(db, peer_id)
+        # defer_buckets controls whether we do incremental updates now or defer to caller
+        # Incremental updates (defer_buckets=False) are efficient - only process new events
+        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=defer_bucket_rebuild)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)

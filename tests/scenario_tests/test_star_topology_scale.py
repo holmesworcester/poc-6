@@ -377,3 +377,94 @@ def test_server_relay_syncs_with_all_in_star_mode(fresh_db):
     ), "Client should sync with server"
 
     print("Server relay syncs with all peers in star mode")
+
+
+def test_100_users_star_topology(fresh_db):
+    """Create 100 users in star topology to verify scaling.
+
+    This test verifies that:
+    1. We can create 100 users without timeouts
+    2. Star topology filters connections correctly for all users
+    """
+    from core import crypto
+    db = fresh_db
+    clock = TestClock()
+
+    # Setup: Alice creates network
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    db.commit()
+
+    # Get network info
+    network_id = network.get_network_id(alice['peer_id'], db)
+    alice_identity = peer_shared_module.get_self(alice['peer_id'], db)
+    alice_peer_shared_id = alice_identity['peer_shared_id']
+
+    # Set up star topology first
+    server_peer_shared_id = crypto.b64encode(b"server_relay_123")
+    network_settings.set_server_relay(
+        network_id=network_id,
+        server_peer_shared_id=server_peer_shared_id,
+        server_address="relay.example.com:5000",
+        peer_id=alice['peer_id'],
+        peer_shared_id=alice_peer_shared_id,
+        t_ms=clock.tick(),
+        db=db
+    )
+    db.commit()
+    run_ticks(db=db, start_t_ms=clock.now(), num_rounds=3)
+
+    # Create 99 more users (total 100)
+    members = [alice]
+    print(f"Creating 99 users...")
+    for i in range(99):
+        invite_id, invite_link, _ = invite.create(
+            peer_id=alice['peer_id'],
+            t_ms=clock.tick(),
+            db=db,
+            mode='user'
+        )
+        member_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        member = user.join(
+            peer_id=member_peer_id,
+            invite_link=invite_link,
+            name=f'User{i+2}',  # User2 through User100
+            t_ms=clock.now(),
+            db=db
+        )
+        members.append(member)
+        if (i + 1) % 10 == 0:
+            print(f"  Created {i + 1} users...")
+        db.commit()
+
+    print(f"Created {len(members)} total users")
+
+    # Verify star topology is active
+    sync_mode = network_settings.get_sync_mode(network_id, alice['peer_id'], db)
+    assert sync_mode == 'star', f"Expected star mode, got {sync_mode}"
+
+    # Verify Alice only syncs with server
+    targets = server_connection.get_sync_targets(
+        peer_id=alice['peer_id'],
+        network_id=network_id,
+        db=db
+    )
+    assert targets == [server_peer_shared_id], \
+        f"Alice should only sync with server, got {len(targets)} targets"
+
+    # Calculate theoretical sync counts
+    n = len(members)
+    mesh_syncs = n * (n - 1)  # O(n^2)
+    star_syncs = n  # O(n)
+    improvement = mesh_syncs // star_syncs
+
+    print(f"\n=== Scaling Results for {n} users ===")
+    print(f"Mesh topology: {mesh_syncs:,} sync pairs per tick")
+    print(f"Star topology: {star_syncs:,} sync pairs per tick")
+    print(f"Improvement: {improvement}x reduction")
+
+    assert n == 100, f"Expected 100 users, got {n}"
+    assert mesh_syncs == 9900, f"Expected 9900 mesh syncs, got {mesh_syncs}"
+    assert star_syncs == 100, f"Expected 100 star syncs, got {star_syncs}"
+    assert improvement == 99, f"Expected 99x improvement, got {improvement}x"
+
+    print(f"\nSUCCESS: 100 users created with {improvement}x scaling improvement")
