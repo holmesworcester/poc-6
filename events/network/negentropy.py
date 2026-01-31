@@ -685,6 +685,151 @@ def get_child_prefix_len(level: str) -> int:
 
 
 # ============================================================================
+# Binary Bisection Functions
+# ============================================================================
+
+# Range constants (48-bit unified key space)
+RANGE_MIN = 0
+RANGE_MAX = (1 << 48)  # Exclusive end (one past max valid key)
+
+
+def range_to_hex(value: int) -> str:
+    """Convert range value to hex string.
+
+    Uses 12 chars for values < 2^48, 13 chars for 2^48 (exclusive end).
+    """
+    if value >= RANGE_MAX:
+        return f"{value:013x}"
+    return f"{value:012x}"
+
+
+def hex_to_range(hex_str: str) -> int:
+    """Convert hex string to range value."""
+    return int(hex_str, 16)
+
+
+def range_midpoint(start: int, end: int) -> int:
+    """Compute midpoint of a range for binary bisection."""
+    return start + (end - start) // 2
+
+
+def compute_range_hash(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> bytes:
+    """Compute XOR fingerprint hash for all events in range [start, end).
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive) as integer
+        end: Range end (exclusive) as integer
+
+    Returns:
+        16-byte XOR fingerprint, or ZERO_HASH if no events in range
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    start_hex = range_to_hex(start)
+    end_hex = range_to_hex(end)
+
+    # Query events with unified_key in [start_hex, end_hex)
+    rows = safedb.query("""
+        SELECT event_id FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+    """, (recorded_by, start_hex, end_hex))
+
+    if not rows:
+        return ZERO_HASH
+
+    # XOR all fingerprints
+    result = ZERO_HASH
+    for row in rows:
+        fp = compute_fingerprint(row['event_id'])
+        result = xor_bytes(result, fp)
+
+    return result
+
+
+def count_events_in_range(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> int:
+    """Count events in range [start, end)."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    start_hex = range_to_hex(start)
+    end_hex = range_to_hex(end)
+
+    row = safedb.query_one("""
+        SELECT COUNT(*) as cnt FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+    """, (recorded_by, start_hex, end_hex))
+
+    return row['cnt'] if row else 0
+
+
+def get_events_in_range(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> list[str]:
+    """Get all event IDs in range [start, end)."""
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    start_hex = range_to_hex(start)
+    end_hex = range_to_hex(end)
+
+    rows = safedb.query("""
+        SELECT event_id FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+        ORDER BY unified_key
+    """, (recorded_by, start_hex, end_hex))
+
+    return [row['event_id'] for row in rows]
+
+
+def first_leaf_in_range(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+    threshold: int = EVENTS_THRESHOLD,
+) -> tuple[int, int]:
+    """Find the first leaf range (count <= threshold) within [start, end).
+
+    Uses binary search to find the smallest prefix range starting at 'start'
+    that contains <= threshold events.
+
+    Returns:
+        (leaf_start, leaf_end) tuple
+    """
+    # Start with the full range
+    leaf_start = start
+    leaf_end = end
+
+    while True:
+        count = count_events_in_range(db, recorded_by, leaf_start, leaf_end)
+
+        if count <= threshold:
+            # This range is small enough
+            return (leaf_start, leaf_end)
+
+        # Too many events - bisect and take left half
+        mid = range_midpoint(leaf_start, leaf_end)
+        if mid <= leaf_start:
+            # Can't bisect further
+            return (leaf_start, leaf_end)
+
+        leaf_end = mid
+
+
+# ============================================================================
 # XOR Fingerprint Hashing (O(1) bucket updates)
 # ============================================================================
 
@@ -2108,6 +2253,199 @@ def get_global_sync_status(db, t_ms: int) -> dict:
         'synced_connections': total_synced,
         'by_peer': by_peer,
     }
+
+
+# ============================================================================
+# Binary Bisection Protocol V2
+# ============================================================================
+# Stateless ping-pong protocol with binary bisection.
+# Each message is self-describing: (start, end, hash)
+# No session state needed - range IS the state.
+
+# Message types for v2 protocol
+MSG_V2_RANGE = 4      # Range hash message
+MSG_V2_MATCH = 5      # Explicit match confirmation
+
+
+def handle_v2_range(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int,
+) -> list[dict]:
+    """Handle a v2 range message using binary bisection.
+
+    Protocol rules:
+    - their_hash == our_hash: send MATCH
+    - their_hash == ZERO: send events from first leaf + next range
+    - our_hash == ZERO: send ZERO to request events
+    - mismatch: bisect (if large) or send events (if small)
+
+    Args:
+        db: Database connection
+        recorded_by: Local peer ID
+        connection_id: Connection ID
+        msg: Message dict with 'start', 'end', 'hash' (hex strings)
+        t_ms: Current timestamp
+
+    Returns:
+        List of response messages
+    """
+    start = hex_to_range(msg['start'])
+    end = hex_to_range(msg['end'])
+    their_hash = bytes.fromhex(msg['hash']) if msg.get('hash') else ZERO_HASH
+
+    our_hash = compute_range_hash(db, recorded_by, start, end)
+
+    responses = []
+
+    # Case 1: Hashes match
+    if their_hash == our_hash:
+        responses.append({
+            'type': 'v2_match',
+            'start': msg['start'],
+            'end': msg['end'],
+        })
+        return responses
+
+    # Case 2: They have nothing (ZERO), we have events
+    if their_hash == ZERO_HASH and our_hash != ZERO_HASH:
+        # Find first leaf and send events
+        leaf_start, leaf_end = first_leaf_in_range(db, recorded_by, start, end)
+        event_ids = get_events_in_range(db, recorded_by, leaf_start, leaf_end)
+
+        # Send event blobs
+        if event_ids:
+            _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+
+        # Send leaf range hash (for verification)
+        leaf_hash = compute_range_hash(db, recorded_by, leaf_start, leaf_end)
+        responses.append({
+            'type': 'v2_range',
+            'start': range_to_hex(leaf_start),
+            'end': range_to_hex(leaf_end),
+            'hash': leaf_hash.hex(),
+        })
+
+        # Send next range hash (to continue)
+        if leaf_end < end:
+            next_hash = compute_range_hash(db, recorded_by, leaf_end, end)
+            responses.append({
+                'type': 'v2_range',
+                'start': range_to_hex(leaf_end),
+                'end': range_to_hex(end),
+                'hash': next_hash.hex(),
+            })
+
+        return responses
+
+    # Case 3: We have nothing (ZERO), they have events
+    if our_hash == ZERO_HASH and their_hash != ZERO_HASH:
+        # Request events by sending ZERO
+        responses.append({
+            'type': 'v2_range',
+            'start': msg['start'],
+            'end': msg['end'],
+            'hash': ZERO_HASH.hex(),
+        })
+        return responses
+
+    # Case 4: Both have events but hashes differ - bisect or send
+    count = count_events_in_range(db, recorded_by, start, end)
+
+    if count <= EVENTS_THRESHOLD:
+        # Small enough - send events directly
+        event_ids = get_events_in_range(db, recorded_by, start, end)
+
+        if event_ids:
+            _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+
+        # Send our hash for verification
+        responses.append({
+            'type': 'v2_range',
+            'start': msg['start'],
+            'end': msg['end'],
+            'hash': our_hash.hex(),
+        })
+
+    else:
+        # Too many events - bisect
+        mid = range_midpoint(start, end)
+
+        left_hash = compute_range_hash(db, recorded_by, start, mid)
+        right_hash = compute_range_hash(db, recorded_by, mid, end)
+
+        responses.append({
+            'type': 'v2_range',
+            'start': range_to_hex(start),
+            'end': range_to_hex(mid),
+            'hash': left_hash.hex(),
+        })
+        responses.append({
+            'type': 'v2_range',
+            'start': range_to_hex(mid),
+            'end': range_to_hex(end),
+            'hash': right_hash.hex(),
+        })
+
+    return responses
+
+
+def handle_v2_match(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int,
+) -> list[dict]:
+    """Handle a v2 match confirmation.
+
+    This is an explicit ACK that the range is synced.
+    No response needed.
+    """
+    # Log for debugging
+    log.debug(f"v2_match: range [{msg['start']}, {msg['end']}) synced")
+    return []
+
+
+def handle_v2_message(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int,
+) -> list[dict]:
+    """Route v2 protocol messages."""
+    msg_type = msg.get('type')
+
+    if msg_type == 'v2_range':
+        return handle_v2_range(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'v2_match':
+        return handle_v2_match(db, recorded_by, connection_id, msg, t_ms)
+    else:
+        log.warning(f"Unknown v2 message type: {msg_type}")
+        return []
+
+
+def initiate_v2_sync(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    t_ms: int,
+) -> list[dict]:
+    """Initiate v2 sync by sending root range hash.
+
+    Returns list of messages to send.
+    """
+    root_hash = compute_range_hash(db, recorded_by, RANGE_MIN, RANGE_MAX)
+
+    return [{
+        'type': 'v2_range',
+        'start': range_to_hex(RANGE_MIN),
+        'end': range_to_hex(RANGE_MAX),
+        'hash': root_hash.hex(),
+    }]
 
 
 # ============================================================================
