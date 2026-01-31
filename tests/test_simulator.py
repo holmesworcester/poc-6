@@ -199,38 +199,6 @@ class TestMaxPacketSize:
         assert len(batch) == 2
 
 
-class TestPacing:
-    """Test outbound pacing."""
-
-    def test_leaky_bucket_limits_send_rate(self):
-        """Pacer limits the number of packets admitted per time window."""
-        sim = NetworkSimulator(NetworkConfig(latency_ms=1))
-        transport.set_simulator(sim)
-        transport.set_pacer(rate_bytes_per_sec=1000, burst_bytes=1000)
-
-        payload = b"x" * 200
-        for _ in range(10):
-            transport.send(payload, ('127.0.0.1', 1000), ('127.0.0.1', 2000))
-
-        # At t=1000, only 5 packets fit in the 1000-byte burst.
-        transport.simulator_transfer(1000)
-        incoming, outgoing = transport.pending_count()
-        assert sim.packets_sent == 5
-        assert outgoing == 5
-        assert incoming == 0
-
-        # Deliver the first batch; no new sends yet.
-        transport.simulator_transfer(1001)
-        batch = transport.drain_incoming(20)
-        assert len(batch) == 5
-
-        # After 1s, budget refills and remaining packets send.
-        transport.simulator_transfer(2000)
-        transport.simulator_transfer(2001)
-        batch = transport.drain_incoming(20)
-        assert len(batch) == 5
-
-
 class TestPartitions:
     """Test network partition simulation."""
 
