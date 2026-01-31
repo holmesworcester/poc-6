@@ -1,4 +1,7 @@
-"""Peer name update event type (encrypted name update for peers/devices)."""
+"""Peer name update event type (encrypted name update for peers/devices).
+
+In sender key model, peer_name_update is encrypted with sender keys to the main group.
+"""
 
 # Registry metadata
 EVENT_TYPE = 'peer_name_update'
@@ -16,12 +19,12 @@ import logging
 from core import crypto
 from core import store
 from core import wire_format
-from events.group import group
+from events.group import group, sender_key
 from core.db import create_safe_db
 from core.projection.types import ProjectorResult, WriteOp
 
 EVENT_SPEC = {
-    'encrypted': True,
+    'encrypted': True,  # Encrypted with sender keys
     'signer': {
         'id_field': 'signed_by',
         'type_field': 'signer_type',
@@ -33,12 +36,6 @@ EVENT_SPEC = {
             'key': 'peer_shared_id',
             'key_from': 'peer_id',
             'fields': ['peer_shared_id'],
-        },
-        'group_key': {
-            'source': 'table',
-            'table': 'group_keys',
-            'key': 'key_id',
-            'fields': ['key_id'],
         },
     },
     'optional': {
@@ -208,12 +205,11 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
            db: Any) -> str:
     """Create a peer_name_update event.
 
-    The peer name is encrypted to the all_members group using the latest known key.
-    If the key is not available, raises KeyNotAvailableError.
+    In sender key model, peer_name_update is encrypted with sender keys to the main group.
 
     Args:
         peer_target_id: The peer (device) this name updates
-        name: Plaintext peer name to encrypt
+        name: Peer name
         peer_id: Local peer ID (for signing)
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
@@ -223,49 +219,26 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
         peer_name_update_id: The stored event ID
 
     Raises:
-        KeyNotAvailableError: If all_members group key is not available yet
+        KeyNotAvailableError: If main group not available yet
     """
     log.info(f"peer_name_update.create() creating peer name for peer_target_id={peer_target_id[:20]}..., name='{name}'")
-
-    # NOTE: peer_shared_id is passed as param - no need to check peers_shared table
-    # The event will have peer_target_id as a dependency and will block until peer_shared is valid
 
     # Get main group (all_members) - use is_main flag since name varies
     main_group = group.get_main(peer_id, db)
     if not main_group:
-        # Main group not available yet (will come from sync)
         log.info(f"peer_name_update.create() main group not found yet")
         raise KeyNotAvailableError("Main group not available yet - will be created on sync")
 
     group_id = main_group['group_id']
 
-    # Get the latest known key for all_members
-    try:
-        key_data = group.pick_key(group_id, peer_id, db)
-    except Exception as e:
-        log.warning(f"peer_name_update.create() no key available: {e}")
-        raise KeyNotAvailableError(f"No group key available for encryption: {e}")
-
-    if not key_data:
-        raise KeyNotAvailableError("No group key available for all_members group")
-
-    # Extract key_id from key_data to include in event
-    key_id_bytes = key_data.get('id')
-    if not key_id_bytes:
-        raise KeyNotAvailableError("Key ID not found in group key data")
-    key_id = crypto.b64encode(key_id_bytes)
-
-    # Build peer_name_update event
-    event_data = {
-        'type': 'peer_name_update',
-        'peer_id': peer_target_id,
-        'name': name,
-        'key_id': key_id,
-        'global_count': 0,
-        'signed_by': peer_shared_id,
-        'signer_type': 'peer_shared',
-        'created_at': t_ms
-    }
+    # Get or create sender key for main group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
 
     _wire_shadow_peer_name_update(peer_target_id, name)
 
@@ -276,7 +249,7 @@ def create(peer_target_id: str, name: str, peer_id: str, peer_shared_id: str, t_
         name=name,
         signed_by_b64=peer_shared_id,
         signer_type="peer_shared",
-        global_count=event_data['global_count'],
+        global_count=0,
         created_at_ms=t_ms,
         key_data=key_data,
         private_key=private_key,

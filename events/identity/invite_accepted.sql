@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS invite_accepteds (
     user_id TEXT DEFAULT '',            -- User ID from invite (for peer invites / device linking)
     address TEXT,                       -- Inviter IP address (from invite link)
     port INTEGER,                       -- Inviter port number (from invite link)
-    inviter_connection_prekey_id TEXT,     -- Inviter's transit prekey ID
-    inviter_connection_prekey_public_key BLOB,  -- Inviter's transit prekey
+    inviter_connection_pubkey_id TEXT,         -- Inviter's connection pubkey ID
+    inviter_connection_pubkey_public_key BLOB, -- Inviter's connection pubkey
     invite_private_key BLOB,            -- Invite signing key (for sync_connect auth)
     invite_pubkey TEXT,                 -- Derived from invite_private_key (for connection ACK verification)
     created_at INTEGER NOT NULL,

@@ -6,14 +6,12 @@ Reactions are reference events that depend on messages.
 """
 from typing import Any
 import logging
-import struct
 from core import crypto
 from core import store
 from core import global_counter
 from core import wire_format
 from events.content import message
-from events.content import message_reaction_deletion
-from events.group import group
+from events.group import group, sender_key
 from events.identity import peer_shared, peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
@@ -25,169 +23,6 @@ log = logging.getLogger(__name__)
 EVENT_TYPE = 'message_reaction'
 SHAREABLE = True  # Sync reactions to other peers
 PROJECTION_TABLE = ('message_reactions', 'reaction_id')
-
-# Wire format constants
-WIRE_TYPE_CODE = 0x05  # TYPE_MESSAGE_REACTION
-WIRE_PLAINTEXT_SIZE = 344  # MESSAGE_REACTION_PLAINTEXT_SIZE
-
-
-# Wire format functions - encode/decode for message_reaction event type
-
-def encode_plaintext(
-    message_id: bytes,
-    reactor_id: bytes,
-    emoji: str,
-) -> bytes:
-    """Encode a message_reaction payload plaintext (pre-encryption)."""
-    wire_format._require_len("message_id", message_id, 16)
-    wire_format._require_len("reactor_id", reactor_id, 16)
-    if not isinstance(emoji, str):
-        raise ValueError("emoji must be a single unicode codepoint")
-    if len(emoji) != 1:
-        # Allow variation selectors (e.g., "❤️" -> "❤")
-        stripped = "".join(ch for ch in emoji if ord(ch) not in (0xFE0E, 0xFE0F))
-        if len(stripped) != 1:
-            raise ValueError("emoji must be a single unicode codepoint")
-        emoji = stripped
-    codepoint = ord(emoji)
-    if codepoint > 0x10FFFF:
-        raise ValueError("emoji codepoint out of range")
-    payload = bytearray(WIRE_PLAINTEXT_SIZE)
-    payload[0:16] = message_id
-    payload[16:32] = reactor_id
-    struct.pack_into("<I", payload, 32, codepoint)
-    return bytes(payload)
-
-
-def decode_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode a message_reaction payload plaintext (post-decryption)."""
-    if len(data) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(
-            f"message_reaction plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
-        )
-    message_id = data[0:16]
-    reactor_id = data[16:32]
-    (codepoint,) = struct.unpack_from("<I", data, 32)
-    emoji = chr(codepoint) if codepoint else ""
-    if emoji == "\u2764":
-        emoji = "\u2764\uFE0F"
-    return {
-        "message_id": message_id,
-        "reactor_id": reactor_id,
-        "emoji": emoji,
-    }
-
-
-def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
-    """Encrypt message_reaction plaintext into wire payload."""
-    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(f"message_reaction plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
-    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
-    if key_data.get("type") != "symmetric":
-        raise ValueError("message_reaction payload requires symmetric key")
-    nonce = crypto.deterministic_nonce(key_id, plaintext)
-    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
-    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
-        raise ValueError("unexpected ciphertext length for message_reaction payload")
-    payload = key_id + nonce + ciphertext
-    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
-
-
-def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
-    """Decrypt wire payload to message_reaction plaintext."""
-    if key_data.get("type") != "symmetric":
-        raise ValueError("message_reaction payload requires symmetric key")
-    nonce = payload[16:40]
-    ciphertext = payload[40:]
-    return crypto.decrypt(ciphertext, key_data["key"], nonce)
-
-
-def is_wire_envelope(data: bytes) -> bool:
-    """Check if data is a message_reaction wire envelope."""
-    if len(data) != wire_format.WIRE_SIZE:
-        return False
-    try:
-        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
-    except ValueError:
-        return False
-    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
-
-
-def encode_wire_event(
-    *,
-    message_id_b64: str,
-    reactor_id_b64: str,
-    signed_by_b64: str,
-    signer_type: str,
-    emoji: str,
-    global_count: int,
-    created_at_ms: int,
-    key_data: dict[str, Any],
-    private_key: bytes,
-) -> bytes:
-    """Encode a complete message_reaction wire event."""
-    if global_count < 0 or global_count > 0xFFFFFFFF:
-        raise ValueError("global_count must fit in u32")
-    message_id = crypto.b64decode(message_id_b64)
-    reactor_id = crypto.b64decode(reactor_id_b64)
-    signer_id = crypto.b64decode(signed_by_b64)
-
-    plaintext = encode_plaintext(
-        message_id=message_id,
-        reactor_id=reactor_id,
-        emoji=emoji,
-    )
-    header = wire_format.WireHeader(
-        version=1,
-        event_type=WIRE_TYPE_CODE,
-        flags=wire_format.FLAG_ENCRYPTED,
-        signer_type=wire_format.signer_type_from_str(signer_type),
-        count=global_count,
-        created_at_ms=created_at_ms,
-        ttl_ms=0,
-        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
-    )
-    signed_bytes = wire_format._signing_bytes(header, plaintext)
-    signature = crypto.sign(signed_bytes, private_key)
-    payload = _encrypt_payload(plaintext, key_data)
-    return wire_format.build_envelope(header, payload, signature)
-
-
-def decode_wire_event(
-    data: bytes,
-    recorded_by: str,
-    db: Any,
-    key_cache: dict[str, dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """Decode a message_reaction wire event."""
-    header, payload, signature = wire_format.parse_envelope(data)
-    if header.event_type != WIRE_TYPE_CODE:
-        return None, []
-    if header.flags & wire_format.FLAG_ENCRYPTED:
-        key_id = payload[:16]
-        key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
-        if not key_data:
-            return None, [key_id_b64]
-        plaintext = _decrypt_payload(payload, key_data)
-    else:
-        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
-
-    decoded = decode_plaintext(plaintext)
-    event_data = {
-        "type": EVENT_TYPE,
-        "message_id": crypto.b64encode(decoded["message_id"]),
-        "reactor_id": crypto.b64encode(decoded["reactor_id"]),
-        "emoji": decoded["emoji"],
-        "global_count": header.count,
-        "signed_by": crypto.b64encode(header.signer_id),
-        "signer_type": wire_format.signer_type_to_str(header.signer_type),
-        "created_at": header.created_at_ms,
-        "_wire_signature": signature,
-        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
-    }
-    return event_data, []
-
 
 # v2 event specification - signed by peer_shared, encrypted
 EVENT_SPEC = {
@@ -259,12 +94,12 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
 def _wire_shadow_message_reaction(message_id: str, reactor_id: str, emoji: str) -> None:
     """Validate message_reaction fields against the fixed-size wire payload layout."""
-    plaintext = encode_plaintext(
+    plaintext = wire_format.encode_message_reaction_plaintext(
         message_id=crypto.b64decode(message_id),
         reactor_id=crypto.b64decode(reactor_id),
         emoji=emoji,
     )
-    decoded = decode_plaintext(plaintext)
+    decoded = wire_format.decode_message_reaction_plaintext(plaintext)
     if decoded["emoji"] != emoji:
         raise ValueError("wire shadow decode emoji mismatch")
 
@@ -308,9 +143,17 @@ def create(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
     # Get global count from framework (Lamport clock)
     global_count = global_counter.get_next_global_count(peer_id, db)
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=message_group_id,
+        peer_id=peer_id,
+        peer_shared_id=reactor_peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(message_group_id, peer_id, db)
-    blob = encode_wire_event(
+    blob = wire_format.encode_message_reaction_wire_event(
         message_id_b64=message_id,
         reactor_id_b64=reactor_user_id,
         signed_by_b64=reactor_peer_shared_id,
@@ -386,9 +229,17 @@ def remove(peer_id: str, message_id: str, emoji: str, t_ms: int, db: Any) -> str
 
     message_group_id = message_row['group_id']
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=message_group_id,
+        peer_id=peer_id,
+        peer_shared_id=remover_peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(message_group_id, peer_id, db)
-    blob = message_reaction_deletion.encode_wire_event(
+    blob = wire_format.encode_message_reaction_deletion_wire_event(
         reaction_id_b64=reaction_id,
         signed_by_b64=remover_peer_shared_id,
         signer_type="peer_shared",
@@ -424,11 +275,11 @@ def project_deletion(event_id: str, recorded_by: str, recorded_at: int, db: Any)
         log.warning(f"message_reaction.project_deletion() blob not found for deletion_id={event_id}")
         return
 
-    if not message_reaction_deletion.is_wire_envelope(blob):
+    if not wire_format.is_wire_message_reaction_deletion_envelope(blob):
         log.warning(f"message_reaction.project_deletion() non-wire deletion blob for {event_id[:20]}...")
         return
 
-    event_data, missing_key_ids = message_reaction_deletion.decode_wire_event(
+    event_data, missing_key_ids = wire_format.decode_message_reaction_deletion_wire_event(
         blob, recorded_by, db
     )
     if not event_data or missing_key_ids:

@@ -357,9 +357,9 @@ def join(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]:
         address=server_address,
     )
 
-    # Create connection prekeys for sync
-    from events.network import connection_prekey
-    connection_prekey.generate_batch(peer_id, 5, t_ms, db)  # Generate 5 prekeys
+    # Create connection pubkeys for sync
+    from events.network import connection_pubkey
+    connection_pubkey.generate_batch(peer_id, 5, t_ms, db)  # Generate 5 pubkeys
 
     log.info(f"server_relay.join() completed: peer_shared_id={peer_shared_id[:20]}..., "
              f"network_id={network_id[:20]}..., server_relay_id={server_relay_id[:20]}...")

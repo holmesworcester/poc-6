@@ -5,297 +5,26 @@ EVENT_TYPE = 'invite'
 SHAREABLE = True  # Invites sync to enable network membership
 PROJECTION_TABLE = ('invites', 'invite_id')
 
-# Wire format constants
-WIRE_TYPE_CODE = 0x2A  # TYPE_INVITE
-WIRE_PLAINTEXT_SIZE = 344  # INVITE_PLAINTEXT_SIZE
-INVITE_MODE_USER = 0
-INVITE_MODE_PEER = 1
-
 from typing import Any
 import json
 import logging
-import struct
 from core import crypto
 from core import store
 from core import wire_format
 from events.identity import peer, peer_shared, network
 from events.content import channel
 from events.group import group
-from events.group import group_prekey
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
 
 log = logging.getLogger(__name__)
 
 
-# Wire format functions - encode/decode for invite event type
-
-def encode_plaintext(
-    mode: int,
-    invite_pubkey: bytes,
-    invite_prekey_id: bytes | None,
-    group_id: bytes | None,
-    channel_id: bytes | None,
-    key_id: bytes | None,
-    network_id: bytes | None,
-    inviter_peer_shared_id: bytes | None,
-    inviter_user_id: bytes | None,
-    target_user_id: bytes | None,
-    admin_grant_id: bytes | None,
-    inviter_ip: str | None,
-    inviter_port: int | None,
-) -> bytes:
-    """Encode an invite payload plaintext (pre-encryption).
-
-    Layout (344 bytes):
-    - mode (1)
-    - invite_pubkey (32)
-    - invite_prekey_id (16)
-    - group_id (16)
-    - channel_id (16)
-    - key_id (16)
-    - network_id (16)
-    - inviter_peer_shared_id (16)
-    - inviter_user_id (16)
-    - target_user_id (16)
-    - admin_grant_id (16)
-    - inviter_ip (16)
-    - inviter_port (2)
-    - pad
-    """
-    if mode not in (INVITE_MODE_USER, INVITE_MODE_PEER):
-        raise ValueError(f"invite mode must be {INVITE_MODE_USER} or {INVITE_MODE_PEER}")
-    wire_format._require_len("invite_pubkey", invite_pubkey, wire_format.PUBKEY_SIZE)
-    invite_prekey_bytes = invite_prekey_id or (b"\x00" * 16)
-    wire_format._require_len("invite_prekey_id", invite_prekey_bytes, 16)
-    group_bytes = group_id or (b"\x00" * 16)
-    wire_format._require_len("group_id", group_bytes, 16)
-    channel_bytes = channel_id or (b"\x00" * 16)
-    wire_format._require_len("channel_id", channel_bytes, 16)
-    key_bytes = key_id or (b"\x00" * 16)
-    wire_format._require_len("key_id", key_bytes, 16)
-    network_bytes = network_id or (b"\x00" * 16)
-    wire_format._require_len("network_id", network_bytes, 16)
-    inviter_peer_bytes = inviter_peer_shared_id or (b"\x00" * 16)
-    wire_format._require_len("inviter_peer_shared_id", inviter_peer_bytes, 16)
-    inviter_user_bytes = inviter_user_id or (b"\x00" * 16)
-    wire_format._require_len("inviter_user_id", inviter_user_bytes, 16)
-    target_user_bytes = target_user_id or (b"\x00" * 16)
-    wire_format._require_len("target_user_id", target_user_bytes, 16)
-    admin_grant_bytes = admin_grant_id or (b"\x00" * 16)
-    wire_format._require_len("admin_grant_id", admin_grant_bytes, 16)
-    if inviter_port is not None and (inviter_port < 0 or inviter_port > 0xFFFF):
-        raise ValueError("inviter_port must fit in u16")
-    payload = bytearray(WIRE_PLAINTEXT_SIZE)
-    payload[0] = mode
-    payload[1:33] = invite_pubkey
-    payload[33:49] = invite_prekey_bytes
-    payload[49:65] = group_bytes
-    payload[65:81] = channel_bytes
-    payload[81:97] = key_bytes
-    payload[97:113] = network_bytes
-    payload[113:129] = inviter_peer_bytes
-    payload[129:145] = inviter_user_bytes
-    payload[145:161] = target_user_bytes
-    payload[161:177] = admin_grant_bytes
-    payload[177:193] = wire_format._encode_ip16(inviter_ip)
-    struct.pack_into("<H", payload, 193, inviter_port or 0)
-    return bytes(payload)
-
-
-def decode_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode an invite payload plaintext (post-decryption)."""
-    if len(data) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(f"invite plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
-    mode = data[0]
-    invite_pubkey = data[1:33]
-    invite_prekey_id = data[33:49]
-    group_id = data[49:65]
-    channel_id = data[65:81]
-    key_id = data[81:97]
-    network_id = data[97:113]
-    inviter_peer_shared_id = data[113:129]
-    inviter_user_id = data[129:145]
-    target_user_id = data[145:161]
-    admin_grant_id = data[161:177]
-    inviter_ip = wire_format._decode_ip16(data[177:193])
-    (inviter_port,) = struct.unpack_from("<H", data, 193)
-    if invite_prekey_id == b"\x00" * 16:
-        invite_prekey_id = None
-    if group_id == b"\x00" * 16:
-        group_id = None
-    if channel_id == b"\x00" * 16:
-        channel_id = None
-    if key_id == b"\x00" * 16:
-        key_id = None
-    if network_id == b"\x00" * 16:
-        network_id = None
-    if inviter_peer_shared_id == b"\x00" * 16:
-        inviter_peer_shared_id = None
-    if inviter_user_id == b"\x00" * 16:
-        inviter_user_id = None
-    if target_user_id == b"\x00" * 16:
-        target_user_id = None
-    if admin_grant_id == b"\x00" * 16:
-        admin_grant_id = None
-    if inviter_port == 0:
-        inviter_port = None
-    return {
-        "mode": mode,
-        "invite_pubkey": invite_pubkey,
-        "invite_prekey_id": invite_prekey_id,
-        "group_id": group_id,
-        "channel_id": channel_id,
-        "key_id": key_id,
-        "network_id": network_id,
-        "inviter_peer_shared_id": inviter_peer_shared_id,
-        "inviter_user_id": inviter_user_id,
-        "target_user_id": target_user_id,
-        "admin_grant_id": admin_grant_id,
-        "inviter_ip": inviter_ip,
-        "inviter_port": inviter_port,
-    }
-
-
-def is_wire_envelope(data: bytes) -> bool:
-    """Check if data is an invite wire envelope."""
-    if len(data) != wire_format.WIRE_SIZE:
-        return False
-    try:
-        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
-    except ValueError:
-        return False
-    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
-
-
-def encode_wire_event(
-    *,
-    mode: str,
-    invite_pubkey_b64: str,
-    invite_prekey_id_b64: str | None,
-    group_id_b64: str | None,
-    channel_id_b64: str | None,
-    key_id_b64: str | None,
-    network_id_b64: str | None,
-    inviter_peer_shared_id_b64: str | None,
-    inviter_user_id_b64: str | None,
-    target_user_id_b64: str | None,
-    admin_grant_id_b64: str | None,
-    inviter_ip: str | None,
-    inviter_port: int | None,
-    signed_by_b64: str,
-    signer_type: str,
-    created_at_ms: int,
-    private_key: bytes,
-) -> bytes:
-    """Encode a complete invite wire event."""
-    # 'server' mode uses same wire format as 'user' (distinction is logical)
-    if mode in ("user", "server"):
-        mode_value = INVITE_MODE_USER
-    elif mode == "peer":
-        mode_value = INVITE_MODE_PEER
-    else:
-        raise ValueError("invite mode must be 'user', 'peer', or 'server'")
-
-    invite_pubkey = crypto.b64decode(invite_pubkey_b64)
-    invite_prekey_id = crypto.b64decode(invite_prekey_id_b64) if invite_prekey_id_b64 else None
-    group_id = crypto.b64decode(group_id_b64) if group_id_b64 else None
-    channel_id = crypto.b64decode(channel_id_b64) if channel_id_b64 else None
-    key_id = crypto.b64decode(key_id_b64) if key_id_b64 else None
-    network_id = crypto.b64decode(network_id_b64) if network_id_b64 else None
-    inviter_peer_shared_id = (
-        crypto.b64decode(inviter_peer_shared_id_b64) if inviter_peer_shared_id_b64 else None
-    )
-    inviter_user_id = crypto.b64decode(inviter_user_id_b64) if inviter_user_id_b64 else None
-    target_user_id = crypto.b64decode(target_user_id_b64) if target_user_id_b64 else None
-    admin_grant_id = crypto.b64decode(admin_grant_id_b64) if admin_grant_id_b64 else None
-    signer_id = crypto.b64decode(signed_by_b64)
-
-    plaintext = encode_plaintext(
-        mode=mode_value,
-        invite_pubkey=invite_pubkey,
-        invite_prekey_id=invite_prekey_id,
-        group_id=group_id,
-        channel_id=channel_id,
-        key_id=key_id,
-        network_id=network_id,
-        inviter_peer_shared_id=inviter_peer_shared_id,
-        inviter_user_id=inviter_user_id,
-        target_user_id=target_user_id,
-        admin_grant_id=admin_grant_id,
-        inviter_ip=inviter_ip,
-        inviter_port=inviter_port,
-    )
-    header = wire_format.WireHeader(
-        version=1,
-        event_type=WIRE_TYPE_CODE,
-        flags=0,
-        signer_type=wire_format.signer_type_from_str(signer_type),
-        count=0,
-        created_at_ms=created_at_ms,
-        ttl_ms=0,
-        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
-    )
-    signed_bytes = wire_format._signing_bytes(header, plaintext)
-    signature = crypto.sign(signed_bytes, private_key)
-    payload = wire_format._pad_payload(plaintext)
-    return wire_format.build_envelope(header, payload, signature)
-
-
-def decode_wire_event(data: bytes) -> dict[str, Any]:
-    """Decode an invite wire event."""
-    header, payload, signature = wire_format.parse_envelope(data)
-    if header.event_type != WIRE_TYPE_CODE:
-        raise ValueError("unexpected event type for invite")
-    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
-    decoded = decode_plaintext(plaintext)
-
-    if decoded["mode"] == INVITE_MODE_USER:
-        mode = "user"
-    elif decoded["mode"] == INVITE_MODE_PEER:
-        mode = "peer"
-    else:
-        raise ValueError("invalid invite mode")
-
-    event_data = {
-        "type": "invite",
-        "mode": mode,
-        "invite_pubkey": crypto.b64encode(decoded["invite_pubkey"]),
-        "signed_by": crypto.b64encode(header.signer_id),
-        "signer_type": wire_format.signer_type_to_str(header.signer_type),
-        "created_at": header.created_at_ms,
-        "_wire_signature": signature,
-        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
-    }
-    if decoded["invite_prekey_id"]:
-        event_data["invite_prekey_id"] = crypto.b64encode(decoded["invite_prekey_id"])
-    if decoded["group_id"]:
-        event_data["group_id"] = crypto.b64encode(decoded["group_id"])
-    if decoded["channel_id"]:
-        event_data["channel_id"] = crypto.b64encode(decoded["channel_id"])
-    if decoded["key_id"]:
-        event_data["key_id"] = crypto.b64encode(decoded["key_id"])
-    if decoded["network_id"]:
-        event_data["network_id"] = crypto.b64encode(decoded["network_id"])
-    if decoded["inviter_peer_shared_id"]:
-        event_data["inviter_peer_shared_id"] = crypto.b64encode(decoded["inviter_peer_shared_id"])
-    if decoded["inviter_user_id"]:
-        event_data["inviter_user_id"] = crypto.b64encode(decoded["inviter_user_id"])
-    if decoded["target_user_id"]:
-        event_data["user_id"] = crypto.b64encode(decoded["target_user_id"])
-    if decoded["admin_grant_id"]:
-        event_data["admin_grant"] = crypto.b64encode(decoded["admin_grant_id"])
-    if decoded["inviter_ip"] is not None:
-        event_data["address"] = decoded["inviter_ip"]
-    if decoded["inviter_port"] is not None:
-        event_data["port"] = decoded["inviter_port"]
-    return event_data
-
 
 def _wire_shadow_invite(
     mode: str,
     invite_pubkey_b64: str,
-    invite_prekey_id: str | None,
+    invite_pubkey_id: str | None,
     group_id: str | None,
     channel_id: str | None,
     key_id: str | None,
@@ -308,14 +37,13 @@ def _wire_shadow_invite(
     port: int | None,
 ) -> None:
     """Validate invite fields against the fixed-size wire payload layout."""
-    if mode not in ("user", "peer", "server"):
-        raise ValueError("invite mode must be 'user', 'peer', or 'server'")
-    # 'server' mode uses same wire format as 'user' (the distinction is logical)
-    mode_value = INVITE_MODE_USER if mode in ("user", "server") else INVITE_MODE_PEER
-    plaintext = encode_plaintext(
+    if mode not in ("user", "peer"):
+        raise ValueError("invite mode must be 'user' or 'peer'")
+    mode_value = wire_format.INVITE_MODE_USER if mode == "user" else wire_format.INVITE_MODE_PEER
+    plaintext = wire_format.encode_invite_plaintext(
         mode=mode_value,
         invite_pubkey=crypto.b64decode(invite_pubkey_b64),
-        invite_prekey_id=crypto.b64decode(invite_prekey_id) if invite_prekey_id else None,
+        invite_pubkey_id=crypto.b64decode(invite_pubkey_id) if invite_pubkey_id else None,
         group_id=crypto.b64decode(group_id) if group_id else None,
         channel_id=crypto.b64decode(channel_id) if channel_id else None,
         key_id=crypto.b64decode(key_id) if key_id else None,
@@ -327,7 +55,7 @@ def _wire_shadow_invite(
         inviter_ip=address,
         inviter_port=port,
     )
-    decoded = decode_plaintext(plaintext)
+    decoded = wire_format.decode_invite_plaintext(plaintext)
     if decoded["mode"] != mode_value:
         raise ValueError("wire shadow decode mode mismatch")
 
@@ -416,7 +144,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     _wire_shadow_invite(
         mode=mode,
         invite_pubkey_b64=invite_pubkey,
-        invite_prekey_id=event_data.get('invite_prekey_id'),
+        invite_pubkey_id=event_data.get('invite_pubkey_id'),
         group_id=group_id,
         channel_id=event_data.get('channel_id'),
         key_id=event_data.get('key_id'),
@@ -486,8 +214,7 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 
 def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None,
-           address: str | None = None, port: int | None = None,
-           server_address: str | None = None) -> tuple[str, str, dict[str, Any]]:
+           address: str | None = None, port: int | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -502,12 +229,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         peer_id: Local peer ID of the inviter
         t_ms: Timestamp
         db: Database connection
-        mode: 'user' for network join invites, 'peer' for device linking invites,
-              'server' for server relay invites
-        user_id: Required for mode='peer', target user to link to. Must be None for mode='user'/'server'.
+        mode: 'user' for network join invites, 'peer' for device linking invites
+        user_id: Required for mode='peer', target user to link to. Must be None for mode='user'.
         address: Inviter's IP address (for connection bootstrapping)
         port: Inviter's port (for connection bootstrapping)
-        server_address: For mode='server', the server's public address (e.g., 'relay.example.com:5000')
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -519,11 +244,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     elif mode == 'peer':
         if user_id is None:
             raise ValueError("mode='peer' invites must have user_id set")
-    elif mode == 'server':
-        if user_id is not None:
-            raise ValueError("mode='server' invites cannot have user_id set")
     else:
-        raise ValueError(f"Invalid mode: {mode}. Must be 'user', 'peer', or 'server'")
+        raise ValueError(f"Invalid mode: {mode}. Must be 'user' or 'peer'")
 
     safedb = create_safe_db(db, recorded_by=peer_id)
     unsafedb = create_unsafe_db(db)
@@ -551,7 +273,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # Authorization check depends on mode:
     # - mode='user' (network join invites): requires admin
     # - mode='peer' (device linking): any user can create for their OWN user_id
-    # - mode='server' (server relay invites): requires admin
     if mode == 'user':
         if not is_admin(peer_shared_id, peer_id, db):
             raise ValueError(f"Only admins can create network join invites. Peer {peer_id} is not an admin.")
@@ -559,9 +280,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         # Security: users can only create device link invites for themselves
         if user_id != inviter_user_id:
             raise ValueError(f"Cannot create device link invite for another user. You can only link your own devices.")
-    elif mode == 'server':
-        if not is_admin(peer_shared_id, peer_id, db):
-            raise ValueError(f"Only admins can create server relay invites. Peer {peer_id} is not an admin.")
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
@@ -573,13 +291,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         # This shouldn't happen if is_admin() passed, but warn just in case
         log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
 
-    # Get key from all_users group
-    group_row = group.get_current_key(all_users_group_id, peer_id, db)
-    if not group_row:
-        raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
-
-    key_id = group_row['key_id']
-
     # Get main channel
     channel_row = safedb.query_one(
         "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
@@ -590,76 +301,66 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     channel_id = channel_row['channel_id']
 
-    # Create a group_prekey (generates keypair) then share it via group_prekey_shared
-    # The invite_prekey_id is the local group_prekey_id (for crypto hint lookup)
-    # The group_prekey_shared is created for sync/sharing but its ID is not used as hint
-    from events.group import group_prekey, group_prekey_shared
+    # Create a pubkey (generates keypair) then share it via pubkey_shared
+    # The invite_pubkey_id is the local pubkey_id (for crypto hint lookup)
+    from events.group import pubkey, pubkey_shared
 
-    # Create local prekey with keypair
-    local_prekey_id, invite_private_key = group_prekey.create(peer_id, t_ms, db)  # No offset needed
+    # Create local pubkey with keypair
+    local_pubkey_id, invite_private_key = pubkey.create(peer_id=peer_id, t_ms=t_ms, db=db)
 
-    # Get the public key from the created prekey for the invite event
-    prekey_blob = store.get(local_prekey_id, unsafedb)
-    if not group_prekey.is_wire_envelope(prekey_blob):
-        raise ValueError("invite requires wire group_prekey event")
-    prekey_data = group_prekey.decode_wire_event(prekey_blob)
-    invite_pubkey_b64 = prekey_data['public_key']
+    # Get the public key from the created pubkey for the invite event
+    invite_pubkey = pubkey.get_public_key(local_pubkey_id, peer_id, db)
+    invite_pubkey_b64 = crypto.b64encode(invite_pubkey)
 
-    # Create shareable prekey event for sync
-    # Context depends on mode:
-    # - mode='user': group context (all_users_group)
-    # - mode='peer': user context (user_id being linked to)
-    if mode == 'peer':
-        # Device linking: context is the user being linked to
-        group_prekey_shared.create(
-            prekey_id=local_prekey_id,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-            db=db,
-            user_id=user_id  # User context for device linking
-        )
-    else:
-        # User invite: context is the all_users group
-        group_prekey_shared.create(
-            prekey_id=local_prekey_id,
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-            db=db,
-            group_id=all_users_group_id,
-            key_id=key_id
-        )
+    # Create shareable pubkey event for sync
+    pubkey_shared.create(
+        pubkey_id=local_pubkey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
 
-    # Use local_prekey_id as invite_prekey_id (consistent with transit_prekey pattern)
-    # This is the ID the recipient uses to look up the private key for decryption
-    invite_prekey_id = local_prekey_id
+    # Use local_pubkey_id as invite_pubkey_id (for crypto hint lookup)
+    invite_pubkey_id = local_pubkey_id
+
+    # Share all known sender keys to the invite pubkey
+    # This allows the invitee to decrypt all past messages from all senders
+    from events.group import sender_key
+    sender_key.share_all_keys_to_pubkey(
+        group_id=all_users_group_id,
+        recipient_pubkey_id=invite_pubkey_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms + 1,  # Offset to ensure ordering
+        db=db,
+    )
 
     # Get inviter's prekey for Bob to send sync requests
-    # Query prekey from connection_prekeys table
+    # Query prekey from connection_pubkeys table
     inviter_prekey_row = unsafedb.query_one(
-        "SELECT connection_prekey_id, public_key FROM connection_prekeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT connection_pubkey_id, public_key FROM connection_pubkeys WHERE owner_peer_id = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_row:
         raise ValueError(f"No prekey found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_prekey_id = inviter_prekey_row['connection_prekey_id']
+    inviter_prekey_id = inviter_prekey_row['connection_pubkey_id']
     inviter_prekey_public_key = inviter_prekey_row['public_key']  # Raw bytes from DB
 
-    # Get prekey_shared_id from connection_prekeys_shared table
+    # Get prekey_shared_id from connection_pubkeys_shared table
     # Query by recorded_by only since peer_id may be old peer_shared_id after linking
     inviter_prekey_shared_row = safedb.query_one(
-        "SELECT connection_prekey_shared_id, created_at FROM connection_prekeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT connection_pubkey_shared_id, created_at FROM connection_pubkeys_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1",
         (peer_id,)
     )
 
     if not inviter_prekey_shared_row:
         raise ValueError(f"No prekey_shared found for inviter {peer_id}. Cannot create invite.")
 
-    inviter_connection_prekey_shared_id = inviter_prekey_shared_row['connection_prekey_shared_id']
-    inviter_connection_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
+    inviter_connection_pubkey_shared_id = inviter_prekey_shared_row['connection_pubkey_shared_id']
+    inviter_connection_pubkey_shared_created_at = inviter_prekey_shared_row['created_at']
 
     # Address info: use passed parameters or fall back to defaults
     # For production, this should come from self_address discovery
@@ -671,7 +372,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     _wire_shadow_invite(
         mode=mode,
         invite_pubkey_b64=invite_pubkey_b64,
-        invite_prekey_id=invite_prekey_id,
+        invite_pubkey_id=invite_pubkey_id,
         group_id=all_users_group_id,
         channel_id=None,
         key_id=None,
@@ -684,10 +385,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         port=inviter_port,
     )
 
-    invite_blob = encode_wire_event(
+    invite_blob = wire_format.encode_invite_wire_event(
         mode=mode,
         invite_pubkey_b64=invite_pubkey_b64,
-        invite_prekey_id_b64=invite_prekey_id,
+        invite_pubkey_id_b64=invite_pubkey_id,
         group_id_b64=all_users_group_id,
         channel_id_b64=None,
         key_id_b64=None,
@@ -705,112 +406,30 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     )
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
-    # Create group_key_shared sealed to invite proof prekey
-    # The create_for_invite function will extract the prekey from the invite event
-    # IMPORTANT: Server relays (mode='server') do NOT receive group keys - they cannot decrypt messages
-    from events.group import group_key_shared
-
-    if mode != 'server':
-        # Share ALL historical keys for the all_users group, not just the current key
-        # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
-        # and all historical content that may have been encrypted with older keys
-        all_group_keys = safedb.query(
-            "SELECT key_id FROM group_keys WHERE recorded_by = ?",
-            (peer_id,)
-        )
-
-        keys_shared = 0
-        for key_row in all_group_keys:
-            historical_key_id = key_row['key_id']
-            try:
-                group_key_shared.create_for_invite(
-                    key_id=historical_key_id,
-                    peer_id=peer_id,
-                    peer_shared_id=peer_shared_id,
-                    invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
-                    t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                    db=db
-                )
-                keys_shared += 1
-            except Exception as e:
-                log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
-
-        log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
-    else:
-        log.info(f"invite.create() mode='server' - NOT sharing group keys (server relays cannot decrypt)")
-
-    # For mode='peer', share keys for ALL groups this user is a member of
-    # This ensures the new device can decrypt all groups the user belongs to
-    if mode == 'peer':
-        log.info(f"invite.create() mode='peer' - sharing keys for user {user_id[:20]}...'s group memberships")
-
-        # Query groups that THIS USER is a member of (not all groups peer knows about)
-        # Join group_members with groups to get both group_id and key_id
-        group_rows = safedb.query(
-            """SELECT DISTINCT g.group_id, g.key_id
-               FROM group_members gm
-               JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
-               WHERE gm.user_id = ? AND gm.recorded_by = ?
-               ORDER BY g.group_id""",
-            (user_id, peer_id)
-        )
-
-        log.info(f"invite.create() found {len(group_rows)} groups for user {user_id[:20]}...")
-
-        for group_row in group_rows:
-            group_id = group_row['group_id']
-            key_id_for_group = group_row['key_id']
-
-            # Skip if we already created it above (all_users)
-            if key_id_for_group == key_id:
-                continue
-
-            # Create group_key_shared sealed to invite_prekey
-            group_key_shared_id = group_key_shared.create_for_invite(
-                key_id=key_id_for_group,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            log.info(f"invite.create() created group_key_shared {group_key_shared_id[:20]}... for group {group_id[:20]}...")
+    # NOTE: In sender key model, keys are already shared to invite pubkey
+    # via sender_key.share_all_keys_to_pubkey() call above
 
     # Build invite link - metadata + keys for connection
     import base64
 
     invite_link_data = {
         'invite_id': invite_id,
-        'invite_prekey_id': invite_prekey_id,
+        'invite_pubkey_id': invite_pubkey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': peer_shared_id,
         'network_id': network_id,
         'channel_id': channel_id,
-        'key_id': key_id,
         'ip': inviter_ip,
         'port': inviter_port,
         # Transit prekey for encrypting initial sync_connect to Alice
-        'inviter_connection_prekey_public_key': crypto.b64encode(inviter_prekey_public_key),
-        'inviter_connection_prekey_shared_id': inviter_connection_prekey_shared_id,
-        'inviter_connection_prekey_id': inviter_prekey_id,
+        'inviter_connection_pubkey_public_key': crypto.b64encode(inviter_prekey_public_key),
+        'inviter_connection_pubkey_shared_id': inviter_connection_pubkey_shared_id,
+        'inviter_connection_pubkey_id': inviter_prekey_id,
     }
 
     # For mode='peer', include user_id so acceptor knows which user to link to
     if mode == 'peer':
         invite_link_data['user_id'] = user_id
-
-    # For mode='server', include server_address in the link
-    if mode == 'server':
-        invite_link_data['server_address'] = server_address
-        invite_link_data['mode'] = 'server'
-
-    # For mode='user', include server_address if network has a server relay configured
-    # This allows new members to know where to connect for star topology sync
-    if mode == 'user':
-        from events.identity import network_settings
-        relay_info = network_settings.get_server_relay(network_id, peer_id, db)
-        if relay_info and relay_info.get('address'):
-            invite_link_data['server_address'] = relay_info['address']
 
     # Encode invite link as base64-urlsafe JSON
     import base64
@@ -819,15 +438,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
 
     # Use different URL prefix based on mode
     # Note: URL prefix "link" is kept for backward compatibility with mode='peer'
-    if mode == "peer":
-        url_prefix = "link"
-    elif mode == "server":
-        url_prefix = "server"
-    else:
-        url_prefix = "invite"
+    url_prefix = "link" if mode == "peer" else "invite"
     invite_link = f"quiet://{url_prefix}/{invite_code}"
 
-    log.info(f"invite.create() invite link created (mode={mode}) with invite_prekey_id={invite_prekey_id[:20]}...")
+    log.info(f"invite.create() invite link created (mode={mode}) with invite_pubkey_id={invite_pubkey_id[:20]}...")
 
     return (invite_id, invite_link, invite_link_data)
 
@@ -869,7 +483,7 @@ def create_peer_invite(
     _wire_shadow_invite(
         mode="peer",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id=None,
+        invite_pubkey_id=None,
         group_id=None,
         channel_id=None,
         key_id=None,
@@ -882,10 +496,10 @@ def create_peer_invite(
         port=None,
     )
 
-    blob = encode_wire_event(
+    blob = wire_format.encode_invite_wire_event(
         mode="peer",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id_b64=None,
+        invite_pubkey_id_b64=None,
         group_id_b64=None,
         channel_id_b64=None,
         key_id_b64=None,
@@ -945,7 +559,7 @@ def create_bootstrap_user_invite(
     _wire_shadow_invite(
         mode="user",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id=None,
+        invite_pubkey_id=None,
         group_id=group_id,
         channel_id=channel_id,
         key_id=key_id,
@@ -958,10 +572,10 @@ def create_bootstrap_user_invite(
         port=None,
     )
 
-    blob = encode_wire_event(
+    blob = wire_format.encode_invite_wire_event(
         mode="user",
         invite_pubkey_b64=crypto.b64encode(invite_pubkey),
-        invite_prekey_id_b64=None,
+        invite_pubkey_id_b64=None,
         group_id_b64=group_id,
         channel_id_b64=channel_id,
         key_id_b64=key_id,
@@ -984,6 +598,120 @@ def create_bootstrap_user_invite(
     return invite_id, invite_private_key, invite_pubkey
 
 
+def create_server_invite(
+    peer_id: str,
+    t_ms: int,
+    db: Any,
+    server_address: str | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    """Create a server invite for a relay to join the network.
+
+    Server invites allow relay servers to join as peers that can sync events
+    but cannot decrypt messages (no user identity, no keys).
+
+    Args:
+        peer_id: Local peer ID of the admin creating the invite
+        t_ms: Timestamp
+        db: Database connection
+        server_address: Expected server address for the relay
+
+    Returns:
+        (invite_id, invite_link, invite_data): The invite data for server relay join
+    """
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    unsafedb = create_unsafe_db(db)
+
+    # Get peer identity
+    identity = peer_shared.get_self(peer_id, db)
+    if not identity or not identity['peer_shared_id']:
+        raise ValueError(f"Peer {peer_id} not found or peer_shared_id not set")
+
+    peer_shared_id = identity['peer_shared_id']
+
+    # Get network
+    network_id = network.get_network_id(peer_id, db)
+    if not network_id:
+        raise ValueError(f"No network found for peer {peer_id}")
+
+    # Check if caller is admin
+    if not is_admin(peer_shared_id, peer_id, db):
+        raise ValueError(f"Only admins can create server invites")
+
+    # Generate keypair for this server invite
+    invite_private_key, invite_pubkey = crypto.generate_keypair()
+    invite_pubkey_b64 = crypto.b64encode(invite_pubkey)
+
+    # Get inviter's user_id for admin_grant lookup
+    inviter_user_id = peer_shared.get_user_id(peer_shared_id, peer_id, db)
+    if not inviter_user_id:
+        raise ValueError(f"User record not found for peer_shared_id {peer_shared_id}")
+
+    # Get admin_grant for signing
+    from events.identity import admin as admin_module
+    admin_grant_id = admin_module.my_grant(inviter_user_id, network_id, peer_id, db)
+
+    # Sign the invite event with inviter's peer private key
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+
+    # Create invite event for server (mode='user' wire format but parsed as server)
+    # Note: Server invites use mode='user' internally but URL prefix quiet://server/
+    _wire_shadow_invite(
+        mode="user",  # Wire format uses 'user' mode
+        invite_pubkey_b64=invite_pubkey_b64,
+        invite_pubkey_id=None,
+        group_id=None,  # Server relays don't join groups
+        channel_id=None,
+        key_id=None,
+        network_id=network_id,
+        inviter_peer_shared_id=peer_shared_id,
+        inviter_user_id=inviter_user_id,
+        target_user_id=None,
+        admin_grant=admin_grant_id,
+        address=None,
+        port=None,
+    )
+
+    blob = wire_format.encode_invite_wire_event(
+        mode="user",
+        invite_pubkey_b64=invite_pubkey_b64,
+        invite_pubkey_id_b64=None,
+        group_id_b64=None,
+        channel_id_b64=None,
+        key_id_b64=None,
+        network_id_b64=network_id,
+        inviter_peer_shared_id_b64=peer_shared_id,
+        inviter_user_id_b64=inviter_user_id,
+        target_user_id_b64=None,
+        admin_grant_id_b64=admin_grant_id,
+        inviter_ip=None,
+        inviter_port=None,
+        signed_by_b64=peer_shared_id,
+        signer_type="peer_shared",
+        created_at_ms=t_ms,
+        private_key=private_key,
+    )
+    invite_id = store.event(blob, peer_id, t_ms, db)
+
+    # Build server invite link
+    invite_link_data = {
+        'invite_id': invite_id,
+        'invite_private_key': crypto.b64encode(invite_private_key),
+        'inviter_peer_shared_id': peer_shared_id,
+        'network_id': network_id,
+        'server_address': server_address,
+    }
+
+    # Encode invite link as base64-urlsafe JSON with quiet://server/ prefix
+    import base64
+    invite_json = json.dumps(invite_link_data, separators=(',', ':'), sort_keys=True)
+    invite_code = base64.urlsafe_b64encode(invite_json.encode()).decode().rstrip('=')
+    invite_link = f"quiet://server/{invite_code}"
+
+    log.info(f"create_server_invite() created server invite {invite_id[:20]}...")
+
+    return (invite_id, invite_link, invite_link_data)
+
+
 def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]:
     """Accept an invite link (mode-agnostic, link-specific logic).
 
@@ -1002,7 +730,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
         - invite_id: Projected invite ID
         - user_id: (For mode='peer' only) Target user to link to
         - inviter_peer_shared_id: Inviter's peer_shared ID (projected locally)
-        - invite_prekey_id: Crypto hint for GKS decryption
+        - invite_pubkey_id: Crypto hint for GKS decryption
         - invite_private_key: For proof signing
         - Other invite/inviter metadata
 
@@ -1043,7 +771,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
 
     # Extract link data (no blobs - those sync after connection)
     invite_id = link_data['invite_id']
-    invite_prekey_id = link_data['invite_prekey_id']
+    invite_pubkey_id = link_data['invite_pubkey_id']
     invite_private_key = crypto.b64decode(link_data['invite_private_key'])
     inviter_peer_shared_id = link_data['inviter_peer_shared_id']
 
@@ -1062,7 +790,7 @@ def accept(peer_id: str, invite_link: str, t_ms: int, db: Any) -> dict[str, Any]
     result = {
         'mode': mode,
         'invite_id': invite_id,
-        'invite_prekey_id': invite_prekey_id,
+        'invite_pubkey_id': invite_pubkey_id,
         'invite_private_key': invite_private_key,
         'inviter_peer_shared_id': inviter_peer_shared_id,
     }

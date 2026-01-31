@@ -36,6 +36,102 @@ def generate_keypair() -> Tuple[bytes, bytes]:
     return bytes(signing_key), bytes(signing_key.verify_key)
 
 
+def generate_x25519_keypair() -> Tuple[bytes, bytes]:
+    """Generate X25519 keypair for DH key exchange.
+
+    X25519 is the Diffie-Hellman function over Curve25519.
+    Used for TreeKEM DH-based path secret derivation.
+
+    Returns:
+        (private_key, public_key): 32-byte raw key bytes each
+    """
+    private = PrivateKey.generate()
+    public = private.public_key
+    return bytes(private), bytes(public)
+
+
+def ed25519_to_x25519_private(ed25519_private: bytes) -> bytes:
+    """Convert an Ed25519 private key to X25519 for DH operations.
+
+    Args:
+        ed25519_private: Ed25519 private (signing) key (32 bytes)
+
+    Returns:
+        X25519 private key (32 bytes)
+    """
+    signing_key = nacl.signing.SigningKey(ed25519_private)
+    curve_private = signing_key.to_curve25519_private_key()
+    return bytes(curve_private)
+
+
+def ed25519_to_x25519_public(ed25519_public: bytes) -> bytes:
+    """Convert an Ed25519 public key to X25519 for DH operations.
+
+    Args:
+        ed25519_public: Ed25519 public (verify) key (32 bytes)
+
+    Returns:
+        X25519 public key (32 bytes)
+    """
+    verify_key = nacl.signing.VerifyKey(ed25519_public)
+    curve_public = verify_key.to_curve25519_public_key()
+    return bytes(curve_public)
+
+
+def ecdh_shared_secret(my_private_key: bytes, their_public_key: bytes, keys_are_x25519: bool = True) -> bytes:
+    """Compute ECDH shared secret between two keys.
+
+    This is the core DH operation for TreeKEM:
+    DH(a, B) = DH(b, A) - both sides compute the same shared secret.
+
+    Args:
+        my_private_key: Our private key (32 bytes)
+        their_public_key: Peer's public key (32 bytes)
+        keys_are_x25519: If True, keys are raw X25519. If False, keys are Ed25519
+                         and will be converted to X25519 for DH.
+
+    Returns:
+        32-byte shared secret suitable for key derivation
+    """
+    if keys_are_x25519:
+        private = PrivateKey(my_private_key)
+        public = PublicKey(their_public_key)
+    else:
+        # Convert Ed25519 to X25519
+        private = PrivateKey(ed25519_to_x25519_private(my_private_key))
+        public = PublicKey(ed25519_to_x25519_public(their_public_key))
+
+    # Box computes the X25519 DH operation
+    box = Box(private, public)
+    # Extract the shared key from the box (this is the DH result + hashing)
+    return box.shared_key()
+
+
+def derive_dh_path_secret(shared_secret: bytes, depth: int, path_prefix: bytes) -> bytes:
+    """Derive parent secret from DH shared secret in TreeKEM path.
+
+    Used after computing DH(my_secret_key, sibling_public_key) to get
+    the parent secret at depth-1.
+
+    The context includes depth and path_prefix for domain separation.
+
+    Args:
+        shared_secret: Output of ecdh_shared_secret() (32 bytes)
+        depth: The current depth (used in context)
+        path_prefix: The path prefix at current depth
+
+    Returns:
+        Parent secret (32 bytes) at depth-1
+    """
+    # Domain-separated KDF: hash(context || secret)
+    context = b"treekem_dh_path_derive" + depth.to_bytes(1, 'big') + path_prefix
+    return nacl.hash.blake2b(
+        context + shared_secret,
+        digest_size=SECRET_SIZE,
+        encoder=nacl.encoding.RawEncoder
+    )
+
+
 def hash(data: bytes, size: int = KEY_ID_SIZE) -> bytes:
     """BLAKE2b hash. Default 16 bytes (128 bits) for key IDs."""
     return nacl.hash.blake2b(data, digest_size=size, encoder=nacl.encoding.RawEncoder)
@@ -48,6 +144,37 @@ def kdf(secret: bytes, salt: bytes, size: int = SECRET_SIZE) -> bytes:
     Default size is 32 bytes (256 bits).
     """
     return nacl.hash.blake2b(secret, salt=salt, digest_size=size, encoder=nacl.encoding.RawEncoder)
+
+
+def derive_path_secret(child_secret: bytes, depth: int, path_prefix: bytes) -> bytes:
+    """Derive parent secret from child secret in TreeKEM path.
+
+    In TreeKEM, path secrets form a chain: leaf → parent → ... → root.
+    Given child secret at depth D, derive parent at depth D-1.
+
+    Uses deterministic KDF so all recipients derive the same root.
+    The context includes depth and path_prefix to ensure domain separation.
+
+    Construction: BLAKE2b(context || child_secret)
+    - context = "treekem_path_derive" || depth (1 byte) || path_prefix
+    - Single hash, context-in-message pattern (standard, auditable)
+
+    Args:
+        child_secret: The secret at the child depth (32 bytes)
+        depth: The child's depth (used in context, not the derived depth)
+        path_prefix: The path prefix at the child's depth
+
+    Returns:
+        Parent secret (32 bytes) at depth-1
+    """
+    # Domain-separated KDF: hash(context || secret)
+    # Context includes domain tag + depth + path_prefix for uniqueness
+    context = b"treekem_path_derive" + depth.to_bytes(1, 'big') + path_prefix
+    return nacl.hash.blake2b(
+        context + child_secret,
+        digest_size=SECRET_SIZE,
+        encoder=nacl.encoding.RawEncoder
+    )
 
 
 def sign(message: bytes, private_key: bytes) -> bytes:
@@ -86,7 +213,7 @@ def decrypt(ciphertext: bytes, key: bytes, nonce: bytes) -> bytes:
     return box.decrypt(nonce + ciphertext)
 
 
-def seal(plaintext: bytes, public_key: bytes) -> bytes:
+def seal(plaintext: bytes, public_key: bytes, is_x25519: bool = False) -> bytes:
     """Deterministically seal a message to a public key.
 
     In a content-addressed system, identical content produces identical event IDs,
@@ -95,10 +222,20 @@ def seal(plaintext: bytes, public_key: bytes) -> bytes:
     to enable reproducible event creation.
 
     Output format is SealedBox-compatible: ephemeral_public_key || Box(plaintext)
+
+    Args:
+        plaintext: Data to encrypt
+        public_key: Recipient's public key (32 bytes)
+        is_x25519: If True, public_key is already X25519. If False, it's Ed25519
+                   and will be converted to X25519 for encryption.
     """
-    # Convert Ed25519 to X25519 for encryption
-    verify_key = nacl.signing.VerifyKey(public_key)
-    recipient_curve = verify_key.to_curve25519_public_key()
+    if is_x25519:
+        # Direct X25519 public key
+        recipient_curve = PublicKey(public_key)
+    else:
+        # Convert Ed25519 to X25519 for encryption
+        verify_key = nacl.signing.VerifyKey(public_key)
+        recipient_curve = verify_key.to_curve25519_public_key()
 
     # Derive ephemeral keypair deterministically from recipient + plaintext
     # This ensures: same recipient + same plaintext → same ciphertext → same event_id
@@ -118,14 +255,24 @@ def seal(plaintext: bytes, public_key: bytes) -> bytes:
     return bytes(ephemeral_public) + nonce + ciphertext
 
 
-def unseal(sealed_data: bytes, private_key: bytes) -> bytes:
+def unseal(sealed_data: bytes, private_key: bytes, is_x25519: bool = False) -> bytes:
     """Unseal a deterministically sealed message with a private key.
 
     Expects format: ephemeral_public (32) || nonce (24) || ciphertext
+
+    Args:
+        sealed_data: The encrypted data
+        private_key: Recipient's private key (32 bytes)
+        is_x25519: If True, private_key is already X25519. If False, it's Ed25519
+                   and will be converted to X25519 for decryption.
     """
-    # Convert Ed25519 to X25519 for decryption
-    signing_key = nacl.signing.SigningKey(private_key)
-    recipient_private = signing_key.to_curve25519_private_key()
+    if is_x25519:
+        # Direct X25519 private key
+        recipient_private = PrivateKey(private_key)
+    else:
+        # Convert Ed25519 to X25519 for decryption
+        signing_key = nacl.signing.SigningKey(private_key)
+        recipient_private = signing_key.to_curve25519_private_key()
 
     # Parse sealed format: ephemeral_public || nonce || ciphertext
     ephemeral_public = PublicKey(sealed_data[:32])
@@ -171,12 +318,12 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     Checks:
     - connections WHERE our_key and key_id matches
-    - connection_prekeys WHERE owner_peer_id == recorded_by
+    - connection_pubkeys WHERE owner_peer_id == recorded_by
     - local_peers.private_key WHERE peer_id == recorded_by
 
     Does NOT check:
-    - connection_prekeys_shared (public keys for encryption, not decryption)
-    - group_keys, group_prekeys (wrong namespace)
+    - connection_pubkeys_shared (public keys for encryption, not decryption)
+    - secrets, pubkeys (wrong namespace)
 
     Args:
         id_bytes: Key ID bytes (16 bytes) - key ID from blob
@@ -195,9 +342,9 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     log.debug(f"get_transit_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
-    # Check connection_prekeys (asymmetric) - DIRECT lookup, no _shared table
+    # Check connection_pubkeys (asymmetric) - DIRECT lookup, no _shared table
     transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ?",
+        "SELECT private_key FROM connection_pubkeys WHERE connection_pubkey_id = ? AND owner_peer_id = ?",
         (key_id, recorded_by)
     )
     if transit_prekey_row and transit_prekey_row['private_key']:
@@ -246,12 +393,12 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
     """Get event decryption key. Only checks LOCAL key tables with our private keys.
 
     Checks:
-    - group_keys WHERE recorded_by == recorded_by
-    - group_prekeys WHERE owner_peer_id == recorded_by AND recorded_by == recorded_by
+    - secrets WHERE recorded_by == recorded_by
+    - pubkeys WHERE owner_peer_id == recorded_by AND recorded_by == recorded_by
 
     Does NOT check:
-    - group_prekeys_shared (public keys for encryption, not decryption)
-    - transit_keys, connection_prekeys (wrong namespace)
+    - pubkeys_shared (public keys for encryption, not decryption)
+    - transit_keys, connection_pubkeys (wrong namespace)
 
     Args:
         id_bytes: Key ID bytes (16 bytes) - key ID from blob
@@ -270,30 +417,31 @@ def get_event_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[str,
 
     log.debug(f"get_event_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
-    # Check group_keys (symmetric)
-    group_row = safedb.query_one(
-        "SELECT key FROM group_keys WHERE key_id = ? AND recorded_by = ?",
-        (key_id, recorded_by)
-    )
-    if group_row:
-        log.debug(f"get_event_key_by_id() found group key for key_id={key_id}")
-        return {
-            'id': id_bytes,
-            'key': group_row['key'],
-            'type': 'symmetric'
-        }
+    # NOTE: secrets and pubkeys removed - use sender keys (secrets/pubkeys)
 
-    # Check group_prekeys (asymmetric) - DIRECT lookup by prekey_id
-    # Hint is now group_prekey_id (matches local prekey_id), consistent with transit_prekey
-    group_prekey_row = safedb.query_one(
-        "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
+    # Check pubkeys (TreeKEM asymmetric) - stores keypair directly
+    pubkey_row = safedb.query_one(
+        "SELECT private_key FROM pubkeys WHERE pubkey_id = ? AND owner_peer_id = ? AND recorded_by = ?",
         (key_id, recorded_by, recorded_by)
     )
-    if group_prekey_row and group_prekey_row['private_key']:
-        log.debug(f"get_event_key_by_id() found group prekey for prekey_id={key_id}")
+    if pubkey_row and pubkey_row['private_key']:
+        log.debug(f"get_event_key_by_id() found pubkey for pubkey_id={key_id}")
         return {
             'id': id_bytes,
-            'private_key': group_prekey_row['private_key'],
+            'private_key': pubkey_row['private_key'],
+            'type': 'asymmetric'
+        }
+
+    # Check treekem_pubkeys (TreeKEM Phase 2 asymmetric - private key now in main table)
+    treekem_pubkey_row = safedb.query_one(
+        "SELECT private_key FROM treekem_pubkeys WHERE treekem_pubkey_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
+    )
+    if treekem_pubkey_row and treekem_pubkey_row['private_key']:
+        log.debug(f"get_event_key_by_id() found treekem_pubkey for treekem_pubkey_id={key_id}")
+        return {
+            'id': id_bytes,
+            'private_key': treekem_pubkey_row['private_key'],
             'type': 'asymmetric'
         }
 
@@ -341,31 +489,33 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any,
             'type': 'symmetric'
         }
 
-    # Then try group keys table (subjective)
+    # NOTE: secrets removed - use sender keys (secrets)
+
+    # Then try secrets table (sender keys)
     safedb = create_safe_db(db, recorded_by=recorded_by)
-    group_row = safedb.query_one(
-        "SELECT key FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+    secret_row = safedb.query_one(
+        "SELECT key FROM secrets WHERE secret_id = ? AND recorded_by = ?",
         (key_id, recorded_by)
     )
-    if group_row:
-        log.debug(f"get_key_by_id() found group key for key_id={key_id}")
+    if secret_row:
+        log.debug(f"get_key_by_id() found secret key for key_id={key_id}")
         return {
             'id': id_bytes,
-            'key': group_row['key'],
+            'key': secret_row['key'],
             'type': 'symmetric'
         }
 
     log.debug(f"get_key_by_id() key_id={key_id} not found in keys tables")
 
-    # Then try asymmetric keys from connection_prekeys (device-wide, with ownership filter)
+    # Then try asymmetric keys from connection_pubkeys (device-wide, with ownership filter)
     # The hint (key_id) is always a prekey_shared_id (event ID)
     # Two cases:
     # 1. Detached prekey (from invite_accepted): prekey_id = prekey_shared_id directly
-    # 2. Regular prekey: need to find connection_prekey_id from connection_prekeys_shared, then look up in connection_prekeys
+    # 2. Regular prekey: need to find connection_pubkey_id from connection_pubkeys_shared, then look up in connection_pubkeys
 
-    log.debug(f"get_key_by_id() checking connection_prekeys for prekey_id={key_id} (detached), owner={recorded_by[:20]}...")
+    log.debug(f"get_key_by_id() checking connection_pubkeys for prekey_id={key_id} (detached), owner={recorded_by[:20]}...")
     transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
+        "SELECT private_key FROM connection_pubkeys WHERE connection_pubkey_id = ? AND owner_peer_id = ? LIMIT 1",
         (key_id, recorded_by)
     )
     if transit_prekey_row and transit_prekey_row['private_key']:
@@ -376,47 +526,46 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any,
             'type': 'asymmetric'
         }
 
-    # Try finding via connection_prekeys_shared (for regular prekeys)
-    log.debug(f"get_key_by_id() checking connection_prekeys_shared for prekey_shared_id={key_id}")
-    connection_prekey_shared_row = safedb.query_one(
-        "SELECT connection_prekey_shared_id FROM connection_prekeys_shared WHERE connection_prekey_shared_id = ? AND recorded_by = ? LIMIT 1",
+    # Try finding via connection_pubkeys_shared (for regular prekeys)
+    log.debug(f"get_key_by_id() checking connection_pubkeys_shared for prekey_shared_id={key_id}")
+    connection_pubkey_shared_row = safedb.query_one(
+        "SELECT connection_pubkey_shared_id FROM connection_pubkeys_shared WHERE connection_pubkey_shared_id = ? AND recorded_by = ? LIMIT 1",
         (key_id, recorded_by)
     )
-    if connection_prekey_shared_row:
-        # Need to get connection_prekey_id from event data
-        connection_prekey_shared_blob = store.get(key_id, db)
-        if connection_prekey_shared_blob:
-            from events.network import connection_prekey_shared
-            if not connection_prekey_shared.is_wire_envelope(connection_prekey_shared_blob):
-                log.warning(f"get_key_by_id() non-wire connection_prekey_shared blob for {key_id}")
+    if connection_pubkey_shared_row:
+        # Need to get connection_pubkey_id from event data
+        connection_pubkey_shared_blob = store.get(key_id, db)
+        if connection_pubkey_shared_blob:
+            from . import wire_format
+            if not wire_format.is_wire_connection_pubkey_shared_envelope(connection_pubkey_shared_blob):
+                log.warning(f"get_key_by_id() non-wire connection_pubkey_shared blob for {key_id}")
                 return None
-            connection_prekey_shared_data = connection_prekey_shared.decode_wire_event(connection_prekey_shared_blob)
-            connection_prekey_id = connection_prekey_shared_data.get('connection_prekey_id')
-            if connection_prekey_id:
+            connection_pubkey_shared_data = wire_format.decode_connection_pubkey_shared_wire_event(connection_pubkey_shared_blob)
+            connection_pubkey_id = connection_pubkey_shared_data.get('connection_pubkey_id')
+            if connection_pubkey_id:
                 transit_prekey_row = unsafedb.query_one(
-                    "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ? LIMIT 1",
-                    (connection_prekey_id, recorded_by)
+                    "SELECT private_key FROM connection_pubkeys WHERE connection_pubkey_id = ? AND owner_peer_id = ? LIMIT 1",
+                    (connection_pubkey_id, recorded_by)
                 )
                 if transit_prekey_row and transit_prekey_row['private_key']:
-                    log.debug(f"get_key_by_id() found transit prekey via connection_prekeys_shared link")
+                    log.debug(f"get_key_by_id() found transit prekey via connection_pubkeys_shared link")
                     return {
                         'id': id_bytes,
                         'private_key': transit_prekey_row['private_key'],
                         'type': 'asymmetric'
                     }
 
-    # Then try group_prekeys (subjective) - direct lookup by prekey_id
-    # Hint is now group_prekey_id (matches local prekey_id), consistent with transit_prekey
-    log.debug(f"get_key_by_id() checking group_prekeys for prekey_id={key_id}")
-    group_prekey_row = safedb.query_one(
-        "SELECT private_key FROM group_prekeys WHERE prekey_id = ? AND owner_peer_id = ? AND recorded_by = ? LIMIT 1",
+    # Then try pubkeys (subjective) - direct lookup by pubkey_id
+    log.debug(f"get_key_by_id() checking pubkeys for pubkey_id={key_id}")
+    pubkey_row = safedb.query_one(
+        "SELECT private_key FROM pubkeys WHERE pubkey_id = ? AND owner_peer_id = ? AND recorded_by = ? LIMIT 1",
         (key_id, recorded_by, recorded_by)
     )
-    if group_prekey_row and group_prekey_row['private_key']:
-        log.debug(f"get_key_by_id() found group prekey for prekey_id={key_id}")
+    if pubkey_row and pubkey_row['private_key']:
+        log.debug(f"get_key_by_id() found pubkey for pubkey_id={key_id}")
         return {
             'id': id_bytes,
-            'private_key': group_prekey_row['private_key'],
+            'private_key': pubkey_row['private_key'],
             'type': 'asymmetric'
         }
 
@@ -524,8 +673,8 @@ def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
 def unwrap_transit(wrapped_blob: bytes, recorded_by: str, db: Any) -> tuple[bytes | None, list[str]]:
     """Unwrap transit-layer blob (network transport). Never blocks on missing keys.
 
-    Only checks transit key namespace: transit_keys, connection_prekeys.
-    Does NOT check: group_keys, group_prekeys.
+    Only checks transit key namespace: transit_keys, connection_pubkeys.
+    Does NOT check: secrets, pubkeys.
 
     Args:
         wrapped_blob: Encrypted blob to unwrap
@@ -547,8 +696,8 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any,
                  key_cache: dict[str, dict[str, Any]] | None = None) -> tuple[bytes | None, list[str]]:
     """Unwrap event-layer blob (application data). Always blocks on missing keys.
 
-    Only checks event key namespace: group_keys, group_prekeys.
-    Does NOT check: transit_keys, connection_prekeys.
+    Only checks event key namespace: secrets, pubkeys.
+    Does NOT check: transit_keys, connection_pubkeys.
 
     Args:
         wrapped_blob: Encrypted blob to unwrap
@@ -566,23 +715,33 @@ def unwrap_event(wrapped_blob: bytes, recorded_by: str, db: Any,
         if len(wrapped_blob) == wire_format.WIRE_SIZE:
             header, payload, _signature = wire_format.parse_envelope(wrapped_blob)
             if header.flags & wire_format.FLAG_ENCRYPTED:
-                key_id = payload[:KEY_ID_SIZE]
-                key_data = get_event_key_by_id(key_id, recorded_by, db)
-                if not key_data:
-                    return None, [b64encode(key_id)]
-                try:
-                    if header.flags & wire_format.FLAG_WRAP_ASYM:
-                        # Asymmetric: key_id + sealed data
-                        sealed = payload[KEY_ID_SIZE:]
-                        plaintext = unseal(sealed, key_data["private_key"])
-                    else:
-                        # Symmetric: key_id + nonce + ciphertext
-                        nonce = payload[KEY_ID_SIZE:KEY_ID_SIZE + 24]
-                        ciphertext = payload[KEY_ID_SIZE + 24:]
-                        plaintext = decrypt(ciphertext, key_data["key"], nonce)
-                    return plaintext, []
-                except Exception:
-                    return None, []
+                decryptors = {
+                    wire_format.TYPE_MESSAGE: wire_format._decrypt_message_payload,
+                    wire_format.TYPE_CHANNEL: wire_format._decrypt_channel_payload,
+                    wire_format.TYPE_MESSAGE_UPDATE: wire_format._decrypt_message_update_payload,
+                    wire_format.TYPE_MESSAGE_DELETION: wire_format._decrypt_message_deletion_payload,
+                    wire_format.TYPE_MESSAGE_REACTION: wire_format._decrypt_message_reaction_payload,
+                    wire_format.TYPE_MESSAGE_REACTION_DELETION: wire_format._decrypt_message_reaction_deletion_payload,
+                    wire_format.TYPE_MESSAGE_ATTACHMENT: wire_format._decrypt_message_attachment_payload,
+                    wire_format.TYPE_CHANNEL_UPDATE: wire_format._decrypt_channel_update_payload,
+                    wire_format.TYPE_GROUP: wire_format._decrypt_group_payload,
+                    wire_format.TYPE_GROUP_MEMBER: wire_format._decrypt_group_member_payload,
+                    wire_format.TYPE_GROUP_KEY_SHARED: wire_format._decrypt_group_key_shared_payload,
+                    wire_format.TYPE_USERNAME_UPDATE: wire_format._decrypt_username_update_payload,
+                    wire_format.TYPE_NETWORK_NAME_UPDATE: wire_format._decrypt_network_name_update_payload,
+                    wire_format.TYPE_PEER_NAME_UPDATE: wire_format._decrypt_peer_name_update_payload,
+                }
+                decryptor = decryptors.get(header.event_type)
+                if decryptor:
+                    key_id = payload[:KEY_ID_SIZE]
+                    key_data = get_event_key_by_id(key_id, recorded_by, db)
+                    if not key_data:
+                        return None, [b64encode(key_id)]
+                    try:
+                        plaintext = decryptor(payload, key_data)
+                        return plaintext, []
+                    except Exception:
+                        return None, []
     except Exception:
         pass
 

@@ -2,18 +2,17 @@
 Scenario tests for channel API functions.
 
 Tests backend functions used by CLI:
-- channel.list_with_keys() returns channels with key_id
+- channel.list_with_keys() returns channels (no key_id in sender key model)
 - channel.get() returns single channel by ID
 """
 import pytest
 from events.identity import user, invite, peer as peer_module
 from events.content import channel
-from events.group import group_key
 from core import tick
 
 
-def test_list_channels_with_keys_returns_key_id(fresh_db):
-    """channel.list_with_keys() includes key_id from group."""
+def test_list_channels_returns_channels(fresh_db):
+    """channel.list_with_keys() returns channels."""
     db = fresh_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -29,16 +28,14 @@ def test_list_channels_with_keys_returns_key_id(fresh_db):
     )
     db.commit()
 
-    # List channels with keys
+    # List channels
     channels = channel.list_with_keys(alice['peer_id'], db)
 
     # Should have at least 2 channels (general + testing)
     assert len(channels) >= 2
 
-    # All channels should have key_id
+    # All channels should have standard fields
     for ch in channels:
-        assert 'key_id' in ch, f"Channel {ch['name']} missing key_id"
-        assert ch['key_id'] is not None, f"Channel {ch['name']} has None key_id"
         assert 'name' in ch
         assert 'channel_id' in ch
         assert 'group_id' in ch
@@ -49,25 +46,8 @@ def test_list_channels_with_keys_returns_key_id(fresh_db):
     assert testing_ch['channel_id'] == channel_id
 
 
-def test_list_channels_with_keys_key_is_valid(fresh_db):
-    """key_id from list_channels_with_keys() is a valid group key."""
-    db = fresh_db
-
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
-    db.commit()
-
-    channels = channel.list_with_keys(alice['peer_id'], db)
-    general_ch = next((c for c in channels if c['name'] == 'general'), None)
-    assert general_ch is not None
-
-    # key_id should be retrievable via group_key.get_key()
-    key_data = group_key.get_key(general_ch['key_id'], alice['peer_id'], db)
-    assert key_data is not None
-    assert 'key' in key_data
-
-
-def test_list_channels_with_keys_includes_all_fields(fresh_db):
-    """list_channels_with_keys() includes all standard channel fields plus key_id."""
+def test_list_channels_includes_all_fields(fresh_db):
+    """list_channels_with_keys() includes all standard channel fields."""
     db = fresh_db
 
     alice = user.new_network(name='Alice', t_ms=1000, db=db)
@@ -95,8 +75,6 @@ def test_list_channels_with_keys_includes_all_fields(fresh_db):
     assert 'signed_by' in ephemeral_ch
     assert 'created_at' in ephemeral_ch
     assert 'disappearing_time_ms' in ephemeral_ch
-    # Plus the key_id from join
-    assert 'key_id' in ephemeral_ch
 
     assert ephemeral_ch['disappearing_time_ms'] == 86400000
 

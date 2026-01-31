@@ -17,13 +17,8 @@ EVENT_TYPE = 'connection_request'
 SHAREABLE = False  # Local-only - contains symmetric key material
 PROJECTION_TABLE = 'pending_connection_requests'
 
-# Wire format constants
-WIRE_TYPE_CODE = 0x32  # TYPE_CONNECTION_REQUEST
-WIRE_PLAINTEXT_SIZE = 344  # CONNECTION_REQUEST_PLAINTEXT_SIZE
-
 from typing import Any
 import logging
-import struct
 from core import crypto
 from core import store
 from core import wire_format
@@ -38,126 +33,46 @@ log = logging.getLogger(__name__)
 CONNECTION_TTL_MS = 300_000
 
 
-# Wire format functions - encode/decode for connection_request event type
+# ============================================================================
+# Connection limiting configuration
+# ============================================================================
+# Rate limit + natural attrition approach:
+# - Rate limit creation: Create at most `rate` new connections per tick
+# - Don't renew excess: When connection approaches expiry, only renew if count < k
+# - Natural attrition: Excess connections expire naturally (TTL = 5 minutes)
+# - Result: Sparse random graph with ~k connections per peer
 
-def encode_plaintext(
-    key: bytes,
-    to_peer_shared_id: bytes | None,
-    invite_id: bytes | None,
-) -> bytes:
-    """Encode a connection_request payload plaintext.
-
-    Layout (344 bytes):
-    - key (32 bytes)
-    - to_peer_shared_id (16 bytes, or zeros if None)
-    - invite_id (16 bytes, or zeros if None)
-    - pad
-    """
-    wire_format._require_len("key", key, wire_format.SECRET_SIZE)
-    to_peer_bytes = to_peer_shared_id or (b"\x00" * 16)
-    invite_bytes = invite_id or (b"\x00" * 16)
-    wire_format._require_len("to_peer_shared_id", to_peer_bytes, 16)
-    wire_format._require_len("invite_id", invite_bytes, 16)
-    payload = bytearray(WIRE_PLAINTEXT_SIZE)
-    payload[0:wire_format.SECRET_SIZE] = key
-    payload[32:48] = to_peer_bytes
-    payload[48:64] = invite_bytes
-    return bytes(payload)
+_max_connections_per_peer: int | None = 20  # Target k (None = unlimited)
+_connection_creation_rate: int = 5  # Max new connections per tick per peer
 
 
-def decode_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode a connection_request payload plaintext."""
-    if len(data) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(
-            f"connection_request plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
-        )
-    key = data[0:wire_format.SECRET_SIZE]
-    to_peer_shared_id = data[32:48]
-    invite_id = data[48:64]
-    if to_peer_shared_id == b"\x00" * 16:
-        to_peer_shared_id = None
-    if invite_id == b"\x00" * 16:
-        invite_id = None
-    return {
-        "key": key,
-        "to_peer_shared_id": to_peer_shared_id,
-        "invite_id": invite_id,
-    }
+def set_max_connections_per_peer(k: int | None) -> None:
+    """Set target connections per peer. None = unlimited."""
+    global _max_connections_per_peer
+    _max_connections_per_peer = k
 
 
-def is_wire_envelope(data: bytes) -> bool:
-    """Check if data is a connection_request wire envelope."""
-    if len(data) != wire_format.WIRE_SIZE:
-        return False
-    try:
-        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
-    except ValueError:
-        return False
-    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
+def get_max_connections_per_peer() -> int | None:
+    """Get target connections per peer. None = unlimited."""
+    return _max_connections_per_peer
 
 
-def encode_wire_event(
-    *,
-    key: bytes,
-    to_peer_shared_id_b64: str | None,
-    invite_id_b64: str | None,
-    signed_by_b64: str,
-    signer_type: str,
-    created_at_ms: int,
-    ttl_ms: int,
-    private_key: bytes,
-) -> bytes:
-    """Encode a complete connection_request wire event.
-
-    Note: connection_request uses sealed encryption (not group encryption),
-    so plaintext is not encrypted - just padded.
-    """
-    to_peer_shared_id = crypto.b64decode(to_peer_shared_id_b64) if to_peer_shared_id_b64 else None
-    invite_id = crypto.b64decode(invite_id_b64) if invite_id_b64 else None
-    signer_id = crypto.b64decode(signed_by_b64)
-    plaintext = encode_plaintext(
-        key=key,
-        to_peer_shared_id=to_peer_shared_id,
-        invite_id=invite_id,
-    )
-    header = wire_format.WireHeader(
-        version=1,
-        event_type=WIRE_TYPE_CODE,
-        flags=0,
-        signer_type=wire_format.signer_type_from_str(signer_type),
-        count=0,
-        created_at_ms=created_at_ms,
-        ttl_ms=ttl_ms,
-        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
-    )
-    signed_bytes = wire_format._signing_bytes(header, plaintext)
-    signature = crypto.sign(signed_bytes, private_key)
-    payload = wire_format._pad_payload(plaintext)
-    return wire_format.build_envelope(header, payload, signature)
+def set_connection_creation_rate(rate: int) -> None:
+    """Set max new connections created per tick per peer."""
+    global _connection_creation_rate
+    _connection_creation_rate = rate
 
 
-def decode_wire_event(data: bytes) -> dict[str, Any]:
-    """Decode a connection_request wire event."""
-    header, payload, signature = wire_format.parse_envelope(data)
-    if header.event_type != WIRE_TYPE_CODE:
-        raise ValueError("unexpected event type for connection_request")
-    plaintext = payload[:WIRE_PLAINTEXT_SIZE]
-    decoded = decode_plaintext(plaintext)
-    event_data = {
-        "type": EVENT_TYPE,
-        "key": crypto.b64encode(decoded["key"]),
-        "signed_by": crypto.b64encode(header.signer_id),
-        "signer_type": wire_format.signer_type_to_str(header.signer_type),
-        "created_at": header.created_at_ms,
-        "ttl_ms": header.ttl_ms,
-        "_wire_signature": signature,
-        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
-    }
-    if decoded["to_peer_shared_id"]:
-        event_data["to_peer_shared_id"] = crypto.b64encode(decoded["to_peer_shared_id"])
-    if decoded["invite_id"]:
-        event_data["invite_id"] = crypto.b64encode(decoded["invite_id"])
-    return event_data
+def get_connection_creation_rate() -> int:
+    """Get max new connections created per tick per peer."""
+    return _connection_creation_rate
+
+
+def reset_connection_limits() -> None:
+    """Reset connection limits to defaults. For testing."""
+    global _max_connections_per_peer, _connection_creation_rate
+    _max_connections_per_peer = 20
+    _connection_creation_rate = 5
 
 
 # v2 event specification
@@ -246,7 +161,7 @@ def create(
         # Normal mode: sign with peer's private key
         private_key = peer.get_private_key(from_peer_id, from_peer_id, db)
 
-    blob = encode_wire_event(
+    blob = wire_format.encode_connection_request_wire_event(
         key=symmetric_key,
         to_peer_shared_id_b64=to_peer_shared_id,
         invite_id_b64=invite_id,
@@ -267,19 +182,12 @@ def create(
 def _get_invite_private_key(peer_id: str, invite_id: str, db: Any) -> bytes | None:
     """Get the invite private key for signing bootstrap connection events.
 
-    Looks in both group_prekeys (inviter's case) and invite_accepteds (joiner's case).
+    The invite_private_key is stored in invite_accepteds when a peer accepts an invite.
+    This is used by joiners to sign their initial connection_request with the invite key.
     """
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # First try group_prekeys (inviter's case - we created the invite)
-    invite_key_row = safedb.query_one(
-        "SELECT private_key FROM group_prekeys WHERE owner_peer_id = ? AND recorded_by = ? LIMIT 1",
-        (peer_id, peer_id)
-    )
-    if invite_key_row and invite_key_row['private_key']:
-        return invite_key_row['private_key']
-
-    # Then try invite_accepteds (joiner's case - we accepted an invite)
+    # Get invite_private_key from invite_accepteds (joiner's case - we accepted an invite)
     ia_row = safedb.query_one(
         "SELECT invite_private_key FROM invite_accepteds WHERE invite_id = ? AND recorded_by = ?",
         (invite_id, peer_id)
@@ -374,12 +282,12 @@ def _wire_shadow_connection_request(
     invite_id: str | None,
 ) -> None:
     """Validate connection_request fields against the fixed-size wire payload layout."""
-    plaintext = encode_plaintext(
+    plaintext = wire_format.encode_connection_request_plaintext(
         key=crypto.b64decode(key_b64),
         to_peer_shared_id=crypto.b64decode(to_peer_shared_id) if to_peer_shared_id else None,
         invite_id=crypto.b64decode(invite_id) if invite_id else None,
     )
-    decoded = decode_plaintext(plaintext)
+    decoded = wire_format.decode_connection_request_plaintext(plaintext)
     if decoded["key"] != crypto.b64decode(key_b64):
         raise ValueError("wire shadow decode key mismatch")
 
@@ -715,7 +623,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
         t_ms: Current timestamp in milliseconds
         db: Database connection
     """
-    from events.network import connection_ack, connection_prekey
+    from events.network import connection_ack, connection_pubkey
 
     unsafedb = create_unsafe_db(db)
     local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
@@ -737,7 +645,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
         # Check this FIRST because bootstrap mode needs it even without peer_self
         invite_row = safedb.query_one(
             """SELECT invite_id, inviter_peer_shared_id,
-                      inviter_connection_prekey_id, inviter_connection_prekey_public_key
+                      inviter_connection_pubkey_id, inviter_connection_pubkey_public_key
                FROM invite_accepteds WHERE recorded_by = ? LIMIT 1""",
             (peer_id,)
         )
@@ -761,11 +669,11 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
                 if not existing:
                     # Build transit prekey dict from invite_accepteds
-                    inviter_connection_prekey = None
-                    if invite_row.get('inviter_connection_prekey_public_key'):
-                        inviter_connection_prekey = {
-                            'id': crypto.b64decode(invite_row['inviter_connection_prekey_id']),
-                            'public_key': invite_row['inviter_connection_prekey_public_key'],
+                    inviter_connection_pubkey = None
+                    if invite_row.get('inviter_connection_pubkey_public_key'):
+                        inviter_connection_pubkey = {
+                            'id': crypto.b64decode(invite_row['inviter_connection_pubkey_id']),
+                            'public_key': invite_row['inviter_connection_pubkey_public_key'],
                             'type': 'asymmetric'
                         }
 
@@ -777,7 +685,7 @@ def send_to_all(t_ms: int, db: Any) -> None:
                             invite_id=invite_id,
                             t_ms=t_ms,
                             db=db,
-                            inviter_connection_prekey=inviter_connection_prekey,
+                            inviter_connection_pubkey=inviter_connection_pubkey,
                         )
                     except Exception as e:
                         log.warning(f"connection_request.send_to_all: bootstrap error: {e}")
@@ -785,7 +693,22 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
         # NORMAL MODE: Have peer_self, can connect to all known peers
 
+        # Connection limiting setup - needed for both pending requests and new connections
+        creation_rate = get_connection_creation_rate()
+        target_k = get_max_connections_per_peer()
+
+        # Count ALL active connections (pending + established) toward the limit
+        current_count = 0
+        if target_k is not None:
+            count_row = safedb.query_one("""
+                SELECT COUNT(*) as cnt FROM connections
+                WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?
+            """, (peer_id, t_ms))
+            current_count = count_row['cnt'] if count_row else 0
+
         # First, process any pending connection requests that we couldn't ack earlier
+        # Always respond to incoming requests - connection limiting only applies
+        # to outgoing connection creation. This ensures new peers can always join.
         pending_requests = safedb.query_all("""
             SELECT request_id, remote_peer_shared_id, remote_invite_id, their_key, received_at
             FROM pending_connection_requests WHERE recorded_by = ?
@@ -805,15 +728,15 @@ def send_to_all(t_ms: int, db: Any) -> None:
 
         # Two types of connections:
         # 1. peers_shared: actual synced peers (peer_shared auth, permanent)
-        # 2. connection_prekeys_shared: includes predicted IDs from invites (invite auth, expires)
+        # 2. connection_pubkeys_shared: includes predicted IDs from invites (invite auth, expires)
         all_peer_ids = set()
 
         for row in safedb.query("SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ?", (peer_id,)):
             all_peer_ids.add(row['peer_shared_id'])
 
-        # Also include peers we have connection_prekeys_shared for (may include predicted invite IDs)
+        # Also include peers we have connection_pubkeys_shared for (may include predicted invite IDs)
         for row in safedb.query(
-            "SELECT peer_id FROM connection_prekeys_shared WHERE recorded_by = ?",
+            "SELECT peer_id FROM connection_pubkeys_shared WHERE recorded_by = ?",
             (peer_id,)
         ):
             all_peer_ids.add(row['peer_id'])
@@ -822,6 +745,9 @@ def send_to_all(t_ms: int, db: Any) -> None:
         if invite_row and invite_row['inviter_peer_shared_id']:
             all_peer_ids.add(invite_row['inviter_peer_shared_id'])
             log.debug(f"connection_request.send_to_all: added inviter {invite_row['inviter_peer_shared_id'][:20]}... from invite_accepteds")
+
+        # Rate limit counter for new outgoing connections
+        new_connections_this_tick = 0
 
         # Send to each peer
         for to_peer_shared_id in all_peer_ids:
@@ -840,6 +766,16 @@ def send_to_all(t_ms: int, db: Any) -> None:
                 log.debug(f"connection_request.send_to_all: skipping {to_peer_shared_id[:20]}... (connection exists)")
                 continue
 
+            # Connection limiting: check if at/over target k
+            if target_k is not None and current_count >= target_k:
+                log.debug(f"connection_request.send_to_all: at connection limit ({current_count}/{target_k}), skipping new connections")
+                break  # Stop creating new connections when at limit
+
+            # Rate limiting: stop after creating `rate` new connections this tick
+            if new_connections_this_tick >= creation_rate:
+                log.debug(f"connection_request.send_to_all: rate limit reached ({creation_rate}), stopping for this tick")
+                break
+
             try:
                 _send_request(
                     to_peer_shared_id=to_peer_shared_id,
@@ -849,6 +785,8 @@ def send_to_all(t_ms: int, db: Any) -> None:
                     t_ms=t_ms,
                     db=db
                 )
+                new_connections_this_tick += 1
+                current_count += 1  # Track for k limit (pending counts toward limit)
             except Exception as e:
                 log.warning(f"connection_request.send_to_all: error sending to {to_peer_shared_id[:20]}...: {e}")
 
@@ -860,7 +798,7 @@ def _send_request(
     invite_id: str | None,
     t_ms: int,
     db: Any,
-    inviter_connection_prekey: dict | None = None,
+    inviter_connection_pubkey: dict | None = None,
 ) -> None:
     """Send a connection request to a specific peer.
 
@@ -871,9 +809,9 @@ def _send_request(
         invite_id: Invite ID for bootstrap auth
         t_ms: Timestamp
         db: Database connection
-        inviter_connection_prekey: Pre-fetched transit prekey dict (for bootstrap mode)
+        inviter_connection_pubkey: Pre-fetched transit prekey dict (for bootstrap mode)
     """
-    from events.network import connection_prekey
+    from events.network import connection_pubkey
 
     # Create request
     connection_id, symmetric_key = create(
@@ -900,31 +838,31 @@ def _send_request(
         t_ms, t_ms, CONNECTION_TTL_MS
     ))
 
-    # Get recipient's connection_prekey - try multiple sources
+    # Get recipient's connection_pubkey - try multiple sources
     to_key = None
 
     # 1. Pre-passed transit prekey (bootstrap mode with prekey from invite_accepteds)
-    if inviter_connection_prekey:
-        to_key = inviter_connection_prekey
+    if inviter_connection_pubkey:
+        to_key = inviter_connection_pubkey
         log.debug(f"connection_request._send_request: using pre-passed transit prekey")
 
-    # 2. Look up from connection_prekeys_shared table (normal mode)
+    # 2. Look up from connection_pubkeys_shared table (normal mode)
     if not to_key:
-        to_key = connection_prekey.get_connection_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+        to_key = connection_pubkey.get_connection_pubkey_for_peer(to_peer_shared_id, from_peer_id, db)
 
     # 3. BOOTSTRAP FALLBACK: Check invite_accepteds for inviter's transit prekey
     if not to_key:
         inviter_row = safedb.query_one("""
-            SELECT inviter_connection_prekey_id, inviter_connection_prekey_public_key
+            SELECT inviter_connection_pubkey_id, inviter_connection_pubkey_public_key
             FROM invite_accepteds
             WHERE inviter_peer_shared_id = ? AND recorded_by = ?
             LIMIT 1
         """, (to_peer_shared_id, from_peer_id))
 
-        if inviter_row and inviter_row['inviter_connection_prekey_public_key']:
+        if inviter_row and inviter_row['inviter_connection_pubkey_public_key']:
             to_key = {
-                'id': crypto.b64decode(inviter_row['inviter_connection_prekey_id']),
-                'public_key': inviter_row['inviter_connection_prekey_public_key'],
+                'id': crypto.b64decode(inviter_row['inviter_connection_pubkey_id']),
+                'public_key': inviter_row['inviter_connection_pubkey_public_key'],
                 'type': 'asymmetric'
             }
             log.info(f"connection_request._send_request: using inviter transit prekey from invite_accepteds for {to_peer_shared_id[:20]}...")
@@ -1474,12 +1412,18 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
 
     Sends a connection ack in response to a connection request.
     Looks up the reply_addr from packet_metadata (stored during receive).
+
+    Note: We always respond to incoming requests - connection limiting only
+    applies to outgoing connection creation. This ensures new peers can always
+    join even when existing peers are at their connection limit. Excess
+    connections will expire naturally via TTL (natural attrition).
     """
     from events.network import connection_ack
 
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
     # Look up reply_addr from packet_metadata staging table
     # This was stored by store_incoming() when the request arrived
-    safedb = create_safe_db(db, recorded_by=recorded_by)
     from_addr_row = safedb.query_one("""
         SELECT from_addr_ip, from_addr_port FROM packet_metadata
         WHERE event_id = ? AND recorded_by = ?
@@ -1504,3 +1448,75 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
 
 # Register the command handler at module load time
 register_command_handler('send_connection_ack', _handle_send_connection_ack)
+
+
+# ============================================================================
+# Online/Offline API for simulating network partitions
+# ============================================================================
+
+# Module-level state for tracking offline peers
+_offline_peers: set[str] = set()
+
+
+def set_all_online() -> None:
+    """Reset all peers to online state.
+
+    Called at the start of tests to ensure clean state.
+    """
+    global _offline_peers
+    _offline_peers.clear()
+
+
+def go_offline(peer_id: str) -> None:
+    """Mark a peer as offline.
+
+    Offline peers won't receive or send sync messages.
+
+    Args:
+        peer_id: The peer ID to mark offline
+    """
+    _offline_peers.add(peer_id)
+    log.debug(f"connection_request.go_offline: peer {peer_id[:20]}... is now offline")
+
+
+def go_online(peer_id: str) -> None:
+    """Mark a peer as online.
+
+    Args:
+        peer_id: The peer ID to mark online
+    """
+    _offline_peers.discard(peer_id)
+    log.debug(f"connection_request.go_online: peer {peer_id[:20]}... is now online")
+
+
+def is_offline(peer_id: str) -> bool:
+    """Check if a peer is offline.
+
+    Args:
+        peer_id: The peer ID to check
+
+    Returns:
+        True if the peer is offline
+    """
+    return peer_id in _offline_peers
+
+
+def is_online(peer_id: str) -> bool:
+    """Check if a peer is online.
+
+    Args:
+        peer_id: The peer ID to check
+
+    Returns:
+        True if the peer is online
+    """
+    return peer_id not in _offline_peers
+
+
+def get_offline_peers() -> set[str]:
+    """Get the set of offline peer IDs.
+
+    Returns:
+        Copy of the set of offline peer IDs
+    """
+    return _offline_peers.copy()

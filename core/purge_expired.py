@@ -102,29 +102,18 @@ def project(purge_expired_id: str, recorded_by: str, recorded_at: int, db: Any) 
             'has_key_id': True,  # Special handling for forward secrecy
         },
         {
-            'table': 'connection_prekeys',
-            'id_col': 'connection_prekey_id',
+            'table': 'connection_pubkeys',
+            'id_col': 'connection_pubkey_id',
             'db': 'unsafe',  # Device-wide, not subjective
-            'name': 'connection prekeys',
+            'name': 'connection pubkeys',
         },
         {
-            'table': 'group_prekeys',
-            'id_col': 'prekey_id',
+            'table': 'connection_pubkeys_shared',
+            'id_col': 'connection_pubkey_shared_id',
             'db': 'safe',
-            'name': 'group prekeys',
+            'name': 'connection_pubkeys_shared',
         },
-        {
-            'table': 'connection_prekeys_shared',
-            'id_col': 'connection_prekey_shared_id',
-            'db': 'safe',
-            'name': 'connection_prekeys_shared',
-        },
-        {
-            'table': 'group_prekeys_shared',
-            'id_col': 'group_prekey_shared_id',
-            'db': 'safe',
-            'name': 'group_prekeys_shared',
-        },
+        # NOTE: group_prekeys, group_prekeys_shared removed - use pubkey/pubkey_shared
         {
             'table': 'message_rekeys',
             'id_col': 'rekey_id',

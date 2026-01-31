@@ -344,7 +344,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         {
             'peer_id': str,
             'peer_shared_id': str,
-            'prekey_id': str,
+            'connection_pubkey_id': str,
             'network_id': str,
             'all_users_group_id': str,
             'channel_id': str,
@@ -405,12 +405,12 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     # Generate deterministic prekey ID from public key hash (for bootstrap user invite)
     # This is needed for invite_accepted.project() to restore invite secrets
     # Use full 32-byte hash for consistency with all key hints
-    bootstrap_invite_prekey_id = crypto.b64encode(crypto.hash(invite_pubkey))
+    bootstrap_invite_pubkey_id = crypto.b64encode(crypto.hash(invite_pubkey))
 
     invite_link_data = {
         'invite_blob': base64.urlsafe_b64encode(invite_blob).decode().rstrip('='),
         'invite_id': invite_id,
-        'invite_prekey_id': bootstrap_invite_prekey_id,
+        'invite_pubkey_id': bootstrap_invite_pubkey_id,
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': None,  # Bootstrap: no inviter (self-invite)
         'ip': '127.0.0.1',
@@ -419,7 +419,7 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     invite_json = json.dumps(invite_link_data, separators=(',', ':'), sort_keys=True)
     invite_code = base64.urlsafe_b64encode(invite_json.encode()).decode().rstrip('=')
     invite_link = f"quiet://invite/{invite_code}"
-    log.info(f"new_network() built invite_link with invite_prekey_id={bootstrap_invite_prekey_id[:20]}...")
+    log.info(f"new_network() built invite_link with invite_pubkey_id={bootstrap_invite_pubkey_id[:20]}...")
 
     # 4. Create user via bootstrap invite (isomorphic with join() flow)
     # Note: peer_self is populated later by peer_shared.project() - no PENDING entry needed
@@ -458,7 +458,6 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         peer_invite_id=peer_invite_id,
         peer_invite_private_key=peer_invite_private_key,
         user_id=user_id,
-        prekey_id=bootstrap_invite_prekey_id,  # Bootstrap user invite's prekey ID
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         device_name=device_name,
@@ -554,21 +553,21 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     )
     log.info(f"new_network() created channel: {channel_id[:20]}...")
 
-    # 11. Create transit_prekey + transit_prekey_shared (for sync)
-    from events.network import connection_prekey, connection_prekey_shared
-    prekey_id, prekey_private = connection_prekey.create(
+    # 11. Create connection_pubkey + connection_pubkey_shared (for sync)
+    from events.network import connection_pubkey, connection_pubkey_shared
+    connection_pubkey_id, connection_pubkey_private = connection_pubkey.create(
         peer_id=peer_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
-    connection_prekey_shared_id = connection_prekey_shared.create(
-        prekey_id=prekey_id,
+    connection_pubkey_shared_id = connection_pubkey_shared.create(
+        pubkey_id=connection_pubkey_id,
         peer_id=peer_id,
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db
     )
-    log.info(f"new_network() created transit prekey: {prekey_id[:20]}..., shared={connection_prekey_shared_id[:20]}...")
+    log.info(f"new_network() created connection pubkey: {connection_pubkey_id[:20]}..., shared={connection_pubkey_shared_id[:20]}...")
 
     # Add user to all_users group
     # Pass admin_grant directly so the event has explicit dependency for convergence
@@ -590,8 +589,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
     return {
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
-        'prekey_id': prekey_id,
-        'connection_prekey_shared_id': connection_prekey_shared_id,
+        'connection_pubkey_id': connection_pubkey_id,
+        'connection_pubkey_shared_id': connection_pubkey_shared_id,
         'network_id': network_id,
         'all_users_group_id': all_users_group_id,
         'channel_id': channel_id,
@@ -761,30 +760,28 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     # Extract metadata from link (no blobs - those sync after connection)
     invite_id = invite_data['invite_id']
-    invite_prekey_id = invite_data['invite_prekey_id']
+    invite_pubkey_id = invite_data['invite_pubkey_id']
     invite_private_key = crypto.b64decode(invite_data['invite_private_key'])
     inviter_peer_shared_id = invite_data['inviter_peer_shared_id']
     channel_id = invite_data.get('channel_id')
-    key_id = invite_data.get('key_id')
 
     log.info(f"join() extracted invite_id={invite_id[:20]}... from invite link")
 
-    # Create group_prekey event from invite key material so we can decrypt group_key_shared events
-    # The invite_prekey_id was used by Alice when wrapping group_key_shared to us
-    # Since group_prekey blobs are deterministic (same key material = same hash),
-    # this produces the SAME prekey_id that Alice created
+    # Create pubkey event from invite key material
+    # In sender key model, this allows the joiner to receive sender keys
+    # that were encrypted to the invite pubkey at invite creation time
     from nacl.signing import SigningKey
-    from events.group import group_prekey
+    from events.group import pubkey
     signing_key = SigningKey(invite_private_key)
     invite_pubkey = bytes(signing_key.verify_key)
-    created_prekey_id = group_prekey.create_from_material(
+    created_pubkey_id = pubkey.create_from_material(
         public_key=invite_pubkey,
         private_key=invite_private_key,
         peer_id=peer_id,
         t_ms=t_ms,
         db=db
     )
-    log.info(f"join() created group_prekey from invite material: {created_prekey_id[:20]}... (should match invite_prekey_id={invite_prekey_id[:20]}...)")
+    log.info(f"join() created pubkey from invite material: {created_pubkey_id[:20]}...")
 
     # Create invite_accepted event to capture invite link data for event-sourcing
     # This stores inviter's transit prekey in invite_accepteds table via projection
@@ -841,15 +838,16 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         peer_invite_id=peer_invite_id,
         peer_invite_private_key=peer_invite_private_key,
         user_id=user_id,
-        prekey_id=invite_prekey_id,  # From user invite (for dependency tracking)
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         device_name=device_name,
         network_id=invite_data.get('network_id')  # Trust anchor for cascade
     )
     peer_shared_id = peer_shared_join_result['peer_shared_id']
-    prekey_id = peer_shared_join_result['connection_prekey_id']
-    connection_prekey_shared_id = peer_shared_join_result['connection_prekey_shared_id']
+    pubkey_id = peer_shared_join_result['pubkey_id']
+    pubkey_shared_id = peer_shared_join_result['pubkey_shared_id']
+    connection_pubkey_id = peer_shared_join_result['connection_pubkey_id']
+    connection_pubkey_shared_id = peer_shared_join_result['connection_pubkey_shared_id']
     log.info(f"join() delegated to peer_shared.join(): peer_shared_id={peer_shared_id[:20]}...")
 
     # Try to create username_update event (encrypted with group key)
@@ -885,11 +883,10 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
         'peer_id': peer_id,
         'peer_shared_id': peer_shared_id,
         'user_id': user_id,
-        'prekey_id': prekey_id,
-        'connection_prekey_shared_id': connection_prekey_shared_id,
+        'pubkey_id': pubkey_id,  # Renamed from prekey_id
+        'connection_pubkey_shared_id': connection_pubkey_shared_id,
         'network_id': invite_data.get('network_id'),  # From invite
         'channel_id': channel_id,
-        'key_id': key_id,
         'invite_data': invite_data,
         'invite_accepted_id': invite_accepted_id,
     }

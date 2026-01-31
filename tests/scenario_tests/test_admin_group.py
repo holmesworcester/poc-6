@@ -161,24 +161,19 @@ def test_admin_group_workflow(fresh_db):
         (charlie['peer_id'],)
     )
 
-    charlie_group_key_row = charlie_safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
-        (all_users_group_id, charlie['peer_id'])
-    )
-
+    # In sender key model, groups don't have key_id - invites pass None
     rogue_invite_private_key, rogue_invite_public_key = crypto.generate_keypair()
     rogue_invite_pubkey_b64 = crypto.b64encode(rogue_invite_public_key)
-    rogue_invite_prekey_id = crypto.b64encode(crypto.hash(rogue_invite_public_key))
-
+    rogue_invite_pubkey_id = crypto.b64encode(crypto.hash(rogue_invite_public_key))
 
     charlie_private_key = peer.get_private_key(charlie['peer_id'], charlie['peer_id'], db)
     rogue_invite_blob = invite.encode_wire_event(
         mode="user",
         invite_pubkey_b64=rogue_invite_pubkey_b64,
-        invite_prekey_id_b64=rogue_invite_prekey_id,
+        invite_pubkey_id_b64=rogue_invite_pubkey_id,
         group_id_b64=all_users_group_id,
         channel_id_b64=charlie_channel['channel_id'],
-        key_id_b64=charlie_group_key_row['key_id'],
+        key_id_b64=None,  # Sender key model: no group keys
         network_id_b64=charlie_network['network_id'],
         inviter_peer_shared_id_b64=charlie['peer_shared_id'],
         inviter_user_id_b64=charlie['user_id'],  # Charlie is NOT an admin!

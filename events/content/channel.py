@@ -1,4 +1,8 @@
-"""Channel event type (shareable, encrypted)."""
+"""Channel event type (shareable, signed).
+
+Note: In sender key model, channels are signed but not encrypted.
+Messages use sender keys for encryption.
+"""
 from __future__ import annotations
 
 # Registry metadata
@@ -6,18 +10,12 @@ EVENT_TYPE = 'channel'
 SHAREABLE = True  # Channels sync to all members
 PROJECTION_TABLE = ('channels', 'channel_id')
 
-# Wire format constants
-WIRE_TYPE_CODE = 0x02  # TYPE_CHANNEL
-WIRE_PLAINTEXT_SIZE = 344  # CHANNEL_PLAINTEXT_SIZE
-NAME_MAX = 64
-
 from typing import Any
 import logging
-import struct
 from core import crypto
 from core import store
 from core import wire_format
-from events.group import group_key, group as group_module, group_member
+from events.group import group as group_module, group_member
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
 from core.projection.types import ProjectorResult, WriteOp
@@ -25,198 +23,11 @@ from core.projection.types import ProjectorResult, WriteOp
 log = logging.getLogger(__name__)
 
 
-# Wire format functions - encode/decode for channel event type
 
-def encode_plaintext(
-    group_id: bytes,
-    name: str | bytes,
-    disappearing_time_ms: int,
-    is_main: int | bool,
-    admin_grant_id: bytes | None,
-) -> bytes:
-    """Encode a channel payload plaintext (pre-encryption).
-
-    Layout (344 bytes):
-    - group_id (16)
-    - name_len (u16)
-    - name_bytes (NAME_MAX)
-    - disappearing_time_ms (u64)
-    - is_main (u8)
-    - admin_grant_id (16, zero if none)
-    - pad
-    """
-    wire_format._require_len("group_id", group_id, 16)
-
-    if isinstance(name, str):
-        name_bytes = name.encode("utf-8")
-    else:
-        name_bytes = bytes(name)
-
-    if len(name_bytes) > NAME_MAX:
-        raise ValueError(f"name exceeds {NAME_MAX} bytes, got {len(name_bytes)}")
-
-    admin_grant_bytes = admin_grant_id or (b"\x00" * 16)
-    wire_format._require_len("admin_grant_id", admin_grant_bytes, 16)
-
-    payload = bytearray(WIRE_PLAINTEXT_SIZE)
-    payload[0:16] = group_id
-    struct.pack_into("<H", payload, 16, len(name_bytes))
-    payload[18:18 + len(name_bytes)] = name_bytes
-    struct.pack_into("<Q", payload, 18 + NAME_MAX, disappearing_time_ms)
-    payload[26 + NAME_MAX] = 1 if is_main else 0
-    payload[27 + NAME_MAX:27 + NAME_MAX + 16] = admin_grant_bytes
-    return bytes(payload)
-
-
-def decode_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode a channel payload plaintext (post-decryption)."""
-    if len(data) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(f"channel plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}")
-
-    group_id = data[0:16]
-    (name_len,) = struct.unpack_from("<H", data, 16)
-    if name_len > NAME_MAX:
-        raise ValueError(f"name_len exceeds {NAME_MAX}, got {name_len}")
-
-    name_bytes = data[18:18 + name_len]
-    try:
-        name = name_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("name is not valid utf-8") from exc
-
-    (disappearing_time_ms,) = struct.unpack_from("<Q", data, 18 + NAME_MAX)
-    is_main = data[26 + NAME_MAX]
-    admin_grant_id = data[27 + NAME_MAX:27 + NAME_MAX + 16]
-    if admin_grant_id == b"\x00" * 16:
-        admin_grant_id = None
-
-    return {
-        "group_id": group_id,
-        "name": name,
-        "disappearing_time_ms": disappearing_time_ms,
-        "is_main": is_main,
-        "admin_grant_id": admin_grant_id,
-    }
-
-
-def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
-    """Encrypt channel plaintext into wire payload."""
-    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(f"channel plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
-    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
-    if key_data.get("type") != "symmetric":
-        raise ValueError("channel payload requires symmetric key")
-    nonce = crypto.deterministic_nonce(key_id, plaintext)
-    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
-    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
-        raise ValueError("unexpected ciphertext length for channel payload")
-    payload = key_id + nonce + ciphertext
-    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
-
-
-def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
-    """Decrypt wire payload to channel plaintext."""
-    if key_data.get("type") != "symmetric":
-        raise ValueError("channel payload requires symmetric key")
-    key_id = payload[:16]
-    nonce = payload[16:40]
-    ciphertext = payload[40:]
-    return crypto.decrypt(ciphertext, key_data["key"], nonce)
-
-
-def encode_wire_event(
-    *,
-    group_id_b64: str,
-    name: str,
-    disappearing_time_ms: int,
-    is_main: int | bool,
-    admin_grant_b64: str | None,
-    signed_by_b64: str,
-    signer_type: str,
-    created_at_ms: int,
-    key_data: dict[str, Any],
-    private_key: bytes,
-) -> bytes:
-    """Encode a complete channel wire event."""
-    group_id = crypto.b64decode(group_id_b64)
-    signer_id = crypto.b64decode(signed_by_b64)
-    admin_grant_id = crypto.b64decode(admin_grant_b64) if admin_grant_b64 else None
-
-    plaintext = encode_plaintext(
-        group_id=group_id,
-        name=name,
-        disappearing_time_ms=disappearing_time_ms,
-        is_main=is_main,
-        admin_grant_id=admin_grant_id,
-    )
-    header = wire_format.WireHeader(
-        version=1,
-        event_type=WIRE_TYPE_CODE,
-        flags=wire_format.FLAG_ENCRYPTED,
-        signer_type=wire_format.signer_type_from_str(signer_type),
-        count=0,
-        created_at_ms=created_at_ms,
-        ttl_ms=disappearing_time_ms,
-        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
-    )
-    signed_bytes = wire_format._signing_bytes(header, plaintext)
-    signature = crypto.sign(signed_bytes, private_key)
-    payload = _encrypt_payload(plaintext, key_data)
-    return wire_format.build_envelope(header, payload, signature)
-
-
-def is_wire_envelope(data: bytes) -> bool:
-    """Check if data is a channel wire envelope."""
-    if len(data) != wire_format.WIRE_SIZE:
-        return False
-    try:
-        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
-    except ValueError:
-        return False
-    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
-
-
-def decode_wire_event(
-    data: bytes,
-    recorded_by: str,
-    db: Any,
-    key_cache: dict[str, dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """Decode a channel wire event."""
-    header, payload, signature = wire_format.parse_envelope(data)
-    if header.event_type != WIRE_TYPE_CODE:
-        return None, []
-    if header.flags & wire_format.FLAG_ENCRYPTED:
-        key_id = payload[:16]
-        key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
-        if not key_data:
-            return None, [key_id_b64]
-        plaintext = _decrypt_payload(payload, key_data)
-    else:
-        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
-
-    decoded = decode_plaintext(plaintext)
-    event_data = {
-        "type": EVENT_TYPE,
-        "group_id": crypto.b64encode(decoded["group_id"]),
-        "name": decoded["name"],
-        "disappearing_time_ms": decoded["disappearing_time_ms"],
-        "is_main": decoded["is_main"],
-        "signed_by": crypto.b64encode(header.signer_id),
-        "signer_type": wire_format.signer_type_to_str(header.signer_type),
-        "created_at": header.created_at_ms,
-        "_wire_signature": signature,
-        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
-    }
-    if decoded["admin_grant_id"]:
-        event_data["admin_grant"] = crypto.b64encode(decoded["admin_grant_id"])
-    return event_data, []
-
-
-# v2 event specification - signed by peer_shared, encrypted
+# v2 event specification - signed by peer_shared
+# NOTE: encrypted=False in sender key model - messages use sender keys
 EVENT_SPEC = {
-    'encrypted': True,
+    'encrypted': False,
     'signer': {
         'id_field': 'signed_by',
         'type_field': 'signer_type',
@@ -226,7 +37,7 @@ EVENT_SPEC = {
             'source': 'table',
             'table': 'groups',
             'key': 'group_id',
-            'fields': ['group_id', 'key_id'],
+            'fields': ['group_id'],  # Removed key_id - no group_key in sender key model
         },
     },
     'optional': {
@@ -315,14 +126,14 @@ def _wire_shadow_channel(
     """Validate channel fields against the fixed-size wire payload layout."""
     group_id_bytes = crypto.b64decode(group_id)
     admin_grant_bytes = crypto.b64decode(admin_grant) if admin_grant else None
-    plaintext = encode_plaintext(
+    plaintext = wire_format.encode_channel_plaintext(
         group_id=group_id_bytes,
         name=name,
         disappearing_time_ms=disappearing_time_ms,
         is_main=is_main,
         admin_grant_id=admin_grant_bytes,
     )
-    decoded = decode_plaintext(plaintext)
+    decoded = wire_format.decode_channel_plaintext(plaintext)
     if decoded["name"] != name:
         raise ValueError("wire shadow decode name mismatch")
     if decoded["disappearing_time_ms"] != disappearing_time_ms:
@@ -351,9 +162,12 @@ def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            group_id: str | None = None, member_user_ids: list[str] | None = None,
-           key_id: str | None = None, is_main: bool = False,
+           is_main: bool = False,
            disappearing_time_ms: int = 0, admin_grant: str | None = None) -> str:
-    """Create a shareable, encrypted channel event.
+    """Create a shareable, signed channel event.
+
+    In sender key model, channels are signed but not encrypted - they're group metadata.
+    Messages within the channel are encrypted with sender keys.
 
     Only admins can create channels (except during initial network setup where group_id is explicitly provided).
     Channels can be:
@@ -375,7 +189,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         db: Database connection
         group_id: Optional explicit group ID (if None and no member_user_ids, will use main group)
         member_user_ids: If provided, create private channel for these members (creates new group)
-        key_id: Optional explicit key_id (only used if group_id provided, otherwise derived)
         is_main: True if this is the main channel for a group
         disappearing_time_ms: Messages expire after this duration in ms (0 = permanent, >0 = milliseconds)
         admin_grant: Optional admin_id that grants authority to create channels.
@@ -431,7 +244,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         log.info(f"channel.create() creating PRIVATE channel name='{name}', peer_id={peer_id}, members={len(member_user_ids)}")
 
         # Create group for the private channel
-        private_group_id, private_key_id = group_module.create(
+        private_group_id, _ = group_module.create(
             name=f"private_channel_{name}",
             peer_id=peer_id,
             peer_shared_id=peer_shared_id,
@@ -441,7 +254,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         )
 
         group_id = private_group_id
-        key_id = private_key_id
 
         # First, ensure the creator is added to the private channel group
         # Get creator's user_id from peers_shared (user→peer relationship stored there)
@@ -516,22 +328,20 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         if not group_id:
             # Find the main group
             main_group = safedb.query_one(
-                "SELECT group_id, key_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
+                "SELECT group_id FROM groups WHERE is_main = 1 AND recorded_by = ? LIMIT 1",
                 (peer_id,)
             )
             if not main_group:
                 raise ValueError("No main group found - cannot create public channel")
             group_id = main_group['group_id']
-            key_id = main_group['key_id']
-        elif not key_id:
-            # If group_id provided but no key_id, look it up
+        else:
+            # Verify group exists
             group_row = safedb.query_one(
-                "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ?",
+                "SELECT group_id FROM groups WHERE group_id = ? AND recorded_by = ?",
                 (group_id, peer_id)
             )
             if not group_row:
                 raise ValueError(f"Group {group_id} not found")
-            key_id = group_row['key_id']
 
         log.info(f"channel.create() creating PUBLIC channel name='{name}', group_id={group_id}, peer_id={peer_id}, is_main={is_main}")
 
@@ -546,10 +356,7 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Get key_data for encryption
-    key_data = group_key.get_key(key_id, peer_id, db)
-
-    blob = encode_wire_event(
+    blob = wire_format.encode_channel_wire_event(
         group_id_b64=group_id,
         name=name,
         disappearing_time_ms=disappearing_time_ms,
@@ -558,7 +365,6 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         signed_by_b64=peer_shared_id,
         signer_type="peer_shared",
         created_at_ms=t_ms,
-        key_data=key_data,
         private_key=private_key,
     )
 
@@ -622,17 +428,18 @@ def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
 
 
 def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
-    """List all channels with their current group keys.
+    """List all channels.
 
-    Returns channel info plus the current key_id from the associated group,
-    avoiding N+1 queries when displaying key state.
+    In the sender key model, groups don't have encryption keys. Each sender
+    has their own key for messages. This function returns channel info without
+    key_id (which no longer exists).
 
     Args:
         recorded_by: Peer perspective for queries
         db: Database connection
 
     Returns:
-        List of dicts with channel_id, name, group_id, key_id, etc.
+        List of dicts with channel_id, name, group_id, etc.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     name_subquery = (
@@ -647,16 +454,15 @@ def list_with_keys(recorded_by: str, db: Any) -> list[dict[str, Any]]:
         "AND cu.new_disappearing_time_ms IS NOT NULL "
         "ORDER BY cu.global_count DESC, cu.update_id DESC LIMIT 1"
     )
+    # Note: In sender key model, groups don't have key_id
     return safedb.query(
         f"""SELECT c.channel_id,
                   COALESCE(({name_subquery}), c.name) AS name,
                   c.group_id,
                   c.signed_by,
                   c.created_at,
-                  COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms,
-                  g.key_id
+                  COALESCE(({ttl_subquery}), c.disappearing_time_ms) AS disappearing_time_ms
            FROM channels c
-           LEFT JOIN groups g ON c.group_id = g.group_id AND c.recorded_by = g.recorded_by
            WHERE c.recorded_by = ?
            ORDER BY c.created_at DESC""",
         (recorded_by,)

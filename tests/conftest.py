@@ -40,6 +40,7 @@ def reset_global_state():
     # Reset network configuration
     from core import network_config
     from core import transport
+    from events.network import connection_request
     network_config.reset_network_config()
 
     # Reset transport and enable loopback mode for testing
@@ -52,6 +53,9 @@ def reset_global_state():
     # Reset monotonic test clock
     tick_helper.reset_test_clock()
 
+    # Reset connection limiting configuration
+    connection_request.reset_connection_limits()
+
     # Reset tick job state (database-backed, needs a temp db)
     # Note: Each test creates its own DB, but we need to reset the
     # job state for tests that reuse databases across ticks
@@ -63,6 +67,7 @@ def reset_global_state():
     jobs.reset_frequency_multiplier()
     network_config.reset_network_config()
     transport.reset()
+    connection_request.reset_connection_limits()
 
 
 @pytest.fixture

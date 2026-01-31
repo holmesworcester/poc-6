@@ -374,58 +374,28 @@ class TransitPrekeyReplenishmentJob(Job):
         if not super().should_run(t_ms, last_run_at, db):
             return False
 
-        # Additional check: only run if prekeys actually low
-        from events.network.connection_prekey import MIN_TRANSIT_PREKEYS
+        # Additional check: only run if pubkeys actually low
+        from events.network.connection_pubkey import MIN_CONNECTION_PUBKEYS
         unsafedb = create_unsafe_db(db)
 
         peers = unsafedb.query("SELECT peer_id FROM local_peers")
         for peer in peers:
             count = unsafedb.query_one(
-                "SELECT COUNT(*) as c FROM connection_prekeys WHERE owner_peer_id = ? AND ttl_ms > ?",
+                "SELECT COUNT(*) as c FROM connection_pubkeys WHERE owner_peer_id = ? AND ttl_ms > ?",
                 (peer['peer_id'], t_ms)
             )
-            if count and count['c'] < MIN_TRANSIT_PREKEYS:
+            if count and count['c'] < MIN_CONNECTION_PUBKEYS:
                 return True  # At least one peer needs replenishment
 
-        return False  # All peers have enough prekeys
+        return False  # All peers have enough pubkeys
 
     def run(self, t_ms: int, db: Any) -> dict:
-        from events.network import connection_prekey
-        return connection_prekey.replenish_for_all_peers(t_ms, db)
+        from events.network import connection_pubkey
+        return connection_pubkey.replenish_for_all_peers(t_ms, db)
 
 
-class GroupPrekeyReplenishmentJob(Job):
-    """Replenish group prekeys when running low (smart conditional)."""
-
-    def __init__(self):
-        super().__init__('group_prekey_replenishment', every_ms=3_600_000, budget_ms=200)
-
-    def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
-        """Run if interval elapsed AND at least one peer has low prekeys."""
-        # First check time interval
-        if not super().should_run(t_ms, last_run_at, db):
-            return False
-
-        # Additional check: only run if prekeys actually low
-        from events.group.group_prekey import MIN_GROUP_PREKEYS
-        from .db import create_safe_db
-        unsafedb = create_unsafe_db(db)
-
-        peers = unsafedb.query("SELECT peer_id FROM local_peers")
-        for peer in peers:
-            safedb = create_safe_db(db, recorded_by=peer['peer_id'])
-            count = safedb.query_one(
-                "SELECT COUNT(*) as c FROM group_prekeys WHERE recorded_by = ? AND ttl_ms > ?",
-                (peer['peer_id'], t_ms)
-            )
-            if count and count['c'] < MIN_GROUP_PREKEYS:
-                return True  # At least one peer needs replenishment
-
-        return False  # All peers have enough prekeys
-
-    def run(self, t_ms: int, db: Any) -> dict:
-        from events.group import group_prekey
-        return group_prekey.replenish_for_all_peers(t_ms, db)
+# NOTE: GroupPrekeyReplenishmentJob removed - group_prekey/group_prekey_shared removed
+# Sender keys (pubkey/pubkey_shared) are created on join, not replenished periodically
 
 
 class ConnectionSendJob(Job):
@@ -603,12 +573,52 @@ class NegentropySyncJob(Job):
         return negentropy.sync_all_connections(t_ms=t_ms, db=db)
 
 
+class TreeKEMUpdateJob(Job):
+    """Periodic TreeKEM updates for forward secrecy using DH-based key exchange.
+
+    This job periodically creates TreeKEM updates for local peers:
+    - Uses join delay to let sync catch up before first update
+    - Rotates keys every 5 minutes for forward secrecy
+    - Builds on current winning base_update_id to avoid conflicts
+    - Uses DH-based path secret derivation for O(1) root convergence
+    """
+
+    def __init__(self):
+        # Run every 5 minutes, but stagger per-peer to avoid thundering herd
+        super().__init__('treekem_update', every_ms=300_000, budget_ms=100)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.group import treekem_update
+        return treekem_update.update_all_peers_if_needed(t_ms, db)
+
+
+class TreeKEMReUpdateJob(Job):
+    """Re-update superseded members to converge on winning TreeKEM state.
+
+    When concurrent updates occur (same base_update_id), only one wins.
+    Superseded members must re-update based on the winner's state to
+    ensure everyone converges to the same root secret.
+
+    This job:
+    - Runs every 2 seconds to quickly detect superseded updates
+    - For each superseded local peer, creates new update based on winner
+    - The new update uses DH with winner's pubkeys for convergence
+    """
+
+    def __init__(self):
+        super().__init__('treekem_re_update', every_ms=2_000, budget_ms=50)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.group import treekem_reupdate
+        return treekem_reupdate.reupdate_all_peers(t_ms, db)
+
+
 HIGH_PRIORITY_DEFAULT_TYPES = [
     # Auth / membership / routing
     "connection_request",
     "connection_ack",
-    "connection_prekey",
-    "connection_prekey_shared",
+    "connection_pubkey",
+    "connection_pubkey_shared",
     "network_intro",
     "self_address",
     "invite",
@@ -624,11 +634,11 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
     "group_member",
     "channel",
     "channel_update",
-    # Keys
-    "group_key",
-    "group_key_shared",
-    "group_prekey",
-    "group_prekey_shared",
+    # Keys (sender keys)
+    "pubkey",
+    "pubkey_shared",
+    "secret",
+    "secret_shared",
     # Messages
     "message",
     "message_update",
@@ -674,5 +684,8 @@ JOBS = [
     MessageRekeyAndPurgeJob(),
     PurgeExpiredEventsJob(),
     TransitPrekeyReplenishmentJob(),
-    GroupPrekeyReplenishmentJob(),
+    # NOTE: GroupPrekeyReplenishmentJob removed - group_prekey/group_prekey_shared removed
+    # TreeKEM DH-based key exchange jobs
+    TreeKEMUpdateJob(),
+    TreeKEMReUpdateJob(),
 ]

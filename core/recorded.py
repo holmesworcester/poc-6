@@ -271,29 +271,32 @@ def _build_key_cache_by_peer(
 
         for chunk in _chunked(list(key_ids), chunk_size):
             placeholders = ",".join("?" for _ in chunk)
+
+            # Look in secrets table for sender keys (symmetric)
             params = (*chunk, recorded_by)
             rows = safedb.query(
-                f"SELECT key_id, key FROM group_keys "
-                f"WHERE key_id IN ({placeholders}) AND recorded_by = ?",
+                f"SELECT secret_id, key FROM secrets "
+                f"WHERE secret_id IN ({placeholders}) AND recorded_by = ?",
                 params,
             )
             for row in rows:
-                key_cache[row['key_id']] = {
-                    'id': crypto.b64decode(row['key_id']),
+                key_cache[row['secret_id']] = {
+                    'id': crypto.b64decode(row['secret_id']),
                     'key': row['key'],
                     'type': 'symmetric',
                 }
 
+            # Look in pubkeys table for asymmetric keys (local-only, has private_key)
             params = (*chunk, recorded_by, recorded_by)
             rows = safedb.query(
-                f"SELECT prekey_id, private_key FROM group_prekeys "
-                f"WHERE prekey_id IN ({placeholders}) AND owner_peer_id = ? AND recorded_by = ?",
+                f"SELECT pubkey_id, private_key FROM pubkeys "
+                f"WHERE pubkey_id IN ({placeholders}) AND owner_peer_id = ? AND recorded_by = ?",
                 params,
             )
             for row in rows:
                 if row['private_key']:
-                    key_cache[row['prekey_id']] = {
-                        'id': crypto.b64decode(row['prekey_id']),
+                    key_cache[row['pubkey_id']] = {
+                        'id': crypto.b64decode(row['pubkey_id']),
                         'private_key': row['private_key'],
                         'type': 'asymmetric',
                     }
@@ -404,24 +407,140 @@ def _decode_event_blob(
     db: Any,
     key_cache: dict[str, dict[str, Any]] | None,
 ) -> tuple[dict[str, Any] | None, str | None, list[str]]:
-    """Decode wire-format or JSON event payload.
-
-    Uses registry-based dispatch: extracts type code from wire header,
-    looks up decoder via registry.decode_by_type_code().
-    """
+    """Decode wire-format or JSON event payload."""
     event_data = None
     event_type = None
     missing_key_ids: list[str] = []
 
-    # Extract type code from wire header
-    type_code = wire_format.get_wire_type_code(event_blob)
-    if type_code is not None:
-        # Use registry to decode by type code
-        event_data, missing_key_ids = registry.decode_by_type_code(
-            type_code, event_blob, recorded_by, db, key_cache
+    if wire_format.is_wire_message_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_message_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_channel_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_channel_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_message_update_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_message_update_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_message_deletion_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_message_deletion_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_message_reaction_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_message_reaction_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_message_reaction_deletion_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_message_reaction_deletion_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_message_attachment_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_message_attachment_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_message_rekey_envelope(event_blob):
+        event_data = wire_format.decode_message_rekey_wire_event(event_blob)
+    elif wire_format.is_wire_channel_update_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_channel_update_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_group_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_group_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_group_member_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_group_member_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    # NOTE: group_key, group_key_shared, group_prekey, group_prekey_shared removed - use sender keys
+    elif wire_format.is_wire_connection_pubkey_envelope(event_blob):
+        event_data = wire_format.decode_connection_pubkey_wire_event(event_blob)
+    elif wire_format.is_wire_connection_pubkey_shared_envelope(event_blob):
+        event_data = wire_format.decode_connection_pubkey_shared_wire_event(event_blob)
+    elif wire_format.is_wire_connection_request_envelope(event_blob):
+        event_data = wire_format.decode_connection_request_wire_event(event_blob)
+    elif wire_format.is_wire_connection_ack_envelope(event_blob):
+        event_data = wire_format.decode_connection_ack_wire_event(event_blob)
+    elif wire_format.is_wire_file_slice(event_blob):
+        event_data = wire_format.decode_file_slice_wire_event(event_blob)
+    elif wire_format.is_wire_user_envelope(event_blob):
+        event_data = wire_format.decode_user_wire_event(event_blob)
+    elif wire_format.is_wire_username_update_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_username_update_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_user_removed_envelope(event_blob):
+        event_data = wire_format.decode_user_removed_wire_event(event_blob)
+    elif wire_format.is_wire_peer_envelope(event_blob):
+        event_data = wire_format.decode_peer_wire_event(event_blob)
+    elif wire_format.is_wire_peer_shared_envelope(event_blob):
+        event_data = wire_format.decode_peer_shared_wire_event(event_blob)
+    elif wire_format.is_wire_peer_name_update_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_peer_name_update_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_peer_removed_envelope(event_blob):
+        event_data = wire_format.decode_peer_removed_wire_event(event_blob)
+    elif wire_format.is_wire_network_envelope(event_blob):
+        event_data = wire_format.decode_network_wire_event(event_blob)
+    elif wire_format.is_wire_network_name_update_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_network_name_update_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_admin_envelope(event_blob):
+        event_data = wire_format.decode_admin_wire_event(event_blob)
+    elif wire_format.is_wire_invite_envelope(event_blob):
+        event_data = wire_format.decode_invite_wire_event(event_blob)
+    elif wire_format.is_wire_invite_accepted_envelope(event_blob):
+        event_data = wire_format.decode_invite_accepted_wire_event(event_blob)
+    elif wire_format.is_wire_self_address_envelope(event_blob):
+        event_data = wire_format.decode_self_address_wire_event(event_blob)
+    elif wire_format.is_wire_observed_address_envelope(event_blob):
+        event_data = wire_format.decode_observed_address_wire_event(event_blob)
+    elif wire_format.is_wire_network_intro_envelope(event_blob):
+        event_data = wire_format.decode_network_intro_wire_event(event_blob)
+    elif wire_format.is_wire_negentropy_envelope(event_blob):
+        event_data = wire_format.decode_negentropy_wire_event(event_blob)
+    # TreeKEM Phase 1 event types
+    elif wire_format.is_wire_pubkey_envelope(event_blob):
+        event_data = wire_format.decode_pubkey_local_event(event_blob)
+    elif wire_format.is_wire_pubkey_shared_envelope(event_blob):
+        event_data = wire_format.decode_pubkey_shared_wire_event(event_blob)
+    elif wire_format.is_wire_secret_envelope(event_blob):
+        event_data = wire_format.decode_secret_wire_event(event_blob)
+    elif wire_format.is_wire_secret_shared_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_secret_shared_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_removal_epoch_envelope(event_blob):
+        event_data = wire_format.decode_removal_epoch_wire_event(event_blob)
+    elif wire_format.is_wire_key_request_envelope(event_blob):
+        event_data = wire_format.decode_key_request_wire_event(event_blob)
+    elif wire_format.is_wire_key_announce_envelope(event_blob):
+        event_data = wire_format.decode_key_announce_wire_event(event_blob)
+    # TreeKEM Phase 2 event types
+    elif wire_format.is_wire_treekem_pubkey_envelope(event_blob):
+        # Old shareable format (deprecated, for backward compat)
+        event_data = wire_format.decode_treekem_pubkey_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_pubkey_local_envelope(event_blob):
+        event_data = wire_format.decode_treekem_pubkey_local_event(event_blob)
+    elif wire_format.is_wire_treekem_pubkey_shared_envelope(event_blob):
+        event_data = wire_format.decode_treekem_pubkey_shared_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_update_envelope(event_blob):
+        event_data = wire_format.decode_treekem_update_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_secret_envelope(event_blob):
+        event_data = wire_format.decode_treekem_secret_wire_event(event_blob)
+    elif wire_format.is_wire_treekem_secret_shared_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_treekem_secret_shared_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
+        )
+    elif wire_format.is_wire_secret_broadcast_envelope(event_blob):
+        event_data, missing_key_ids = wire_format.decode_secret_broadcast_wire_event(
+            event_blob, recorded_by, db, key_cache=key_cache
         )
     else:
-        # Not a valid wire envelope
         if event_blob and event_blob[:1] in (b'{', b'['):
             raise ValueError("JSON event blobs are no longer supported")
 

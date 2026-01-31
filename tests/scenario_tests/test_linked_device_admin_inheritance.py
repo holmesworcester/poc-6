@@ -16,7 +16,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer_shared, peer, network
 from events.group import group_member
-from tests.utils.tick_helper import assert_eventually, TestClock
+from tests.utils.tick_helper import assert_eventually
 
 
 def test_linked_device_inherits_admin_privileges(fresh_db):
@@ -24,12 +24,11 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
 
     # Setup
     db = fresh_db
-    clock = TestClock()
 
     print("\n=== Setup: Alice creates network (becomes admin) ===")
 
     # Alice creates network
-    alice_device1 = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
+    alice_device1 = user.new_network(name='Alice', t_ms=1000, db=db)
     print(f"Alice created network on device 1")
     print(f"  user_id={alice_device1['user_id'][:20]}...")
     print(f"  peer_shared_id={alice_device1['peer_shared_id'][:20]}...")
@@ -50,23 +49,23 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
 
     invite_id, invite_link, _ = invite.create(
         peer_id=alice_device1['peer_id'],
-        t_ms=clock.tick(),
+        t_ms=2000,
         db=db,
         mode='peer',
         user_id=alice_device1['user_id']
     )
     db.commit()
 
-    alice_device2_peer_id = peer.create(t_ms=clock.tick(), db=db)
-    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=clock.tick(), db=db)
+    alice_device2_peer_id = peer.create(t_ms=3000, db=db)
+    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=3001, db=db)
     assert accepted['mode'] == 'peer'
     alice_device2 = peer_shared.join(
         peer_id=alice_device2_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        prekey_id=accepted['invite_prekey_id'],
-        t_ms=clock.tick(),
+        # prekey_id removed in sender key model
+        t_ms=3002,
         db=db
     )
     print(f"Alice linked device 2")
@@ -97,7 +96,7 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
 
     bob_invite_id, bob_invite_link, _ = invite.create(
         peer_id=alice_device2['peer_id'],  # Device 2 creates invite
-        t_ms=clock.tick(),
+        t_ms=5000,
         db=db
     )
     print(f"Device 2 created invite: {bob_invite_id[:20]}...")
@@ -107,12 +106,12 @@ def test_linked_device_inherits_admin_privileges(fresh_db):
     # Bob joins via device 2's invite
     print("\n=== Bob joins via device 2's invite ===")
 
-    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob_peer_id = peer.create(t_ms=6000, db=db)
     bob = user.join(
         peer_id=bob_peer_id,
         invite_link=bob_invite_link,
         name='Bob',
-        t_ms=clock.now(),
+        t_ms=6000,
         db=db
     )
     print(f"Bob joined network")

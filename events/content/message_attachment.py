@@ -10,14 +10,6 @@ EVENT_TYPE = 'message_attachment'
 SHAREABLE = True  # Attachments sync with messages
 PROJECTION_TABLE = None  # No created_at lookup needed
 
-# Wire format constants
-WIRE_TYPE_CODE = 0x07  # TYPE_MESSAGE_ATTACHMENT
-WIRE_PLAINTEXT_SIZE = 344  # MESSAGE_ATTACHMENT_PLAINTEXT_SIZE
-FILENAME_MAX = 128
-MIME_MAX = 32
-NONCE_PREFIX_SIZE = 20
-SECRET_SIZE = 32
-
 # v2 event specification
 EVENT_SPEC = {
     'encrypted': True,  # Group-wrapped via store.publish
@@ -38,254 +30,17 @@ from typing import Any
 import base64
 import io
 import logging
-import struct
 from PIL import Image
 from core import crypto
 from core import store
 from core import wire_format
 from core.projection.types import ProjectorResult, WriteOp
 from events.identity import peer_shared, peer
-from events.group import group
+from events.group import group, sender_key
 from events.content import file_slice, message
 from core.db import create_safe_db, create_unsafe_db
 
 log = logging.getLogger(__name__)
-
-
-# Wire format functions - encode/decode for message_attachment event type
-
-def encode_plaintext(
-    message_id: bytes,
-    file_id: bytes,
-    blob_bytes: int,
-    total_slices: int,
-    nonce_prefix: bytes,
-    enc_key: bytes,
-    root_hash: bytes,
-    filename: str | bytes | None,
-    mime_type: str | bytes | None,
-) -> bytes:
-    """Encode a message_attachment payload plaintext (pre-encryption)."""
-    wire_format._require_len("message_id", message_id, 16)
-    wire_format._require_len("file_id", file_id, 16)
-    wire_format._require_len("nonce_prefix", nonce_prefix, NONCE_PREFIX_SIZE)
-    wire_format._require_len("enc_key", enc_key, SECRET_SIZE)
-    wire_format._require_len("root_hash", root_hash, 32)
-    if blob_bytes < 0:
-        raise ValueError("blob_bytes must be non-negative")
-    if total_slices < 0 or total_slices > 0xFFFFFFFF:
-        raise ValueError("total_slices must fit in u32")
-
-    if filename is None:
-        filename_bytes = b""
-    elif isinstance(filename, str):
-        filename_bytes = filename.encode("utf-8")
-    else:
-        filename_bytes = bytes(filename)
-
-    if mime_type is None:
-        mime_bytes = b""
-    elif isinstance(mime_type, str):
-        mime_bytes = mime_type.encode("utf-8")
-    else:
-        mime_bytes = bytes(mime_type)
-
-    if len(filename_bytes) > FILENAME_MAX:
-        raise ValueError(f"filename exceeds {FILENAME_MAX} bytes, got {len(filename_bytes)}")
-    if len(mime_bytes) > MIME_MAX:
-        raise ValueError(f"mime_type exceeds {MIME_MAX} bytes, got {len(mime_bytes)}")
-
-    payload = bytearray(WIRE_PLAINTEXT_SIZE)
-    payload[0:16] = message_id
-    payload[16:32] = file_id
-    struct.pack_into("<Q", payload, 32, blob_bytes)
-    struct.pack_into("<I", payload, 40, total_slices)
-    payload[44:44 + NONCE_PREFIX_SIZE] = nonce_prefix
-    payload[64:96] = enc_key
-    payload[96:128] = root_hash
-    struct.pack_into("<H", payload, 128, len(filename_bytes))
-    payload[130:130 + len(filename_bytes)] = filename_bytes
-    mime_len_offset = 130 + FILENAME_MAX
-    struct.pack_into("<H", payload, mime_len_offset, len(mime_bytes))
-    payload[mime_len_offset + 2:mime_len_offset + 2 + len(mime_bytes)] = mime_bytes
-    return bytes(payload)
-
-
-def decode_plaintext(data: bytes) -> dict[str, Any]:
-    """Decode a message_attachment payload plaintext (post-decryption)."""
-    if len(data) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(
-            f"message_attachment plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
-        )
-    message_id = data[0:16]
-    file_id = data[16:32]
-    (blob_bytes,) = struct.unpack_from("<Q", data, 32)
-    (total_slices,) = struct.unpack_from("<I", data, 40)
-    nonce_prefix = data[44:44 + NONCE_PREFIX_SIZE]
-    enc_key = data[64:96]
-    root_hash = data[96:128]
-    (filename_len,) = struct.unpack_from("<H", data, 128)
-    if filename_len > FILENAME_MAX:
-        raise ValueError(f"filename_len exceeds {FILENAME_MAX}, got {filename_len}")
-    filename_bytes = data[130:130 + filename_len]
-    (mime_len,) = struct.unpack_from("<H", data, 130 + FILENAME_MAX)
-    if mime_len > MIME_MAX:
-        raise ValueError(f"mime_len exceeds {MIME_MAX}, got {mime_len}")
-    mime_bytes = data[132 + FILENAME_MAX:132 + FILENAME_MAX + mime_len]
-
-    if filename_len:
-        try:
-            filename = filename_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("filename is not valid utf-8") from exc
-    else:
-        filename = None
-    if mime_len:
-        try:
-            mime_type = mime_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("mime_type is not valid utf-8") from exc
-    else:
-        mime_type = None
-    return {
-        "message_id": message_id,
-        "file_id": file_id,
-        "blob_bytes": blob_bytes,
-        "total_slices": total_slices,
-        "nonce_prefix": nonce_prefix,
-        "enc_key": enc_key,
-        "root_hash": root_hash,
-        "filename": filename,
-        "mime_type": mime_type,
-    }
-
-
-def _encrypt_payload(plaintext: bytes, key_data: dict[str, Any]) -> bytes:
-    """Encrypt message_attachment plaintext into wire payload."""
-    if len(plaintext) != WIRE_PLAINTEXT_SIZE:
-        raise ValueError(f"message_attachment plaintext must be {WIRE_PLAINTEXT_SIZE} bytes")
-    key_id = wire_format._require_len("key_id", key_data.get("id", b""), 16)
-    if key_data.get("type") != "symmetric":
-        raise ValueError("message_attachment payload requires symmetric key")
-    nonce = crypto.deterministic_nonce(key_id, plaintext)
-    ciphertext = crypto.encrypt(plaintext, key_data["key"], nonce)
-    if len(ciphertext) != WIRE_PLAINTEXT_SIZE + 16:
-        raise ValueError("unexpected ciphertext length for message_attachment payload")
-    payload = key_id + nonce + ciphertext
-    return wire_format._require_len("payload", payload, wire_format.PAYLOAD_SIZE)
-
-
-def _decrypt_payload(payload: bytes, key_data: dict[str, Any]) -> bytes:
-    """Decrypt wire payload to message_attachment plaintext."""
-    if key_data.get("type") != "symmetric":
-        raise ValueError("message_attachment payload requires symmetric key")
-    nonce = payload[16:40]
-    ciphertext = payload[40:]
-    return crypto.decrypt(ciphertext, key_data["key"], nonce)
-
-
-def is_wire_envelope(data: bytes) -> bool:
-    """Check if data is a message_attachment wire envelope."""
-    if len(data) != wire_format.WIRE_SIZE:
-        return False
-    try:
-        header = wire_format.WireHeader.unpack(data[:wire_format.HEADER_SIZE])
-    except ValueError:
-        return False
-    return header.version == 1 and header.event_type == WIRE_TYPE_CODE
-
-
-def encode_wire_event(
-    *,
-    message_id_b64: str,
-    file_id_b64: str,
-    blob_bytes: int,
-    total_slices: int,
-    nonce_prefix_b64: str,
-    enc_key_b64: str,
-    root_hash_b64: str,
-    filename: str | None,
-    mime_type: str | None,
-    signed_by_b64: str,
-    signer_type: str,
-    created_at_ms: int,
-    key_data: dict[str, Any],
-    private_key: bytes,
-) -> bytes:
-    """Encode a complete message_attachment wire event."""
-    message_id = crypto.b64decode(message_id_b64)
-    file_id = crypto.b64decode(file_id_b64)
-    nonce_prefix = crypto.b64decode(nonce_prefix_b64)
-    enc_key = crypto.b64decode(enc_key_b64)
-    root_hash = crypto.b64decode(root_hash_b64)
-    signer_id = crypto.b64decode(signed_by_b64)
-
-    plaintext = encode_plaintext(
-        message_id=message_id,
-        file_id=file_id,
-        blob_bytes=blob_bytes,
-        total_slices=total_slices,
-        nonce_prefix=nonce_prefix,
-        enc_key=enc_key,
-        root_hash=root_hash,
-        filename=filename,
-        mime_type=mime_type,
-    )
-    header = wire_format.WireHeader(
-        version=1,
-        event_type=WIRE_TYPE_CODE,
-        flags=wire_format.FLAG_ENCRYPTED,
-        signer_type=wire_format.signer_type_from_str(signer_type),
-        count=0,
-        created_at_ms=created_at_ms,
-        ttl_ms=0,
-        signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
-    )
-    signed_bytes = wire_format._signing_bytes(header, plaintext)
-    signature = crypto.sign(signed_bytes, private_key)
-    payload = _encrypt_payload(plaintext, key_data)
-    return wire_format.build_envelope(header, payload, signature)
-
-
-def decode_wire_event(
-    data: bytes,
-    recorded_by: str,
-    db: Any,
-    key_cache: dict[str, dict[str, Any]] | None = None,
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """Decode a message_attachment wire event."""
-    header, payload, signature = wire_format.parse_envelope(data)
-    if header.event_type != WIRE_TYPE_CODE:
-        return None, []
-    if header.flags & wire_format.FLAG_ENCRYPTED:
-        key_id = payload[:16]
-        key_id_b64 = crypto.b64encode(key_id)
-        key_data = crypto.get_key_by_id(key_id, recorded_by, db, key_cache=key_cache)
-        if not key_data:
-            return None, [key_id_b64]
-        plaintext = _decrypt_payload(payload, key_data)
-    else:
-        plaintext = payload[:WIRE_PLAINTEXT_SIZE]
-
-    decoded = decode_plaintext(plaintext)
-    event_data = {
-        "type": EVENT_TYPE,
-        "message_id": crypto.b64encode(decoded["message_id"]),
-        "file_id": crypto.b64encode(decoded["file_id"]),
-        "filename": decoded["filename"],
-        "mime_type": decoded["mime_type"],
-        "blob_bytes": decoded["blob_bytes"],
-        "total_slices": decoded["total_slices"],
-        "nonce_prefix": crypto.b64encode(decoded["nonce_prefix"]),
-        "enc_key": crypto.b64encode(decoded["enc_key"]),
-        "root_hash": crypto.b64encode(decoded["root_hash"]),
-        "signed_by": crypto.b64encode(header.signer_id),
-        "signer_type": wire_format.signer_type_to_str(header.signer_type),
-        "created_at": header.created_at_ms,
-        "_wire_signature": signature,
-        "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
-    }
-    return event_data, []
 
 
 
@@ -391,7 +146,7 @@ def _wire_shadow_message_attachment(
     mime_type: str | None,
 ) -> None:
     """Validate message_attachment fields against the fixed-size wire payload layout."""
-    plaintext = encode_plaintext(
+    plaintext = wire_format.encode_message_attachment_plaintext(
         message_id=crypto.b64decode(message_id),
         file_id=crypto.b64decode(file_id),
         blob_bytes=blob_bytes,
@@ -402,7 +157,7 @@ def _wire_shadow_message_attachment(
         filename=filename,
         mime_type=mime_type,
     )
-    decoded = decode_plaintext(plaintext)
+    decoded = wire_format.decode_message_attachment_plaintext(plaintext)
     if decoded["file_id"] != crypto.b64decode(file_id):
         raise ValueError("wire shadow decode file_id mismatch")
 
@@ -507,9 +262,17 @@ def create(peer_id: str, message_id: str, file_data: bytes,
     # Step 6: Compute root_hash
     root_hash = crypto.compute_root_hash(slice_ciphertexts)
 
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     private_key = peer.get_private_key(peer_id, peer_id, db)
-    key_data = group.pick_key(group_id, peer_id, db)
-    blob = encode_wire_event(
+    blob = wire_format.encode_message_attachment_wire_event(
         message_id_b64=message_id,
         file_id_b64=file_id,
         blob_bytes=len(file_data),
@@ -725,13 +488,19 @@ def create_from_file(peer_id: str, message_id: str, file_path: str,
             pass
 
     # ===== Create message_attachment event =====
+    # Get or create sender key for the message's group
+    key_data = sender_key.pick_or_create_key(
+        group_id=group_id,
+        peer_id=peer_id,
+        peer_shared_id=peer_shared_id,
+        t_ms=t_ms,
+        db=db,
+    )
+
     # Sign the event
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    # Get group key for encryption
-    key_data = group.pick_key(group_id, peer_id, db)
-
-    blob = encode_wire_event(
+    blob = wire_format.encode_message_attachment_wire_event(
         message_id_b64=message_id,
         file_id_b64=file_id,
         blob_bytes=file_size,

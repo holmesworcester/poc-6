@@ -7,9 +7,7 @@ import logging
 
 from core import crypto
 from core import wire_format
-from core import transport
 from events import registry
-from events.network import negentropy
 from core.db import create_safe_db
 
 log = logging.getLogger(__name__)
@@ -61,48 +59,6 @@ def _unwrap_transit_with_key(blob: bytes, key_data: dict[str, Any]) -> bytes | N
     return None
 
 
-def _send_transport_ack(db: Any, key_id: str, ack_count: int, t_ms: int) -> bool:
-    """Send a transport ACK to a connection.
-
-    Args:
-        db: Database connection
-        key_id: Connection key_id to send ACK on
-        ack_count: Number of blobs being acknowledged
-        t_ms: Current timestamp
-
-    Returns:
-        True if sent successfully
-    """
-    if ack_count <= 0:
-        return False
-
-    # Get recorded_by for this connection
-    row = db._conn.execute(
-        "SELECT recorded_by FROM connections WHERE key_id = ?",
-        (key_id,),
-    ).fetchone()
-
-    if not row:
-        log.debug(f"_send_transport_ack: connection {key_id[:16]}... not found")
-        return False
-
-    recorded_by = row[0]
-
-    # Encode the transport_ack event
-    ack_blob = wire_format.encode_transport_ack_wire_event(
-        ack_count=ack_count,
-        created_at_ms=t_ms,
-    )
-
-    # Use connection_request.send which handles all the address resolution
-    from events.network import connection_request
-    result = connection_request.send(recorded_by, key_id, ack_blob, t_ms, db)
-
-    if result:
-        log.debug(f"_send_transport_ack: sent ack_count={ack_count} to {key_id[:16]}...")
-    return result
-
-
 def queue_incoming(
     batch: Iterable[tuple[bytes, tuple[str, int] | None]],
     t_ms: int,
@@ -147,8 +103,8 @@ def queue_incoming(
             key_map.setdefault(key_id, []).append((recorded_by, key_data))
 
         prekey_rows = db._conn.execute(
-            f"SELECT connection_prekey_id, owner_peer_id, private_key "
-            f"FROM connection_prekeys WHERE connection_prekey_id IN ({placeholders})",
+            f"SELECT connection_pubkey_id, owner_peer_id, private_key "
+            f"FROM connection_pubkeys WHERE connection_pubkey_id IN ({placeholders})",
             params,
         ).fetchall()
         for key_id, owner_peer_id, private_key in prekey_rows:
@@ -171,9 +127,6 @@ def queue_incoming(
             }
             key_map.setdefault(peer_id, []).append((peer_id, key_data))
 
-        # Track receipts per flow_key (connection key_id) for ACKs
-        ack_pending: dict[str, int] = {}  # flow_key -> ack_count
-
         for blob, from_addr, _key_id_bytes, key_id_b64 in entries:
             candidates = key_map.get(key_id_b64, [])
             if not candidates:
@@ -183,31 +136,12 @@ def queue_incoming(
                 event_blob = _unwrap_transit_with_key(blob, key_data)
                 if not event_blob:
                     continue
-
-                # Handle transport_ack immediately - don't queue
-                if wire_format.is_wire_transport_ack_envelope(event_blob):
-                    try:
-                        ack_data = wire_format.decode_transport_ack_wire_event(event_blob)
-                        transport.flow_on_ack(key_id_b64, ack_data.get("ack_count", 0))
-                    except Exception as e:
-                        log.warning(f"ingest: failed to decode transport_ack: {e}")
-                    continue  # Don't add to rows
-
-                # Track receipt for flow control ACKs
-                ack_count = transport.flow_on_receive(key_id_b64, t_ms)
-                if ack_count > 0:
-                    ack_pending[key_id_b64] = ack_pending.get(key_id_b64, 0) + ack_count
-
                 hint = (
                     b""
                     if event_blob[:1] in (b"{", b"[")
                     else event_blob[:crypto.KEY_ID_SIZE] if len(event_blob) >= crypto.KEY_ID_SIZE else b""
                 )
                 rows.append((hint, recorded_by, t_ms, source_ip, source_port, None, event_blob, 0))
-
-        # Send ACKs for flows that reached threshold
-        for flow_key, ack_count in ack_pending.items():
-            _send_transport_ack(db, flow_key, ack_count, t_ms)
 
     if not rows:
         return 0
@@ -260,10 +194,80 @@ def append_incoming_log(
 
 
 def _event_type_from_envelope(event_blob: bytes) -> str | None:
-    """Get event type from wire envelope using registry."""
-    type_code = wire_format.get_wire_type_code(event_blob)
-    if type_code is not None:
-        return registry.get_event_type_by_code(type_code)
+    if wire_format.is_wire_message_envelope(event_blob):
+        return "message"
+    if wire_format.is_wire_channel_envelope(event_blob):
+        return "channel"
+    if wire_format.is_wire_message_update_envelope(event_blob):
+        return "message_update"
+    if wire_format.is_wire_message_deletion_envelope(event_blob):
+        return "message_deletion"
+    if wire_format.is_wire_message_reaction_envelope(event_blob):
+        return "message_reaction"
+    if wire_format.is_wire_message_reaction_deletion_envelope(event_blob):
+        return "message_reaction_deletion"
+    if wire_format.is_wire_message_attachment_envelope(event_blob):
+        return "message_attachment"
+    if wire_format.is_wire_message_rekey_envelope(event_blob):
+        return "message_rekey"
+    if wire_format.is_wire_channel_update_envelope(event_blob):
+        return "channel_update"
+    if wire_format.is_wire_group_envelope(event_blob):
+        return "group"
+    if wire_format.is_wire_group_member_envelope(event_blob):
+        return "group_member"
+    # NOTE: group_key, group_key_shared, group_prekey, group_prekey_shared removed - use sender keys
+    if wire_format.is_wire_pubkey_envelope(event_blob):
+        return "pubkey"
+    if wire_format.is_wire_pubkey_shared_envelope(event_blob):
+        return "pubkey_shared"
+    if wire_format.is_wire_connection_pubkey_envelope(event_blob):
+        return "connection_pubkey"
+    if wire_format.is_wire_connection_pubkey_shared_envelope(event_blob):
+        return "connection_pubkey_shared"
+    if wire_format.is_wire_connection_request_envelope(event_blob):
+        return "connection_request"
+    if wire_format.is_wire_connection_ack_envelope(event_blob):
+        return "connection_ack"
+    if wire_format.is_wire_file_slice(event_blob):
+        return "file_slice"
+    if wire_format.is_wire_user_envelope(event_blob):
+        return "user"
+    if wire_format.is_wire_username_update_envelope(event_blob):
+        return "username_update"
+    if wire_format.is_wire_user_removed_envelope(event_blob):
+        return "user_removed"
+    if wire_format.is_wire_peer_envelope(event_blob):
+        return "peer"
+    if wire_format.is_wire_peer_shared_envelope(event_blob):
+        return "peer_shared"
+    if wire_format.is_wire_peer_name_update_envelope(event_blob):
+        return "peer_name_update"
+    if wire_format.is_wire_peer_removed_envelope(event_blob):
+        return "peer_removed"
+    if wire_format.is_wire_network_envelope(event_blob):
+        return "network"
+    if wire_format.is_wire_network_name_update_envelope(event_blob):
+        return "network_name_update"
+    if wire_format.is_wire_admin_envelope(event_blob):
+        return "admin"
+    if wire_format.is_wire_invite_envelope(event_blob):
+        return "invite"
+    if wire_format.is_wire_invite_accepted_envelope(event_blob):
+        return "invite_accepted"
+    if wire_format.is_wire_self_address_envelope(event_blob):
+        return "self_address"
+    if wire_format.is_wire_observed_address_envelope(event_blob):
+        return "observed_address"
+    if wire_format.is_wire_network_intro_envelope(event_blob):
+        return "network_intro"
+    if wire_format.is_wire_negentropy_envelope(event_blob):
+        return "negentropy"
+    # TreeKEM pubkey types
+    if wire_format.is_wire_treekem_pubkey_local_envelope(event_blob):
+        return "treekem_pubkey"
+    if wire_format.is_wire_treekem_pubkey_shared_envelope(event_blob):
+        return "treekem_pubkey_shared"
     return None
 
 
@@ -314,8 +318,8 @@ def materialize_log_batch(
         if event_blob[:1] in (b'{', b'['):
             raise ValueError("JSON event blobs are no longer supported")
 
-        if negentropy.is_wire_envelope(event_blob):
-            event_data = negentropy.decode_wire_event(event_blob)
+        if wire_format.is_wire_negentropy_envelope(event_blob):
+            event_data = wire_format.decode_negentropy_wire_event(event_blob)
             protocol_rows.append((log_id, recorded_by, event_data))
             protocol_log_ids.append(log_id)
             continue

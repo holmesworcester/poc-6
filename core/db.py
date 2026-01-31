@@ -25,11 +25,7 @@ SUBJECTIVE_TABLES = {
     'groups',
     'channels',
     'addresses',
-    'group_keys',                  # NEW: subjective group encryption keys
-    'group_keys_shared',           # Group keys shared (subjective)
-    'group_prekeys',               # Subjective group prekeys
-    'group_prekeys_shared',        # Group prekeys shared (subjective)
-    'connection_prekeys_shared',      # Transit prekeys shared (subjective)
+    'connection_pubkeys_shared',   # Connection pubkeys shared (subjective)
     'users',
     'user_names',                  # Encrypted username updates (peer-scoped)
     'peer_names',                  # Encrypted peer/device name updates (peer-scoped)
@@ -66,14 +62,33 @@ SUBJECTIVE_TABLES = {
     'negentropy_sync_state',       # Negentropy sync: per-connection sync state (peer-scoped)
     'negentropy_checkpoints',      # Negentropy sync: completion checkpoints (peer-scoped)
     'trust_anchors',               # Trust anchors: network_ids pre-approved by invite_accepted (peer-scoped)
+    # Star topology tables
     'server_relays',               # Server relay peers (peer-scoped)
     'network_settings',            # Network settings for star topology (peer-scoped)
+    # TreeKEM Phase 1 tables
+    'pubkeys',                     # TreeKEM pubkeys with keypairs (peer-scoped, local-only)
+    'pubkeys_shared',              # TreeKEM pubkeys shared (peer-scoped, shareable)
+    'secrets',                     # TreeKEM symmetric secrets (peer-scoped)
+    'secrets_shared',              # TreeKEM shared secrets (peer-scoped)
+    'removal_epochs',              # Removal epoch tracking (peer-scoped)
+    'removal_epoch_refs',          # Removal epoch removed entity refs (peer-scoped)
+    'removal_epoch_parents',       # Removal epoch parent links (peer-scoped)
+    'key_requests',                # Key healing requests (peer-scoped)
+    'key_announces',               # Key announcements for groups (peer-scoped)
+    # TreeKEM Phase 2 tables
+    'treekem_pubkeys',             # TreeKEM tree node pubkeys with keypairs (peer-scoped, local-only)
+    'treekem_pubkeys_shared',      # TreeKEM tree node pubkeys shared (peer-scoped, shareable)
+    'treekem_updates',             # TreeKEM update orchestration (peer-scoped)
+    'treekem_tree_state',          # TreeKEM winning state cache (peer-scoped)
+    'treekem_secrets',             # TreeKEM path secrets (peer-scoped, local-only)
+    'treekem_secrets_shared',      # TreeKEM path secrets shared to copath (peer-scoped, shareable)
+    'secrets_broadcast',           # O(1) sender key distribution via root secret (peer-scoped, shareable)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)
 DEVICE_TABLES = {
     'local_peers',
-    'connection_prekeys',             # Asymmetric keys for initial contact
+    'connection_pubkeys',             # Asymmetric keys for initial contact
     'store',
     'incoming_event_log',
     'ingest_index',
