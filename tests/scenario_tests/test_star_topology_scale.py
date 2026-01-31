@@ -379,32 +379,59 @@ def test_server_relay_syncs_with_all_in_star_mode(fresh_db):
     print("Server relay syncs with all peers in star mode")
 
 
-def test_100_users_star_topology(fresh_db):
-    """Create 100 users in star topology to verify scaling.
+def test_100_users_star_topology_sync(fresh_db):
+    """100 users sync through server relay in star topology.
 
-    This test verifies that:
-    1. We can create 100 users without timeouts
-    2. Star topology filters connections correctly for all users
+    Verifies:
+    1. 100 users can be created with star topology
+    2. All users achieve full visibility via sync
+    3. Star topology provides 99x scaling improvement
     """
     from core import crypto
+    from core.db import create_safe_db
+    from core import tick
+    from tests.utils.tick_helper import assert_eventually
+
     db = fresh_db
+    tick.reset_state(db)
     clock = TestClock()
 
-    # Setup: Alice creates network
+    # Alice creates network
     alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Get network info
     network_id = network.get_network_id(alice['peer_id'], db)
     alice_identity = peer_shared_module.get_self(alice['peer_id'], db)
     alice_peer_shared_id = alice_identity['peer_shared_id']
+    all_users_group_id = network.get_all_users_group_id(network_id, alice['peer_id'], db)
 
-    # Set up star topology first
-    server_peer_shared_id = crypto.b64encode(b"server_relay_123")
+    # Create server relay
+    server_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    server_invite_id, server_invite_link, _ = invite.create(
+        peer_id=alice['peer_id'],
+        t_ms=clock.tick(),
+        db=db,
+        mode='server',
+        server_address='relay.example.com:5000'
+    )
+    db.commit()
+
+    server_result = server_relay.join(
+        peer_id=server_peer_id,
+        invite_link=server_invite_link,
+        t_ms=clock.tick(),
+        db=db
+    )
+    db.commit()
+    server_peer_shared_id = server_result['peer_shared_id']
+
+    run_ticks(db=db, start_t_ms=clock.now(), num_rounds=5)
+
+    # Configure star topology
     network_settings.set_server_relay(
         network_id=network_id,
         server_peer_shared_id=server_peer_shared_id,
-        server_address="relay.example.com:5000",
+        server_address='relay.example.com:5000',
         peer_id=alice['peer_id'],
         peer_shared_id=alice_peer_shared_id,
         t_ms=clock.tick(),
@@ -413,9 +440,8 @@ def test_100_users_star_topology(fresh_db):
     db.commit()
     run_ticks(db=db, start_t_ms=clock.now(), num_rounds=3)
 
-    # Create 99 more users (total 100)
+    # Create 99 more users
     members = [alice]
-    print(f"Creating 99 users...")
     for i in range(99):
         invite_id, invite_link, _ = invite.create(
             peer_id=alice['peer_id'],
@@ -427,44 +453,52 @@ def test_100_users_star_topology(fresh_db):
         member = user.join(
             peer_id=member_peer_id,
             invite_link=invite_link,
-            name=f'User{i+2}',  # User2 through User100
+            name=f'User{i+2}',
             t_ms=clock.now(),
             db=db
         )
         members.append(member)
-        if (i + 1) % 10 == 0:
-            print(f"  Created {i + 1} users...")
         db.commit()
 
-    print(f"Created {len(members)} total users")
+    assert len(members) == 100
 
-    # Verify star topology is active
+    # Verify star topology
     sync_mode = network_settings.get_sync_mode(network_id, alice['peer_id'], db)
-    assert sync_mode == 'star', f"Expected star mode, got {sync_mode}"
+    assert sync_mode == 'star'
 
-    # Verify Alice only syncs with server
     targets = server_connection.get_sync_targets(
         peer_id=alice['peer_id'],
         network_id=network_id,
         db=db
     )
-    assert targets == [server_peer_shared_id], \
-        f"Alice should only sync with server, got {len(targets)} targets"
+    assert targets == [server_peer_shared_id]
 
-    # Calculate theoretical sync counts
+    # Helper to count visible users
+    def count_visible_users(peer_id: str) -> int:
+        safedb = create_safe_db(db, recorded_by=peer_id)
+        result = list(safedb.query(
+            "SELECT COUNT(DISTINCT user_id) as cnt FROM group_members WHERE group_id = ? AND recorded_by = ?",
+            (all_users_group_id, peer_id)
+        ))
+        return result[0]['cnt'] if result else 0
+
+    # Assert Alice achieves full visibility
+    def alice_sees_all_users():
+        return count_visible_users(alice['peer_id']) >= 100
+
+    assert_eventually(
+        alice_sees_all_users,
+        db=db,
+        max_rounds=500,
+        msg="Alice should see all 100 users"
+    )
+
+    # Verify scaling improvement
     n = len(members)
-    mesh_syncs = n * (n - 1)  # O(n^2)
-    star_syncs = n  # O(n)
+    mesh_syncs = n * (n - 1)  # O(n^2) = 9900
+    star_syncs = n  # O(n) = 100
     improvement = mesh_syncs // star_syncs
 
-    print(f"\n=== Scaling Results for {n} users ===")
-    print(f"Mesh topology: {mesh_syncs:,} sync pairs per tick")
-    print(f"Star topology: {star_syncs:,} sync pairs per tick")
-    print(f"Improvement: {improvement}x reduction")
-
-    assert n == 100, f"Expected 100 users, got {n}"
-    assert mesh_syncs == 9900, f"Expected 9900 mesh syncs, got {mesh_syncs}"
-    assert star_syncs == 100, f"Expected 100 star syncs, got {star_syncs}"
-    assert improvement == 99, f"Expected 99x improvement, got {improvement}x"
-
-    print(f"\nSUCCESS: 100 users created with {improvement}x scaling improvement")
+    assert mesh_syncs == 9900
+    assert star_syncs == 100
+    assert improvement == 99
