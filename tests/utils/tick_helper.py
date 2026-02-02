@@ -8,8 +8,9 @@ from core import tick as tick_module
 
 
 # Global test timeout - increase this if tests are timing out
-# 500 rounds = 50 seconds of simulated time at 100ms intervals
-DEFAULT_MAX_ROUNDS = 500
+# 1000 rounds = 100 seconds of simulated time at 100ms intervals
+# Increased from 500 to account for 50ms RTT simulator latency
+DEFAULT_MAX_ROUNDS = 1000
 
 # Realistic base timestamp for tests (2025-01-02 00:00:00 UTC)
 # This is one day after EPOCH_MS (2025-01-01) to ensure events get proper

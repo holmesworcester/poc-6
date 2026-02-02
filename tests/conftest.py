@@ -10,7 +10,11 @@ from core.db import Database
 from core import schema
 from core import tick
 from core import jobs
+from core import simulator
 from tests.utils import tick_helper
+
+# Default network latency for tests (one-way, so RTT = 2x this)
+DEFAULT_TEST_LATENCY_MS = 25  # 25ms one-way = 50ms RTT
 
 # Disable all logging during tests for performance
 # Use pytest -o log_cli=true to re-enable if needed for debugging
@@ -42,9 +46,12 @@ def reset_global_state():
     from core import transport
     network_config.reset_network_config()
 
-    # Reset transport and enable loopback mode for testing
+    # Reset transport and enable simulator with realistic latency
     transport.reset()
-    transport.enable_loopback()
+    sim = simulator.NetworkSimulator(
+        simulator.NetworkConfig(latency_ms=DEFAULT_TEST_LATENCY_MS)
+    )
+    transport.set_simulator(sim)
 
     # Reset job frequency multiplier
     jobs.reset_frequency_multiplier()
