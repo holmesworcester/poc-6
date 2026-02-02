@@ -311,11 +311,8 @@ def materialize_log_batch(
                 peer_rows,
             )
 
-    if protocol_log_ids:
-        db._conn.executemany(
-            "UPDATE incoming_event_log SET event_type = 'negentropy' WHERE id = ?",
-            [(log_id,) for log_id in protocol_log_ids],
-        )
+    # NOTE: Don't mark protocol_log_ids here - let SyncRespondJob handle and mark them.
+    # This allows SyncUpdateJob to run before SyncRespondJob without skipping negentropy messages.
 
     try:
         max_log_id = int(rows[-1][0])
