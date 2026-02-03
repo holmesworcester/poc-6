@@ -146,8 +146,8 @@ class TestFirstLeafInRange:
         clock = TestClock()
         peer_id = "test_peer_123"
 
-        # Add more events than threshold
-        events = [(f"event_{i}", clock.tick()) for i in range(200)]
+        # Add more events than threshold (EVENTS_THRESHOLD is 200)
+        events = [(f"event_{i}", clock.tick()) for i in range(300)]
         negentropy.add_events_to_sync_batch(db, peer_id, events)
         db.commit()
 
@@ -258,8 +258,8 @@ class TestV2Protocol:
         peer_id = "test_peer_123"
         conn_id = "conn_123"
 
-        # Add many events
-        events = [(f"event_{i}", clock.tick()) for i in range(200)]
+        # Add many events (more than EVENTS_THRESHOLD of 200)
+        events = [(f"event_{i}", clock.tick()) for i in range(300)]
         negentropy.add_events_to_sync_batch(db, peer_id, events)
         db.commit()
 
