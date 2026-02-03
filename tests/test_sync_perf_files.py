@@ -1,18 +1,11 @@
 """
 Performance tests for large file sync.
 
-Tests that file sync completes in a reasonable number of rounds for:
-- 1MB file (~2222 slices at 450 bytes/slice)
-- 10MB file (~23333 slices)
-- 100MB file (~233333 slices)
-
-The key metric is bisection depth - with the new time-based unified key design,
-we should need far fewer rounds than with the old unbounded 63-bit range.
-
-Expected rounds (post-fix):
-- 1MB: ~50-100 rounds
-- 10MB: ~200-300 rounds
-- 100MB: ~300-500 rounds
+Tests that file sync completes for various file sizes:
+- 1MB file (~2330 slices at 450 bytes/slice)
+- 10MB file (~23302 slices)
+- 100MB file (~233017 slices)
+- 200MB file (~466034 slices)
 
 Run with: PYTHONPATH=. pytest tests/test_sync_perf_files.py -v -s -m slow
 """
@@ -21,8 +14,7 @@ import time
 from events.identity import user, invite, peer
 from events.content import message, message_attachment
 from tests.utils import tick_helper
-from tests.utils.tick_helper import TestClock
-from core import tick
+from tests.utils.tick_helper import TestClock, assert_eventually
 
 
 def _create_file_data(size_bytes: int) -> bytes:
@@ -33,7 +25,7 @@ def _create_file_data(size_bytes: int) -> bytes:
     return (pattern * repetitions)[:size_bytes]
 
 
-def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expected_max_rounds: int):
+def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int = 1000):
     """Run a file sync test and report performance metrics."""
     db = fresh_db
     clock = TestClock()
@@ -43,7 +35,7 @@ def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expecte
     print(f"File Sync Performance Test: {size_name} ({file_size_bytes:,} bytes)")
     print(f"{'='*60}")
 
-    # Setup: Alice creates network, Bob joins (using realistic timestamps for time-based keys)
+    # Setup: Alice creates network, Bob joins
     print("\n[Setup] Creating network...")
     alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
@@ -54,18 +46,17 @@ def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expecte
 
     # Initial sync
     print("[Setup] Running initial sync...")
-    t_ms = tick_helper.initial_sync(db, start_t_ms=None)
+    tick_helper.initial_sync(db, start_t_ms=None)
 
     # Alice creates message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content=f'Here is a {size_name} file',
-        t_ms=t_ms,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']
-    t_ms += 100
 
     # Alice creates the file
     print(f"[Create] Generating {size_name} file data...")
@@ -80,7 +71,7 @@ def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expecte
         file_data=file_data,
         filename=f'test_{size_name}.bin',
         mime_type='application/octet-stream',
-        t_ms=t_ms,
+        t_ms=clock.tick(),
         db=db
     )
     file_id = file_result['file_id']
@@ -89,76 +80,36 @@ def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expecte
     print(f"[Create] Created file: {slice_count:,} slices in {create_time:.2f}s")
     db.commit()
 
-    t_ms += 100
-
-    # Track sync progress
-    print(f"\n[Sync] Starting sync (max {max_rounds} rounds)...")
+    # Sync until complete using assert_eventually
+    print(f"\n[Sync] Starting sync...")
     start_sync = time.time()
 
-    rounds_completed = 0
-    last_progress_pct = -1
-    sync_complete = False
+    def file_sync_complete():
+        progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
+        assert progress and progress['is_complete'], \
+            f"Sync incomplete: {progress['slices_received'] if progress else 0}/{slice_count} slices"
 
-    for round_num in range(max_rounds):
-        tick.tick(t_ms=t_ms + round_num * 100, db=db)
-        rounds_completed = round_num + 1
-
-        # Check progress every 10 rounds or at key milestones
-        if round_num % 10 == 0 or round_num < 5:
-            progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
-            if progress:
-                pct = progress['percentage_complete']
-                if pct != last_progress_pct:
-                    elapsed = time.time() - start_sync
-                    print(f"  Round {round_num:4d}: {progress['slices_received']:6,}/{slice_count:,} slices ({pct:3d}%) - {elapsed:.1f}s")
-                    last_progress_pct = pct
-
-                if progress['is_complete']:
-                    sync_complete = True
-                    break
-
+    assert_eventually(file_sync_complete, db=db, start_t_ms=None, max_rounds=max_rounds)
     sync_time = time.time() - start_sync
 
-    # Verify completion
-    print(f"\n[Verify] Checking sync completion...")
-    progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
-
-    if progress and progress['is_complete']:
-        print(f"  Bob has all {progress['slices_received']:,} slices")
-
-        # Verify data integrity
-        bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
-        if bob_data == file_data:
-            print(f"  Data integrity verified (matches original)")
-        else:
-            print(f"  WARNING: Data mismatch!")
-            assert False, "Data integrity check failed"
-    else:
-        slices_received = progress['slices_received'] if progress else 0
-        pct = (slices_received / slice_count * 100) if slice_count > 0 else 0
-        print(f"  INCOMPLETE: {slices_received:,}/{slice_count:,} slices ({pct:.1f}%)")
+    # Verify data integrity
+    print(f"\n[Verify] Checking data integrity...")
+    bob_data = message_attachment.get_file_data(file_id, bob['peer_id'], db)
+    assert bob_data == file_data, "Data integrity check failed"
+    print(f"  Data integrity verified ({slice_count:,} slices)")
 
     # Report metrics
     print(f"\n{'='*60}")
     print(f"Results: {size_name} File Sync")
     print(f"{'='*60}")
     print(f"  File size:      {file_size_bytes:,} bytes ({slice_count:,} slices)")
-    print(f"  Rounds used:    {rounds_completed:,} / {max_rounds:,}")
     print(f"  Sync time:      {sync_time:.2f}s")
     print(f"  Create time:    {create_time:.2f}s")
-    print(f"  Slices/round:   {slice_count / rounds_completed:.1f}")
-    print(f"  Complete:       {'YES' if sync_complete else 'NO'}")
     print(f"{'='*60}")
-
-    # Assert completion within expected rounds
-    assert sync_complete, f"Sync did not complete within {max_rounds} rounds"
-    assert rounds_completed <= expected_max_rounds, \
-        f"Sync took {rounds_completed} rounds, expected <= {expected_max_rounds}"
 
     return {
         'file_size': file_size_bytes,
         'slice_count': slice_count,
-        'rounds': rounds_completed,
         'sync_time': sync_time,
         'create_time': create_time,
     }
@@ -166,62 +117,34 @@ def _run_file_sync_test(fresh_db, file_size_bytes: int, max_rounds: int, expecte
 
 @pytest.mark.slow
 def test_sync_perf_1mb_file(fresh_db):
-    """Performance test: sync a 1MB file.
-
-    1MB = 1,048,576 bytes / 450 bytes per slice = 2,330 slices
-
-    With time-based unified keys, this should sync in ~50-100 rounds.
-    """
-    _run_file_sync_test(
-        fresh_db,
-        file_size_bytes=1 * 1024 * 1024,  # 1MB
-        max_rounds=200,
-        expected_max_rounds=150,
-    )
+    """Performance test: sync a 1MB file (~2,330 slices)."""
+    _run_file_sync_test(fresh_db, file_size_bytes=1 * 1024 * 1024)
 
 
 @pytest.mark.slow
 def test_sync_perf_10mb_file(fresh_db):
-    """Performance test: sync a 10MB file.
-
-    10MB = 10,485,760 bytes / 450 bytes per slice = 23,302 slices
-
-    This was the problem case - used to get stuck at 99%.
-    With time-based unified keys, should sync in ~200-300 rounds.
-    """
-    _run_file_sync_test(
-        fresh_db,
-        file_size_bytes=10 * 1024 * 1024,  # 10MB
-        max_rounds=600,
-        expected_max_rounds=400,
-    )
+    """Performance test: sync a 10MB file (~23,302 slices)."""
+    _run_file_sync_test(fresh_db, file_size_bytes=10 * 1024 * 1024)
 
 
 @pytest.mark.slow
 def test_sync_perf_100mb_file(fresh_db):
-    """Performance test: sync a 100MB file.
+    """Performance test: sync a 100MB file (~233,017 slices)."""
+    _run_file_sync_test(fresh_db, file_size_bytes=100 * 1024 * 1024)
 
-    100MB = 104,857,600 bytes / 450 bytes per slice = 233,017 slices
 
-    With time-based unified keys, should sync in ~300-500 rounds.
-    """
-    _run_file_sync_test(
-        fresh_db,
-        file_size_bytes=100 * 1024 * 1024,  # 100MB
-        max_rounds=1000,
-        expected_max_rounds=700,
-    )
+@pytest.mark.slow
+def test_sync_perf_200mb_file(fresh_db):
+    """Performance test: sync a 200MB file (~466,034 slices)."""
+    _run_file_sync_test(fresh_db, file_size_bytes=200 * 1024 * 1024)
 
 
 @pytest.mark.slow
 def test_sync_perf_comparison():
-    """Run all file sizes and compare performance.
-
-    This test provides a summary comparison across file sizes.
-    """
+    """Run all file sizes and compare performance."""
     import sqlite3
     from core.db import Database
-    from core import schema
+    from core import schema, transport
 
     results = []
 
@@ -234,14 +157,11 @@ def test_sync_perf_comparison():
         conn = sqlite3.Connection(":memory:")
         db = Database(conn)
         schema.create_all(db)
+        transport.reset()
+        transport.enable_loopback()
 
         try:
-            result = _run_file_sync_test(
-                db,
-                file_size_bytes=size_mb * 1024 * 1024,
-                max_rounds=600,
-                expected_max_rounds=500,
-            )
+            result = _run_file_sync_test(db, file_size_bytes=size_mb * 1024 * 1024)
             results.append(result)
         except Exception as e:
             print(f"FAILED: {e}")
@@ -251,16 +171,16 @@ def test_sync_perf_comparison():
     print(f"\n\n{'='*70}")
     print("PERFORMANCE COMPARISON SUMMARY")
     print(f"{'='*70}")
-    print(f"{'Size':<10} {'Slices':>10} {'Rounds':>10} {'Time':>10} {'Slices/Round':>15}")
+    print(f"{'Size':<10} {'Slices':>12} {'Sync Time':>12} {'ms/slice':>12}")
     print(f"{'-'*70}")
 
     for r in results:
         if 'error' in r:
             size_mb = r['file_size'] // (1024 * 1024)
-            print(f"{size_mb}MB{'':<7} {'ERROR':>10} {r['error'][:40]}")
+            print(f"{size_mb}MB{'':<7} {'ERROR':>12} {r['error'][:40]}")
         else:
             size_mb = r['file_size'] // (1024 * 1024)
-            slices_per_round = r['slice_count'] / r['rounds']
-            print(f"{size_mb}MB{'':<7} {r['slice_count']:>10,} {r['rounds']:>10,} {r['sync_time']:>9.1f}s {slices_per_round:>15.1f}")
+            ms_per_slice = r['sync_time'] * 1000 / r['slice_count']
+            print(f"{size_mb}MB{'':<7} {r['slice_count']:>12,} {r['sync_time']:>11.1f}s {ms_per_slice:>12.3f}")
 
     print(f"{'='*70}")

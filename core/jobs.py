@@ -653,8 +653,8 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
 JOBS = [
     ConnectionSendJob(),
     ReceiveJob(),
-    SyncRespondJob(),
-    SyncUpdateJob(),
+    SyncUpdateJob(),      # Index blobs first
+    SyncRespondJob(),     # Then respond to negentropy
     ProjectionStreamJob(
         name="high_priority_project",
         stream_name="high_priority",
