@@ -20,9 +20,8 @@ from api.app import app
 from api.core import database as api_db_module
 from api.core import auth as api_auth_module
 from events.identity import user, invite, peer
-from events.content import message
-from core import tick
 from tests.utils import tick_helper
+from tests.utils.tick_helper import TestClock
 
 
 def urlsafe_b64(s: str) -> str:
@@ -37,19 +36,15 @@ def urlsafe_b64(s: str) -> str:
 class APIClient:
     """Wrapper around TestClient that sets peer context per request."""
 
-    def __init__(self, client: TestClient, peer_id: str):
+    def __init__(self, client: TestClient, peer_id: str, clock: TestClock):
         self.client = client
         self.peer_id = peer_id
-        self._t_ms = 0
-
-    def set_time(self, t_ms: int):
-        """Set the timestamp for subsequent requests."""
-        self._t_ms = t_ms
+        self.clock = clock
 
     def _make_request(self, method: str, url: str, **kwargs):
         """Make a request with peer context set."""
         api_db_module.set_request_peer_id(self.peer_id)
-        api_db_module.set_request_t_ms(self._t_ms)
+        api_db_module.set_request_t_ms(self.clock.now())
         try:
             return getattr(self.client, method)(url, **kwargs)
         finally:
@@ -68,36 +63,38 @@ class APIClient:
 
 @pytest.fixture
 def api_setup(tmp_path):
-    """Set up API with disk-based SQLite + WAL mode (matches production)."""
+    """Set up API with SQLite database that supports multi-threaded access."""
     import sqlite3
     from core.db import Database
-    from core import schema
+    from core import schema, transport, simulator
 
-    # Reset any previous state
+    # Reset transport and set up simulator (same as conftest autouse fixture)
+    transport.reset()
+    sim = simulator.NetworkSimulator(simulator.NetworkConfig(latency_ms=25))
+    transport.set_simulator(sim)
+
+    # Reset test clock
+    tick_helper.reset_test_clock()
+
     api_db_module.reset_db()
 
-    # Create disk-based database with WAL mode (like production)
     db_path = tmp_path / "test_api.db"
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=-64000")  # 64MB
-    conn.execute("PRAGMA temp_store=MEMORY")
     db = Database(conn)
     schema.create_all(db)
 
-    # Inject the database into the API module
     api_db_module.inject_db(db)
     api_db_module.enable_test_mode()
-    api_auth_module.disable_auth()  # Disable PSK auth for tests
-    # Set a default peer_id (will be overridden per-request in test mode)
+    api_auth_module.disable_auth()
     api_db_module.set_peer_id("default-test-peer")
 
     yield db
 
-    # Cleanup
     conn.close()
     api_db_module.reset_db()
+    transport.reset()
 
 
 @pytest.fixture
@@ -109,11 +106,13 @@ def test_client(api_setup):
 def test_three_player_api(api_setup, test_client):
     """Three peers: Alice creates network, Bob joins, Charlie separate - via API."""
     db = api_setup
+    clock = TestClock()
+    u = urlsafe_b64
 
     print("\n=== Setup: Create networks and peers directly ===")
 
     # Alice creates a network (using event modules directly for setup)
-    alice = user.new_network(name="Alice", t_ms=1000, db=db)
+    alice = user.new_network(name="Alice", t_ms=clock.tick(), db=db)
     alice_peer_id = alice["peer_id"]
     alice_network_id = alice["network_id"]
     alice_channel_id = alice["channel_id"]
@@ -121,53 +120,51 @@ def test_three_player_api(api_setup, test_client):
     print(f"Alice's channel: {alice_channel_id[:20]}...")
 
     # Create Alice's API client
-    alice_api = APIClient(test_client, alice_peer_id)
+    alice_api = APIClient(test_client, alice_peer_id, clock)
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice_peer_id,
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db,
     )
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
     bob = user.join(
         peer_id=bob_peer_id,
         invite_link=invite_link,
         name="Bob",
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
     )
     print(f"Bob joined network: {bob['peer_id'][:20]}...")
 
     # Create Bob's API client
-    bob_api = APIClient(test_client, bob_peer_id)
+    bob_api = APIClient(test_client, bob_peer_id, clock)
 
     # Charlie creates his own separate network
-    charlie = user.new_network(name="Charlie", t_ms=3000, db=db)
+    charlie = user.new_network(name="Charlie", t_ms=clock.tick(), db=db)
     charlie_peer_id = charlie["peer_id"]
     charlie_network_id = charlie["network_id"]
     charlie_channel_id = charlie["channel_id"]
     print(f"Charlie created separate network: {charlie_network_id[:20]}...")
 
     # Create Charlie's API client
-    charlie_api = APIClient(test_client, charlie_peer_id)
+    charlie_api = APIClient(test_client, charlie_peer_id, clock)
 
     db.commit()
 
     # Run sync so Alice and Bob can see each other's events
     print("\n=== Initial sync ===")
-    num_rounds = 100
-    for i in range(num_rounds):
-        tick.tick(t_ms=4000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
-    print(f"Initial sync completed after {num_rounds} ticks")
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=30)
+    print("Initial sync completed")
 
     # === Test API: List networks ===
     print("\n=== API Test: List networks ===")
 
-    alice_api.set_time(5000)
+    clock.tick()
     resp = alice_api.get("/api/networks")
     assert resp.status_code == 200, f"Alice list networks failed: {resp.text}"
     alice_networks = resp.json()["items"]
@@ -175,7 +172,6 @@ def test_three_player_api(api_setup, test_client):
     assert alice_networks[0]["network_id"] == alice_network_id
     print(f"Alice sees network: {alice_networks[0]['network_id'][:20]}...")
 
-    bob_api.set_time(5000)
     resp = bob_api.get("/api/networks")
     assert resp.status_code == 200, f"Bob list networks failed: {resp.text}"
     bob_networks = resp.json()["items"]
@@ -184,7 +180,6 @@ def test_three_player_api(api_setup, test_client):
     assert bob_networks[0]["network_id"] == alice_network_id
     print(f"Bob sees network: {bob_networks[0]['network_id'][:20]}...")
 
-    charlie_api.set_time(5000)
     resp = charlie_api.get("/api/networks")
     assert resp.status_code == 200, f"Charlie list networks failed: {resp.text}"
     charlie_networks = resp.json()["items"]
@@ -194,9 +189,6 @@ def test_three_player_api(api_setup, test_client):
 
     # === Test API: List channels ===
     print("\n=== API Test: List channels ===")
-
-    # Use urlsafe_b64 for IDs in URLs (converts + to - and / to _)
-    u = urlsafe_b64
 
     resp = alice_api.get(f"/api/networks/{u(alice_network_id)}/channels")
     assert resp.status_code == 200, f"Alice list channels failed: {resp.text}"
@@ -222,7 +214,7 @@ def test_three_player_api(api_setup, test_client):
     print("\n=== API Test: Send messages ===")
 
     # Alice sends a message
-    alice_api.set_time(6000)
+    clock.tick()
     resp = alice_api.post(
         f"/api/networks/{u(alice_network_id)}/channels/{u(alice_channel_id)}/messages",
         json={"text": "Hello from Alice via API!"},
@@ -232,7 +224,7 @@ def test_three_player_api(api_setup, test_client):
     print(f"Alice sent message: {alice_msg_id[:20]}...")
 
     # Bob sends a message
-    bob_api.set_time(6100)
+    clock.tick()
     resp = bob_api.post(
         f"/api/networks/{u(alice_network_id)}/channels/{u(alice_channel_id)}/messages",
         json={"text": "Hello from Bob via API!"},
@@ -242,7 +234,7 @@ def test_three_player_api(api_setup, test_client):
     print(f"Bob sent message: {bob_msg_id[:20]}...")
 
     # Charlie sends a message in his own network
-    charlie_api.set_time(6200)
+    clock.tick()
     resp = charlie_api.post(
         f"/api/networks/{u(charlie_network_id)}/channels/{u(charlie_channel_id)}/messages",
         json={"text": "Hello from Charlie via API!"},

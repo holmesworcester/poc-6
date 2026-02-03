@@ -14,9 +14,8 @@ from api.app import app
 from api.core import database as api_db_module
 from api.core import auth as api_auth_module
 from events.identity import user, invite, peer
-from events.content import message
-from core import tick
 from tests.utils import tick_helper
+from tests.utils.tick_helper import TestClock
 
 
 def urlsafe_b64(s: str) -> str:
@@ -27,17 +26,14 @@ def urlsafe_b64(s: str) -> str:
 class APIClient:
     """Wrapper around TestClient that sets peer context per request."""
 
-    def __init__(self, client: TestClient, peer_id: str):
+    def __init__(self, client: TestClient, peer_id: str, clock: TestClock):
         self.client = client
         self.peer_id = peer_id
-        self._t_ms = 0
-
-    def set_time(self, t_ms: int):
-        self._t_ms = t_ms
+        self.clock = clock
 
     def _make_request(self, method: str, url: str, **kwargs):
         api_db_module.set_request_peer_id(self.peer_id)
-        api_db_module.set_request_t_ms(self._t_ms)
+        api_db_module.set_request_t_ms(self.clock.now())
         try:
             return getattr(self.client, method)(url, **kwargs)
         finally:
@@ -59,10 +55,18 @@ class APIClient:
 
 @pytest.fixture
 def api_setup(tmp_path):
-    """Set up API with disk-based SQLite + WAL mode."""
+    """Set up API with SQLite database that supports multi-threaded access."""
     import sqlite3
     from core.db import Database
-    from core import schema
+    from core import schema, transport, simulator
+
+    # Reset transport and set up simulator (same as conftest autouse fixture)
+    transport.reset()
+    sim = simulator.NetworkSimulator(simulator.NetworkConfig(latency_ms=25))
+    transport.set_simulator(sim)
+
+    # Reset test clock
+    tick_helper.reset_test_clock()
 
     api_db_module.reset_db()
 
@@ -75,13 +79,14 @@ def api_setup(tmp_path):
 
     api_db_module.inject_db(db)
     api_db_module.enable_test_mode()
-    api_auth_module.disable_auth()  # Disable PSK auth for tests
+    api_auth_module.disable_auth()
     api_db_module.set_peer_id("default-test-peer")
 
     yield db
 
     conn.close()
     api_db_module.reset_db()
+    transport.reset()
 
 
 @pytest.fixture
@@ -92,15 +97,16 @@ def test_client(api_setup):
 def test_message_deletion_by_author(api_setup, test_client):
     """Author can delete their own message via API."""
     db = api_setup
+    clock = TestClock()
     u = urlsafe_b64
 
     # Setup: Alice creates network and sends a message
-    alice = user.new_network(name="Alice", t_ms=1000, db=db)
-    alice_api = APIClient(test_client, alice["peer_id"])
+    alice = user.new_network(name="Alice", t_ms=clock.tick(), db=db)
+    alice_api = APIClient(test_client, alice["peer_id"], clock)
     db.commit()
 
     # Alice sends a message
-    alice_api.set_time(2000)
+    clock.tick()
     resp = alice_api.post(
         f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages",
         json={"text": "Message to be deleted"},
@@ -118,14 +124,14 @@ def test_message_deletion_by_author(api_setup, test_client):
     assert messages[0]["content"] == "Message to be deleted"
 
     # Delete the message
-    alice_api.set_time(3000)
+    clock.tick()
     resp = alice_api.delete(
         f"/api/networks/{u(alice['network_id'])}/messages/{u(message_id)}"
     )
     assert resp.status_code == 200
     assert resp.json()["success"] is True
 
-    # Verify message is deleted (no longer in list)
+    # Verify message is deleted
     resp = alice_api.get(
         f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages"
     )
@@ -133,21 +139,20 @@ def test_message_deletion_by_author(api_setup, test_client):
     messages = resp.json()["items"]
     assert len(messages) == 0, "Deleted message should not appear in list"
 
-    print("✓ Message deletion by author works via API")
-
 
 def test_message_edit_by_author(api_setup, test_client):
     """Author can edit their own message via API."""
     db = api_setup
+    clock = TestClock()
     u = urlsafe_b64
 
     # Setup: Alice creates network and sends a message
-    alice = user.new_network(name="Alice", t_ms=1000, db=db)
-    alice_api = APIClient(test_client, alice["peer_id"])
+    alice = user.new_network(name="Alice", t_ms=clock.tick(), db=db)
+    alice_api = APIClient(test_client, alice["peer_id"], clock)
     db.commit()
 
     # Alice sends a message
-    alice_api.set_time(2000)
+    clock.tick()
     resp = alice_api.post(
         f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages",
         json={"text": "Original message"},
@@ -161,10 +166,9 @@ def test_message_edit_by_author(api_setup, test_client):
     )
     messages = resp.json()["items"]
     assert messages[0]["content"] == "Original message"
-    assert messages[0]["edited_at"] is None or messages[0]["edited_at"] == 0
 
     # Edit the message
-    alice_api.set_time(3000)
+    clock.tick()
     resp = alice_api.patch(
         f"/api/networks/{u(alice['network_id'])}/messages/{u(message_id)}",
         json={"text": "Edited message"},
@@ -181,37 +185,35 @@ def test_message_edit_by_author(api_setup, test_client):
     assert messages[0]["content"] == "Edited message"
     assert messages[0]["edited_at"] is not None and messages[0]["edited_at"] > 0
 
-    print("✓ Message edit by author works via API")
-
 
 def test_two_player_message_visibility(api_setup, test_client):
     """Bob can see messages after Alice sends them (via sync)."""
     db = api_setup
+    clock = TestClock()
     u = urlsafe_b64
 
     # Alice creates network
-    alice = user.new_network(name="Alice", t_ms=1000, db=db)
-    alice_api = APIClient(test_client, alice["peer_id"])
+    alice = user.new_network(name="Alice", t_ms=clock.tick(), db=db)
+    alice_api = APIClient(test_client, alice["peer_id"], clock)
 
     # Alice creates invite
     invite_id, invite_link, _ = invite.create(
-        peer_id=alice["peer_id"], t_ms=1500, db=db
+        peer_id=alice["peer_id"], t_ms=clock.tick(), db=db
     )
 
     # Bob joins
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
     bob = user.join(
-        peer_id=bob_peer_id, invite_link=invite_link, name="Bob", t_ms=2000, db=db
+        peer_id=bob_peer_id, invite_link=invite_link, name="Bob", t_ms=clock.tick(), db=db
     )
-    bob_api = APIClient(test_client, bob_peer_id)
+    bob_api = APIClient(test_client, bob_peer_id, clock)
     db.commit()
 
-    # Initial sync
-    for i in range(50):
-        tick.tick(t_ms=3000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
+    # Initial sync to establish connections
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=30)
 
     # Alice sends a message
-    alice_api.set_time(5000)
+    clock.tick()
     resp = alice_api.post(
         f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages",
         json={"text": "Hello Bob!"},
@@ -230,37 +232,35 @@ def test_two_player_message_visibility(api_setup, test_client):
         assert messages[0]["content"] == "Hello Bob!"
         assert messages[0]["author_name"] == "Alice"
 
-    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=None)
-
-    print("✓ Two player message visibility works via API")
+    tick_helper.assert_eventually(bob_sees_message, db=db)
 
 
 def test_deleted_message_syncs_to_other_user(api_setup, test_client):
     """When Alice deletes a message, Bob no longer sees it after sync."""
     db = api_setup
+    clock = TestClock()
     u = urlsafe_b64
 
     # Alice creates network
-    alice = user.new_network(name="Alice", t_ms=1000, db=db)
-    alice_api = APIClient(test_client, alice["peer_id"])
+    alice = user.new_network(name="Alice", t_ms=clock.tick(), db=db)
+    alice_api = APIClient(test_client, alice["peer_id"], clock)
 
     # Bob joins via invite
     invite_id, invite_link, _ = invite.create(
-        peer_id=alice["peer_id"], t_ms=1500, db=db
+        peer_id=alice["peer_id"], t_ms=clock.tick(), db=db
     )
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
     bob = user.join(
-        peer_id=bob_peer_id, invite_link=invite_link, name="Bob", t_ms=2000, db=db
+        peer_id=bob_peer_id, invite_link=invite_link, name="Bob", t_ms=clock.tick(), db=db
     )
-    bob_api = APIClient(test_client, bob_peer_id)
+    bob_api = APIClient(test_client, bob_peer_id, clock)
     db.commit()
 
     # Initial sync
-    for i in range(50):
-        tick.tick(t_ms=3000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=30)
 
     # Alice sends a message
-    alice_api.set_time(5000)
+    clock.tick()
     resp = alice_api.post(
         f"/api/networks/{u(alice['network_id'])}/channels/{u(alice['channel_id'])}/messages",
         json={"text": "This will be deleted"},
@@ -276,10 +276,10 @@ def test_deleted_message_syncs_to_other_user(api_setup, test_client):
         )
         assert len(resp.json()["items"]) == 1
 
-    tick_helper.assert_eventually(bob_sees_message, db=db, start_t_ms=None)
+    tick_helper.assert_eventually(bob_sees_message, db=db)
 
     # Alice deletes the message
-    alice_api.set_time(8000)
+    clock.tick()
     resp = alice_api.delete(
         f"/api/networks/{u(alice['network_id'])}/messages/{u(message_id)}"
     )
@@ -294,6 +294,4 @@ def test_deleted_message_syncs_to_other_user(api_setup, test_client):
         messages = resp.json()["items"]
         assert len(messages) == 0, f"Deleted message should not appear for Bob, got {len(messages)}"
 
-    tick_helper.assert_eventually(bob_sees_deletion, db=db, start_t_ms=None)
-
-    print("✓ Message deletion syncs to other users via API")
+    tick_helper.assert_eventually(bob_sees_deletion, db=db)

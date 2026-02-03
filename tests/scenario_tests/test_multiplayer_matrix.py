@@ -2068,20 +2068,28 @@ class TestStateMachine:
         """Test state machine with multiple sequential removals."""
         db = fresh_db
         tick.reset_state(db)
+        clock = TestClock()
 
         # Setup: Alice creates network, Bob and Charlie join
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-        invite1_id, invite1_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2000, db=db)
-        bob_peer_id = peer.create(t_ms=3000, db=db)
-        bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=3000, db=db)
+        invite1_id, invite1_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+        bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        bob = user.join(peer_id=bob_peer_id, invite_link=invite1_link, name='Bob', t_ms=clock.tick(), db=db)
 
-        invite2_id, invite2_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=4000, db=db)
-        charlie_peer_id = peer.create(t_ms=5000, db=db)
-        charlie = user.join(peer_id=charlie_peer_id, invite_link=invite2_link, name='Charlie', t_ms=5000, db=db)
+        invite2_id, invite2_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+        charlie_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        charlie = user.join(peer_id=charlie_peer_id, invite_link=invite2_link, name='Charlie', t_ms=clock.tick(), db=db)
 
         db.commit()
-        run_ticks(db=db, start_t_ms=None, num_rounds=300)
+
+        # Wait for sync
+        def all_users_synced():
+            all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
+            members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+            assert len(members) == 3, f"Expected 3 members, got {len(members)}"
+
+        assert_eventually(all_users_synced, db=db)
 
         # State: 3 users
         all_users_group_id = network_module.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
@@ -2100,7 +2108,7 @@ class TestStateMachine:
             removed_user_id=bob['user_id'],
             removed_by_peer_id=alice['peer_shared_id'],
             removed_by_local_peer_id=alice['peer_id'],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()
@@ -2122,7 +2130,7 @@ class TestStateMachine:
             removed_user_id=charlie['user_id'],
             removed_by_peer_id=alice['peer_shared_id'],
             removed_by_local_peer_id=alice['peer_id'],
-            t_ms=20000,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()
@@ -2141,11 +2149,17 @@ class TestStateMachine:
         assert key_after_charlie != key_after_bob
 
         # Transition: Alice can still invite new users
-        invite3_id, invite3_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=25000, db=db)
-        david_peer_id = peer.create(t_ms=26000, db=db)
-        david = user.join(peer_id=david_peer_id, invite_link=invite3_link, name='David', t_ms=26000, db=db)
+        invite3_id, invite3_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+        david_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        david = user.join(peer_id=david_peer_id, invite_link=invite3_link, name='David', t_ms=clock.tick(), db=db)
         db.commit()
-        run_ticks(db=db, start_t_ms=None, num_rounds=200)
+
+        # Wait for David to sync
+        def david_synced():
+            members = group_member.list_members(all_users_group_id, alice['peer_id'], db)
+            assert len(members) == 2, f"Expected 2 members (Alice, David), got {len(members)}"
+
+        assert_eventually(david_synced, db=db)
 
         # State: 2 users (Alice, David) - verify by user_id due to known name sync issues
         members = group_member.list_members(all_users_group_id, alice['peer_id'], db)

@@ -138,39 +138,28 @@ def test_file_attachment_sync_only(fresh_db):
 
     db.commit()
 
-    print("\n=== Sync file to Bob (9 rounds) ===")
-    for round_num in range(9):
-        run_ticks(db, None, 1)
+    print("\n=== Sync file to Bob ===")
 
-        # Check progress using API (what frontends would use)
-        progress = message_attachment.get_file_download_progress(file_id, bob['peer_id'], db)
-        if progress:
-            print(f"  Round {round_num}: {progress['filename']} - "
-                  f"{progress['slices_received']}/{progress['total_slices']} slices "
-                  f"({progress['percentage_complete']}%) "
-                  f"[{progress['size_human']}]")
-        else:
-            print(f"  Round {round_num}: File not yet available")
+    def bob_has_file():
+        # Bob should have file metadata (in message_attachments)
+        bob_file = db.query_one(
+            "SELECT file_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
+            (file_id, bob['peer_id'])
+        )
+        assert bob_file is not None, "Bob should have file metadata"
 
-    print("✓ Sync completed")
+        # Bob should have all slices
+        bob_slices = db.query_all(
+            "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
+            (file_id, bob['peer_id'])
+        )
+        assert len(bob_slices) == slice_count, f"Bob should have {slice_count} slices, got {len(bob_slices)}"
+
+    assert_eventually(bob_has_file, db=db, start_t_ms=None)
 
     print("\n=== Verify Bob received file ===")
-
-    # Bob should have file metadata (in message_attachments)
-    bob_file = db.query_one(
-        "SELECT file_id FROM message_attachments WHERE file_id = ? AND recorded_by = ?",
-        (file_id, bob['peer_id'])
-    )
-    assert bob_file is not None, "Bob should have file metadata"
     print(f"✓ Bob has file metadata")
-
-    # Bob should have all slices
-    bob_slices = db.query_all(
-        "SELECT slice_number FROM file_slices WHERE file_id = ? AND recorded_by = ? ORDER BY slice_number",
-        (file_id, bob['peer_id'])
-    )
-    assert len(bob_slices) == slice_count, f"Bob should have {slice_count} slices, got {len(bob_slices)}"
-    print(f"✓ Bob has all {len(bob_slices)} slices")
+    print(f"✓ Bob has all {slice_count} slices")
 
     # Bob should have attachment metadata
     bob_attach = db.query_one(

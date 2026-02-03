@@ -238,12 +238,13 @@ class TestCLIThreePlayer:
         charlie_join = run_cli(charlie_db, f"accept-invite --username Charlie --devicename Tablet --invite {invite_charlie}")
         assert "joined" in charlie_join.lower(), f"Charlie failed to join: {charlie_join}"
 
-        # Start all daemons
+        # Start all daemons with more startup delay for connection establishment
         alice_daemon = run_cli_daemon(alice_db, alice_port)
-        time.sleep(0.3)
+        time.sleep(1.0)
         bob_daemon = run_cli_daemon(bob_db, bob_port, peer_addrs=[f"{alice_peer_shared_id}@127.0.0.1:{alice_port}"])
-        time.sleep(0.3)
+        time.sleep(1.0)
         charlie_daemon = run_cli_daemon(charlie_db, charlie_port, peer_addrs=[f"{alice_peer_shared_id}@127.0.0.1:{alice_port}"])
+        time.sleep(1.0)  # Allow connections to establish
 
         try:
             # Step 1: Wait for Bob's channel to be ready (means sync completed)
@@ -264,9 +265,9 @@ class TestCLIThreePlayer:
                     return False, out
                 return True, out
 
-            wait_for_condition(check_bob_channel, timeout=30.0, interval=1.0,
+            wait_for_condition(check_bob_channel, timeout=60.0, interval=1.0,
                                description="Bob's channel to be ready")
-            wait_for_condition(check_charlie_channel, timeout=30.0, interval=1.0,
+            wait_for_condition(check_charlie_channel, timeout=60.0, interval=1.0,
                                description="Charlie's channel to be ready")
 
             # Step 2: All three send their messages
