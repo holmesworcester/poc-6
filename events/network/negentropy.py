@@ -549,11 +549,11 @@ class CCState:
 
     Uses range-ID tracking for accurate RTT measurement and in-flight counting.
     Each outgoing request gets a unique ID; responses echo the ID back.
-    Supports both string range_ids (from old protocol) and int range_ids (from v2).
+    Supports both string range_ids (bucket protocol) and int range_ids (bisection protocol).
     """
     window: int = 4                          # Max in-flight requests (CC_INITIAL_WINDOW)
     rtt_ms: float = 200.0                    # RTT estimate (exponential moving average)
-    next_id: int = 1                         # Next range_id to assign (for v2 protocol)
+    next_id: int = 1                         # Next range_id to assign
     outstanding: dict = None                 # {range_id (str or int): send_time_ms}
 
     def __post_init__(self):
@@ -593,7 +593,7 @@ def _cc_can_send(recorded_by: str, connection_id: str) -> bool:
 
 
 def _cc_allocate_id(recorded_by: str, connection_id: str, t_ms: int) -> int:
-    """Allocate a range_id for a new request and track send time (v2 protocol)."""
+    """Allocate a range_id for a new request and track send time."""
     state = _get_cc_state(recorded_by, connection_id)
     range_id = state.next_id
     state.next_id += 1
@@ -602,7 +602,7 @@ def _cc_allocate_id(recorded_by: str, connection_id: str, t_ms: int) -> int:
 
 
 def _cc_track_request(recorded_by: str, connection_id: str, range_id: str, t_ms: int) -> None:
-    """Track a request by its range_id (old protocol - string IDs)."""
+    """Track a request by its range_id (bucket protocol - string IDs)."""
     state = _get_cc_state(recorded_by, connection_id)
     state.outstanding[range_id] = t_ms
 
@@ -2547,19 +2547,19 @@ def get_global_sync_status(db, t_ms: int) -> dict:
 # Each message is self-describing: (start, end, hash)
 # No session state needed - range IS the state.
 
-# Message types for v2 protocol
-MSG_V2_RANGE = 4      # Range hash message
-MSG_V2_MATCH = 5      # Explicit match confirmation
+# Message types for binary bisection protocol
+MSG_SYNC_RANGE = 4    # Range hash message
+MSG_SYNC_MATCH = 5    # Explicit match confirmation
 
 
-def handle_v2_range(
+def handle_sync_range(
     db,
     recorded_by: str,
     connection_id: str,
     msg: dict,
     t_ms: int,
 ) -> list[dict]:
-    """Handle a v2 range message using binary bisection.
+    """Handle a sync_range message using binary bisection.
 
     Protocol rules:
     - their_hash == our_hash: send MATCH
@@ -2599,7 +2599,7 @@ def handle_v2_range(
     # Case 1: Hashes match
     if their_hash == our_hash:
         responses.append(make_response({
-            'type': 'v2_match',
+            'type': 'sync_match',
             'start': msg['start'],
             'end': msg['end'],
         }))
@@ -2618,7 +2618,7 @@ def handle_v2_range(
         # Send leaf range hash (for verification)
         leaf_hash = compute_range_hash(db, recorded_by, leaf_start, leaf_end)
         responses.append(make_response({
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(leaf_start),
             'end': range_to_hex(leaf_end),
             'hash': leaf_hash.hex(),
@@ -2628,7 +2628,7 @@ def handle_v2_range(
         if leaf_end < end:
             next_hash = compute_range_hash(db, recorded_by, leaf_end, end)
             responses.append(make_response({
-                'type': 'v2_range',
+                'type': 'sync_range',
                 'start': range_to_hex(leaf_end),
                 'end': range_to_hex(end),
                 'hash': next_hash.hex(),
@@ -2640,7 +2640,7 @@ def handle_v2_range(
     if our_hash == ZERO_HASH and their_hash != ZERO_HASH:
         # Request events by sending ZERO
         responses.append(make_response({
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': msg['start'],
             'end': msg['end'],
             'hash': ZERO_HASH.hex(),
@@ -2659,7 +2659,7 @@ def handle_v2_range(
 
         # Send our hash for verification
         responses.append(make_response({
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': msg['start'],
             'end': msg['end'],
             'hash': our_hash.hex(),
@@ -2673,13 +2673,13 @@ def handle_v2_range(
         right_hash = compute_range_hash(db, recorded_by, mid, end)
 
         responses.append(make_response({
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(start),
             'end': range_to_hex(mid),
             'hash': left_hash.hex(),
         }))
         responses.append(make_response({
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(mid),
             'end': range_to_hex(end),
             'hash': right_hash.hex(),
@@ -2688,14 +2688,14 @@ def handle_v2_range(
     return responses
 
 
-def handle_v2_match(
+def handle_sync_match(
     db,
     recorded_by: str,
     connection_id: str,
     msg: dict,
     t_ms: int,
 ) -> list[dict]:
-    """Handle a v2 match confirmation.
+    """Handle a sync_match confirmation.
 
     This is an explicit ACK that the range is synced.
     No response needed.
@@ -2705,43 +2705,43 @@ def handle_v2_match(
     if their_range_id is not None:
         _cc_on_response(recorded_by, connection_id, t_ms, range_id=their_range_id)
 
-    log.debug(f"v2_match: range [{msg['start']}, {msg['end']}) synced")
+    log.debug(f"sync_match: range [{msg['start']}, {msg['end']}) synced")
     return []
 
 
-def handle_v2_message(
+def handle_bisect_message(
     db,
     recorded_by: str,
     connection_id: str,
     msg: dict,
     t_ms: int,
 ) -> list[dict]:
-    """Route v2 protocol messages."""
+    """Route binary bisection protocol messages."""
     msg_type = msg.get('type')
 
-    if msg_type == 'v2_range':
-        return handle_v2_range(db, recorded_by, connection_id, msg, t_ms)
-    elif msg_type == 'v2_match':
-        return handle_v2_match(db, recorded_by, connection_id, msg, t_ms)
+    if msg_type == 'sync_range':
+        return handle_sync_range(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'sync_match':
+        return handle_sync_match(db, recorded_by, connection_id, msg, t_ms)
     else:
-        log.warning(f"Unknown v2 message type: {msg_type}")
+        log.warning(f"Unknown bisect message type: {msg_type}")
         return []
 
 
-def initiate_v2_sync(
+def initiate_sync(
     db,
     recorded_by: str,
     connection_id: str,
     t_ms: int,
 ) -> list[dict]:
-    """Initiate v2 sync by sending root range hash.
+    """Initiate sync by sending root range hash.
 
     Returns list of messages to send.
     """
     root_hash = compute_range_hash(db, recorded_by, RANGE_MIN, RANGE_MAX)
 
     return [{
-        'type': 'v2_range',
+        'type': 'sync_range',
         'start': range_to_hex(RANGE_MIN),
         'end': range_to_hex(RANGE_MAX),
         'hash': root_hash.hex(),

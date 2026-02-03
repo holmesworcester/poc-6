@@ -1,11 +1,11 @@
-"""Tests for negentropy v2 binary bisection protocol."""
+"""Tests for negentropy binary bisection protocol."""
 import pytest
 from events.network import negentropy
 from events.network.negentropy import (
     RANGE_MIN, RANGE_MAX, ZERO_HASH,
     range_to_hex, hex_to_range, range_midpoint,
     compute_range_hash, count_events_in_range, get_events_in_range,
-    first_leaf_in_range, handle_v2_range, initiate_v2_sync,
+    first_leaf_in_range, handle_sync_range, initiate_sync,
 )
 
 
@@ -161,8 +161,8 @@ class TestFirstLeafInRange:
         assert count <= negentropy.EVENTS_THRESHOLD
 
 
-class TestV2Protocol:
-    """Test v2 binary bisection protocol."""
+class TestBisectProtocol:
+    """Test binary bisection protocol."""
 
     def test_initiate_sync(self, fresh_db):
         """Initiate sends root range hash."""
@@ -170,32 +170,32 @@ class TestV2Protocol:
         peer_id = "test_peer_123"
         conn_id = "conn_123"
 
-        msgs = initiate_v2_sync(db, peer_id, conn_id, 1000)
+        msgs = initiate_sync(db, peer_id, conn_id, 1000)
 
         assert len(msgs) == 1
-        assert msgs[0]['type'] == 'v2_range'
+        assert msgs[0]['type'] == 'sync_range'
         assert msgs[0]['start'] == range_to_hex(RANGE_MIN)
         assert msgs[0]['end'] == range_to_hex(RANGE_MAX)
         assert msgs[0]['hash'] == ZERO_HASH.hex()  # Empty peer
 
     def test_matching_hashes_return_match(self, fresh_db):
-        """Matching hashes return v2_match."""
+        """Matching hashes return sync_match."""
         db = fresh_db
         peer_id = "test_peer_123"
         conn_id = "conn_123"
 
         # Both empty - hashes match
         msg = {
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(0),
             'end': range_to_hex(RANGE_MAX),
             'hash': ZERO_HASH.hex(),
         }
 
-        responses = handle_v2_range(db, peer_id, conn_id, msg, 1000)
+        responses = handle_sync_range(db, peer_id, conn_id, msg, 1000)
 
         assert len(responses) == 1
-        assert responses[0]['type'] == 'v2_match'
+        assert responses[0]['type'] == 'sync_match'
 
     def test_they_have_nothing_we_have_events(self, fresh_db):
         """When they have nothing, we send events."""
@@ -212,17 +212,17 @@ class TestV2Protocol:
 
         # They send ZERO hash
         msg = {
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(0),
             'end': range_to_hex(RANGE_MAX),
             'hash': ZERO_HASH.hex(),
         }
 
-        responses = handle_v2_range(db, peer_id, conn_id, msg, clock.now())
+        responses = handle_sync_range(db, peer_id, conn_id, msg, clock.now())
 
         # Should get leaf range + possibly next range
         assert len(responses) >= 1
-        assert responses[0]['type'] == 'v2_range'
+        assert responses[0]['type'] == 'sync_range'
         assert responses[0]['hash'] != ZERO_HASH.hex()
 
     def test_we_have_nothing_they_have_events(self, fresh_db):
@@ -237,17 +237,17 @@ class TestV2Protocol:
         their_hash = "abcd" + "00" * 14  # Non-zero 16-byte hash
 
         msg = {
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(0),
             'end': range_to_hex(RANGE_MAX),
             'hash': their_hash,
         }
 
-        responses = handle_v2_range(db, peer_id, conn_id, msg, clock.now())
+        responses = handle_sync_range(db, peer_id, conn_id, msg, clock.now())
 
         # Should request by sending ZERO
         assert len(responses) == 1
-        assert responses[0]['type'] == 'v2_range'
+        assert responses[0]['type'] == 'sync_range'
         assert responses[0]['hash'] == ZERO_HASH.hex()
 
     def test_mismatch_bisects(self, fresh_db):
@@ -267,18 +267,18 @@ class TestV2Protocol:
         their_hash = "ffff" + "00" * 14
 
         msg = {
-            'type': 'v2_range',
+            'type': 'sync_range',
             'start': range_to_hex(0),
             'end': range_to_hex(RANGE_MAX),
             'hash': their_hash,
         }
 
-        responses = handle_v2_range(db, peer_id, conn_id, msg, clock.now())
+        responses = handle_sync_range(db, peer_id, conn_id, msg, clock.now())
 
         # Should bisect - two range responses
         assert len(responses) == 2
-        assert responses[0]['type'] == 'v2_range'
-        assert responses[1]['type'] == 'v2_range'
+        assert responses[0]['type'] == 'sync_range'
+        assert responses[1]['type'] == 'sync_range'
 
         # Ranges should be left and right halves
         mid = range_midpoint(0, RANGE_MAX)
