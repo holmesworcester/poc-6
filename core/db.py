@@ -83,6 +83,7 @@ DEVICE_TABLES = {
     'incoming_blobs',
     'sync_state_ephemeral',
     'removed_peers',               # Removed peers tracking (device-wide, by peer_shared_id)
+    'invalidated_invites',         # Invites invalidated due to user removal (device-wide)
     'job_state',                   # Job execution state tracking (device-wide)
     'connection_inbox',            # Routing inbox for incoming blobs (device-wide)
     'peer_global_counter',         # Lamport clock state for each peer (device-wide)

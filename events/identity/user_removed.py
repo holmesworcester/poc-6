@@ -320,6 +320,9 @@ def _handle_user_removed_side_effects(
         deleted_count = connection_request.remove_connections_for_peer(peer_shared_id, db)
         log.info(f"user_removed: deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
 
+    # Invalidate all open invites (removed user may know these)
+    _invalidate_invites_for_removal(removed_user_id, recorded_by, removed_at, db)
+
     # Rotate group keys for all groups this user was a member of
     # IMPORTANT: Only the peer who CREATED this event should rotate keys.
     # Other peers receive the rotated keys via group_key_shared.
@@ -388,6 +391,62 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
         except Exception as e:
             log.warning(f"user_removed._rotate_keys_for_removed_user() failed to rotate key for group {group_id[:20]}...: {e}")
             # Continue rotating keys for other groups even if one fails
+
+
+def _invalidate_invites_for_removal(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> int:
+    """Invalidate all open invites when a user is removed.
+
+    This prevents the removed user from using known invites to reconnect.
+    Also deletes bootstrap connections associated with those invites.
+
+    Returns count of invites invalidated.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    unsafedb = create_unsafe_db(db)
+
+    # Find ALL open invites - removed user may know about any of them
+    # (they were created while the user was a member)
+    invites_to_invalidate = safedb.query(
+        "SELECT invite_id FROM invites WHERE recorded_by = ?",
+        (recorded_by,)
+    )
+
+    total_invalidated = 0
+    from events.network import connection_request
+
+    for inv_row in invites_to_invalidate:
+        invite_id = inv_row['invite_id']
+
+        # Mark invite as invalidated (device-wide) so we reject future bootstrap connections
+        unsafedb.execute(
+            "INSERT OR IGNORE INTO invalidated_invites (invite_id, invalidated_at, reason) VALUES (?, ?, ?)",
+            (invite_id, t_ms, 'user_removed')
+        )
+
+        # Delete bootstrap connections using this invite
+        removed_conns = connection_request.remove_connections_for_invite(invite_id, db)
+        if removed_conns > 0:
+            log.info(f"_invalidate_invites_for_removal: deleted {removed_conns} bootstrap connections for invite {invite_id[:20]}...")
+
+        total_invalidated += 1
+
+    # Also delete invite records created by the removed user's peers
+    removed_peers = safedb.query(
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
+        (removed_user_id, recorded_by)
+    )
+    removed_peer_ids = [p['peer_shared_id'] for p in removed_peers]
+
+    if removed_peer_ids:
+        placeholders = ",".join("?" for _ in removed_peer_ids)
+        safedb.execute(
+            f"DELETE FROM invites WHERE recorded_by = ? AND inviter_id IN ({placeholders})",
+            (recorded_by, *removed_peer_ids)
+        )
+
+    log.info(f"_invalidate_invites_for_removal: invalidated {total_invalidated} invites for removed user {removed_user_id[:20]}...")
+
+    return total_invalidated
 
 
 def _command_handle_user_removed_side_effects(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:

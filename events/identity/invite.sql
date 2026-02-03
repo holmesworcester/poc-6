@@ -21,3 +21,15 @@ ON invites(invite_pubkey, recorded_by);
 
 CREATE INDEX IF NOT EXISTS idx_invites_recorded_by
 ON invites(recorded_by);
+
+-- Invalidated invites - device-wide table
+-- Used to reject bootstrap connections from removed users
+-- When a user is removed, all invites they knew about are invalidated
+CREATE TABLE IF NOT EXISTS invalidated_invites (
+    invite_id TEXT PRIMARY KEY,
+    invalidated_at INTEGER NOT NULL,
+    reason TEXT  -- 'user_removed', etc.
+);
+
+CREATE INDEX IF NOT EXISTS idx_invalidated_invites_id
+ON invalidated_invites(invite_id);
