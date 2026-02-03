@@ -225,6 +225,65 @@ def decode_wire_event(
     return event_data, []
 
 
+def _seal_key_to_active_invites(key_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> int:
+    """Seal a group key to all active peer invites for this user.
+
+    When a group is created, its key must be sealed to all active device-link
+    invites so that devices joining via any invite can decrypt the key.
+
+    Args:
+        key_id: The group key to seal
+        peer_id: Local peer ID
+        peer_shared_id: Peer's shared identity
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        Number of invites the key was sealed to
+    """
+    from events.group import group_key_shared
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Get user_id from peer_self
+    peer_self = safedb.query_one(
+        "SELECT user_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, peer_id)
+    )
+    if not peer_self or not peer_self['user_id']:
+        return 0
+
+    user_id = peer_self['user_id']
+
+    # Find all mode='peer' invites for this user
+    invites = safedb.query(
+        "SELECT invite_id FROM invites WHERE mode = 'peer' AND user_id = ? AND recorded_by = ?",
+        (user_id, peer_id)
+    )
+
+    sealed_count = 0
+    for invite_row in invites:
+        invite_id = invite_row['invite_id']
+        try:
+            group_key_shared.create_for_invite(
+                key_id=key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                invite_id=invite_id,
+                t_ms=t_ms,
+                db=db
+            )
+            sealed_count += 1
+            log.info(f"group._seal_key_to_active_invites() sealed key {key_id[:20]}... to invite {invite_id[:20]}...")
+        except Exception as e:
+            log.warning(f"group._seal_key_to_active_invites() failed to seal key to invite {invite_id[:20]}...: {e}")
+
+    if sealed_count > 0:
+        log.info(f"group._seal_key_to_active_invites() sealed key to {sealed_count} active invite(s)")
+
+    return sealed_count
+
+
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            is_main: bool = False, network_id: str | None = None,
            signer_id: str | None = None, signer_private_key: bytes | None = None) -> tuple[str, str]:
@@ -286,6 +345,11 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     event_id = store.event(blob, peer_id, t_ms, db)
 
     log.info(f"group.create() created group_id={event_id}, key_id={key_id}")
+
+    # Seal key to all active peer invites for this user
+    # This ensures devices joining via any invite can decrypt this group's key
+    _seal_key_to_active_invites(key_id, peer_id, peer_shared_id, t_ms, db)
+
     return (event_id, key_id)
 
 
