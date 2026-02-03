@@ -271,6 +271,47 @@ def send_ack_for_request(
         db: Database connection
         reply_addr: Direct reply address (ip, port) from the incoming packet
     """
+    unsafedb = create_unsafe_db(db)
+
+    # Skip removed peers - don't ack connection requests from them
+    if remote_peer_shared_id:
+        removed = unsafedb.query_one(
+            "SELECT 1 FROM removed_peers WHERE peer_shared_id = ?",
+            (remote_peer_shared_id,)
+        )
+        if removed:
+            log.debug(f"connection_ack.send_ack_for_request: skipping removed peer {remote_peer_shared_id[:20]}...")
+            return
+
+    # Also check if peer belongs to a removed user (catches linked devices)
+    # This handles the case where Bob1 is removed but Bob2 (linked device) wasn't
+    # explicitly in removed_peers because we didn't know about it at removal time
+    if remote_peer_shared_id:
+        safedb = create_safe_db(db, recorded_by=local_peer_id)
+        peer_user = safedb.query_one(
+            "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+            (remote_peer_shared_id, local_peer_id)
+        )
+        if peer_user:
+            removed_user = safedb.query_one(
+                "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ?",
+                (peer_user['user_id'], local_peer_id)
+            )
+            if removed_user:
+                log.debug(f"connection_ack.send_ack_for_request: skipping peer from removed user {peer_user['user_id'][:20]}...")
+                return
+
+    # Skip invalidated invites - don't ack bootstrap connections for invites
+    # that were invalidated due to user removal
+    if remote_invite_id:
+        invalidated = unsafedb.query_one(
+            "SELECT 1 FROM invalidated_invites WHERE invite_id = ?",
+            (remote_invite_id,)
+        )
+        if invalidated:
+            log.debug(f"connection_ack.send_ack_for_request: skipping invalidated invite {remote_invite_id[:20]}...")
+            return
+
     safedb = create_safe_db(db, recorded_by=local_peer_id)
 
     # Get our peer_shared_id

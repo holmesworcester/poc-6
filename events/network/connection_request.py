@@ -828,6 +828,31 @@ def send_to_all(t_ms: int, db: Any) -> None:
             if to_peer_shared_id == peer_shared_id:
                 continue  # Skip self
 
+            # Skip removed peers - check device-wide removed_peers table
+            removed = unsafedb.query_one(
+                "SELECT 1 FROM removed_peers WHERE peer_shared_id = ?",
+                (to_peer_shared_id,)
+            )
+            if removed:
+                log.debug(f"connection_request.send_to_all: skipping removed peer {to_peer_shared_id[:20]}...")
+                continue
+
+            # Also check if peer belongs to a removed user (catches linked devices)
+            # This handles the case where Bob1 is removed but Bob2 (linked device) wasn't
+            # explicitly in removed_peers because we didn't know about it at removal time
+            peer_user = safedb.query_one(
+                "SELECT user_id FROM peers_shared WHERE peer_shared_id = ? AND recorded_by = ?",
+                (to_peer_shared_id, peer_id)
+            )
+            if peer_user:
+                removed_user = safedb.query_one(
+                    "SELECT 1 FROM removed_users WHERE user_id = ? AND recorded_by = ?",
+                    (peer_user['user_id'], peer_id)
+                )
+                if removed_user:
+                    log.debug(f"connection_request.send_to_all: skipping peer from removed user {peer_user['user_id'][:20]}...")
+                    continue
+
             # Skip if already have ANY unexpired connection (active or pending)
             # We only need one pending request per peer - no point sending duplicates
             existing = safedb.query_one("""
@@ -1293,6 +1318,41 @@ def remove_connections_for_peer(peer_shared_id: str, db: Any) -> int:
 
     if total_removed > 0:
         log.info(f"connection_request.remove_connections_for_peer: removed {total_removed} connections to peer {peer_shared_id[:20]}...")
+
+    return total_removed
+
+
+def remove_connections_for_invite(invite_id: str, db: Any) -> int:
+    """Remove all bootstrap connections using a specific invite.
+
+    Called when an invite is invalidated (e.g., user removal).
+    Returns total number of connections removed.
+    """
+    unsafedb = create_unsafe_db(db)
+    local_peers = unsafedb.query("SELECT peer_id FROM local_peers")
+
+    total_removed = 0
+
+    for peer_row in local_peers:
+        peer_id = peer_row['peer_id']
+        safedb = create_safe_db(db, recorded_by=peer_id)
+
+        # Count before delete
+        count_row = safedb.query_one(
+            "SELECT COUNT(*) as cnt FROM connections WHERE invite_id = ? AND recorded_by = ?",
+            (invite_id, peer_id)
+        )
+        count = count_row['cnt'] if count_row else 0
+
+        if count > 0:
+            safedb.execute(
+                "DELETE FROM connections WHERE invite_id = ? AND recorded_by = ?",
+                (invite_id, peer_id)
+            )
+            total_removed += count
+
+    if total_removed > 0:
+        log.info(f"remove_connections_for_invite: removed {total_removed} bootstrap connections for invite {invite_id[:20]}...")
 
     return total_removed
 
