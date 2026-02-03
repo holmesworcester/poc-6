@@ -13,7 +13,7 @@ from core.db import create_safe_db
 from events.identity import user, invite, peer
 from events.content import message
 from events.network import connection_request
-from tests.utils.tick_helper import assert_eventually, run_ticks
+from tests.utils.tick_helper import assert_eventually, run_ticks, TestClock
 
 
 class TestConnectionLimiting:
@@ -54,38 +54,32 @@ class TestConnectionLimiting:
         - Sync still works (messages propagate)
         """
         db = fresh_db
+        clock = TestClock()
 
-        # Use low rate limit to test gradual formation
         connection_request.set_max_connections_per_peer(5)
         connection_request.set_connection_creation_rate(2)
 
-        # Create admin
-        admin = user.new_network(name='Admin', t_ms=1000, db=db)
+        admin = user.new_network(name='Admin', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create 9 more peers via invites (total 10 peers)
         members = [admin]
-        t_ms = 2000
 
         for i in range(9):
             invite_id, invite_link, _ = invite.create(
                 peer_id=admin['peer_id'],
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
-            new_peer_id = peer.create(t_ms=t_ms, db=db)
-            t_ms += 10
+            new_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
             member = user.join(
                 peer_id=new_peer_id,
                 invite_link=invite_link,
                 name=f'Member{i}',
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
             members.append({
                 'peer_id': member['peer_id'],
                 'peer_shared_id': member['peer_shared_id'],
@@ -94,21 +88,18 @@ class TestConnectionLimiting:
 
         db.commit()
 
-        # Run enough ticks for connections to form and sync to happen
-        t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=50)
+        run_ticks(db=db, start_t_ms=clock.tick(), num_rounds=50)
 
-        # Verify sync still works - admin sends a message
         admin_msg = message.create(
             peer_id=admin['peer_id'],
             channel_id=admin['channel_id'],
             content='Test message from admin',
-            t_ms=t_ms,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()
 
-        # Give time for message to propagate
-        t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=50)
+        run_ticks(db=db, start_t_ms=clock.tick(), num_rounds=50)
 
         # At least some members should see the message
         members_with_message = 0
@@ -125,38 +116,34 @@ class TestConnectionLimiting:
     def test_rate_limiting_gradual_formation(self, fresh_db):
         """Test that connections form gradually with rate limiting."""
         db = fresh_db
+        clock = TestClock()
 
-        # Very low rate limit to observe gradual formation
         connection_request.set_max_connections_per_peer(10)
         connection_request.set_connection_creation_rate(2)
 
-        # Create admin and 5 members
-        admin = user.new_network(name='Admin', t_ms=1000, db=db)
+        admin = user.new_network(name='Admin', t_ms=clock.tick(), db=db)
         db.commit()
 
         members = []
-        t_ms = 2000
         for i in range(5):
             invite_id, invite_link, _ = invite.create(
                 peer_id=admin['peer_id'],
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            new_peer_id = peer.create(t_ms=t_ms + 10, db=db)
+            new_peer_id = peer.create(t_ms=clock.tick(), db=db)
             member = user.join(
                 peer_id=new_peer_id,
                 invite_link=invite_link,
                 name=f'Member{i}',
-                t_ms=t_ms + 20,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 100
             members.append(member)
 
         db.commit()
 
-        # Count connections after just 2 ticks
-        t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=2)
+        t_ms = run_ticks(db=db, start_t_ms=clock.tick(), num_rounds=2)
 
         safedb = create_safe_db(db, recorded_by=admin['peer_id'])
         early_count = safedb.query_one("""
@@ -164,13 +151,10 @@ class TestConnectionLimiting:
             WHERE recorded_by = ? AND last_handshake_ms + ttl_ms > ?
         """, (admin['peer_id'], t_ms))['cnt']
 
-        # With rate=2, after 2 ticks admin should have created at most 4 new connections
-        # (some may be responses to incoming requests, so allow more)
         assert early_count <= 10, \
             f"Expected gradual connection formation, got {early_count} after 2 ticks"
 
-        # Run more ticks - connections should stabilize
-        t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=20)
+        t_ms = run_ticks(db=db, start_t_ms=clock.tick(), num_rounds=20)
 
         later_count = safedb.query_one("""
             SELECT COUNT(*) as cnt FROM connections
@@ -199,43 +183,36 @@ class TestConnectionLimitingScale:
         - All peers eventually become connected (sync works)
         """
         db = fresh_db
+        clock = TestClock()
 
-        # Use default k=20, rate=5
-
-        # Create community
-        admin = user.new_network(name='Admin', t_ms=1000, db=db)
+        admin = user.new_network(name='Admin', t_ms=clock.tick(), db=db)
         db.commit()
 
         members = [admin]
-        t_ms = 2000
 
         for i in range(n - 1):
             invite_id, invite_link, _ = invite.create(
                 peer_id=admin['peer_id'],
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
-            new_peer_id = peer.create(t_ms=t_ms, db=db)
-            t_ms += 10
+            new_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
             member = user.join(
                 peer_id=new_peer_id,
                 invite_link=invite_link,
                 name=f'Member{i}',
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
             members.append({
                 'peer_id': member['peer_id'],
             })
 
         db.commit()
 
-        # Run just a few ticks first
-        t_ms_early = run_ticks(db=db, start_t_ms=t_ms, num_rounds=5)
+        t_ms_early = run_ticks(db=db, start_t_ms=clock.tick(), num_rounds=5)
 
         # Count connections after few ticks - should be limited by rate
         early_connections = 0
@@ -253,8 +230,7 @@ class TestConnectionLimitingScale:
             """, (peer_id, t_ms_early))
             early_connections += count_row['cnt'] if count_row else 0
 
-        # Run more ticks
-        t_ms_later = run_ticks(db=db, start_t_ms=t_ms_early, num_rounds=50)
+        t_ms_later = run_ticks(db=db, start_t_ms=clock.tick(), num_rounds=50)
 
         # Count connections after more ticks - should have grown
         later_connections = 0

@@ -19,7 +19,7 @@ from core.db import Database, create_safe_db
 from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_link_device_sees_pre_existing_groups(fresh_db):
@@ -27,11 +27,12 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
 
     # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network on first device ===")
 
     # Alice creates network on first device
-    alice_device1 = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_device1 = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"Alice created network")
     print(f"  user_id={alice_device1['user_id'][:20]}...")
     db.commit()
@@ -43,7 +44,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         name='Group A',
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Created Group A: {group_a_id[:20]}...")
@@ -52,7 +53,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         user_id=alice_device1['user_id'],
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2001,
+        t_ms=clock.tick(),
         db=db
     )
 
@@ -60,7 +61,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         name='Group B',
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2100,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Created Group B: {group_b_id[:20]}...")
@@ -69,7 +70,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         user_id=alice_device1['user_id'],
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2101,
+        t_ms=clock.tick(),
         db=db
     )
 
@@ -77,7 +78,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         name='Group C',
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2200,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Created Group C: {group_c_id[:20]}...")
@@ -86,7 +87,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
         user_id=alice_device1['user_id'],
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2201,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -96,7 +97,7 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
 
     invite_id, invite_link, _ = invite.create(
         peer_id=alice_device1['peer_id'],
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_device1['user_id']
@@ -107,15 +108,15 @@ def test_link_device_sees_pre_existing_groups(fresh_db):
     # Alice links second device
     print("\n=== Alice links second device ===")
 
-    alice_device2_peer_id = peer.create(t_ms=5000, db=db)
-    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=5001, db=db)
+    alice_device2_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=clock.tick(), db=db)
     assert accepted['mode'] == 'peer'
     alice_device2 = peer_shared.join(
         peer_id=alice_device2_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        t_ms=5002,
+        t_ms=clock.tick(),
         db=db,
         network_id=accepted.get('network_id')
     )

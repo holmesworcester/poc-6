@@ -13,6 +13,7 @@ Key insight: DH(a, B) = DH(b, A) - both sides compute identical shared secrets!
 import pytest
 from core import crypto
 from core import treekem
+from tests.utils.tick_helper import TestClock
 from events.identity import user, peer
 from events.group import (
     sender_key,
@@ -109,10 +110,10 @@ class TestTreeKEMX25519Keypairs:
     def test_treekem_pubkey_creates_x25519(self, fresh_db):
         """TreeKEM pubkeys should now use X25519 by default."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create a treekem_pubkey (uses X25519 by default)
         pubkey_id, pubkey_shared_id, private_key = treekem_pubkey.create(
             depth=1,
             path_prefix=b'\x80',
@@ -120,7 +121,7 @@ class TestTreeKEMX25519Keypairs:
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
-            t_ms=2000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -141,10 +142,10 @@ class TestSiblingResolution:
     def test_get_resolution_with_pubkey(self, fresh_db):
         """Resolution of non-blank node should return just that pubkey."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create a pubkey at depth=1
         pubkey_id, pubkey_shared_id, _ = treekem_pubkey.create(
             depth=1,
             path_prefix=b'\x80',
@@ -152,7 +153,7 @@ class TestSiblingResolution:
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
-            t_ms=2000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -173,11 +174,10 @@ class TestSiblingResolution:
     def test_get_resolution_blank_node(self, fresh_db):
         """Resolution of blank node should find descendants."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create pubkeys at depth=2 (children of depth=1)
-        # Left child (prefix \x00)
         pk1_id, _, _ = treekem_pubkey.create(
             depth=2,
             path_prefix=b'\x00',
@@ -185,11 +185,10 @@ class TestSiblingResolution:
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
-            t_ms=2000,
+            t_ms=clock.tick(),
             db=db,
         )
 
-        # Right child (prefix \x40 - bit 1 set at position 1)
         pk2_id, _, _ = treekem_pubkey.create(
             depth=2,
             path_prefix=b'\x40',
@@ -197,7 +196,7 @@ class TestSiblingResolution:
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
-            t_ms=2100,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -222,17 +221,17 @@ class TestDHBasedUpdatePath:
     def test_create_update_path_dh_single_member(self, fresh_db):
         """Single member update path should create pubkeys and secrets."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create DH-based update path
         result = treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=2000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -249,17 +248,17 @@ class TestDHBasedUpdatePath:
     def test_create_update_path_dh_creates_root_secret(self, fresh_db):
         """DH update path should create root secret at depth=0."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create update path
         result = treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=2000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -278,46 +277,42 @@ class TestO1BroadcastWithDH:
         from events.group import secret_broadcast
 
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create a test group
         test_group_id = crypto.b64encode(crypto.generate_secret()[:16])
 
-        # Create DH update path (establishes root secret)
         treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=2000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
 
-        # Create a sender key
         secret_id = secret.create(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             group_id=test_group_id,
             removal_epoch_id=None,
-            t_ms=3000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
 
-        # Verify root secret exists
         root_key = treekem_secret.get_root_secret_key_data(alice['peer_id'], db)
         assert root_key is not None
 
-        # Should be able to create broadcast using root
         broadcast_id = secret_broadcast.create(
             secret_id=secret_id,
             source_update_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
-            t_ms=4000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -365,29 +360,29 @@ class TestTreeKEMJobs:
     def test_should_update_respects_join_delay(self, fresh_db):
         """Peers should wait after join before updating."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Immediately after join, should not update (within 10s delay)
-        should = treekem_update.should_update(alice['peer_id'], 2000, db)
+        should = treekem_update.should_update(alice['peer_id'], clock.tick(), db)
         assert should is False
 
-        # After join delay (10 seconds), should update
-        should = treekem_update.should_update(alice['peer_id'], 15000, db)
+        clock.advance(15000)
+        should = treekem_update.should_update(alice['peer_id'], clock.tick(), db)
         assert should is True
 
     def test_should_update_respects_rotation_interval(self, fresh_db):
         """Peers should not update too frequently."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Verify we can update initially (after join delay)
-        should = treekem_update.should_update(alice['peer_id'], 15000, db)
+        clock.advance(15000)
+        should = treekem_update.should_update(alice['peer_id'], clock.now(), db)
         assert should is True
 
-        # First update after join delay - use t_ms that will be stored
-        update_time = 15000
+        update_time = clock.tick()
         treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
@@ -399,19 +394,15 @@ class TestTreeKEMJobs:
         )
         db.commit()
 
-        # Check the update was recorded
         latest = treekem_update.get_latest_update_by_author(
             alice['peer_shared_id'], alice['peer_id'], db
         )
         assert latest is not None
-        # The recorded_at will be around update_time
         recorded_at = latest['recorded_at']
 
-        # Shortly after recorded_at, should NOT update again
         should = treekem_update.should_update(alice['peer_id'], recorded_at + 1000, db)
         assert should is False, "Should not update within rotation interval"
 
-        # After rotation interval (5 minutes = 300,000ms), should update
         should = treekem_update.should_update(alice['peer_id'], recorded_at + 300_001, db)
         assert should is True, "Should update after rotation interval"
 
@@ -422,17 +413,18 @@ class TestConcurrentUpdateHandling:
     def test_is_winning_update(self, fresh_db):
         """Lowest update ID should win among concurrent updates."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create first update
+        clock.advance(15000)
         result1 = treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -446,17 +438,18 @@ class TestConcurrentUpdateHandling:
     def test_get_concurrent_updates(self, fresh_db):
         """Should find all updates with the same base_update_id."""
         db = fresh_db
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        clock = TestClock()
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
-        # Create first update (base_update_id = None)
+        clock.advance(15000)
         result1 = treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()

@@ -14,6 +14,7 @@ from core.db import Database, create_safe_db, create_unsafe_db
 from core import schema
 from events.identity import user, invite, peer
 from tests.utils import tick_helper
+from tests.utils.tick_helper import TestClock
 from core import tick
 from events.network import connection_request as conn_module
 
@@ -23,25 +24,26 @@ def test_connection_establishment(fresh_db):
 
     # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create network and users ===")
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"Alice created network, peer_id: {alice['peer_id'][:20]}...")
 
     # Alice creates an invite for Bob
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Alice created invite: {invite_id[:20]}...")
 
     # Bob joins Alice's network
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
@@ -58,7 +60,7 @@ def test_connection_establishment(fresh_db):
     # Tick 2: peers receive sync_connect, store their_transit_key, send ack
     # Tick 3: peers receive ack (completes bidirectional key exchange)
     print("\n=== Running first tick (sends sync_connect) ===")
-    tick.tick(t_ms=3000, db=db)
+    tick.tick(t_ms=clock.tick(), db=db)
 
     # Check that connections were initiated (peer-scoped, so check for any)
     connections = db.query("SELECT * FROM connections")
@@ -67,10 +69,10 @@ def test_connection_establishment(fresh_db):
     print(f"✓ Initiated {len(connections)} connection(s)")
 
     print("\n=== Running second tick (receives connect, sends ack) ===")
-    tick.tick(t_ms=4000, db=db)
+    tick.tick(t_ms=clock.tick(), db=db)
 
     print("\n=== Running third tick (receives ack, completes handshake) ===")
-    tick.tick(t_ms=5000, db=db)
+    tick.tick(t_ms=clock.tick(), db=db)
 
     # Now connections should have both our_key and their_key
     conn_row = db.query_one("""
@@ -86,7 +88,7 @@ def test_connection_establishment(fresh_db):
 
     # Run another tick - connections should remain stable (not recreated)
     print("\n=== Running fourth tick (connections should be stable) ===")
-    tick.tick(t_ms=6000, db=db)
+    tick.tick(t_ms=clock.tick(), db=db)
 
     # In the new design, existing connections are reused - verify same connection count
     connections_after_tick4 = db.query("SELECT * FROM connections")
@@ -102,27 +104,28 @@ def test_connection_expiry(fresh_db):
 
     # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create network and establish connection ===")
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     # Create invite and Bob joins
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
 
     db.commit()
 
     # Establish connections
-    tick.tick(t_ms=3000, db=db)
+    tick.tick(t_ms=clock.tick(), db=db)
 
     connections = db.query("SELECT * FROM connections")
     initial_count = len(connections)
@@ -163,29 +166,30 @@ def test_sync_uses_connections(fresh_db):
 
     # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create network and users ===")
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     # Create invite and Bob joins
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
-    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
 
     db.commit()
 
     # Run sync rounds - need more rounds with random window selection
     print("\n=== Running sync rounds ===")
-    for i in range(20):  # More rounds needed with random windows
-        tick.tick(t_ms=3000 + i * tick_helper.TICK_INTERVAL_MS, db=db)
+    for i in range(20):
+        tick.tick(t_ms=clock.tick(), db=db)
 
     # Verify that sync completed successfully
     # (If connections weren't working, sync would fail or fall back to prekeys)
@@ -218,11 +222,12 @@ def test_two_way_handshake(fresh_db):
     4. Both peers have each other's keys for bidirectional sync
     """
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create network with Alice and Bob ===")
 
     # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     alice_peer_id = alice['peer_id']
     print(f"Alice peer_id: {alice_peer_id[:20]}...")
 
@@ -238,32 +243,32 @@ def test_two_way_handshake(fresh_db):
     # Create invite and Bob joins
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice_peer_id,
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
-    bob_peer_id = peer.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob peer_shared_id: {bob_peer_shared_id[:20]}...")
 
     db.commit()
 
     # Initially no connections (check both peers' connections)
-    alice_conns = conn_module.get_connections(alice_peer_id, 2000, db)
-    bob_conns = conn_module.get_connections(bob_peer_id, 2000, db)
+    alice_conns = conn_module.get_connections(alice_peer_id, clock.now(), db)
+    bob_conns = conn_module.get_connections(bob_peer_id, clock.now(), db)
     assert len(alice_conns) == 0 and len(bob_conns) == 0, "Should have no connections initially"
     print("✓ No connections initially")
 
     # Step 1: Run tick to send connection requests and process acks
     print("\n=== Step 1: Run tick to establish connections ===")
-    tick.tick(t_ms=3000, db=db)
+    tick.tick(t_ms=clock.tick(), db=db)
     db.commit()
     print("✓ First tick completed")
 
     # Step 2: Check connections after tick
     print("\n=== Step 2: Check connections ===")
-    alice_conns = conn_module.get_connections(alice_peer_id, 3000, db)
-    bob_conns = conn_module.get_connections(bob_peer_id, 3000, db)
+    alice_conns = conn_module.get_connections(alice_peer_id, clock.now(), db)
+    bob_conns = conn_module.get_connections(bob_peer_id, clock.now(), db)
 
     print(f"Alice has {len(alice_conns)} connection(s)")
     print(f"Bob has {len(bob_conns)} connection(s)")

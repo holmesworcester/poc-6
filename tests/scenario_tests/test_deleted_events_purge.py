@@ -18,21 +18,22 @@ from events.content import message as message_module
 from events.content import message, channel
 from events.content import message_deletion
 from core import tick
+from tests.utils.tick_helper import TestClock
 
 
 def test_deleted_message_blob_is_purged(fresh_db):
     """Verify that when a message is deleted, its blob is removed from store."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Alice sends a message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="This message will be deleted",
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']
@@ -51,11 +52,10 @@ def test_deleted_message_blob_is_purged(fresh_db):
     )
     assert shareable_before is not None, "Message should be shareable before deletion"
 
-    # Alice deletes the message
     message_deletion.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -96,8 +96,9 @@ def test_deleted_message_arriving_via_sync_is_immediately_purged(fresh_db):
     This simulates: deletion arrives first, then message arrives via sync later.
     """
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
     # First, create a message blob manually (simulating it arriving via sync)
@@ -189,44 +190,40 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     5. Verify Bob's copy is also purged and won't resync
     """
     db = fresh_db
+    clock = TestClock()
 
-    # Setup Alice and Bob
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     invite_id, invite_link, _ = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
 
-    bob_peer_id = peer_module.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer_module.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Tick to sync group keys
     for i in range(15):
-        tick.tick(t_ms=2100 + i * 200, db=db)
+        tick.tick(t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Alice sends a message
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=alice['channel_id'],
         content="Message to be deleted across peers",
-        t_ms=5000,
+        t_ms=clock.tick(),
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    # SAVE the original blob before it gets deleted (for resync simulation later)
     unsafedb = create_unsafe_db(db)
     original_blob_row = unsafedb.query_one("SELECT blob FROM store WHERE id = ?", (message_id,))
     assert original_blob_row is not None, "Message blob should exist"
     original_blob = original_blob_row['blob']
 
-    # Propagate message to Bob
-    bob_recorded_id = recorded.create(message_id, bob['peer_id'], 5500, db, return_dupes=False)
+    bob_recorded_id = recorded.create(message_id, bob['peer_id'], clock.tick(), db, return_dupes=False)
     recorded.project(bob_recorded_id, db)
     db.commit()
 
@@ -239,11 +236,10 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     assert bob_msg is not None, "Bob should have the message"
     assert bob_msg['content'] == "Message to be deleted across peers"
 
-    # Alice deletes the message
     deletion_id = message_deletion.create(
         peer_id=alice['peer_id'],
         message_id=message_id,
-        t_ms=6000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -263,8 +259,7 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     )
     assert alice_shareable is None, "Message should not be shareable by Alice"
 
-    # Propagate deletion to Bob
-    bob_deletion_recorded_id = recorded.create(deletion_id, bob['peer_id'], 6500, db, return_dupes=False)
+    bob_deletion_recorded_id = recorded.create(deletion_id, bob['peer_id'], clock.tick(), db, return_dupes=False)
     recorded.project(bob_deletion_recorded_id, db)
     db.commit()
 
@@ -293,22 +288,16 @@ def test_multi_peer_deleted_message_not_resynced(fresh_db):
     )
     assert bob_deleted is not None, "Message should be in Bob's deleted_events"
 
-    # Now simulate the message trying to "come back" via sync to Bob
-    # (e.g., from a third peer who hasn't seen the deletion yet)
-    # Re-insert the ORIGINAL blob to simulate it arriving again via sync
     unsafedb.execute(
         "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
-        (message_id, original_blob, 7000)
+        (message_id, original_blob, clock.tick())
     )
     db.commit()
 
-    # Verify blob is back in store
     blob_reinserted = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (message_id,))
     assert blob_reinserted is not None, "Blob should be re-inserted for resync test"
 
-    # Try to project it for Bob (simulating sync)
-    # Use return_dupes=True since the recorded event already exists from first sync
-    resync_recorded_id = recorded.create(message_id, bob['peer_id'], 7500, db, return_dupes=True)
+    resync_recorded_id = recorded.create(message_id, bob['peer_id'], clock.tick(), db, return_dupes=True)
     recorded.project(resync_recorded_id, db)
     db.commit()
 

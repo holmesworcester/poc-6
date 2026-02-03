@@ -11,6 +11,7 @@ from core.db import Database
 from core import schema, store
 from events.identity import user, invite, peer_shared, peer
 from tests.utils import tick_helper
+from tests.utils.tick_helper import TestClock
 
 
 def test_device_link_without_remote_invite_blob(fresh_db):
@@ -28,20 +29,19 @@ def test_device_link_without_remote_invite_blob(fresh_db):
     4. When invite blob syncs and projects, cascade unblocks peer_shared
     """
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network on phone ===")
 
-    # Alice creates a network on her phone
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    alice_phone = user.new_network(name='Alice', t_ms=clock.tick(), db=db, device_name='Phone')
     db.commit()
     print(f"Alice created network on phone: peer_id={alice_phone['peer_id'][:20]}...")
 
-    # Alice creates a peer invite on her phone for device linking
     print("\n=== Alice creates peer invite for laptop ===")
 
     invite_id, link_url, invite_data = invite.create(
         peer_id=alice_phone['peer_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_phone['user_id']
@@ -49,16 +49,13 @@ def test_device_link_without_remote_invite_blob(fresh_db):
     db.commit()
     print(f"Peer invite created: {invite_id[:20]}...")
 
-    # Record the invite_id for patching
     peer_invite_id = invite_id
 
-    # Create laptop peer
     print("\n=== Create laptop peer ===")
-    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    alice_laptop_peer_id = peer.create(t_ms=clock.tick(), db=db)
     print(f"Created laptop peer: {alice_laptop_peer_id[:20]}...")
 
-    # Accept the invite to get the private key
-    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=clock.tick(), db=db)
     assert accepted['mode'] == 'peer'
     print(f"Accepted peer invite")
 
@@ -78,19 +75,16 @@ def test_device_link_without_remote_invite_blob(fresh_db):
             return None
         return original_store_get(blob_id, db_conn)
 
-    # Patch store.get for the duration of peer_shared.join()
     with mock.patch.object(store, 'get', side_effect=patched_store_get):
-        # Complete the peer linking
-        # Note: prekey_id removed in sender key model (group_prekey replaced by pubkey)
         alice_laptop = peer_shared.join(
             peer_id=alice_laptop_peer_id,
             peer_invite_id=accepted['invite_id'],
             peer_invite_private_key=accepted['invite_private_key'],
             user_id=accepted['user_id'],
-            t_ms=3002,
+            t_ms=clock.tick(),
             db=db,
             device_name='Laptop',
-            network_id=accepted['network_id']  # Required for trust anchoring
+            network_id=accepted['network_id']
         )
 
     db.commit()
@@ -147,32 +141,29 @@ def test_user_join_without_remote_invite_blob(fresh_db):
     4. When invite blob syncs and projects, cascade unblocks user -> peer_shared
     """
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network on phone ===")
 
-    # Alice creates a network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db, device_name='Phone')
     db.commit()
     print(f"Alice created network: user_id={alice['user_id'][:20]}...")
 
-    # Alice creates a user invite for Bob
     print("\n=== Alice creates user invite for Bob ===")
 
     invite_id, link_url, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         mode='user'
     )
     db.commit()
     print(f"User invite created: {invite_id[:20]}...")
 
-    # Record the invite_id for patching
     user_invite_id = invite_id
 
-    # Create Bob's peer
     print("\n=== Create Bob's peer ===")
-    bob_peer_id = peer.create(t_ms=3000, db=db)
+    bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
     print(f"Created Bob's peer: {bob_peer_id[:20]}...")
 
     db.commit()
@@ -190,12 +181,11 @@ def test_user_join_without_remote_invite_blob(fresh_db):
         return original_store_get(blob_id, db_conn)
 
     with mock.patch.object(store, 'get', side_effect=patched_store_get):
-        # Bob joins the network (user.join takes the link_url string)
         bob = user.join(
             peer_id=bob_peer_id,
             invite_link=link_url,
             name='Bob',
-            t_ms=3002,
+            t_ms=clock.tick(),
             db=db,
             device_name='Laptop'
         )
@@ -237,15 +227,16 @@ def test_user_join_without_remote_invite_blob(fresh_db):
 def test_invite_accepteds_stores_user_id_for_device_link(fresh_db):
     """Verify invite_accepteds stores user_id correctly for device linking fallback."""
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create network and device link invite ===")
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db, device_name='Phone')
     db.commit()
 
     invite_id, link_url, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice['user_id']
@@ -253,21 +244,18 @@ def test_invite_accepteds_stores_user_id_for_device_link(fresh_db):
     db.commit()
     print(f"Peer invite for device link: {invite_id[:20]}...")
 
-    # Create and accept on laptop
-    laptop_peer_id = peer.create(t_ms=3000, db=db)
-    accepted = invite.accept(laptop_peer_id, link_url, t_ms=3001, db=db)
+    laptop_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    accepted = invite.accept(laptop_peer_id, link_url, t_ms=clock.tick(), db=db)
 
-    # Join with the invite
-    # Note: prekey_id removed in sender key model (group_prekey replaced by pubkey)
     laptop = peer_shared.join(
         peer_id=laptop_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        t_ms=3002,
+        t_ms=clock.tick(),
         db=db,
         device_name='Laptop',
-        network_id=accepted['network_id']  # Required for trust anchoring
+        network_id=accepted['network_id']
     )
     db.commit()
 

@@ -13,22 +13,21 @@ from core.db import Database
 from core import schema
 from events.identity import user, network, invite
 from events.content import message
+from tests.utils.tick_helper import TestClock
 
 
 def test_alice_network_with_encrypted_username(fresh_db):
     """Alice creates a network with encrypted username and network name."""
 
-    # Setup: Initialize in-memory database
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
 
-    # Create all tables using centralized schema loader
     schema.create_all(db)
 
-    # Alice creates network with username and network name
     alice_result = user.new_network(
         name='Alice',
-        t_ms=1000,
+        t_ms=clock.tick(),
         db=db,
         device_name='Alice Phone',
         network_name='My Network'
@@ -88,15 +87,14 @@ def test_alice_network_with_encrypted_username(fresh_db):
 def test_bob_joins_with_username():
     """Bob joins Alice's network and gets a username encrypted."""
 
-    # Setup: Initialize in-memory database
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
-    # Alice creates network
     alice_result = user.new_network(
         name='Alice',
-        t_ms=1000,
+        t_ms=clock.tick(),
         db=db,
         device_name='Alice Phone',
         network_name='Alice Network'
@@ -116,15 +114,14 @@ def test_bob_joins_with_username():
 def test_username_appears_with_device_link():
     """When a second device links, it should see Alice's username."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
-    # Alice Device 1 creates network
     alice_d1 = user.new_network(
         name='Alice',
-        t_ms=1000,
+        t_ms=clock.tick(),
         db=db,
         device_name='Phone'
     )
@@ -156,15 +153,14 @@ def test_username_appears_with_device_link():
 def test_pending_name_updates_table():
     """Verify pending_name_updates table exists and can store data."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
-    # Insert a test pending name
     from core.db import create_safe_db
     from events.identity import peer
-    peer_id = peer.create(t_ms=1000, db=db)
+    peer_id = peer.create(t_ms=clock.tick(), db=db)
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
@@ -193,15 +189,14 @@ def test_pending_name_updates_table():
 def test_pending_name_decrypts_table():
     """Verify pending_name_decrypts table exists for storing encrypted blobs."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
-    # Insert a test pending decrypt
     from core.db import create_safe_db
     from events.identity import peer
-    peer_id = peer.create(t_ms=1000, db=db)
+    peer_id = peer.create(t_ms=clock.tick(), db=db)
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
@@ -232,15 +227,14 @@ def test_pending_name_decrypts_table():
 def test_user_names_table():
     """Verify user_names table stores decrypted usernames."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
-    # Create Alice's network
     alice_result = user.new_network(
         name='Alice',
-        t_ms=1000,
+        t_ms=clock.tick(),
         db=db,
         device_name='Phone'
     )
@@ -265,15 +259,14 @@ def test_user_names_table():
 def test_network_names_table():
     """Verify network_names table stores decrypted network names."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
-    # Create Alice's network with name
     alice_result = user.new_network(
         name='Alice',
-        t_ms=1000,
+        t_ms=clock.tick(),
         db=db,
         network_name='My Private Network'
     )
@@ -298,16 +291,15 @@ def test_network_names_table():
 def test_validation_blocks_until_entity_exists():
     """Verify that username_update validation blocks until user event exists."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
     from events.identity import username_update, peer
     from core.db import create_safe_db
 
-    # Create a peer
-    peer_id = peer.create(t_ms=1000, db=db)
+    peer_id = peer.create(t_ms=clock.tick(), db=db)
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Create a fake username_update event blob for non-existent user
@@ -323,17 +315,16 @@ def test_validation_blocks_until_entity_exists():
 def test_pending_updates_retry_on_key_arrival():
     """Verify that pending name updates are retried when group_key_shared arrives."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
     from core.db import create_safe_db
     from events.identity import peer
     import hashlib
 
-    # Create a peer
-    peer_id = peer.create(t_ms=1000, db=db)
+    peer_id = peer.create(t_ms=clock.tick(), db=db)
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Insert a pending name update (waiting for key)
@@ -367,18 +358,17 @@ def test_pending_updates_retry_on_key_arrival():
 def test_name_table_with_missing_decryption():
     """Test handling of names that can't be decrypted (key missing)."""
 
-    # Setup
     conn = sqlite3.Connection(":memory:")
     db = Database(conn)
+    clock = TestClock()
     schema.create_all(db)
 
     from core.db import create_safe_db
     import hashlib
 
-    # Create Alice's network first
     alice_result = user.new_network(
         name='Alice',
-        t_ms=1000,
+        t_ms=clock.tick(),
         db=db
     )
 

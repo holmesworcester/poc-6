@@ -9,21 +9,22 @@ import pytest
 from events.identity import user, invite, peer as peer_module
 from events.content import channel
 from core import tick
+from tests.utils.tick_helper import TestClock
 
 
 def test_list_channels_returns_channels(fresh_db):
     """channel.list_with_keys() returns channels."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Create additional channel
     channel_id = channel.create(
         name='testing',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -49,18 +50,18 @@ def test_list_channels_returns_channels(fresh_db):
 def test_list_channels_includes_all_fields(fresh_db):
     """list_channels_with_keys() includes all standard channel fields."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Create channel with disappearing time
     channel.create(
         name='ephemeral',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
-        disappearing_time_ms=86400000  # 1 day
+        disappearing_time_ms=86400000
     )
     db.commit()
 
@@ -82,16 +83,16 @@ def test_list_channels_includes_all_fields(fresh_db):
 def test_get_by_id_returns_channel(fresh_db):
     """channel.get() returns channel dict for valid ID."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Create a channel
     channel_id = channel.create(
         name='lookup-test',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -111,8 +112,9 @@ def test_get_by_id_returns_channel(fresh_db):
 def test_get_by_id_returns_none_for_invalid_id(fresh_db):
     """channel.get() returns None for non-existent channel."""
     db = fresh_db
+    clock = TestClock()
 
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
     # Try to get non-existent channel
@@ -124,20 +126,19 @@ def test_get_by_id_returns_none_for_invalid_id(fresh_db):
 def test_get_by_id_respects_recorded_by(fresh_db):
     """channel.get() only returns channels visible to the peer."""
     db = fresh_db
+    clock = TestClock()
 
-    # Alice creates network and channel
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     channel_id = channel.create(
         name='alice-channel',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
 
-    # Bob creates separate network (no sync between networks)
-    bob = user.new_network(name='Bob', t_ms=3000, db=db)
+    bob = user.new_network(name='Bob', t_ms=clock.tick(), db=db)
     db.commit()
 
     # Alice can see her channel
@@ -153,25 +154,22 @@ def test_get_by_id_respects_recorded_by(fresh_db):
 def test_get_by_id_after_sync(fresh_db):
     """channel.get() works after channel syncs to new user."""
     db = fresh_db
+    clock = TestClock()
 
-    # Alice creates network
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
-    # Create invite for Bob
     invite_id, invite_link, _ = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
 
-    # Bob joins
-    bob_peer_id = peer_module.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer_module.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Sync - use more ticks to ensure convergence
     for i in range(50):
-        tick.tick(t_ms=2100 + i * 100, db=db)
+        tick.tick(t_ms=clock.tick(), db=db)
     db.commit()
 
     # Verify Bob can list channels (prerequisite for get_by_id to work)

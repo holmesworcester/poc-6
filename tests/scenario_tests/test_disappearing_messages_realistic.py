@@ -20,61 +20,60 @@ from events.content import channel, message, channel_update
 from core import recorded
 from core import purge_expired
 from core import tick
+from tests.utils.tick_helper import TestClock
 
 
 def test_alice_creates_disappearing_channel_and_sends_messages(fresh_db):
     """Alice creates channel with disappearing messages and verifies expiration."""
 
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Create a disappearing channel: messages expire after 5 seconds
     print("\n=== Alice creates channel with 5-second disappearing time ===")
     disappearing_time_ms = 5000
     ephemeral_channel_id = channel.create(
         name='ephemeral',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         disappearing_time_ms=disappearing_time_ms
     )
     db.commit()
     print(f"✓ Channel created: {ephemeral_channel_id[:20]}...")
 
-    # Send message at t=3000
-    print("\n=== Alice sends message at t=3000 ===")
+    print("\n=== Alice sends message ===")
+    msg_created_at = clock.tick()
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=ephemeral_channel_id,
         content="This will disappear in 5 seconds",
-        t_ms=3000,
+        t_ms=msg_created_at,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
     print(f"✓ Message created: {message_id[:20]}...")
 
-    # Verify message appears in list before expiry
-    print("\n=== Before expiry (t=7000): message should be visible ===")
+    print("\n=== Before expiry: message should be visible ===")
     messages_before = message.list(ephemeral_channel_id, alice['peer_id'], db)
     assert len(messages_before) == 1, "Should have 1 message"
     assert messages_before[0]['content'] == "This will disappear in 5 seconds"
     assert messages_before[0]['message_id'] == message_id
     print("✓ Message visible in channel")
 
-    # Message TTL should be 3000 + 5000 = 8000
+    expected_ttl = msg_created_at + disappearing_time_ms
     msg_ttl = messages_before[0].get('ttl_ms')
     if msg_ttl:
-        assert msg_ttl == 8000, f"TTL should be 8000, got {msg_ttl}"
-        print(f"✓ Message TTL correct: {msg_ttl}ms (expires at t=8000)")
+        assert msg_ttl == expected_ttl, f"TTL should be {expected_ttl}, got {msg_ttl}"
+        print(f"✓ Message TTL correct: {msg_ttl}ms")
 
-    # Run purge_expired at t=8100 (past expiry)
-    print("\n=== Run purge_expired at t=8100 (past expiry) ===")
-    cutoff_ms = 8100
+    print("\n=== Run purge_expired (past expiry) ===")
+    cutoff_ms = expected_ttl + 100
     purge_expired.run_purge_expired_for_all_peers(cutoff_ms, db)
     db.commit()
     print("✓ Purge ran")
@@ -92,64 +91,61 @@ def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     """Alice and Bob both see messages disappear at the same time."""
 
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network, Bob joins ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
 
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice['peer_id'],
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
 
-    bob_peer_id = peer_module.create(t_ms=2000, db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    bob_peer_id = peer_module.create(t_ms=clock.tick(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
     print("✓ Alice and Bob set up")
 
-    # Sync phase: propagate group keys so Bob can decrypt Alice's channels
-    print("\n=== Sync phase: propagate group keys (ticks 2100-5000) ===")
+    print("\n=== Sync phase: propagate group keys ===")
     for i in range(15):
-        tick.tick(t_ms=2100 + i*200, db=db)
+        tick.tick(t_ms=clock.tick(), db=db)
     db.commit()
     print("✓ Sync complete, Bob should now have group keys")
 
-    # Create disappearing channel
     print("\n=== Alice creates channel with 3-second disappearing time ===")
+    disappearing_time_ms = 3000
     channel_id = channel.create(
         name='ephemeral',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db,
-        disappearing_time_ms=3000
+        disappearing_time_ms=disappearing_time_ms
     )
     db.commit()
 
-    # Project channel for Bob (Alice already has it from create)
-    bob_recorded_id = recorded.create(channel_id, bob['peer_id'], 3500, db, return_dupes=False)
+    bob_recorded_id = recorded.create(channel_id, bob['peer_id'], clock.tick(), db, return_dupes=False)
     recorded.project(bob_recorded_id, db)
     db.commit()
 
-    # Alice sends a message
-    print("\n=== Alice sends message at t=4000 ===")
+    print("\n=== Alice sends message ===")
+    msg_created_at = clock.tick()
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Secret message",
-        t_ms=4000,
+        t_ms=msg_created_at,
         db=db
     )
     message_id = msg_result['id']
     db.commit()
 
-    # Project message for Bob (Alice already has it from create)
-    bob_msg_recorded_id = recorded.create(message_id, bob['peer_id'], 4500, db, return_dupes=False)
+    bob_msg_recorded_id = recorded.create(message_id, bob['peer_id'], clock.tick(), db, return_dupes=False)
     recorded.project(bob_msg_recorded_id, db)
     db.commit()
 
-    # Both see the message
     alice_messages = message.list(channel_id, alice['peer_id'], db)
     bob_messages = message.list(channel_id, bob['peer_id'], db)
     assert len(alice_messages) == 1
@@ -158,9 +154,8 @@ def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     assert bob_messages[0]['content'] == "Secret message"
     print("✓ Both Alice and Bob can read the message")
 
-    # Run purge at t=8000 (past expiry at 7000)
-    print("\n=== Run purge_expired at t=8000 (past expiry) ===")
-    cutoff_ms = 8000
+    print("\n=== Run purge_expired (past expiry) ===")
+    cutoff_ms = msg_created_at + disappearing_time_ms + 1000
     purge_expired.run_purge_expired_for_all_peers(cutoff_ms, db)
     db.commit()
 
@@ -178,67 +173,65 @@ def test_channel_ttl_update_affects_new_messages(fresh_db):
     """Updating a channel's TTL affects new messages."""
 
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network ===")
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Create channel with 10-second TTL
     print("\n=== Alice creates channel with 10-second TTL ===")
+    original_ttl = 10000
     channel_id = channel.create(
         name='flexible',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
-        disappearing_time_ms=10000
+        disappearing_time_ms=original_ttl
     )
     db.commit()
 
-    # Send first message
-    print("\n=== Alice sends message 1 at t=3000 ===")
+    print("\n=== Alice sends message 1 ===")
+    msg1_created_at = clock.tick()
     msg1 = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Message 1",
-        t_ms=3000,
+        t_ms=msg1_created_at,
         db=db
     )
     db.commit()
 
-    # Update channel TTL to 2 seconds
     print("\n=== Alice updates channel to 2-second TTL ===")
+    new_ttl = 2000
     update_id = channel_update.create(
         channel_id=channel_id,
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=5000,
+        t_ms=clock.tick(),
         db=db,
-        new_disappearing_time_ms=2000
+        new_disappearing_time_ms=new_ttl
     )
-    # Projection happens automatically via store.event() in create()
     db.commit()
     print("✓ Channel updated")
 
-    # Send second message (should get 2-second TTL)
-    print("\n=== Alice sends message 2 at t=6000 ===")
+    print("\n=== Alice sends message 2 ===")
+    msg2_created_at = clock.tick()
     msg2 = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Message 2",
-        t_ms=6000,
+        t_ms=msg2_created_at,
         db=db
     )
     db.commit()
 
-    # Both messages should be visible before selective expiry
     all_messages = message.list(channel_id, alice['peer_id'], db)
     assert len(all_messages) == 2, "Should have 2 messages"
     print("✓ Both messages visible")
 
-    # Purge at t=9000 (expires msg2 with TTL=8000, but not msg1 with TTL=13000)
-    print("\n=== Purge at t=9000 (selective expiry) ===")
-    cutoff_ms = 9000
+    print("\n=== Purge (selective expiry) ===")
+    cutoff_ms = msg2_created_at + new_ttl + 1000
     purge_expired.run_purge_expired_for_all_peers(cutoff_ms, db)
     db.commit()
 

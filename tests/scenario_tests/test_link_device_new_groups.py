@@ -16,29 +16,27 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.group import group, group_member
-from tests.utils.tick_helper import assert_eventually
+from tests.utils.tick_helper import assert_eventually, TestClock
 
 
 def test_link_device_sees_new_groups_after_invite(fresh_db):
     """Second device can see groups created between invite creation and device linking."""
 
-    # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network and Group A ===")
 
-    # Alice creates network
-    alice_device1 = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice_device1 = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     print(f"Alice created network")
     print(f"  user_id={alice_device1['user_id'][:20]}...")
     db.commit()
 
-    # Create Group A and add Alice as member
     group_a_id, _ = group.create(
         name='Group A',
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Created Group A: {group_a_id[:20]}...")
@@ -47,17 +45,16 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
         user_id=alice_device1['user_id'],
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=2001,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
 
-    # Alice creates peer invite for device linking
     print("\n=== Alice creates peer invite for device linking ===")
 
     invite_id, invite_link, invite_data = invite.create(
         peer_id=alice_device1['peer_id'],
-        t_ms=3000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_device1['user_id']
@@ -65,14 +62,13 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
     print(f"Peer invite created: {invite_id[:20]}...")
     db.commit()
 
-    # Alice creates Group B AFTER invite creation and adds herself as member
     print("\n=== Alice creates Group B (after invite) ===")
 
     group_b_id, _ = group.create(
         name='Group B',
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=3500,
+        t_ms=clock.tick(),
         db=db
     )
     print(f"Created Group B: {group_b_id[:20]}...")
@@ -81,28 +77,24 @@ def test_link_device_sees_new_groups_after_invite(fresh_db):
         user_id=alice_device1['user_id'],
         peer_id=alice_device1['peer_id'],
         peer_shared_id=alice_device1['peer_shared_id'],
-        t_ms=3501,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
 
-    # Alice links second device via the link URL
     print("\n=== Alice links second device via peer invite ===")
 
-    # Create peer for device 2
-    alice_device2_peer_id = peer.create(t_ms=5000, db=db)
+    alice_device2_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
-    # Accept the invite
-    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=5001, db=db)
+    accepted = invite.accept(alice_device2_peer_id, invite_link, t_ms=clock.tick(), db=db)
     assert accepted['mode'] == 'peer'
 
-    # Complete the peer linking (prekey_id removed in sender key model)
     alice_device2 = peer_shared.join(
         peer_id=alice_device2_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        t_ms=5002,
+        t_ms=clock.tick(),
         db=db,
         network_id=accepted.get('network_id')
     )

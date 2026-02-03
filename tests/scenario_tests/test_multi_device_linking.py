@@ -18,7 +18,7 @@ from core.db import Database
 from core import schema
 from events.identity import user, invite, peer_shared, peer
 from events.content import message
-from tests.utils.tick_helper import assert_eventually, run_ticks
+from tests.utils.tick_helper import assert_eventually, run_ticks, TestClock
 
 
 # TODO: Fix username sync for linked devices - laptop doesn't see username before trying to send
@@ -26,13 +26,12 @@ from tests.utils.tick_helper import assert_eventually, run_ticks
 def test_alice_links_phone_to_laptop(fresh_db):
     """Alice links her phone and laptop via link URL."""
 
-    # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network on phone ===")
 
-    # Alice creates a network on her phone
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    alice_phone = user.new_network(name='Alice', t_ms=clock.tick(), db=db, device_name='Phone')
     print(f"Alice created network on phone")
     print(f"  peer_id={alice_phone['peer_id'][:20]}...")
     print(f"  user_id={alice_phone['user_id'][:20]}...")
@@ -40,12 +39,11 @@ def test_alice_links_phone_to_laptop(fresh_db):
 
     db.commit()
 
-    # Alice creates a peer invite on her phone for device linking
     print("\n=== Alice creates peer invite for laptop (device linking) ===")
 
     invite_id, link_url, invite_data = invite.create(
         peer_id=alice_phone['peer_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_phone['user_id']
@@ -55,26 +53,21 @@ def test_alice_links_phone_to_laptop(fresh_db):
 
     db.commit()
 
-    # Alice links laptop to her account via the link URL
     print("\n=== Alice links laptop to her account ===")
 
-    # Create peer for laptop
-    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
+    alice_laptop_peer_id = peer.create(t_ms=clock.tick(), db=db)
     print(f"Created laptop peer: {alice_laptop_peer_id[:20]}...")
 
-    # Accept the invite (handles parsing, projection of backgrounds, and invite_accepted)
-    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=clock.tick(), db=db)
     assert accepted['mode'] == 'peer', f"Expected mode='peer', got {accepted['mode']}"
     print(f"Accepted peer invite from link URL")
 
-    # Complete the peer linking via peer_shared.join()
     alice_laptop = peer_shared.join(
         peer_id=alice_laptop_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        # prekey_id removed in sender key model
-        t_ms=3002,
+        t_ms=clock.tick(),
         db=db,
         device_name='Laptop'
     )
@@ -240,21 +233,19 @@ def test_alice_links_phone_to_laptop(fresh_db):
 def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
     """Alice's laptop joins after phone already has messages."""
 
-    # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Alice creates network and sends messages ===")
 
-    # Alice creates network on phone
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    alice_phone = user.new_network(name='Alice', t_ms=clock.tick(), db=db, device_name='Phone')
     db.commit()
 
-    # Alice sends messages from phone first
     msg1 = message.create(
         peer_id=alice_phone['peer_id'],
         channel_id=alice_phone['channel_id'],
         content="Message 1 from phone",
-        t_ms=1500,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
@@ -263,35 +254,33 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
         peer_id=alice_phone['peer_id'],
         channel_id=alice_phone['channel_id'],
         content="Message 2 from phone",
-        t_ms=1600,
+        t_ms=clock.tick(),
         db=db
     )
     db.commit()
 
     print(f"Phone sent 2 messages")
 
-    # Now link laptop
     print("\n=== Link laptop after messages already exist ===")
 
     invite_id, link_url, invite_data = invite.create(
         peer_id=alice_phone['peer_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_phone['user_id']
     )
     db.commit()
 
-    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
-    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=3001, db=db)
+    alice_laptop_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    accepted = invite.accept(alice_laptop_peer_id, link_url, t_ms=clock.tick(), db=db)
     assert accepted['mode'] == 'peer'
     alice_laptop = peer_shared.join(
         peer_id=alice_laptop_peer_id,
         peer_invite_id=accepted['invite_id'],
         peer_invite_private_key=accepted['invite_private_key'],
         user_id=accepted['user_id'],
-        # prekey_id removed in sender key model
-        t_ms=3002,
+        t_ms=clock.tick(),
         db=db,
         device_name='Laptop'
     )
@@ -334,61 +323,57 @@ def test_alice_laptop_joins_after_phone_has_messages(fresh_db):
 def test_three_devices_all_linked(fresh_db):
     """Alice links phone, laptop, and tablet - all three share messages."""
 
-    # Setup
     db = fresh_db
+    clock = TestClock()
 
     print("\n=== Setup: Create network on phone ===")
 
-    alice_phone = user.new_network(name='Alice', t_ms=1000, db=db, device_name='Phone')
+    alice_phone = user.new_network(name='Alice', t_ms=clock.tick(), db=db, device_name='Phone')
     db.commit()
 
-    # Link laptop
     print("\n=== Link laptop ===")
 
     invite_id_1, link_url_1, _ = invite.create(
         peer_id=alice_phone['peer_id'],
-        t_ms=2000,
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_phone['user_id']
     )
     db.commit()
 
-    alice_laptop_peer_id = peer.create(t_ms=3000, db=db)
-    accepted_1 = invite.accept(alice_laptop_peer_id, link_url_1, t_ms=3001, db=db)
+    alice_laptop_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    accepted_1 = invite.accept(alice_laptop_peer_id, link_url_1, t_ms=clock.tick(), db=db)
     alice_laptop = peer_shared.join(
         peer_id=alice_laptop_peer_id,
         peer_invite_id=accepted_1['invite_id'],
         peer_invite_private_key=accepted_1['invite_private_key'],
         user_id=accepted_1['user_id'],
-        # prekey_id removed in sender key model
-        t_ms=3002,
+        t_ms=clock.tick(),
         db=db,
         device_name='Laptop'
     )
     db.commit()
 
-    # Link tablet
     print("\n=== Link tablet ===")
 
     invite_id_2, link_url_2, _ = invite.create(
-        peer_id=alice_phone['peer_id'],  # Can create from phone or laptop
-        t_ms=4000,
+        peer_id=alice_phone['peer_id'],
+        t_ms=clock.tick(),
         db=db,
         mode='peer',
         user_id=alice_phone['user_id']
     )
     db.commit()
 
-    alice_tablet_peer_id = peer.create(t_ms=5000, db=db)
-    accepted_2 = invite.accept(alice_tablet_peer_id, link_url_2, t_ms=5001, db=db)
+    alice_tablet_peer_id = peer.create(t_ms=clock.tick(), db=db)
+    accepted_2 = invite.accept(alice_tablet_peer_id, link_url_2, t_ms=clock.tick(), db=db)
     alice_tablet = peer_shared.join(
         peer_id=alice_tablet_peer_id,
         peer_invite_id=accepted_2['invite_id'],
         peer_invite_private_key=accepted_2['invite_private_key'],
         user_id=accepted_2['user_id'],
-        # prekey_id removed in sender key model
-        t_ms=5002,
+        t_ms=clock.tick(),
         db=db,
         device_name='Tablet'
     )

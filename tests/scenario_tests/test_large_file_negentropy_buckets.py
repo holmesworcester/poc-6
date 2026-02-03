@@ -19,6 +19,7 @@ This test verifies that:
 3. Sync completes successfully for large files
 """
 import pytest
+from tests.utils.tick_helper import TestClock
 from events.network.negentropy import (
     compute_unified_key,
     LEVEL_PREFIX_LEN,
@@ -163,10 +164,10 @@ def test_bucket_subdivision_with_many_events(fresh_db):
     across buckets based on the 16-bit hash suffix.
     """
     db = fresh_db
+    clock = TestClock()
 
-    # We need a peer_id to add events
     from events.identity import user
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     peer_id = alice['peer_id']
 
     num_events = 500
@@ -211,9 +212,10 @@ def test_bucket_subdivision_with_many_events(fresh_db):
 def test_events_across_multiple_minutes(fresh_db):
     """Test that events across multiple minutes spread across different time buckets."""
     db = fresh_db
+    clock = TestClock()
 
     from events.identity import user
-    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     peer_id = alice['peer_id']
 
     # Create events across 10 different minutes

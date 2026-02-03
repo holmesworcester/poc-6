@@ -29,7 +29,7 @@ from events.group import (
     treekem_update,
     secret_broadcast,
 )
-from tests.utils.tick_helper import assert_eventually, run_ticks
+from tests.utils.tick_helper import assert_eventually, run_ticks, TestClock
 
 
 class TestDHRootConvergence:
@@ -37,10 +37,9 @@ class TestDHRootConvergence:
 
     def create_community(self, n: int, db) -> dict:
         """Create admin + (n-1) members via invite flow."""
-        t_ms = 1000
+        clock = TestClock()
 
-        admin = user.new_network(name='Admin', t_ms=t_ms, db=db)
-        t_ms += 100
+        admin = user.new_network(name='Admin', t_ms=clock.tick(), db=db)
         db.commit()
 
         members = [admin]
@@ -48,22 +47,19 @@ class TestDHRootConvergence:
         for i in range(n - 1):
             invite_id, invite_link, _ = invite.create(
                 peer_id=admin['peer_id'],
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
-            new_peer_id = peer.create(t_ms=t_ms, db=db)
-            t_ms += 10
+            new_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
             member = user.join(
                 peer_id=new_peer_id,
                 invite_link=invite_link,
                 name=f'Member{i}',
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
             members.append({
                 'peer_id': member['peer_id'],
@@ -73,12 +69,12 @@ class TestDHRootConvergence:
 
         db.commit()
 
-        t_ms = assert_eventually(
+        assert_eventually(
             lambda: len(sender_key.get_group_member_peer_ids(
                 admin['all_users_group_id'], admin['peer_id'], db
             )) >= n,
             db=db,
-            start_t_ms=t_ms,
+            start_t_ms=None,
             msg=f"All {n} members should be in group"
         )
 
@@ -86,14 +82,14 @@ class TestDHRootConvergence:
             'admin': admin,
             'members': members,
             'group_id': admin['all_users_group_id'],
-            't_ms': t_ms,
         }
 
     def test_single_update_gives_author_root_secret(self, fresh_db):
         """Author of an update should have root secret."""
         db = fresh_db
+        clock = TestClock()
 
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Alice creates DH update
@@ -103,12 +99,12 @@ class TestDHRootConvergence:
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
 
-        run_ticks(db=db, start_t_ms=16000, num_rounds=20)
+        run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
         # Alice should have root secret
         root_key = treekem_secret.get_root_secret(alice['peer_id'], db)
@@ -117,10 +113,10 @@ class TestDHRootConvergence:
     def test_winning_update_determines_root(self, fresh_db):
         """With concurrent updates, the winner's root is authoritative."""
         db = fresh_db
+        clock = TestClock()
         n = 3
 
         community = self.create_community(n, db)
-        t_ms = community['t_ms']
         all_peer_shared_ids = [m['peer_shared_id'] for m in community['members']]
 
         # All members create concurrent updates (base_update_id=None)
@@ -132,14 +128,13 @@ class TestDHRootConvergence:
                 removal_epoch_id=None,
                 base_update_id=None,
                 active_members=all_peer_shared_ids,
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db,
             )
             update_ids.append((result['treekem_update_id'], member))
-            t_ms += 10
 
         db.commit()
-        run_ticks(db=db, start_t_ms=t_ms, num_rounds=100)
+        run_ticks(db=db, start_t_ms=None, num_rounds=100)
 
         # Determine winner (lowest update_id)
         winner = get_winning_update_from_list(update_ids)
@@ -152,10 +147,10 @@ class TestDHRootConvergence:
     def test_author_always_has_their_own_root(self, fresh_db):
         """Each update author has their root secret (before sync convergence)."""
         db = fresh_db
+        clock = TestClock()
         n = 5
 
         community = self.create_community(n, db)
-        t_ms = community['t_ms']
         all_peer_shared_ids = [m['peer_shared_id'] for m in community['members']]
 
         # Each member creates update
@@ -166,13 +161,12 @@ class TestDHRootConvergence:
                 removal_epoch_id=None,
                 base_update_id=None,
                 active_members=all_peer_shared_ids,
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db,
             )
-            t_ms += 100
 
         db.commit()
-        run_ticks(db=db, start_t_ms=t_ms, num_rounds=100)
+        run_ticks(db=db, start_t_ms=None, num_rounds=100)
 
         # Each author should have SOME root secret (their own)
         authors_with_roots = 0
@@ -195,10 +189,9 @@ class TestO1BroadcastReachesAll:
 
     def create_community_with_updates(self, n: int, db) -> dict:
         """Create community and have all members post DH updates."""
-        t_ms = 1000
+        clock = TestClock()
 
-        admin = user.new_network(name='Admin', t_ms=t_ms, db=db)
-        t_ms += 100
+        admin = user.new_network(name='Admin', t_ms=clock.tick(), db=db)
         db.commit()
 
         members = [admin]
@@ -206,22 +199,19 @@ class TestO1BroadcastReachesAll:
         for i in range(n - 1):
             invite_id, invite_link, _ = invite.create(
                 peer_id=admin['peer_id'],
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
-            new_peer_id = peer.create(t_ms=t_ms, db=db)
-            t_ms += 10
+            new_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
             member = user.join(
                 peer_id=new_peer_id,
                 invite_link=invite_link,
                 name=f'Member{i}',
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
             members.append({
                 'peer_id': member['peer_id'],
@@ -230,7 +220,7 @@ class TestO1BroadcastReachesAll:
             })
 
         db.commit()
-        t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=50)
+        run_ticks(db=db, start_t_ms=None, num_rounds=50)
 
         all_peer_shared_ids = [m['peer_shared_id'] for m in members]
 
@@ -242,19 +232,18 @@ class TestO1BroadcastReachesAll:
                 removal_epoch_id=None,
                 base_update_id=None,
                 active_members=all_peer_shared_ids,
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db,
             )
-            t_ms += 100
 
         db.commit()
-        t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=100)
+        run_ticks(db=db, start_t_ms=None, num_rounds=100)
 
         return {
             'admin': admin,
             'members': members,
             'group_id': admin['all_users_group_id'],
-            't_ms': t_ms,
+            'clock': clock,
         }
 
     def test_broadcast_is_o1_with_root_secret(self, fresh_db):
@@ -263,7 +252,7 @@ class TestO1BroadcastReachesAll:
         n = 10
 
         community = self.create_community_with_updates(n, db)
-        t_ms = community['t_ms']
+        clock = community['clock']
 
         # Verify admin has root secret
         root_secret = treekem_secret.get_root_secret_key_data(
@@ -277,7 +266,7 @@ class TestO1BroadcastReachesAll:
             peer_shared_id=community['admin']['peer_shared_id'],
             group_id=community['group_id'],
             removal_epoch_id=None,
-            t_ms=t_ms,
+            t_ms=clock.tick(),
             db=db,
         )
 
@@ -287,7 +276,7 @@ class TestO1BroadcastReachesAll:
             peer_id=community['admin']['peer_id'],
             peer_shared_id=community['admin']['peer_shared_id'],
             removal_epoch_id=None,
-            t_ms=t_ms + 1,
+            t_ms=clock.tick(),
             db=db,
         )
 
@@ -300,7 +289,7 @@ class TestO1BroadcastReachesAll:
         n = 5
 
         community = self.create_community_with_updates(n, db)
-        t_ms = community['t_ms']
+        clock = community['clock']
 
         # Verify admin has root secret
         admin_root = treekem_secret.get_root_secret_key_data(
@@ -314,7 +303,7 @@ class TestO1BroadcastReachesAll:
             peer_shared_id=community['admin']['peer_shared_id'],
             group_id=community['group_id'],
             removal_epoch_id=None,
-            t_ms=t_ms,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -326,7 +315,7 @@ class TestO1BroadcastReachesAll:
             peer_id=community['admin']['peer_id'],
             peer_shared_id=community['admin']['peer_shared_id'],
             removal_epoch_id=None,
-            t_ms=t_ms + 1,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -335,7 +324,7 @@ class TestO1BroadcastReachesAll:
         assert len(broadcast_ids) == 1, "Should be O(1) broadcast"
 
         # Sync
-        t_ms = run_ticks(db=db, start_t_ms=t_ms + 10, num_rounds=100)
+        run_ticks(db=db, start_t_ms=None, num_rounds=100)
 
         # Count members with root secrets (they can decrypt)
         members_with_root = sum(
@@ -444,8 +433,9 @@ class TestReUpdateMechanism:
     def test_concurrent_updates_select_winner(self, fresh_db):
         """When multiple updates have same base, lowest ID wins."""
         db = fresh_db
+        clock = TestClock()
 
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Create first update
@@ -455,7 +445,7 @@ class TestReUpdateMechanism:
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -469,8 +459,9 @@ class TestReUpdateMechanism:
     def test_superseded_update_detection(self, fresh_db):
         """Superseded updates should be detectable."""
         db = fresh_db
+        clock = TestClock()
 
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Create update
@@ -480,7 +471,7 @@ class TestReUpdateMechanism:
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -504,8 +495,9 @@ class TestEdgeCases:
     def test_single_member_still_has_root(self, fresh_db):
         """Single member should still have a root secret (trivial case)."""
         db = fresh_db
+        clock = TestClock()
 
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Create DH update for single member
@@ -515,12 +507,12 @@ class TestEdgeCases:
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
 
-        run_ticks(db=db, start_t_ms=16000, num_rounds=20)
+        run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
         # Should have root secret
         root_key = treekem_secret.get_root_secret(alice['peer_id'], db)
@@ -529,22 +521,23 @@ class TestEdgeCases:
     def test_two_members_both_have_roots_after_updates(self, fresh_db):
         """Two members should each have a root secret after their updates."""
         db = fresh_db
+        clock = TestClock()
 
         # Create Alice's network
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Bob joins
         invite_id, invite_link, _ = invite.create(
             peer_id=alice['peer_id'],
-            t_ms=1100,
+            t_ms=clock.tick(),
             db=db
         )
-        bob_peer_id = peer.create(t_ms=1200, db=db)
-        bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=1200, db=db)
+        bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
         db.commit()
 
-        run_ticks(db=db, start_t_ms=1300, num_rounds=50)
+        run_ticks(db=db, start_t_ms=None, num_rounds=50)
 
         members = [alice['peer_shared_id'], bob['peer_shared_id']]
 
@@ -555,7 +548,7 @@ class TestEdgeCases:
             removal_epoch_id=None,
             base_update_id=None,
             active_members=members,
-            t_ms=15000,
+            t_ms=clock.tick(),
             db=db,
         )
 
@@ -565,12 +558,12 @@ class TestEdgeCases:
             removal_epoch_id=None,
             base_update_id=None,
             active_members=members,
-            t_ms=15100,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
 
-        run_ticks(db=db, start_t_ms=16000, num_rounds=100)
+        run_ticks(db=db, start_t_ms=None, num_rounds=100)
 
         # Both should have root secrets (their own from their updates)
         alice_root = treekem_secret.get_root_secret(alice['peer_id'], db)
@@ -590,34 +583,37 @@ class TestJobIntegration:
     def test_should_update_after_join_delay(self, fresh_db):
         """Peers should wait after join before updating (reduces concurrency)."""
         db = fresh_db
+        clock = TestClock()
 
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Immediately after join, should NOT update (within 10s delay)
-        should = treekem_update.should_update(alice['peer_id'], 2000, db)
+        should = treekem_update.should_update(alice['peer_id'], clock.tick(), db)
         assert should is False, "Should not update immediately after join"
 
         # After join delay (10 seconds), should update
-        should = treekem_update.should_update(alice['peer_id'], 15000, db)
+        clock.advance(15000)
+        should = treekem_update.should_update(alice['peer_id'], clock.tick(), db)
         assert should is True, "Should update after join delay"
 
     def test_should_not_update_too_frequently(self, fresh_db):
         """Peers should respect rotation interval between updates."""
         db = fresh_db
+        clock = TestClock()
 
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # First update after join delay
-        update_t_ms = 15000
+        clock.advance(15000)
         treekem_update.create_update_path_dh(
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
             removal_epoch_id=None,
             base_update_id=None,
             active_members=[alice['peer_shared_id']],
-            t_ms=update_t_ms,
+            t_ms=clock.tick(),
             db=db,
         )
         db.commit()
@@ -634,5 +630,5 @@ class TestJobIntegration:
         assert should is False, "Should not update within rotation interval"
 
         # After rotation interval (5 minutes = 300,000ms), should update
-        should = treekem_update.should_update(alice['peer_id'], recorded_at + 300_001, db)
+        should = treekem_update.should_update(alice['peer_id'], recorded_at + 300001, db)
         assert should is True, "Should update after rotation interval"
