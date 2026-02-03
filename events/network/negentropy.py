@@ -491,8 +491,50 @@ LEVEL_PREFIX_LEN = {
 }
 
 # When bucket has this many events or fewer, send event IDs instead of drilling down
-# 100 is a good balance: small enough for reliable delivery, large enough for efficiency
-EVENTS_THRESHOLD = 50
+# 200 allows 4x more events per leaf node, reducing sync rounds by ~4x
+# Risk: larger messages, more retransmit cost on packet loss
+EVENTS_THRESHOLD = 200
+
+
+# ============================================================================
+# Bucket Size Helpers for Range-to-Bucket Mapping
+# ============================================================================
+
+def get_bucket_size(level: str) -> int:
+    """Get the number of unified keys covered by one bucket at this level.
+
+    Each hex char represents 4 bits, so a prefix of length N covers
+    2^(4*(12-N)) = 16^(12-N) unified keys.
+    """
+    prefix_len = LEVEL_PREFIX_LEN[level]
+    return 1 << (4 * (12 - prefix_len))
+
+
+def find_best_level(range_size: int) -> str:
+    """Find the coarsest bucket level where bucket_size <= range_size.
+
+    Returns the level that provides the best balance: coarse enough to use
+    few buckets, but fine enough that buckets fit within the range.
+    """
+    for level in LEVELS[1:]:  # Skip root
+        if get_bucket_size(level) <= range_size:
+            return level
+    return 'prefix_10'
+
+
+def range_to_prefix(start: int, level: str) -> str:
+    """Convert an aligned range start to its bucket prefix.
+
+    Args:
+        start: Range start as integer (should be aligned to bucket boundary)
+        level: Bucket level (determines prefix length)
+
+    Returns:
+        Hex prefix string for this bucket
+    """
+    hex_str = f"{start:012x}"
+    prefix_len = LEVEL_PREFIX_LEN[level]
+    return hex_str[:prefix_len]
 
 
 # ============================================================================
@@ -503,16 +545,30 @@ EVENTS_THRESHOLD = 50
 
 @dataclass
 class CCState:
-    """Congestion control state for a single connection."""
-    window: int = 1              # Max in-flight range operations
-    in_flight: int = 0           # Currently awaiting response
-    rtt_ms: float = 200.0        # RTT estimate (exponential moving average)
-    last_send_ms: int = 0        # Time of oldest in-flight request
+    """Congestion control state for a single connection.
+
+    Uses range-ID tracking for accurate RTT measurement and in-flight counting.
+    Each outgoing request gets a unique ID; responses echo the ID back.
+    Supports both string range_ids (bucket protocol) and int range_ids (bisection protocol).
+    """
+    window: int = 4                          # Max in-flight requests (CC_INITIAL_WINDOW)
+    rtt_ms: float = 200.0                    # RTT estimate (exponential moving average)
+    next_id: int = 1                         # Next range_id to assign
+    outstanding: dict = None                 # {range_id (str or int): send_time_ms}
+
+    def __post_init__(self):
+        if self.outstanding is None:
+            self.outstanding = {}
+
+    @property
+    def in_flight(self) -> int:
+        return len(self.outstanding)
 
 
 # Constants for congestion control
 CC_MIN_WINDOW = 1
-CC_MAX_WINDOW = 32
+CC_INITIAL_WINDOW = 4            # Start with 4 parallel requests
+CC_MAX_WINDOW = 64               # Allow up to 64 parallel requests
 CC_RTT_ALPHA = 0.2               # EMA smoothing factor
 CC_TIMEOUT_MULTIPLIER = 3        # Timeout = 3 * RTT
 
@@ -536,41 +592,74 @@ def _cc_can_send(recorded_by: str, connection_id: str) -> bool:
     return state.in_flight < state.window
 
 
+def _cc_allocate_id(recorded_by: str, connection_id: str, t_ms: int) -> int:
+    """Allocate a range_id for a new request and track send time."""
+    state = _get_cc_state(recorded_by, connection_id)
+    range_id = state.next_id
+    state.next_id += 1
+    state.outstanding[range_id] = t_ms
+    return range_id
+
+
+def _cc_track_request(recorded_by: str, connection_id: str, range_id: str, t_ms: int) -> None:
+    """Track a request by its range_id (bucket protocol - string IDs)."""
+    state = _get_cc_state(recorded_by, connection_id)
+    state.outstanding[range_id] = t_ms
+
+
 def _cc_on_send(recorded_by: str, connection_id: str, t_ms: int) -> None:
-    """Record that we sent a range request."""
+    """Record that we sent a range request (legacy, for non-ID-tracked sends)."""
+    # For backwards compatibility - allocates an ID but discards it
+    _cc_allocate_id(recorded_by, connection_id, t_ms)
+
+
+def _cc_on_response(recorded_by: str, connection_id: str, t_ms: int, range_id = None) -> None:
+    """Record that we received a response.
+
+    If range_id is provided (str or int), uses precise RTT measurement.
+    Otherwise falls back to approximate tracking.
+    """
     state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight == 0:
-        state.last_send_ms = t_ms
-    state.in_flight += 1
 
-
-def _cc_on_response(recorded_by: str, connection_id: str, t_ms: int) -> None:
-    """Record that we received a response (range_matched or range_response)."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0:
-        state.in_flight -= 1
-
-    if state.in_flight == 0 and state.last_send_ms > 0:
-        # All requests answered - measure RTT and grow window
-        rtt_sample = t_ms - state.last_send_ms
+    if range_id is not None and range_id in state.outstanding:
+        # Precise tracking: measure RTT from this specific request
+        send_time = state.outstanding.pop(range_id)
+        rtt_sample = t_ms - send_time
         if rtt_sample > 0:
             state.rtt_ms = (1 - CC_RTT_ALPHA) * state.rtt_ms + CC_RTT_ALPHA * rtt_sample
+
+        # Grow window on successful response (additive increase)
         state.window = min(state.window + 1, CC_MAX_WINDOW)
-        log.debug(f"CC: conn={connection_id[:16]}... RTT={state.rtt_ms:.0f}ms window={state.window}")
+        log.debug(f"CC: conn={connection_id[:16]}... RTT={rtt_sample}ms (avg={state.rtt_ms:.0f}ms) window={state.window} in_flight={state.in_flight}")
+
+    elif range_id is None:
+        # Legacy: no ID tracking, remove oldest if any
+        if state.outstanding:
+            # Find oldest by send_time, not by key (keys can be str or int)
+            oldest_id = min(state.outstanding.keys(), key=lambda k: state.outstanding[k])
+            send_time = state.outstanding.pop(oldest_id)
+            rtt_sample = t_ms - send_time
+            if rtt_sample > 0:
+                state.rtt_ms = (1 - CC_RTT_ALPHA) * state.rtt_ms + CC_RTT_ALPHA * rtt_sample
+            state.window = min(state.window + 1, CC_MAX_WINDOW)
 
 
 def _cc_check_timeout(recorded_by: str, connection_id: str, t_ms: int) -> bool:
     """Check for timeout and shrink window if needed. Returns True if timed out."""
     state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0 and state.last_send_ms > 0:
-        timeout_ms = CC_TIMEOUT_MULTIPLIER * state.rtt_ms
-        if (t_ms - state.last_send_ms) > timeout_ms:
-            # Timeout - shrink window and reset in_flight
-            old_window = state.window
-            state.window = max(CC_MIN_WINDOW, state.window // 2)
-            state.in_flight = 0
-            log.info(f"CC: timeout conn={connection_id[:16]}... window {old_window}->{state.window}")
-            return True
+    if not state.outstanding:
+        return False
+
+    timeout_ms = CC_TIMEOUT_MULTIPLIER * state.rtt_ms
+    oldest_time = min(state.outstanding.values()) if state.outstanding else t_ms
+
+    if (t_ms - oldest_time) > timeout_ms:
+        # Timeout - shrink window and clear outstanding
+        old_window = state.window
+        state.window = max(CC_MIN_WINDOW, state.window // 2)
+        state.outstanding.clear()
+        log.info(f"CC: timeout conn={connection_id[:16]}... window {old_window}->{state.window}")
+        return True
     return False
 
 
@@ -713,13 +802,16 @@ def range_midpoint(start: int, end: int) -> int:
     return start + (end - start) // 2
 
 
-def compute_range_hash(
+def _scan_events_hash(
     db,
     recorded_by: str,
     start: int,
     end: int,
 ) -> bytes:
-    """Compute XOR fingerprint hash for all events in range [start, end).
+    """Scan events in range [start, end) and compute XOR fingerprint hash.
+
+    This is the fallback O(n) implementation for unaligned edge ranges.
+    For aligned ranges, use compute_range_hash() which uses bucket cache.
 
     Args:
         db: Database connection
@@ -753,13 +845,17 @@ def compute_range_hash(
     return result
 
 
-def count_events_in_range(
+def _scan_events_count(
     db,
     recorded_by: str,
     start: int,
     end: int,
 ) -> int:
-    """Count events in range [start, end)."""
+    """Scan events in range [start, end) and return count.
+
+    This is the fallback O(n) implementation for unaligned edge ranges.
+    For aligned ranges, use count_events_in_range() which uses bucket cache.
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     start_hex = range_to_hex(start)
@@ -771,6 +867,133 @@ def count_events_in_range(
     """, (recorded_by, start_hex, end_hex))
 
     return row['cnt'] if row else 0
+
+
+def compute_range_hash(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> bytes:
+    """Compute XOR fingerprint hash for all events in range [start, end).
+
+    Uses bucket cache for O(buckets) performance instead of O(events).
+    For bucket-aligned ranges, XORs cached bucket hashes.
+    For edges, recursively uses finer bucket levels.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive) as integer
+        end: Range end (exclusive) as integer
+
+    Returns:
+        16-byte XOR fingerprint, or ZERO_HASH if no events in range
+    """
+    if start >= end:
+        return ZERO_HASH
+
+    # Full range = root hash (O(1) lookup)
+    if start == 0 and end >= RANGE_MAX:
+        root = get_bucket_hash(db, recorded_by, 'root', '')
+        return root if root else ZERO_HASH
+
+    range_size = end - start
+    level = find_best_level(range_size)
+    bucket_size = get_bucket_size(level)
+
+    # If range is smaller than smallest bucket (prefix_10 = 2^8 = 256), just scan
+    if range_size < bucket_size:
+        return _scan_events_hash(db, recorded_by, start, end)
+
+    # Align boundaries to bucket boundaries
+    aligned_start = ((start + bucket_size - 1) // bucket_size) * bucket_size
+    aligned_end = (end // bucket_size) * bucket_size
+
+    result = ZERO_HASH
+
+    # Left edge: recursively compute hash [start, aligned_start)
+    if start < aligned_start:
+        result = xor_bytes(result, compute_range_hash(db, recorded_by, start, aligned_start))
+
+    # Middle: XOR bucket hashes [aligned_start, aligned_end)
+    if aligned_start < aligned_end:
+        prefixes = []
+        current = aligned_start
+        while current < aligned_end:
+            prefixes.append(range_to_prefix(current, level))
+            current += bucket_size
+
+        bucket_hashes = _fetch_bucket_hashes_batch(db, recorded_by, level, prefixes)
+        for h in bucket_hashes:
+            if h:
+                result = xor_bytes(result, h)
+
+    # Right edge: recursively compute hash [aligned_end, end)
+    if aligned_end < end:
+        result = xor_bytes(result, compute_range_hash(db, recorded_by, aligned_end, end))
+
+    return result
+
+
+def count_events_in_range(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> int:
+    """Count events in range [start, end).
+
+    Uses bucket cache for O(buckets) performance instead of O(events).
+    For bucket-aligned ranges, sums cached bucket counts.
+    For edges, recursively uses finer bucket levels.
+    """
+    if start >= end:
+        return 0
+
+    # Full range = root bucket count (O(1) lookup)
+    if start == 0 and end >= RANGE_MAX:
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        row = safedb.query_one("""
+            SELECT event_count FROM negentropy_buckets
+            WHERE recorded_by = ? AND level = ? AND prefix = ?
+        """, (recorded_by, 'root', ''))
+        return row['event_count'] if row and row['event_count'] else 0
+
+    range_size = end - start
+    level = find_best_level(range_size)
+    bucket_size = get_bucket_size(level)
+
+    # If range is smaller than smallest bucket, just scan
+    if range_size < bucket_size:
+        return _scan_events_count(db, recorded_by, start, end)
+
+    # Align boundaries to bucket boundaries
+    aligned_start = ((start + bucket_size - 1) // bucket_size) * bucket_size
+    aligned_end = (end // bucket_size) * bucket_size
+
+    result = 0
+
+    # Left edge: recursively count [start, aligned_start)
+    if start < aligned_start:
+        result += count_events_in_range(db, recorded_by, start, aligned_start)
+
+    # Middle: sum bucket counts [aligned_start, aligned_end)
+    if aligned_start < aligned_end:
+        prefixes = []
+        current = aligned_start
+        while current < aligned_end:
+            prefixes.append(range_to_prefix(current, level))
+            current += bucket_size
+
+        bucket_counts = _fetch_bucket_counts_batch(db, recorded_by, level, prefixes)
+        result += sum(bucket_counts)
+
+    # Right edge: recursively count [aligned_end, end)
+    if aligned_end < end:
+        result += count_events_in_range(db, recorded_by, aligned_end, end)
+
+    return result
 
 
 def get_events_in_range(
@@ -1501,6 +1724,64 @@ def get_bucket_hash(
 recompute_bucket_hash = get_bucket_hash
 
 
+def _fetch_bucket_hashes_batch(
+    db,
+    recorded_by: str,
+    level: str,
+    prefixes: list[str]
+) -> list[bytes | None]:
+    """Fetch multiple bucket hashes in one query.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        level: Bucket level
+        prefixes: List of bucket prefixes to fetch
+
+    Returns:
+        List of hashes (or None) in same order as prefixes
+    """
+    if not prefixes:
+        return []
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    placeholders = ",".join("?" for _ in prefixes)
+    rows = safedb.query(f"""
+        SELECT prefix, hash FROM negentropy_buckets
+        WHERE recorded_by = ? AND level = ? AND prefix IN ({placeholders})
+    """, (recorded_by, level, *prefixes))
+    hash_map = {row['prefix']: row['hash'] for row in rows}
+    return [hash_map.get(p) for p in prefixes]
+
+
+def _fetch_bucket_counts_batch(
+    db,
+    recorded_by: str,
+    level: str,
+    prefixes: list[str]
+) -> list[int]:
+    """Fetch multiple bucket event counts in one query.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        level: Bucket level
+        prefixes: List of bucket prefixes to fetch
+
+    Returns:
+        List of event counts in same order as prefixes (0 for missing buckets)
+    """
+    if not prefixes:
+        return []
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    placeholders = ",".join("?" for _ in prefixes)
+    rows = safedb.query(f"""
+        SELECT prefix, event_count FROM negentropy_buckets
+        WHERE recorded_by = ? AND level = ? AND prefix IN ({placeholders})
+    """, (recorded_by, level, *prefixes))
+    count_map = {row['prefix']: row['event_count'] or 0 for row in rows}
+    return [count_map.get(p, 0) for p in prefixes]
+
+
 def get_hashes_at_level(
     db,
     recorded_by: str,
@@ -1736,23 +2017,19 @@ def handle_range_request(
             """, (t_ms, recorded_by, connection_id, range_id))
 
             event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
-            if len(event_ids) > max_events:
-                log.warning(
-                    f"negentropy: truncating {len(event_ids)} event_ids to {max_events} for wire payload"
-                )
-                event_ids = event_ids[:max_events]
 
             # Send actual event blobs - they'll dedupe on their side
             if event_ids:
                 sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
                 log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events in bucket)")
 
-            # Also send the event IDs so they know what we have (for bidirectional sync)
+            # Signal "at leaf" - receiver will send all their events for this prefix
+            # No need to send event_ids list; both sides send all, receiver dedupes
             responses.append({
                 'type': 'range_events',
                 'range_id': range_id,
                 'prefix': prefix,
-                'event_ids': event_ids,
+                'event_ids': [],  # Empty - "both send all at leaf" protocol
                 'our_hash': our_hash.hex() if our_hash else '',
                 'root_hash': root_hash.hex() if root_hash else '',
                 'total_events': total_events,
@@ -1844,8 +2121,8 @@ def handle_range_matched(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     range_id = msg['range_id']
 
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
+    # Track for congestion control - we received a response with range_id for precise RTT
+    _cc_on_response(recorded_by, connection_id, t_ms, range_id=range_id)
 
     safedb.execute("""
         UPDATE negentropy_sync_state
@@ -1905,18 +2182,18 @@ def handle_range_events(
     msg: dict,
     t_ms: int
 ) -> list[dict]:
-    """Handle incoming events for a bucket.
+    """Handle incoming 'at leaf' signal for a bucket.
 
-    Sends actual event blobs for events they need.
+    Both sides send all events at leaf - but only if hashes differ.
+    If our hash matches their hash, we have the same events (no need to send).
+    This avoids echoing back events we just received.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
-
     range_id = msg['range_id']
+
+    # Track for congestion control - we received a response with range_id for precise RTT
+    _cc_on_response(recorded_by, connection_id, t_ms, range_id=range_id)
     prefix = msg.get('prefix', '')
-    their_event_ids = set(msg['event_ids'])
 
     # Get root hash and total events for responses
     root_hash = get_root_hash(db, recorded_by)
@@ -1927,15 +2204,6 @@ def handle_range_events(
     if their_root_hash and their_root_hash == root_hash:
         _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
 
-    # Get our events for this bucket
-    our_event_ids = set(get_events_in_bucket(db, recorded_by, prefix))
-
-    # Events they have that we don't -> we need to request/store
-    events_we_need = their_event_ids - our_event_ids
-
-    # Events we have that they don't -> send blobs
-    events_they_need = our_event_ids - their_event_ids
-
     # Mark range complete
     safedb.execute("""
         UPDATE negentropy_sync_state
@@ -1943,9 +2211,20 @@ def handle_range_events(
         WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
     """, (t_ms, recorded_by, connection_id, range_id))
 
-    # Send actual event blobs they need
-    if events_they_need:
-        sent = _send_event_blobs(db, recorded_by, connection_id, list(events_they_need), t_ms)
+    # Compare our bucket hash with theirs - only send if different
+    # This avoids echoing back events we just received from them
+    their_bucket_hash = bytes.fromhex(msg.get('our_hash', '')) if msg.get('our_hash') else None
+    our_bucket_hash = recompute_bucket_hash(db, recorded_by, 'prefix_6', prefix)
+
+    if their_bucket_hash and our_bucket_hash == their_bucket_hash:
+        # Hashes match - we have the same events, nothing to send
+        log.debug(f"negentropy: bucket {prefix} hashes match, no events to send")
+        return []
+
+    # Hashes differ - send all our events for this bucket
+    our_event_ids = list(get_events_in_bucket(db, recorded_by, prefix))
+    if our_event_ids:
+        sent = _send_event_blobs(db, recorded_by, connection_id, our_event_ids, t_ms)
         log.info(f"negentropy: sent {sent} event blobs to connection {connection_id[:20]}...")
 
     # No protocol response needed - we sent the blobs directly
@@ -2013,8 +2292,11 @@ def sync_connection(
         )
         if conn_module.send(recorded_by, conn.key_id, blob, t_ms, db):
             sent += 1
-            # Track for congestion control
-            _cc_on_send(recorded_by, conn.key_id, t_ms)
+            # Track for congestion control with actual range_id for precise RTT
+            if 'range_id' in msg:
+                _cc_track_request(recorded_by, conn.key_id, msg['range_id'], t_ms)
+            else:
+                _cc_on_send(recorded_by, conn.key_id, t_ms)
     return sent
 
 
@@ -2059,6 +2341,9 @@ def handle_incoming(
         )
         if conn_module.send(recorded_by, connection_id, blob, t_ms, db):
             sent += 1
+            # Track range_request responses for CC (these are our new outgoing requests)
+            if response.get('type') == 'range_request' and 'range_id' in response:
+                _cc_track_request(recorded_by, connection_id, response['range_id'], t_ms)
     return sent
 
 
@@ -2322,19 +2607,19 @@ def get_global_sync_status(db, t_ms: int) -> dict:
 # Each message is self-describing: (start, end, hash)
 # No session state needed - range IS the state.
 
-# Message types for v2 protocol
-MSG_V2_RANGE = 4      # Range hash message
-MSG_V2_MATCH = 5      # Explicit match confirmation
+# Message types for binary bisection protocol
+MSG_SYNC_RANGE = 4    # Range hash message
+MSG_SYNC_MATCH = 5    # Explicit match confirmation
 
 
-def handle_v2_range(
+def handle_sync_range(
     db,
     recorded_by: str,
     connection_id: str,
     msg: dict,
     t_ms: int,
 ) -> list[dict]:
-    """Handle a v2 range message using binary bisection.
+    """Handle a sync_range message using binary bisection.
 
     Protocol rules:
     - their_hash == our_hash: send MATCH
@@ -2346,7 +2631,7 @@ def handle_v2_range(
         db: Database connection
         recorded_by: Local peer ID
         connection_id: Connection ID
-        msg: Message dict with 'start', 'end', 'hash' (hex strings)
+        msg: Message dict with 'start', 'end', 'hash', optional 'range_id'
         t_ms: Current timestamp
 
     Returns:
@@ -2355,18 +2640,29 @@ def handle_v2_range(
     start = hex_to_range(msg['start'])
     end = hex_to_range(msg['end'])
     their_hash = bytes.fromhex(msg['hash']) if msg.get('hash') else ZERO_HASH
+    their_range_id = msg.get('range_id')  # Echo back for CC tracking
+
+    # CC: If this message has a range_id we're tracking, it's a response to our request
+    if their_range_id is not None:
+        _cc_on_response(recorded_by, connection_id, t_ms, range_id=their_range_id)
 
     our_hash = compute_range_hash(db, recorded_by, start, end)
 
     responses = []
 
+    # Helper to add range_id to response (echo theirs, or allocate new if initiating)
+    def make_response(resp: dict) -> dict:
+        if their_range_id is not None:
+            resp['range_id'] = their_range_id
+        return resp
+
     # Case 1: Hashes match
     if their_hash == our_hash:
-        responses.append({
-            'type': 'v2_match',
+        responses.append(make_response({
+            'type': 'sync_match',
             'start': msg['start'],
             'end': msg['end'],
-        })
+        }))
         return responses
 
     # Case 2: They have nothing (ZERO), we have events
@@ -2381,34 +2677,34 @@ def handle_v2_range(
 
         # Send leaf range hash (for verification)
         leaf_hash = compute_range_hash(db, recorded_by, leaf_start, leaf_end)
-        responses.append({
-            'type': 'v2_range',
+        responses.append(make_response({
+            'type': 'sync_range',
             'start': range_to_hex(leaf_start),
             'end': range_to_hex(leaf_end),
             'hash': leaf_hash.hex(),
-        })
+        }))
 
         # Send next range hash (to continue)
         if leaf_end < end:
             next_hash = compute_range_hash(db, recorded_by, leaf_end, end)
-            responses.append({
-                'type': 'v2_range',
+            responses.append(make_response({
+                'type': 'sync_range',
                 'start': range_to_hex(leaf_end),
                 'end': range_to_hex(end),
                 'hash': next_hash.hex(),
-            })
+            }))
 
         return responses
 
     # Case 3: We have nothing (ZERO), they have events
     if our_hash == ZERO_HASH and their_hash != ZERO_HASH:
         # Request events by sending ZERO
-        responses.append({
-            'type': 'v2_range',
+        responses.append(make_response({
+            'type': 'sync_range',
             'start': msg['start'],
             'end': msg['end'],
             'hash': ZERO_HASH.hex(),
-        })
+        }))
         return responses
 
     # Case 4: Both have events but hashes differ - bisect or send
@@ -2422,12 +2718,12 @@ def handle_v2_range(
             _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
 
         # Send our hash for verification
-        responses.append({
-            'type': 'v2_range',
+        responses.append(make_response({
+            'type': 'sync_range',
             'start': msg['start'],
             'end': msg['end'],
             'hash': our_hash.hex(),
-        })
+        }))
 
     else:
         # Too many events - bisect
@@ -2436,72 +2732,76 @@ def handle_v2_range(
         left_hash = compute_range_hash(db, recorded_by, start, mid)
         right_hash = compute_range_hash(db, recorded_by, mid, end)
 
-        responses.append({
-            'type': 'v2_range',
+        responses.append(make_response({
+            'type': 'sync_range',
             'start': range_to_hex(start),
             'end': range_to_hex(mid),
             'hash': left_hash.hex(),
-        })
-        responses.append({
-            'type': 'v2_range',
+        }))
+        responses.append(make_response({
+            'type': 'sync_range',
             'start': range_to_hex(mid),
             'end': range_to_hex(end),
             'hash': right_hash.hex(),
-        })
+        }))
 
     return responses
 
 
-def handle_v2_match(
+def handle_sync_match(
     db,
     recorded_by: str,
     connection_id: str,
     msg: dict,
     t_ms: int,
 ) -> list[dict]:
-    """Handle a v2 match confirmation.
+    """Handle a sync_match confirmation.
 
     This is an explicit ACK that the range is synced.
     No response needed.
     """
-    # Log for debugging
-    log.debug(f"v2_match: range [{msg['start']}, {msg['end']}) synced")
+    # CC: If this has a range_id, it's a response to our request
+    their_range_id = msg.get('range_id')
+    if their_range_id is not None:
+        _cc_on_response(recorded_by, connection_id, t_ms, range_id=their_range_id)
+
+    log.debug(f"sync_match: range [{msg['start']}, {msg['end']}) synced")
     return []
 
 
-def handle_v2_message(
+def handle_bisect_message(
     db,
     recorded_by: str,
     connection_id: str,
     msg: dict,
     t_ms: int,
 ) -> list[dict]:
-    """Route v2 protocol messages."""
+    """Route binary bisection protocol messages."""
     msg_type = msg.get('type')
 
-    if msg_type == 'v2_range':
-        return handle_v2_range(db, recorded_by, connection_id, msg, t_ms)
-    elif msg_type == 'v2_match':
-        return handle_v2_match(db, recorded_by, connection_id, msg, t_ms)
+    if msg_type == 'sync_range':
+        return handle_sync_range(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'sync_match':
+        return handle_sync_match(db, recorded_by, connection_id, msg, t_ms)
     else:
-        log.warning(f"Unknown v2 message type: {msg_type}")
+        log.warning(f"Unknown bisect message type: {msg_type}")
         return []
 
 
-def initiate_v2_sync(
+def initiate_sync(
     db,
     recorded_by: str,
     connection_id: str,
     t_ms: int,
 ) -> list[dict]:
-    """Initiate v2 sync by sending root range hash.
+    """Initiate sync by sending root range hash.
 
     Returns list of messages to send.
     """
     root_hash = compute_range_hash(db, recorded_by, RANGE_MIN, RANGE_MAX)
 
     return [{
-        'type': 'v2_range',
+        'type': 'sync_range',
         'start': range_to_hex(RANGE_MIN),
         'end': range_to_hex(RANGE_MAX),
         'hash': root_hash.hex(),

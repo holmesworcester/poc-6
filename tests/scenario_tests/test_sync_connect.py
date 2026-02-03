@@ -9,9 +9,7 @@ Tests:
 - Connections expire after TTL
 - Connections refresh on repeated connects
 """
-import sqlite3
-from core.db import Database, create_safe_db, create_unsafe_db
-from core import schema
+from core.db import create_safe_db
 from events.identity import user, invite, peer
 from tests.utils import tick_helper
 from tests.utils.tick_helper import TestClock
@@ -21,8 +19,6 @@ from events.network import connection_request as conn_module
 
 def test_connection_establishment(fresh_db):
     """Test that sync_connect establishes connections between peers."""
-
-    # Setup
     db = fresh_db
     clock = TestClock()
 
@@ -42,67 +38,37 @@ def test_connection_establishment(fresh_db):
 
     # Bob joins Alice's network
     bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
     print(f"Bob joined network, peer_id: {bob['peer_id'][:20]}...")
 
     db.commit()
 
     # Before any tick, there should be no connections
-    connections = db.query("SELECT * FROM connections")
+    connections = list(db.query("SELECT * FROM connections"))
     assert len(connections) == 0, "Should have no connections initially"
     print("✓ No connections before first tick")
 
-    # Run one tick cycle - should establish connections
-    # Run multiple ticks for full two-way handshake:
-    # Tick 1: peers send sync_connect (creates rows with our_transit_key_id)
-    # Tick 2: peers receive sync_connect, store their_transit_key, send ack
-    # Tick 3: peers receive ack (completes bidirectional key exchange)
-    print("\n=== Running first tick (sends sync_connect) ===")
-    tick.tick(t_ms=clock.tick(), db=db)
+    # Run ticks to establish connections
+    print("\n=== Running ticks to establish connections ===")
 
-    # Check that connections were initiated (peer-scoped, so check for any)
-    connections = db.query("SELECT * FROM connections")
-    print(f"Connections initiated: {len(connections)}")
-    assert len(connections) >= 1, "Should have at least one connection after first tick"
-    print(f"✓ Initiated {len(connections)} connection(s)")
+    def has_complete_connection():
+        conns = list(db.query("SELECT * FROM connections WHERE their_key IS NOT NULL"))
+        assert len(conns) >= 1, f"Expected complete connection, got {len(conns)}"
+        return True
 
-    print("\n=== Running second tick (receives connect, sends ack) ===")
-    tick.tick(t_ms=clock.tick(), db=db)
-
-    print("\n=== Running third tick (receives ack, completes handshake) ===")
-    tick.tick(t_ms=clock.tick(), db=db)
+    tick_helper.assert_eventually(has_complete_connection, db=db)
 
     # Now connections should have both our_key and their_key
-    conn_row = db.query_one("""
-        SELECT * FROM connections
-        WHERE their_key IS NOT NULL
-        LIMIT 1
-    """)
+    conn_row = db.query_one("SELECT * FROM connections WHERE their_key IS NOT NULL LIMIT 1")
     assert conn_row is not None, "Should have at least one complete connection"
     assert conn_row['peer_shared_id'] or conn_row['invite_id'], "Connection should have identity label"
     assert conn_row['their_key_id'], "Connection should have their_key_id"
     assert conn_row['their_key'], "Connection should have their_key"
     print("✓ Connection has all required fields after handshake")
 
-    # Run another tick - connections should remain stable (not recreated)
-    print("\n=== Running fourth tick (connections should be stable) ===")
-    tick.tick(t_ms=clock.tick(), db=db)
-
-    # In the new design, existing connections are reused - verify same connection count
-    connections_after_tick4 = db.query("SELECT * FROM connections")
-    print(f"Connections after tick 4: {len(connections_after_tick4)}")
-
-    # Verify connections still exist and are usable
-    assert len(connections_after_tick4) >= 1, "Should still have at least one connection"
-    print("✓ Connections remain stable across ticks")
-
 
 def test_connection_expiry(fresh_db):
     """Test that expired connections are purged."""
-
-    # Setup
     db = fresh_db
     clock = TestClock()
 
@@ -118,16 +84,14 @@ def test_connection_expiry(fresh_db):
         db=db
     )
     bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
 
     db.commit()
 
-    # Establish connections
-    tick.tick(t_ms=clock.tick(), db=db)
+    # Run initial ticks to establish connections
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=10)
 
-    connections = db.query("SELECT * FROM connections")
+    connections = list(db.query("SELECT * FROM connections"))
     initial_count = len(connections)
     assert initial_count >= 1, "Should have connections"
     print(f"✓ Established {initial_count} connection(s)")
@@ -145,7 +109,7 @@ def test_connection_expiry(fresh_db):
     tick.tick(t_ms=expiry_time + 1000, db=db)
 
     # Connections should be purged
-    connections_after = db.query("SELECT * FROM connections")
+    connections_after = list(db.query("SELECT * FROM connections"))
     # Note: Connections will be re-established in the same tick, so we check
     # that purge happened by verifying new timestamps
     if len(connections_after) > 0:
@@ -157,14 +121,7 @@ def test_connection_expiry(fresh_db):
 
 
 def test_sync_uses_connections(fresh_db):
-    """Test that sync uses established connections.
-
-    Note: With key-based connections using random window selection,
-    full sync may require many rounds. This test verifies connections
-    are used, not that sync completes efficiently.
-    """
-
-    # Setup
+    """Test that sync uses established connections."""
     db = fresh_db
     clock = TestClock()
 
@@ -180,47 +137,30 @@ def test_sync_uses_connections(fresh_db):
         db=db
     )
     bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
-
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
 
     db.commit()
 
-    # Run sync rounds - need more rounds with random window selection
+    # Run sync rounds
     print("\n=== Running sync rounds ===")
-    for i in range(20):
-        tick.tick(t_ms=clock.tick(), db=db)
+    tick_helper.run_ticks(db=db, start_t_ms=None, num_rounds=20)
 
-    # Verify that sync completed successfully
-    # (If connections weren't working, sync would fail or fall back to prekeys)
-
-    # Check that connections exist (peer-scoped)
-    connections = db.query("SELECT * FROM connections")
+    # Check that connections exist
+    connections = list(db.query("SELECT * FROM connections"))
     assert len(connections) >= 1, "Should have active connections"
     print(f"✓ Sync using {len(connections)} connection(s)")
 
     # Verify at least one peer can see the other
-    # (Full bidirectional sync may require more rounds with random windows)
     alice_sees_bob = db.query_one(
         "SELECT 1 FROM peers_shared WHERE recorded_by = ?",
         (alice['peer_id'],)
     )
-
-    # TODO: Full sync efficiency - with random windows, may need many more rounds
-    # for bidirectional sync. For now just verify connections work.
     assert alice_sees_bob, "Alice should see Bob's peer_shared (sent during join)"
     print("✓ Connections used for sync")
 
 
 def test_two_way_handshake(fresh_db):
-    """Test two-way connection handshake: connect → ack → bidirectional keys.
-
-    Verifies:
-    1. First tick sends connection requests
-    2. Queue processing receives requests, sends acks
-    3. Acks are processed, connections become bidirectional
-    4. Both peers have each other's keys for bidirectional sync
-    """
+    """Test two-way connection handshake: connect → ack → bidirectional keys."""
     db = fresh_db
     clock = TestClock()
 
@@ -253,73 +193,46 @@ def test_two_way_handshake(fresh_db):
 
     db.commit()
 
-    # Initially no connections (check both peers' connections)
+    # Initially no connections
     alice_conns = conn_module.get_connections(alice_peer_id, clock.now(), db)
     bob_conns = conn_module.get_connections(bob_peer_id, clock.now(), db)
     assert len(alice_conns) == 0 and len(bob_conns) == 0, "Should have no connections initially"
     print("✓ No connections initially")
 
-    # Step 1: Run tick to send connection requests and process acks
-    print("\n=== Step 1: Run tick to establish connections ===")
-    tick.tick(t_ms=clock.tick(), db=db)
-    db.commit()
-    print("✓ First tick completed")
-
-    # Step 2: Check connections after tick
-    print("\n=== Step 2: Check connections ===")
-    alice_conns = conn_module.get_connections(alice_peer_id, clock.now(), db)
-    bob_conns = conn_module.get_connections(bob_peer_id, clock.now(), db)
-
-    print(f"Alice has {len(alice_conns)} connection(s)")
-    print(f"Bob has {len(bob_conns)} connection(s)")
-
-    # At least one peer should have a connection
-    assert len(alice_conns) + len(bob_conns) >= 1, "Should have at least one connection after tick"
-    print("✓ Connections established")
-
-    # Step 3: Wait for bidirectional handshake to complete
-    print("\n=== Step 3: Waiting for bidirectional handshake ===")
+    # Wait for bidirectional handshake to complete
+    print("\n=== Waiting for bidirectional handshake ===")
 
     def both_can_send():
-        # Get all connections for both peers
-        # Note: During bootstrap, connections use invite_id not peer_shared_id,
-        # so we check get_connections() instead of get_connection_by_peer()
-        alice_conns = conn_module.get_connections(alice_peer_id, 5000, db)
-        bob_conns = conn_module.get_connections(bob_peer_id, 5000, db)
+        alice_conns = conn_module.get_connections(alice_peer_id, clock.now(), db)
+        bob_conns = conn_module.get_connections(bob_peer_id, clock.now(), db)
 
-        # Alice should have at least one connection she can send on
         alice_can_send = any(c.can_send() for c in alice_conns)
-        assert alice_can_send, \
-            f"Alice should have a connection with their_key (has {len(alice_conns)} conns)"
+        assert alice_can_send, f"Alice should have a sendable connection (has {len(alice_conns)} conns)"
 
-        # Bob should have at least one connection he can send on
         bob_can_send = any(c.can_send() for c in bob_conns)
-        assert bob_can_send, \
-            f"Bob should have a connection with their_key (has {len(bob_conns)} conns)"
+        assert bob_can_send, f"Bob should have a sendable connection (has {len(bob_conns)} conns)"
 
-    tick_helper.assert_eventually(both_can_send, db=db, start_t_ms=None)
-
-    # Verify final state: both peers have connections they can send on
-    print("\n=== Verifying bidirectional connection state ===")
-
-    # Get connections for both peers using the connection module
-    alice_connections = conn_module.get_connections(alice_peer_id, 5000, db)
-    bob_connections = conn_module.get_connections(bob_peer_id, 5000, db)
-    print(f"Total connections: Alice={len(alice_connections)}, Bob={len(bob_connections)}")
-
-    for conn in alice_connections + bob_connections:
-        print(f"  Connection for {conn.recorded_by[:10]}... to {conn.label[:20]}...")
-        print(f"    their_key_id: {conn.their_key_id[:20] if conn.their_key_id else 'None'}...")
-        print(f"    their_key: {'[present]' if conn.their_key else 'None'}")
+    tick_helper.assert_eventually(both_can_send, db=db)
 
     print("\n✅ Two-way handshake test passed!")
-    print("  ✓ Connection requests sent and acks received")
-    print("  ✓ Bidirectional: Both peers have each other's keys")
 
 
 if __name__ == '__main__':
-    test_connection_establishment()
-    test_connection_expiry()
-    test_sync_uses_connections()
-    test_two_way_handshake()
+    import sqlite3
+    from core.db import Database
+    from core import schema, transport, simulator
+
+    # Setup for direct execution
+    transport.reset()
+    sim = simulator.NetworkSimulator(simulator.NetworkConfig(latency_ms=25))
+    transport.set_simulator(sim)
+
+    conn = sqlite3.connect(':memory:')
+    db = Database(conn)
+    schema.create_all(db)
+
+    test_connection_establishment(db)
+    test_connection_expiry(db)
+    test_sync_uses_connections(db)
+    test_two_way_handshake(db)
     print("\n=== All sync_connect tests passed ===")

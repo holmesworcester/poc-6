@@ -198,10 +198,11 @@ def assert_eventually(
 # - Other jobs: slower (minutes/hours)
 
 # Test timing constants
-TICK_INTERVAL_MS = 100  # Match sync job frequency for realistic timing
-INITIAL_SYNC_ROUNDS = 15  # ~1.5 seconds - enough for initial connection + first sync
-MESSAGE_SYNC_ROUNDS = 20  # ~2 seconds - enough for message propagation
-CONVERGENCE_ROUNDS = 100  # ~10 seconds - for complete event convergence tests
+# 50ms tick simulates realistic 50ms RTT network latency
+TICK_INTERVAL_MS = 50  # Simulate 50ms RTT for realistic network testing
+INITIAL_SYNC_ROUNDS = 30  # ~1.5 seconds - enough for initial connection + first sync
+MESSAGE_SYNC_ROUNDS = 40  # ~2 seconds - enough for message propagation
+CONVERGENCE_ROUNDS = 200  # ~10 seconds - for complete event convergence tests
 
 
 def run_ticks(db: Any, start_t_ms: int | None, num_rounds: int, interval_ms: int = TICK_INTERVAL_MS) -> int:

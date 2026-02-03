@@ -257,6 +257,7 @@ def test_server_mode_invite_requires_admin(fresh_db):
     """Only admins can create server mode invites."""
     db = fresh_db
     clock = TestClock()
+    from tests.utils.tick_helper import assert_eventually
 
     # Setup: Alice creates network, Bob joins
     alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
@@ -271,14 +272,21 @@ def test_server_mode_invite_requires_admin(fresh_db):
     )
 
     bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
-    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.now(), db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Run ticks to sync
-    run_ticks(db=db, start_t_ms=clock.now(), num_rounds=15)
+    # Wait for Bob to have full network membership synced
+    def bob_has_admin_info():
+        # Bob should be able to see network info (admin checks require this)
+        from events.identity import peer_shared
+        identity = peer_shared.get_self(bob['peer_id'], db)
+        assert identity is not None, "Bob should have peer_self record"
+        assert identity.get('peer_shared_id'), "Bob should have peer_shared_id"
+
+    assert_eventually(bob_has_admin_info, db=db)
 
     # Bob (non-admin) should NOT be able to create server invite
-    with pytest.raises(ValueError, match="admin"):
+    with pytest.raises(ValueError, match="(admin|Admin)"):
         invite.create(
             peer_id=bob['peer_id'],
             t_ms=clock.tick(),

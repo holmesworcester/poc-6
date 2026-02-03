@@ -460,7 +460,7 @@ class CLISession:
 
         for i in range(self.auto_tick_count):
             self.current_time_ms += 100  # 100ms per tick
-            tick.tick_sync_only(t_ms=self.current_time_ms, db=self.db)
+            tick.tick(t_ms=self.current_time_ms, db=self.db)
             ticks_run += 1
 
             # Check if synced (every 10 ticks to avoid overhead)
@@ -2952,25 +2952,25 @@ def run_non_interactive(session: CLISession):
             break
 
 
-def run_sync_daemon(session: CLISession):
-    """Run sync daemon mode - continuously tick without REPL.
+def run_daemon(session: CLISession):
+    """Run daemon mode - continuously tick without REPL.
 
-    Used for network daemons that just sync in the background.
+    Used for network daemons that sync in the background.
     Press Ctrl+C to stop.
     """
     import time
     from core import tick as tick_module
 
-    print("Sync daemon mode - press Ctrl+C to stop")
+    print("Daemon mode - press Ctrl+C to stop")
 
     try:
         while True:
             t_ms = int(time.time() * 1000)
-            tick_module.tick_sync_only(t_ms=t_ms, db=session.db)
+            tick_module.tick(t_ms=t_ms, db=session.db)
             session.db.commit()
             time.sleep(0.1)  # 100ms tick interval
     except KeyboardInterrupt:
-        print("\nStopping sync daemon...")
+        print("\nStopping daemon...")
 
 
 # ============================================================================
@@ -2997,7 +2997,7 @@ def main():
     parser.add_argument("--listen", type=str, help="UDP listen address (host:port)")
     parser.add_argument("--peer", type=str, action="append", help="Peer address (peer_shared_id@host:port)")
     parser.add_argument("--exec", "-e", dest="exec_cmd", type=str, help="Execute single command and exit")
-    parser.add_argument("--sync-only", action="store_true", help="Run sync daemon mode without REPL")
+    parser.add_argument("--daemon", action="store_true", help="Run daemon mode (continuous tick without REPL)")
 
     args = parser.parse_args()
 
@@ -3029,9 +3029,9 @@ def main():
         if args.exec_cmd:
             # Execute single command and exit
             execute_command(session, args.exec_cmd, show_prompt=False)
-        elif args.sync_only:
-            # Run sync daemon mode
-            run_sync_daemon(session)
+        elif args.daemon:
+            # Run daemon mode
+            run_daemon(session)
         elif args.interactive:
             run_interactive(session)
         else:
