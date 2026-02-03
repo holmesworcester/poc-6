@@ -496,6 +496,47 @@ EVENTS_THRESHOLD = 50
 
 
 # ============================================================================
+# Bucket Size Helpers for Range-to-Bucket Mapping
+# ============================================================================
+
+def get_bucket_size(level: str) -> int:
+    """Get the number of unified keys covered by one bucket at this level.
+
+    Each hex char represents 4 bits, so a prefix of length N covers
+    2^(4*(12-N)) = 16^(12-N) unified keys.
+    """
+    prefix_len = LEVEL_PREFIX_LEN[level]
+    return 1 << (4 * (12 - prefix_len))
+
+
+def find_best_level(range_size: int) -> str:
+    """Find the coarsest bucket level where bucket_size <= range_size.
+
+    Returns the level that provides the best balance: coarse enough to use
+    few buckets, but fine enough that buckets fit within the range.
+    """
+    for level in LEVELS[1:]:  # Skip root
+        if get_bucket_size(level) <= range_size:
+            return level
+    return 'prefix_10'
+
+
+def range_to_prefix(start: int, level: str) -> str:
+    """Convert an aligned range start to its bucket prefix.
+
+    Args:
+        start: Range start as integer (should be aligned to bucket boundary)
+        level: Bucket level (determines prefix length)
+
+    Returns:
+        Hex prefix string for this bucket
+    """
+    hex_str = f"{start:012x}"
+    prefix_len = LEVEL_PREFIX_LEN[level]
+    return hex_str[:prefix_len]
+
+
+# ============================================================================
 # Congestion Control State
 # ============================================================================
 # Per-connection adaptive windowing based on RTT measurement.
@@ -713,13 +754,16 @@ def range_midpoint(start: int, end: int) -> int:
     return start + (end - start) // 2
 
 
-def compute_range_hash(
+def _scan_events_hash(
     db,
     recorded_by: str,
     start: int,
     end: int,
 ) -> bytes:
-    """Compute XOR fingerprint hash for all events in range [start, end).
+    """Scan events in range [start, end) and compute XOR fingerprint hash.
+
+    This is the fallback O(n) implementation for unaligned edge ranges.
+    For aligned ranges, use compute_range_hash() which uses bucket cache.
 
     Args:
         db: Database connection
@@ -753,13 +797,17 @@ def compute_range_hash(
     return result
 
 
-def count_events_in_range(
+def _scan_events_count(
     db,
     recorded_by: str,
     start: int,
     end: int,
 ) -> int:
-    """Count events in range [start, end)."""
+    """Scan events in range [start, end) and return count.
+
+    This is the fallback O(n) implementation for unaligned edge ranges.
+    For aligned ranges, use count_events_in_range() which uses bucket cache.
+    """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     start_hex = range_to_hex(start)
@@ -771,6 +819,133 @@ def count_events_in_range(
     """, (recorded_by, start_hex, end_hex))
 
     return row['cnt'] if row else 0
+
+
+def compute_range_hash(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> bytes:
+    """Compute XOR fingerprint hash for all events in range [start, end).
+
+    Uses bucket cache for O(buckets) performance instead of O(events).
+    For bucket-aligned ranges, XORs cached bucket hashes.
+    For edges, recursively uses finer bucket levels.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive) as integer
+        end: Range end (exclusive) as integer
+
+    Returns:
+        16-byte XOR fingerprint, or ZERO_HASH if no events in range
+    """
+    if start >= end:
+        return ZERO_HASH
+
+    # Full range = root hash (O(1) lookup)
+    if start == 0 and end >= RANGE_MAX:
+        root = get_bucket_hash(db, recorded_by, 'root', '')
+        return root if root else ZERO_HASH
+
+    range_size = end - start
+    level = find_best_level(range_size)
+    bucket_size = get_bucket_size(level)
+
+    # If range is smaller than smallest bucket (prefix_10 = 2^8 = 256), just scan
+    if range_size < bucket_size:
+        return _scan_events_hash(db, recorded_by, start, end)
+
+    # Align boundaries to bucket boundaries
+    aligned_start = ((start + bucket_size - 1) // bucket_size) * bucket_size
+    aligned_end = (end // bucket_size) * bucket_size
+
+    result = ZERO_HASH
+
+    # Left edge: recursively compute hash [start, aligned_start)
+    if start < aligned_start:
+        result = xor_bytes(result, compute_range_hash(db, recorded_by, start, aligned_start))
+
+    # Middle: XOR bucket hashes [aligned_start, aligned_end)
+    if aligned_start < aligned_end:
+        prefixes = []
+        current = aligned_start
+        while current < aligned_end:
+            prefixes.append(range_to_prefix(current, level))
+            current += bucket_size
+
+        bucket_hashes = _fetch_bucket_hashes_batch(db, recorded_by, level, prefixes)
+        for h in bucket_hashes:
+            if h:
+                result = xor_bytes(result, h)
+
+    # Right edge: recursively compute hash [aligned_end, end)
+    if aligned_end < end:
+        result = xor_bytes(result, compute_range_hash(db, recorded_by, aligned_end, end))
+
+    return result
+
+
+def count_events_in_range(
+    db,
+    recorded_by: str,
+    start: int,
+    end: int,
+) -> int:
+    """Count events in range [start, end).
+
+    Uses bucket cache for O(buckets) performance instead of O(events).
+    For bucket-aligned ranges, sums cached bucket counts.
+    For edges, recursively uses finer bucket levels.
+    """
+    if start >= end:
+        return 0
+
+    # Full range = root bucket count (O(1) lookup)
+    if start == 0 and end >= RANGE_MAX:
+        safedb = create_safe_db(db, recorded_by=recorded_by)
+        row = safedb.query_one("""
+            SELECT event_count FROM negentropy_buckets
+            WHERE recorded_by = ? AND level = ? AND prefix = ?
+        """, (recorded_by, 'root', ''))
+        return row['event_count'] if row and row['event_count'] else 0
+
+    range_size = end - start
+    level = find_best_level(range_size)
+    bucket_size = get_bucket_size(level)
+
+    # If range is smaller than smallest bucket, just scan
+    if range_size < bucket_size:
+        return _scan_events_count(db, recorded_by, start, end)
+
+    # Align boundaries to bucket boundaries
+    aligned_start = ((start + bucket_size - 1) // bucket_size) * bucket_size
+    aligned_end = (end // bucket_size) * bucket_size
+
+    result = 0
+
+    # Left edge: recursively count [start, aligned_start)
+    if start < aligned_start:
+        result += count_events_in_range(db, recorded_by, start, aligned_start)
+
+    # Middle: sum bucket counts [aligned_start, aligned_end)
+    if aligned_start < aligned_end:
+        prefixes = []
+        current = aligned_start
+        while current < aligned_end:
+            prefixes.append(range_to_prefix(current, level))
+            current += bucket_size
+
+        bucket_counts = _fetch_bucket_counts_batch(db, recorded_by, level, prefixes)
+        result += sum(bucket_counts)
+
+    # Right edge: recursively count [aligned_end, end)
+    if aligned_end < end:
+        result += count_events_in_range(db, recorded_by, aligned_end, end)
+
+    return result
 
 
 def get_events_in_range(
@@ -1439,6 +1614,64 @@ def get_bucket_hash(
 
 # Alias for backwards compatibility
 recompute_bucket_hash = get_bucket_hash
+
+
+def _fetch_bucket_hashes_batch(
+    db,
+    recorded_by: str,
+    level: str,
+    prefixes: list[str]
+) -> list[bytes | None]:
+    """Fetch multiple bucket hashes in one query.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        level: Bucket level
+        prefixes: List of bucket prefixes to fetch
+
+    Returns:
+        List of hashes (or None) in same order as prefixes
+    """
+    if not prefixes:
+        return []
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    placeholders = ",".join("?" for _ in prefixes)
+    rows = safedb.query(f"""
+        SELECT prefix, hash FROM negentropy_buckets
+        WHERE recorded_by = ? AND level = ? AND prefix IN ({placeholders})
+    """, (recorded_by, level, *prefixes))
+    hash_map = {row['prefix']: row['hash'] for row in rows}
+    return [hash_map.get(p) for p in prefixes]
+
+
+def _fetch_bucket_counts_batch(
+    db,
+    recorded_by: str,
+    level: str,
+    prefixes: list[str]
+) -> list[int]:
+    """Fetch multiple bucket event counts in one query.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        level: Bucket level
+        prefixes: List of bucket prefixes to fetch
+
+    Returns:
+        List of event counts in same order as prefixes (0 for missing buckets)
+    """
+    if not prefixes:
+        return []
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    placeholders = ",".join("?" for _ in prefixes)
+    rows = safedb.query(f"""
+        SELECT prefix, event_count FROM negentropy_buckets
+        WHERE recorded_by = ? AND level = ? AND prefix IN ({placeholders})
+    """, (recorded_by, level, *prefixes))
+    count_map = {row['prefix']: row['event_count'] or 0 for row in rows}
+    return [count_map.get(p, 0) for p in prefixes]
 
 
 def get_hashes_at_level(
