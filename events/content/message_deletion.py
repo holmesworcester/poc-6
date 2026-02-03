@@ -564,11 +564,11 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
            WHERE ss.recorded_by = ?
            AND NOT EXISTS (
                SELECT 1 FROM secrets s
-               WHERE s.secret_id = ss.secret_id AND s.recorded_by = ?
+               WHERE s.secret_id = ss.original_secret_id AND s.recorded_by = ?
            )
            AND NOT EXISTS (
                SELECT 1 FROM secrets_shared ss2
-               JOIN secrets s ON ss2.secret_id = s.secret_id AND s.recorded_by = ss2.recorded_by
+               JOIN secrets s ON ss2.original_secret_id = s.secret_id AND s.recorded_by = ss2.recorded_by
                WHERE ss2.recipient_pubkey_id = ss.recipient_pubkey_id AND ss2.recorded_by = ?
            )""",
         (peer_id, peer_id, peer_id)
@@ -585,7 +585,82 @@ def run_message_purge_cycle(peer_id: str, t_ms: int, db: Any) -> dict[str, Any]:
         log.info(f"message_deletion.run_message_purge_cycle() purged pubkey {pubkey_id[:20]}...")
 
     stats['pubkeys_purged'] = len(pubkeys_purged)
-    log.info(f"message_deletion.run_message_purge_cycle() complete: {stats['messages_rekeyed']} messages rekeyed, {stats['keys_purged']} keys purged, {stats['pubkeys_purged']} pubkeys purged")
+
+    # Find orphaned treekem_pubkeys
+    # A treekem_pubkey is orphaned when:
+    # - No secrets_shared references it (secret distribution to tree nodes)
+    # - No treekem_secrets_shared references it (path secret distribution)
+    treekem_pubkeys_purged = []
+    orphaned_treekem_pubkeys = safedb.query(
+        """SELECT DISTINCT tp.treekem_pubkey_id
+           FROM treekem_pubkeys tp
+           WHERE tp.recorded_by = ?
+           -- No secrets distributed to this pubkey
+           AND NOT EXISTS (
+               SELECT 1 FROM secrets_shared ss
+               JOIN secrets s ON ss.original_secret_id = s.secret_id
+                   AND s.recorded_by = ss.recorded_by
+               WHERE ss.recipient_pubkey_id = tp.treekem_pubkey_id
+               AND ss.recorded_by = tp.recorded_by
+           )
+           -- No path secrets distributed to this pubkey
+           AND NOT EXISTS (
+               SELECT 1 FROM treekem_secrets_shared tss
+               JOIN treekem_secrets ts ON tss.treekem_secret_id = ts.treekem_secret_id
+                   AND ts.recorded_by = tss.recorded_by
+               WHERE tss.recipient_pubkey_id = tp.treekem_pubkey_id
+               AND tss.recorded_by = tp.recorded_by
+           )""",
+        (peer_id,)
+    )
+
+    for row in orphaned_treekem_pubkeys:
+        treekem_pubkey_id = row['treekem_pubkey_id']
+        safedb.execute(
+            "DELETE FROM treekem_pubkeys WHERE treekem_pubkey_id = ? AND recorded_by = ?",
+            (treekem_pubkey_id, peer_id)
+        )
+        treekem_pubkeys_purged.append(treekem_pubkey_id)
+        log.info(f"message_deletion.run_message_purge_cycle() purged treekem_pubkey {treekem_pubkey_id[:20]}...")
+
+    stats['treekem_pubkeys_purged'] = len(treekem_pubkeys_purged)
+
+    # Find orphaned treekem_secrets (path secrets)
+    # A treekem_secret is orphaned when no secrets_broadcast uses its source_update
+    treekem_secrets_purged = []
+    orphaned_treekem_secrets = safedb.query(
+        """SELECT DISTINCT ts.treekem_secret_id
+           FROM treekem_secrets ts
+           WHERE ts.recorded_by = ?
+           AND ts.source_update_id IS NOT NULL
+           -- No broadcasts use this update's root secret
+           AND NOT EXISTS (
+               SELECT 1 FROM secrets_broadcast sb
+               JOIN secrets s ON sb.secret_id = s.secret_id
+                   AND s.recorded_by = sb.recorded_by
+               WHERE sb.source_update_id = ts.source_update_id
+               AND sb.recorded_by = ts.recorded_by
+           )""",
+        (peer_id,)
+    )
+
+    for row in orphaned_treekem_secrets:
+        treekem_secret_id = row['treekem_secret_id']
+        safedb.execute(
+            "DELETE FROM treekem_secrets WHERE treekem_secret_id = ? AND recorded_by = ?",
+            (treekem_secret_id, peer_id)
+        )
+        treekem_secrets_purged.append(treekem_secret_id)
+        log.info(f"message_deletion.run_message_purge_cycle() purged treekem_secret {treekem_secret_id[:20]}...")
+
+    stats['treekem_secrets_purged'] = len(treekem_secrets_purged)
+
+    log.info(f"message_deletion.run_message_purge_cycle() complete: "
+             f"{stats['messages_rekeyed']} messages rekeyed, "
+             f"{stats['keys_purged']} keys purged, "
+             f"{stats['pubkeys_purged']} pubkeys purged, "
+             f"{stats['treekem_pubkeys_purged']} treekem_pubkeys purged, "
+             f"{stats['treekem_secrets_purged']} treekem_secrets purged")
     return stats
 
 

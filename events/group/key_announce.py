@@ -65,6 +65,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'removal_epoch_id': removal_epoch_id,
                 'signed_by': signed_by,
                 'created_at': created_at,
+                'recorded_by': ctx.recorded_by,
                 'recorded_at': ctx.recorded_at,
             },
         ),

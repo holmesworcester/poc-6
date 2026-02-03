@@ -14,7 +14,7 @@ These tests verify these security properties are enforced.
 import pytest
 from events.identity import user, invite, peer, admin, network
 from events.identity import server_relay, network_settings
-from events.group import group_key_shared
+from events.group import sender_key, secret_shared
 from core.db import create_safe_db
 from tests.utils.tick_helper import TestClock, run_ticks
 
@@ -48,7 +48,7 @@ def test_server_invite_mode_creates_correct_link(fresh_db):
 
 
 def test_server_invite_does_not_share_keys(fresh_db):
-    """Server mode invite does NOT share group keys."""
+    """Server mode invite does NOT share secrets (TreeKEM-based key distribution)."""
     db = fresh_db
     clock = TestClock()
 
@@ -56,36 +56,35 @@ def test_server_invite_does_not_share_keys(fresh_db):
     alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
     db.commit()
 
-    # Count group keys shared before creating server invite
+    # Count secrets shared before creating server invite
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    keys_before = safedb.query(
-        "SELECT key_shared_id FROM group_keys_shared WHERE recorded_at > 0 AND recorded_by = ?",
+    secrets_before = safedb.query(
+        "SELECT secret_shared_id FROM secrets_shared WHERE recorded_at > 0 AND recorded_by = ?",
         (alice['peer_id'],)
     )
-    keys_before_count = len(list(keys_before))
+    secrets_before_count = len(list(secrets_before))
 
     # Create server invite
-    invite_id, invite_link, invite_data = invite.create(
+    invite_id, invite_link, invite_data = invite.create_server_invite(
         peer_id=alice['peer_id'],
         t_ms=clock.tick(),
         db=db,
-        mode='server',
         server_address='relay.example.com:5000'
     )
     db.commit()
 
-    # Count group keys shared after creating server invite
-    keys_after = safedb.query(
-        "SELECT key_shared_id FROM group_keys_shared WHERE recorded_at > 0 AND recorded_by = ?",
+    # Count secrets shared after creating server invite
+    secrets_after = safedb.query(
+        "SELECT secret_shared_id FROM secrets_shared WHERE recorded_at > 0 AND recorded_by = ?",
         (alice['peer_id'],)
     )
-    keys_after_count = len(list(keys_after))
+    secrets_after_count = len(list(secrets_after))
 
-    # No new keys should have been shared for server invite
-    assert keys_after_count == keys_before_count, \
-        f"Server invite should NOT share keys. Before: {keys_before_count}, After: {keys_after_count}"
+    # No new secrets should have been shared for server invite
+    assert secrets_after_count == secrets_before_count, \
+        f"Server invite should NOT share secrets. Before: {secrets_before_count}, After: {secrets_after_count}"
 
-    # Now create a regular user invite and verify it DOES share keys
+    # Now create a regular user invite and verify it DOES share secrets
     user_invite_id, user_invite_link, _ = invite.create(
         peer_id=alice['peer_id'],
         t_ms=clock.tick(),
@@ -94,17 +93,17 @@ def test_server_invite_does_not_share_keys(fresh_db):
     )
     db.commit()
 
-    keys_after_user = safedb.query(
-        "SELECT key_shared_id FROM group_keys_shared WHERE recorded_at > 0 AND recorded_by = ?",
+    secrets_after_user = safedb.query(
+        "SELECT secret_shared_id FROM secrets_shared WHERE recorded_at > 0 AND recorded_by = ?",
         (alice['peer_id'],)
     )
-    keys_after_user_count = len(list(keys_after_user))
+    secrets_after_user_count = len(list(secrets_after_user))
 
-    # User invite SHOULD share keys
-    assert keys_after_user_count > keys_before_count, \
-        f"User invite SHOULD share keys. Before: {keys_before_count}, After user: {keys_after_user_count}"
+    # User invite SHOULD share secrets
+    assert secrets_after_user_count > secrets_before_count, \
+        f"User invite SHOULD share secrets. Before: {secrets_before_count}, After user: {secrets_after_user_count}"
 
-    print("Server invite correctly skips key sharing")
+    print("Server invite correctly skips secret sharing")
 
 
 def test_server_relay_is_detected(fresh_db):
@@ -165,12 +164,12 @@ def test_server_relay_is_detected(fresh_db):
 
 
 def test_server_relay_excluded_from_key_distribution(fresh_db):
-    """Server relays are excluded from key distribution via share_key_with_group_members."""
+    """Server relays are excluded from key distribution via sender_key.distribute_key_to_group."""
     db = fresh_db
     clock = TestClock()
 
-    # This test verifies the security enforcement in group_key_shared.share_key_with_group_members
-    # The actual exclusion logic was added to that function
+    # This test verifies the security enforcement in sender_key.distribute_key_to_group
+    # Server relays should be excluded from receiving secret keys
 
     # Setup: Alice creates network
     alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
@@ -180,19 +179,13 @@ def test_server_relay_excluded_from_key_distribution(fresh_db):
     network_id = network.get_network_id(alice['peer_id'], db)
     all_users_group_id = network.get_all_users_group_id(network_id, alice['peer_id'], db)
 
-    # Get current key
-    from events.group import group as group_module
-    key_row = group_module.get_current_key(all_users_group_id, alice['peer_id'], db)
-    key_id = key_row['key_id']
-
     # Get Alice's peer_shared_id
     from events.identity import peer_shared as peer_shared_module
     alice_identity = peer_shared_module.get_self(alice['peer_id'], db)
     alice_peer_shared_id = alice_identity['peer_shared_id']
 
-    # Try to share key with group members (should work normally with no relays)
-    key_shared_ids = group_key_shared.share_key_with_group_members(
-        key_id=key_id,
+    # Create a sender key for the group using the new API
+    key_data = sender_key.pick_or_create_key(
         group_id=all_users_group_id,
         peer_id=alice['peer_id'],
         peer_shared_id=alice_peer_shared_id,
@@ -200,8 +193,9 @@ def test_server_relay_excluded_from_key_distribution(fresh_db):
         db=db
     )
 
-    # Should succeed (even if no other members to share with)
-    print(f"Key shared with {len(key_shared_ids)} members (excluding self)")
+    # Should succeed and return key data
+    assert key_data is not None, "Should have created/retrieved a sender key"
+    print(f"Sender key created/retrieved: {key_data['type']}")
 
     print("Key distribution exclusion for server relays is enforced")
 

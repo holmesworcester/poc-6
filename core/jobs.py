@@ -613,6 +613,28 @@ class TreeKEMReUpdateJob(Job):
         return treekem_reupdate.reupdate_all_peers(t_ms, db)
 
 
+class KeyRequestJob(Job):
+    """Request missing announced keys.
+
+    When we see a key_announce for a group we're in but don't have the secret,
+    create a key_request event. The fulfillment happens automatically via the
+    check_key_request_fulfillment command handler when the key owner receives
+    the request.
+
+    This enables:
+    - Late joiners to request keys from existing members
+    - Partition healing where one side created new keys
+    """
+
+    def __init__(self):
+        # Run every 2 seconds, similar to TreeKEMReUpdateJob
+        super().__init__('key_request', every_ms=2_000, budget_ms=50)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.group import key_request
+        return key_request.handle_all_peers(t_ms, db)
+
+
 HIGH_PRIORITY_DEFAULT_TYPES = [
     # Auth / membership / routing
     "connection_request",
@@ -637,6 +659,8 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
     # Keys (sender keys)
     "pubkey",
     "pubkey_shared",
+    "key_announce",
+    "key_request",
     "secret",
     "secret_shared",
     # Messages
@@ -688,4 +712,6 @@ JOBS = [
     # TreeKEM DH-based key exchange jobs
     TreeKEMUpdateJob(),
     TreeKEMReUpdateJob(),
+    # Key request job for missing announced keys
+    KeyRequestJob(),
 ]

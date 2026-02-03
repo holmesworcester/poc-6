@@ -647,6 +647,10 @@ def create_update_path(
 
     log.info(f"treekem_update.create_update_path() created update_id={update_id[:20]}...")
 
+    # Link path secrets to this update for forward secrecy purge tracking
+    for secret_id, _depth, _path_prefix in path_secrets:
+        treekem_secret.set_source_update_id(secret_id, update_id, peer_id, db)
+
     return {
         'treekem_update_id': update_id,
         'path_secrets': path_secrets,
@@ -861,6 +865,10 @@ def create_update_path_dh(
     )
 
     log.info(f"treekem_update.create_update_path_dh() created update_id={update_id[:20]}...")
+
+    # Link path secrets to this update for forward secrecy purge tracking
+    for secret_id, _depth, _path_prefix in path_secrets:
+        treekem_secret.set_source_update_id(secret_id, update_id, peer_id, db)
 
     return {
         'treekem_update_id': update_id,

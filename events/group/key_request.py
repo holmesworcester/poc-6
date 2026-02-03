@@ -126,6 +126,10 @@ def create(peer_id: str, peer_shared_id: str, requested_key_id: str,
 def fulfill_request(request_id: str, peer_id: str, t_ms: int, db: Any) -> str | None:
     """Attempt to fulfill a key request by creating a secret_shared event.
 
+    DEDUPLICATION: Only the key owner (announcer) fulfills requests. This prevents
+    duplicate responses when multiple peers have the key. We check if our peer_shared_id
+    matches the signed_by field of the key_announce event.
+
     SECURITY: Keys are bound to removal_epochs. Before fulfilling a request, we check
     if the requester is removed in the key's removal_epoch. This ensures that:
     - If we have the key, we must have received its removal_epoch
@@ -161,6 +165,26 @@ def fulfill_request(request_id: str, peer_id: str, t_ms: int, db: Any) -> str | 
     requested_key_id = request['requested_key_id']
     requester_pubkey_id = request['requester_pubkey_id']
     requester_peer_id = request['requester_peer_id']
+
+    # DEDUPLICATION: Only fulfill if we're the key owner (announcer)
+    # This prevents duplicate responses from multiple peers
+    announce = safedb.query_one(
+        """SELECT signed_by FROM key_announces
+           WHERE key_id = ? AND recorded_by = ?""",
+        (requested_key_id, peer_id)
+    )
+    if not announce:
+        log.info(f"key_request.fulfill_request() no key_announce found for key: {requested_key_id}")
+        return None  # We don't know about this key announcement
+
+    # Get our peer_shared_id
+    peer_self = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, peer_id)
+    )
+    if not peer_self or announce['signed_by'] != peer_self['peer_shared_id']:
+        log.info(f"key_request.fulfill_request() we're not the owner, skipping: {requested_key_id}")
+        return None  # We're not the owner, don't fulfill
 
     # Check if we have the secret
     from events.group import secret
@@ -255,6 +279,88 @@ def list_requests(peer_id: str, db: Any) -> list[dict[str, Any]]:
            ORDER BY created_at DESC""",
         (peer_id,)
     ))
+
+
+def request_missing_keys(peer_id: str, t_ms: int, db: Any) -> list[str]:
+    """Request any missing announced keys for this peer.
+
+    Scans for keys that have been announced (via key_announce) but we don't
+    have the secret for. Creates key_request events for each missing key.
+
+    Returns list of created request_ids.
+    """
+    from events.group import key_announce, pubkey
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Get our identity
+    peer_self = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (peer_id, peer_id)
+    )
+    if not peer_self:
+        return []
+    our_peer_shared_id = peer_self['peer_shared_id']
+
+    # Get our pubkey for responses to be encrypted to
+    our_pubkeys = pubkey.list_own_pubkeys(peer_id, db)
+    if not our_pubkeys:
+        log.info(f"key_request.request_missing_keys() no pubkeys found for peer {peer_id[:20]}...")
+        return []
+    # Use most recent pubkey
+    our_pubkey_id = our_pubkeys[0]['pubkey_id']
+
+    # Get all missing keys
+    missing_keys = key_announce.get_all_missing_keys(peer_id, db)
+
+    requested_ids = []
+    for key_row in missing_keys:
+        key_id = key_row['key_id']
+
+        # Skip if already requested and not fulfilled
+        existing = safedb.query_one(
+            """SELECT 1 FROM key_requests
+               WHERE requested_key_id = ? AND recorded_by = ? AND fulfilled = 0""",
+            (key_id, peer_id)
+        )
+        if existing:
+            continue
+
+        # Create request
+        request_id = create(
+            peer_id=peer_id,
+            peer_shared_id=our_peer_shared_id,
+            requested_key_id=key_id,
+            requester_pubkey_id=our_pubkey_id,
+            t_ms=t_ms,
+            db=db,
+        )
+        requested_ids.append(request_id)
+        log.info(f"key_request.request_missing_keys() created request for key {key_id[:20]}...")
+
+    return requested_ids
+
+
+def handle_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
+    """Handle key requests for all local peers.
+
+    Called by KeyRequestJob to scan all local peers for missing announced keys
+    and create key_request events for them.
+
+    Returns dict with 'requests_created' count.
+    """
+    from core.db import create_unsafe_db
+
+    unsafedb = create_unsafe_db(db)
+    peers = list(unsafedb.query("SELECT peer_id FROM local_peers"))
+
+    total_requested = 0
+    for peer_row in peers:
+        peer_id = peer_row['peer_id']
+        requested = request_missing_keys(peer_id, t_ms, db)
+        total_requested += len(requested)
+
+    return {'requests_created': total_requested}
 
 
 # Command handler for check_key_request_fulfillment

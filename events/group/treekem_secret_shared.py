@@ -211,6 +211,10 @@ def create_dh_encrypted(
         db=db,
     )
 
+    # Link to source update for forward secrecy purge tracking
+    if source_update_id:
+        treekem_secret.set_source_update_id(parent_secret_id, source_update_id, peer_id, db)
+
     # Get recipient's treekem_pubkey for wrapping
     from events.group import treekem_pubkey
     recipient_pk = treekem_pubkey.get_treekem_pubkey_by_id(recipient_pubkey_id, peer_id, db)

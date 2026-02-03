@@ -48,6 +48,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     depth = event_data.get('depth')
     path_prefix_b64 = event_data.get('path_prefix')
     key_b64 = event_data.get('key')
+    source_update_id = event_data.get('source_update_id')  # Optional, for purge tracking
 
     if depth is None or path_prefix_b64 is None or not key_b64:
         return ProjectorResult(writes=tuple(), valid_event=False)
@@ -76,6 +77,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'depth': depth,
                 'path_prefix': path_prefix,
                 'key': key_bytes,
+                'source_update_id': source_update_id,
                 'recorded_at': ctx.recorded_at,
             },
         ),
@@ -188,6 +190,33 @@ def create_with_material(
 
     log.info(f"treekem_secret.create_with_material() created treekem_secret_id={treekem_secret_id[:20]}...")
     return treekem_secret_id
+
+
+def set_source_update_id(
+    treekem_secret_id: str,
+    source_update_id: str,
+    recorded_by: str,
+    db: Any,
+) -> None:
+    """Set the source_update_id for a treekem_secret (for purge tracking).
+
+    This links the path secret to the treekem_update that created it,
+    enabling orphan detection during forward secrecy purge cycles.
+
+    Args:
+        treekem_secret_id: The treekem_secret event ID
+        source_update_id: The treekem_update event ID that created this secret
+        recorded_by: Local peer ID
+        db: Database connection
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute(
+        """UPDATE treekem_secrets
+           SET source_update_id = ?
+           WHERE treekem_secret_id = ? AND recorded_by = ?""",
+        (source_update_id, treekem_secret_id, recorded_by)
+    )
+    log.debug(f"treekem_secret.set_source_update_id() linked {treekem_secret_id[:20]}... to update {source_update_id[:20]}...")
 
 
 def get_key_bytes(treekem_secret_id: str, recorded_by: str, db: Any) -> bytes | None:

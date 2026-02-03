@@ -21,7 +21,7 @@ from events.group import (
     treekem_pubkey_shared,
     treekem_secret,
 )
-from tests.utils.tick_helper import assert_eventually, run_ticks
+from tests.utils.tick_helper import assert_eventually, run_ticks, TestClock
 
 
 class TestTreeKEMScale:
@@ -34,12 +34,17 @@ class TestTreeKEMScale:
         - Admin creates network
         - Each member joins via peer.create() + user.join(invite)
         - assert_eventually verifies sync convergence
+
+        Uses TestClock to ensure timestamps are consistent with tick_helper's
+        _coerce_start_t_ms(), preventing TreeKEMUpdateJob from auto-triggering.
+
+        Uses 10ms step to keep all events within the 10-second JOIN_DELAY_MS window
+        (100 members × 3 events = 300 events × 10ms = 3 seconds < 10 seconds).
         """
-        t_ms = 1000
+        clock = TestClock(default_step_ms=10)
 
         # Admin creates network
-        admin = user.new_network(name='Admin', t_ms=t_ms, db=db)
-        t_ms += 100
+        admin = user.new_network(name='Admin', t_ms=clock.tick(), db=db)
         db.commit()
 
         members = [admin]
@@ -48,22 +53,19 @@ class TestTreeKEMScale:
         for i in range(n - 1):
             invite_id, invite_link, _ = invite.create(
                 peer_id=admin['peer_id'],
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
-            new_peer_id = peer.create(t_ms=t_ms, db=db)
-            t_ms += 10
+            new_peer_id = peer.create(t_ms=clock.tick(), db=db)
 
             member = user.join(
                 peer_id=new_peer_id,
                 invite_link=invite_link,
                 name=f'Member{i}',
-                t_ms=t_ms,
+                t_ms=clock.tick(),
                 db=db
             )
-            t_ms += 10
 
             members.append({
                 'peer_id': member['peer_id'],
@@ -78,13 +80,13 @@ class TestTreeKEMScale:
 
         db.commit()
 
-        # Sync to propagate all events
+        # Sync to propagate all events - use clock.now() for consistency
         t_ms = assert_eventually(
             lambda: len(sender_key.get_group_member_peer_ids(
                 admin['all_users_group_id'], admin['peer_id'], db
             )) >= n,
             db=db,
-            start_t_ms=t_ms,
+            start_t_ms=clock.now(),
             msg=f"All {n} members should be in group"
         )
 

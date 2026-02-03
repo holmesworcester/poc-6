@@ -1167,22 +1167,23 @@ class TestRemovedUserKeySharing:
         4. Alice creates a new removal_epoch
         5. When creating new secrets, Alice should check Bob is removed
         """
-        from tests.utils.tick_helper import assert_eventually
+        from tests.utils.tick_helper import assert_eventually, TestClock
         from events.identity import invite, user_removed
         from events.identity import removal_epoch
 
         db = fresh_db
+        clock = TestClock()
 
         # Alice creates network
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Alice creates invite for Bob
-        _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+        _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
 
         # Bob joins
-        bob_peer_id = peer.create(t_ms=2000, db=db)
-        bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+        bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Wait for Bob to sync
@@ -1193,7 +1194,7 @@ class TestRemovedUserKeySharing:
             )
             assert len(channels) >= 1
 
-        t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=None)
+        t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=clock.now())
 
         # Bob creates his own treekem_pubkey (from Bob's perspective)
         bob_pubkey_id, bob_pubkey_id_shared, _ = treekem_pubkey.create(
@@ -1364,13 +1365,14 @@ class TestMultiPeerKeyDistribution:
 
     def test_alice_and_bob_create_pubkeys(self, fresh_db):
         """Both Alice and Bob create pubkeys that sync to each other."""
-        from tests.utils.tick_helper import assert_eventually
+        from tests.utils.tick_helper import assert_eventually, TestClock
         from events.identity import invite
 
         db = fresh_db
+        clock = TestClock()
 
         # Alice creates network
-        alice = user.new_network(name='Alice', t_ms=1000, db=db)
+        alice = user.new_network(name='Alice', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Alice creates her treekem_pubkey
@@ -1381,15 +1383,15 @@ class TestMultiPeerKeyDistribution:
             removal_epoch_id=None,
             peer_id=alice['peer_id'],
             peer_shared_id=alice['peer_shared_id'],
-            t_ms=1500,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()
 
         # Bob joins
-        _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=2000, db=db)
-        bob_peer_id = peer.create(t_ms=2500, db=db)
-        bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2500, db=db)
+        _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=clock.tick(), db=db)
+        bob_peer_id = peer.create(t_ms=clock.tick(), db=db)
+        bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=clock.tick(), db=db)
         db.commit()
 
         # Wait for sync
@@ -1400,7 +1402,7 @@ class TestMultiPeerKeyDistribution:
             )
             assert len(channels) >= 1
 
-        t_ms = assert_eventually(bob_in_network, db=db, start_t_ms=None)
+        t_ms = assert_eventually(bob_in_network, db=db, start_t_ms=clock.now())
 
         # Bob creates his treekem_pubkey
         bob_pk_id, pk_shared_id, _ = treekem_pubkey.create(
