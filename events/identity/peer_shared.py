@@ -113,7 +113,12 @@ def project_pure(ctx: Any) -> ProjectorResult:
     commands = []
 
     # Connection label upgrade: when a remote peer's peer_shared syncs, upgrade
-    # connections that have invite_id but not peer_shared_id
+    # connections that have invite_id but not peer_shared_id.
+    # NOTE: Alternative approach would be dual-connection model - keep bootstrap
+    # connection (via invite) separate from peer_shared connection, letting the
+    # bootstrap connection expire naturally. This avoids mutating existing rows
+    # and is more concurrency-safe. Current UPDATE approach works but conflates
+    # two connection states.
     if invite_id and owner_peer_id != ctx.recorded_by:
         commands.append(Command(
             command_type='upgrade_connection_label',
