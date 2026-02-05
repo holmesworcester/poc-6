@@ -12,7 +12,7 @@ from core import crypto
 from core import store
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection_v2.types import ProjectorResult, WriteOp
+from core.projection_v2.types import ProjectorResult, WriteOp, Command
 
 log = logging.getLogger(__name__)
 
@@ -110,7 +110,21 @@ def project_pure(ctx: Any) -> ProjectorResult:
             )
         )
 
-    return ProjectorResult(writes=tuple(writes), valid_event=True)
+    commands = []
+
+    # Share group keys to new device's invite (when another device joins our user)
+    # Only when: has invite_id, not our own peer, has user_id
+    if invite_id and owner_peer_id != ctx.recorded_by and user_id:
+        commands.append(Command(
+            command_type='share_keys_to_invite',
+            args={
+                'user_id': user_id,
+                'invite_id': invite_id,
+                'new_peer_shared_id': ctx.event_id,
+            }
+        ))
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True, commands=tuple(commands))
 
 
 def create(peer_id: str, t_ms: int, db: Any,
@@ -693,3 +707,60 @@ def join(peer_id: str, peer_invite_id: str, peer_invite_private_key: bytes,
         'connection_prekey_shared_id': connection_prekey_shared_id,
         'invite_accepted_id': invite_accepted_id,
     }
+
+
+# ============================================================================
+# Command handlers for v2 projection
+# ============================================================================
+
+from core.projection_v2.apply import register_command_handler
+
+
+def _handle_share_keys_to_invite(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Share group keys to a newly linked device via its invite pubkey."""
+    from events.group import group_key_shared
+
+    user_id = args['user_id']
+    invite_id = args['invite_id']
+    new_peer_shared_id = args['new_peer_shared_id']
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get our peer_shared_id
+    our_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (recorded_by, recorded_by)
+    )
+    if not our_row:
+        log.warning(f"share_keys_to_invite: no peer_shared_id for {recorded_by[:20]}...")
+        return
+    our_peer_shared_id = our_row['peer_shared_id']
+
+    # Get all groups this user is a member of
+    group_rows = safedb.query(
+        """SELECT DISTINCT g.group_id, g.key_id
+           FROM group_members gm
+           JOIN groups g ON gm.group_id = g.group_id AND gm.recorded_by = g.recorded_by
+           WHERE gm.user_id = ? AND gm.recorded_by = ?""",
+        (user_id, recorded_by)
+    )
+
+    log.info(f"share_keys_to_invite: sharing {len(group_rows)} group keys to {new_peer_shared_id[:20]}...")
+
+    key_share_ts = recorded_at + 1000
+    for row in group_rows:
+        try:
+            group_key_shared.create_for_invite(
+                key_id=row['key_id'],
+                peer_id=recorded_by,
+                peer_shared_id=our_peer_shared_id,
+                invite_id=invite_id,
+                t_ms=key_share_ts,
+                db=db
+            )
+            key_share_ts += 1
+        except Exception as e:
+            log.warning(f"share_keys_to_invite: failed to share key {row['key_id'][:20]}...: {e}")
+
+
+register_command_handler('share_keys_to_invite', _handle_share_keys_to_invite)

@@ -41,8 +41,6 @@ from events.group import group, group_member
 from tests.utils.tick_helper import assert_eventually
 
 
-# TODO: Fix key sealing to use invite_id from peer_shared event instead of time-based heuristic
-@pytest.mark.xfail(reason="Key sealing uses time-based heuristic instead of peer_shared.invite_id")
 def test_device_joins_with_older_invite_gets_correct_keys(fresh_db):
     """Device joining with older invite should get keys sealed to that invite's prekey.
 
