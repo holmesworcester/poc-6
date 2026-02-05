@@ -112,6 +112,17 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     commands = []
 
+    # Connection label upgrade: when a remote peer's peer_shared syncs, upgrade
+    # connections that have invite_id but not peer_shared_id
+    if invite_id and owner_peer_id != ctx.recorded_by:
+        commands.append(Command(
+            command_type='upgrade_connection_label',
+            args={
+                'peer_shared_id': ctx.event_id,
+                'invite_id': invite_id,
+            }
+        ))
+
     # Share group keys to new device's invite (when another device joins our user)
     # Only when: has invite_id, not our own peer, has user_id
     if invite_id and owner_peer_id != ctx.recorded_by and user_id:
@@ -763,4 +774,23 @@ def _handle_share_keys_to_invite(args: dict, recorded_by: str, recorded_at: int,
             log.warning(f"share_keys_to_invite: failed to share key {row['key_id'][:20]}...: {e}")
 
 
+def _handle_upgrade_connection_label(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Upgrade connection labels when peer_shared syncs.
+
+    When a remote peer's peer_shared event is projected, update connections
+    that have the matching invite_id but no peer_shared_id yet.
+    """
+    peer_shared_id = args['peer_shared_id']
+    invite_id = args['invite_id']
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    safedb.execute("""
+        UPDATE connections
+        SET peer_shared_id = ?
+        WHERE invite_id = ? AND peer_shared_id IS NULL AND recorded_by = ?
+    """, (peer_shared_id, invite_id, recorded_by))
+    log.info(f"upgrade_connection_label: peer_shared_id={peer_shared_id[:20]}... for invite_id={invite_id[:20]}...")
+
+
+register_command_handler('upgrade_connection_label', _handle_upgrade_connection_label)
 register_command_handler('share_keys_to_invite', _handle_share_keys_to_invite)
