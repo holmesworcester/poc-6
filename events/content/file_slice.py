@@ -14,7 +14,8 @@ Security model:
 
 # Registry metadata
 EVENT_TYPE = 'file_slice'
-SHAREABLE = True  # File slices sync to message recipients
+SHAREABLE = True  # File slices sync via negentropy like all other events
+SYNC_INDEXED = True  # Include in negentropy sync
 PROJECTION_TABLE = None  # No created_at lookup needed
 
 from typing import Any
@@ -208,6 +209,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
     global _batch_mode
     from core import store
     from core.db import create_safe_db
+    from events import registry
 
     if not slices_data:
         return 0
@@ -261,18 +263,18 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
             dep_batch
         )
 
-        # Mark slices as shareable using batch function for efficiency
-        # File slices are regular shareable events - they sync like any other event type
-        # Access control is enforced at message_attachment level (group-encrypted)
-        from events.network import negentropy
-        # Build batch: (event_id, created_at, recorded_at)
-        shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
-        # Defer bucket computation for efficiency - we'll rebuild once at the end
-        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=True)
+        if registry.is_sync_indexed(EVENT_TYPE):
+            # Mark slices as shareable using batch function for efficiency
+            # Access control is enforced at message_attachment level (group-encrypted)
+            from events.network import negentropy
+            # Build batch: (event_id, created_at, recorded_at)
+            shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
+            # Defer bucket computation for efficiency - we'll rebuild once at the end
+            negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=True)
 
-        # Rebuild all bucket hashes in one efficient pass (unless caller defers)
-        if not defer_bucket_rebuild:
-            negentropy.rebuild_buckets_for_peer(db, peer_id)
+            # Rebuild all bucket hashes in one efficient pass (unless caller defers)
+            if not defer_bucket_rebuild:
+                negentropy.rebuild_buckets_for_peer(db, peer_id)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)
