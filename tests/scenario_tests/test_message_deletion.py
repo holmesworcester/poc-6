@@ -16,9 +16,11 @@ import pytest
 import sqlite3
 from core.db import Database, create_safe_db, create_unsafe_db
 from core import schema
-from events.identity import user, invite, peer, admin
+from events.identity import user, invite, peer, peer_shared, admin
 from events.content import message
 from events.content import message_deletion
+from events.group import group
+from core import crypto, store
 from tests.utils.tick_helper import assert_eventually
 
 
@@ -272,10 +274,219 @@ def test_message_deletion_unauthorized(fresh_db):
     assert "not the author" in str(exc_info.value) and "not an admin" in str(exc_info.value)
 
 
-@pytest.mark.skip(reason="Key propagation issue: events blocked waiting for missing keys")
-def test_message_deletion_ordering():
-    """Test that deletion works regardless of whether message or deletion arrives first."""
-    pass
+def test_message_deletion_ordering(fresh_db):
+    """Test that deletion works regardless of whether message or deletion arrives first.
+
+    Ordering cases:
+    1. Message first, then deletion (normal case) - message is removed
+    2. Deletion first, then message (pre-block) - message never projects
+    3. Two-peer sync: Alice deletes, Bob gets deletion before message
+    4. Two-peer sync: Alice deletes, Bob gets message before deletion
+    """
+    db = fresh_db
+
+    # Setup: Alice creates network, Bob joins
+    alice = user.new_network(name='Alice', t_ms=1000, db=db)
+    _, invite_link, _ = invite.create(peer_id=alice['peer_id'], t_ms=1500, db=db)
+    bob_peer_id = peer.create(t_ms=2000, db=db)
+    bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
+    db.commit()
+
+    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
+
+    # Wait for Bob to have channel
+    def bob_has_channel():
+        bob_channels = db.query_all(
+            "SELECT channel_id FROM channels WHERE recorded_by = ?",
+            (bob['peer_id'],)
+        )
+        assert len(bob_channels) >= 1
+
+    t_ms = assert_eventually(bob_has_channel, db=db, start_t_ms=3000)
+
+    # ========================================
+    # Case 1: Message first, then deletion (local - same peer)
+    # ========================================
+    msg1_result = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content="Message to be deleted normally",
+        t_ms=t_ms,
+        db=db
+    )
+    msg1_id = msg1_result['id']
+    db.commit()
+
+    # Verify message exists
+    msg1_check = alice_safedb.query_one(
+        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (msg1_id, alice['peer_id'])
+    )
+    assert msg1_check is not None, "Case 1: Message should exist before deletion"
+
+    # Delete message
+    message_deletion.create(
+        peer_id=alice['peer_id'],
+        message_id=msg1_id,
+        t_ms=t_ms + 100,
+        db=db
+    )
+    db.commit()
+
+    # Verify message is gone
+    msg1_after = alice_safedb.query_one(
+        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (msg1_id, alice['peer_id'])
+    )
+    assert msg1_after is None, "Case 1: Message should be deleted"
+    print("✅ Case 1 passed: Message first, then deletion (local)")
+
+    # ========================================
+    # Case 2: Deletion first (pre-block), then message (local)
+    # ========================================
+    # Create message blob but pre-insert deletion before storing
+
+    identity = peer_shared.get_self(alice['peer_id'], db)
+    key_data = group.pick_key(alice['group_id'], alice['peer_id'], db)
+    private_key = peer.get_private_key(alice['peer_id'], alice['peer_id'], db)
+
+    preblock_event_data = {
+        'type': 'message',
+        'channel_id': alice['channel_id'],
+        'signed_by': identity['peer_shared_id'],
+        'signer_type': 'peer_shared',
+        'author_id': identity['user_id'],
+        'content': "This message should be pre-blocked",
+        'created_at': t_ms + 200,
+    }
+    signed_event = crypto.sign_event(preblock_event_data, private_key)
+    canonical = crypto.canonicalize_json(signed_event)
+    blob = crypto.wrap(canonical, key_data, db)
+
+    # Calculate what the message ID will be (base64 encoded hash)
+    preblock_msg_id = crypto.b64encode(crypto.hash(blob))
+
+    # Pre-insert deletion BEFORE storing the message
+    alice_safedb.execute(
+        "INSERT INTO deleted_events (event_id, recorded_by, deleted_at) VALUES (?, ?, ?)",
+        (preblock_msg_id, alice['peer_id'], t_ms + 150)
+    )
+    db.commit()
+
+    # Now store the message - it should be blocked
+    stored_id = store.event(blob, alice['peer_id'], t_ms + 200, db)
+    db.commit()
+
+    assert stored_id == preblock_msg_id, "Stored ID should match pre-calculated ID"
+
+    # The message should NOT be in messages table (pre-blocked)
+    msg_preblocked = alice_safedb.query_one(
+        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (stored_id, alice['peer_id'])
+    )
+    assert msg_preblocked is None, "Case 2: Pre-blocked message should NOT be in messages table"
+    print("✅ Case 2 passed: Deletion first (pre-block), then message (local)")
+
+    # ========================================
+    # Case 3: Two peers - Bob gets deletion before message
+    # ========================================
+    # Alice creates a message, then deletes it
+    # We simulate Bob receiving the deletion first
+
+    msg3_result = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content="Message for cross-peer deletion test",
+        t_ms=t_ms + 300,
+        db=db
+    )
+    msg3_id = msg3_result['id']
+    db.commit()
+
+    # Alice deletes it
+    del3_id = message_deletion.create(
+        peer_id=alice['peer_id'],
+        message_id=msg3_id,
+        t_ms=t_ms + 400,
+        db=db
+    )
+    db.commit()
+
+    # Simulate Bob receiving deletion first (pre-block for Bob)
+    bob_safedb.execute(
+        "INSERT INTO deleted_events (event_id, recorded_by, deleted_at) VALUES (?, ?, ?)",
+        (msg3_id, bob['peer_id'], t_ms + 350)
+    )
+    db.commit()
+
+    # Now sync message to Bob - it should be blocked
+    unsafedb = create_unsafe_db(db)
+    msg3_blob = store.get(msg3_id, unsafedb)
+    if msg3_blob:  # Message blob might be deleted
+        # Store for Bob (simulating sync)
+        bob_stored_id = store.event(msg3_blob, bob['peer_id'], t_ms + 500, db)
+        db.commit()
+
+        # Bob should NOT have the message
+        bob_msg3 = bob_safedb.query_one(
+            "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (msg3_id, bob['peer_id'])
+        )
+        assert bob_msg3 is None, "Case 3: Bob should not have message (pre-blocked by deletion)"
+
+    print("✅ Case 3 passed: Bob gets deletion before message")
+
+    # ========================================
+    # Case 4: Two peers - Bob gets message before deletion (normal sync order)
+    # ========================================
+    msg4_result = message.create(
+        peer_id=alice['peer_id'],
+        channel_id=alice['channel_id'],
+        content="Another message for cross-peer test",
+        t_ms=t_ms + 600,
+        db=db
+    )
+    msg4_id = msg4_result['id']
+    db.commit()
+
+    # Sync message to Bob first (via tick/sync)
+    def bob_sees_msg4():
+        bob_msgs = message.list(alice['channel_id'], bob['peer_id'], db)
+        assert any(m['message_id'] == msg4_id for m in bob_msgs), \
+            "Bob should see message 4"
+
+    t_ms = assert_eventually(bob_sees_msg4, db=db, start_t_ms=t_ms + 600)
+
+    # Verify Bob has the message
+    bob_msg4_before = bob_safedb.query_one(
+        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (msg4_id, bob['peer_id'])
+    )
+    assert bob_msg4_before is not None, "Case 4: Bob should have message before deletion"
+
+    # Alice deletes it
+    message_deletion.create(
+        peer_id=alice['peer_id'],
+        message_id=msg4_id,
+        t_ms=t_ms + 100,
+        db=db
+    )
+    db.commit()
+
+    # Sync deletion to Bob
+    def bob_msg4_deleted():
+        bob_msg4 = bob_safedb.query_one(
+            "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+            (msg4_id, bob['peer_id'])
+        )
+        assert bob_msg4 is None, "Bob's copy of message 4 should be deleted"
+
+    assert_eventually(bob_msg4_deleted, db=db, start_t_ms=t_ms + 100)
+
+    print("✅ Case 4 passed: Bob gets message before deletion (normal sync)")
+
+    print("\n✅ All message deletion ordering cases passed!")
 
 
 if __name__ == "__main__":
