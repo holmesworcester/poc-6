@@ -295,10 +295,12 @@ def list(peer_id: str, db: Any) -> list[dict[str, Any]]:
 
 
 def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
-                       t_ms: int, removed_user_id: str, db: Any) -> str:
+                       t_ms: int, removed_user_id: str, db: Any,
+                       removed_peer_shared_id: str | None = None) -> str:
     """Rotate a group's encryption key when a member is removed.
 
     Creates a new key and shares it with all remaining members (excluding removed user).
+    Uses hybrid distribution: TreeKEM for covered members + leaf fallback for uncovered.
 
     Args:
         group_id: Group whose key should be rotated
@@ -307,6 +309,7 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
         t_ms: Base timestamp for key creation
         removed_user_id: User ID being removed (to exclude from sharing)
         db: Database connection
+        removed_peer_shared_id: Optional peer_shared_id of removed member (for TreeKEM)
 
     Returns:
         new_key_id: The newly created group key ID
@@ -315,6 +318,8 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
         ValueError: If group not found
     """
     from events.group import group_key_shared
+    from events.group import treekem_key_shared
+    from events.identity import network_settings
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
@@ -339,16 +344,53 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
     )
     log.info(f"group_key.rotate_for_removal() updated group {group_id[:20]}... with new key")
 
-    # Share new key with all remaining members (excluding removed user)
-    group_key_shared.share_key_with_group_members(
-        key_id=new_key_id,
-        group_id=group_id,
-        peer_id=peer_id,
-        peer_shared_id=peer_shared_id,
-        t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-        db=db,
-        exclude_user_id=removed_user_id
+    # Get all remaining members
+    all_members = safedb.query(
+        """SELECT DISTINCT ps.peer_shared_id
+           FROM group_members gm
+           JOIN peers_shared ps ON gm.user_id = ps.user_id AND ps.recorded_by = gm.recorded_by
+           WHERE gm.group_id = ? AND ps.peer_shared_id != ? AND gm.user_id != ? AND gm.recorded_by = ?""",
+        (group_id, peer_shared_id, removed_user_id, peer_id)
     )
+    all_member_ids = [m['peer_shared_id'] for m in all_members]
 
-    log.info(f"group_key.rotate_for_removal() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}...")
+    # Check if TreeKEM is enabled and we have the removed member's peer_shared_id
+    treekem_enabled = network_settings.is_treekem_enabled(group_id, peer_id, db)
+    covered_members: set[str] = set()
+
+    if treekem_enabled and removed_peer_shared_id and all_member_ids:
+        log.info(f"group_key.rotate_for_removal() TreeKEM enabled, attempting O(log n) distribution")
+
+        # Use TreeKEM for covered members
+        _treekem_ids, covered_members = treekem_key_shared.distribute_via_treekem(
+            key_id=new_key_id,
+            group_id=group_id,
+            removed_peer_shared_id=removed_peer_shared_id,
+            all_members=all_member_ids,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 1,  # Offset to avoid timestamp collision
+            db=db,
+        )
+
+        log.info(f"group_key.rotate_for_removal() TreeKEM covered {len(covered_members)}/{len(all_member_ids)} members")
+
+    # Use leaf fallback for uncovered members (hybrid approach)
+    uncovered_members = set(all_member_ids) - covered_members
+
+    if uncovered_members:
+        log.info(f"group_key.rotate_for_removal() using leaf fallback for {len(uncovered_members)} uncovered members")
+
+        # Share with uncovered members via direct group_key_shared
+        group_key_shared.share_key_with_specific_members(
+            key_id=new_key_id,
+            member_peer_shared_ids=list(uncovered_members),
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + len(covered_members) + 2,  # Offset past TreeKEM events
+            db=db,
+        )
+
+    log.info(f"group_key.rotate_for_removal() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}... "
+             f"(TreeKEM: {len(covered_members)}, leaf: {len(uncovered_members)})")
     return new_key_id

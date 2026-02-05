@@ -580,3 +580,55 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
         log.info(f"key_shared.share_key_with_group_members() skipped {skipped_relays} server relay(s)")
 
     return key_shared_ids
+
+
+def share_key_with_specific_members(key_id: str, member_peer_shared_ids: list[str],
+                                     peer_id: str, peer_shared_id: str, t_ms: int,
+                                     db: Any) -> list[str]:
+    """Create key_shared events for specific members (leaf fallback for TreeKEM).
+
+    IMPORTANT: Server relays are automatically excluded from key distribution.
+
+    Args:
+        key_id: The symmetric key to share
+        member_peer_shared_ids: List of peer_shared_ids to share with
+        peer_id: Local peer ID (creator)
+        peer_shared_id: Public peer ID (creator)
+        t_ms: Base timestamp
+        db: Database connection
+
+    Returns:
+        List of key_shared event IDs created
+    """
+    from events.identity import server_relay
+
+    log.info(f"key_shared.share_key_with_specific_members() key={key_id[:20]}..., members={len(member_peer_shared_ids)}")
+
+    key_shared_ids = []
+    skipped_relays = 0
+
+    for i, recipient_peer_shared_id in enumerate(member_peer_shared_ids):
+        # SECURITY: Never distribute keys to server relays
+        if server_relay.is_server_relay(recipient_peer_shared_id, peer_id, db):
+            log.info(f"key_shared.share_key_with_specific_members() skipping server relay {recipient_peer_shared_id[:20]}...")
+            skipped_relays += 1
+            continue
+
+        try:
+            key_shared_id = create(
+                key_id=key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                recipient_peer_id=recipient_peer_shared_id,
+                t_ms=t_ms + i + 1,
+                db=db
+            )
+            key_shared_ids.append(key_shared_id)
+            log.info(f"key_shared.share_key_with_specific_members() created key_shared for {recipient_peer_shared_id[:20]}...")
+        except Exception as e:
+            log.warning(f"key_shared.share_key_with_specific_members() failed for {recipient_peer_shared_id[:20]}...: {e}")
+
+    if skipped_relays > 0:
+        log.info(f"key_shared.share_key_with_specific_members() skipped {skipped_relays} server relay(s)")
+
+    return key_shared_ids

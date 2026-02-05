@@ -428,6 +428,88 @@ class GroupPrekeyReplenishmentJob(Job):
         return group_prekey.replenish_for_all_peers(t_ms, db)
 
 
+class TreeKEMUpdateJob(Job):
+    """Proactively update TreeKEM pubkeys on a cadence.
+
+    This job runs periodically to refresh TreeKEM pubkeys before they expire.
+    Only runs if TreeKEM is enabled for at least one network.
+    """
+
+    def __init__(self):
+        # Run every 5 minutes
+        from core import treekem
+        super().__init__('treekem_update', every_ms=treekem.TREEKEM_UPDATE_INTERVAL_MS, budget_ms=100)
+
+    def should_run(self, t_ms: int, last_run_at: int, db: Any) -> bool:
+        """Run if interval elapsed AND TreeKEM is enabled for at least one network."""
+        # First check time interval
+        if not super().should_run(t_ms, last_run_at, db):
+            return False
+
+        # Additional check: only run if TreeKEM is enabled somewhere
+        from .db import create_safe_db
+        unsafedb = create_unsafe_db(db)
+
+        peers = unsafedb.query("SELECT peer_id FROM local_peers")
+        for peer in peers:
+            peer_id = peer['peer_id']
+            safedb = create_safe_db(db, recorded_by=peer_id)
+
+            # Check if any network has TreeKEM enabled
+            row = safedb.query_one(
+                """SELECT 1 FROM network_settings
+                   WHERE recorded_by = ? AND treekem_enabled = 1
+                   LIMIT 1""",
+                (peer_id,)
+            )
+            if row:
+                return True  # At least one network has TreeKEM enabled
+
+        return False  # TreeKEM not enabled anywhere
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from events.group import treekem_update
+        from .db import create_safe_db
+        unsafedb = create_unsafe_db(db)
+
+        total_stats = {
+            'peers_processed': 0,
+            'groups_processed': 0,
+            'groups_updated': 0,
+            'pubkeys_shared': 0,
+        }
+
+        peers = unsafedb.query("SELECT peer_id FROM local_peers")
+        for peer in peers:
+            peer_id = peer['peer_id']
+            safedb = create_safe_db(db, recorded_by=peer_id)
+
+            # Get peer_shared_id
+            peer_self = safedb.query_one(
+                "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+                (peer_id, peer_id)
+            )
+            if not peer_self:
+                continue
+
+            peer_shared_id = peer_self['peer_shared_id']
+
+            stats = treekem_update.update_for_all_groups(
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms,
+                db=db,
+            )
+
+            total_stats['peers_processed'] += 1
+            total_stats['groups_processed'] += stats.get('groups_processed', 0)
+            total_stats['groups_updated'] += stats.get('groups_updated', 0)
+            total_stats['pubkeys_shared'] += stats.get('pubkeys_shared', 0)
+
+        db.commit()
+        return total_stats
+
+
 class ConnectionSendJob(Job):
     """Send connection requests to establish/refresh connections."""
 
@@ -575,6 +657,7 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
     "peer_shared",
     "user",
     "network",
+    "network_settings",
     "group",
     "group_member",
     "channel",
@@ -584,6 +667,10 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
     "group_key_shared",
     "group_prekey",
     "group_prekey_shared",
+    # TreeKEM keys
+    "treekem_pubkey",
+    "treekem_pubkey_shared",
+    "treekem_key_shared",
     # Messages
     "message",
     "message_update",
@@ -630,4 +717,5 @@ JOBS = [
     PurgeExpiredEventsJob(),
     TransitPrekeyReplenishmentJob(),
     GroupPrekeyReplenishmentJob(),
+    TreeKEMUpdateJob(),
 ]

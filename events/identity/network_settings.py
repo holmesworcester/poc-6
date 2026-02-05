@@ -1,9 +1,10 @@
 """Network settings event type (shareable) - stores network-level configuration.
 
-Used for star topology sync mode configuration:
+Used for star topology sync mode configuration and TreeKEM feature toggle:
 - server_relay_peer_shared_id: The relay's peer_shared_id
 - server_relay_address: Connection info (e.g., 'relay.example.com:5000')
 - sync_mode: 'star' if server relay set, else 'mesh'
+- treekem_enabled: True if TreeKEM O(log n) key distribution is enabled
 """
 
 # Registry metadata
@@ -35,6 +36,7 @@ def encode_plaintext(
     server_relay_address: bytes | None,
     sync_mode: int,  # 0 = mesh, 1 = star
     admin_grant_id: bytes | None,
+    treekem_enabled: bool = False,
 ) -> bytes:
     """Encode a network_settings payload plaintext.
 
@@ -43,6 +45,7 @@ def encode_plaintext(
     - server_relay_peer_shared_id (16) - zero-padded if None
     - admin_grant_id (16) - zero-padded if None (bootstrap)
     - sync_mode (1)
+    - treekem_enabled (1) - 0 = disabled, 1 = enabled
     - address_len (2)
     - server_relay_address (up to 256 bytes, UTF-8 encoded)
     - pad
@@ -62,8 +65,9 @@ def encode_plaintext(
     payload[16:32] = relay_id_bytes
     payload[32:48] = admin_grant_bytes
     payload[48] = sync_mode & 0xFF
-    payload[49:51] = len(address_bytes).to_bytes(2, 'little')
-    payload[51:51 + len(address_bytes)] = address_bytes
+    payload[49] = 1 if treekem_enabled else 0
+    payload[50:52] = len(address_bytes).to_bytes(2, 'little')
+    payload[52:52 + len(address_bytes)] = address_bytes
     return bytes(payload)
 
 
@@ -79,13 +83,15 @@ def decode_plaintext(data: bytes) -> dict[str, Any]:
     if admin_grant_id == b"\x00" * 16:
         admin_grant_id = None
     sync_mode = data[48]
-    address_len = int.from_bytes(data[49:51], 'little')
-    server_relay_address = data[51:51 + address_len] if address_len > 0 else None
+    treekem_enabled = data[49] == 1
+    address_len = int.from_bytes(data[50:52], 'little')
+    server_relay_address = data[52:52 + address_len] if address_len > 0 else None
     return {
         "network_id": network_id,
         "server_relay_peer_shared_id": server_relay_peer_shared_id,
         "admin_grant_id": admin_grant_id,
         "sync_mode": sync_mode,
+        "treekem_enabled": treekem_enabled,
         "server_relay_address": server_relay_address,
     }
 
@@ -112,6 +118,7 @@ def encode_wire_event(
     admin_grant_id_b64: str | None,
     created_at_ms: int,
     private_key: bytes,
+    treekem_enabled: bool = False,
 ) -> bytes:
     """Encode a complete network_settings wire event."""
     network_id = crypto.b64decode(network_id_b64)
@@ -127,6 +134,7 @@ def encode_wire_event(
         server_relay_address=address_bytes,
         sync_mode=sync_mode_int,
         admin_grant_id=admin_grant_id,
+        treekem_enabled=treekem_enabled,
     )
     header = wire_format.WireHeader(
         version=1,
@@ -155,6 +163,7 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         "type": EVENT_TYPE,
         "network_id": crypto.b64encode(decoded["network_id"]),
         "sync_mode": "star" if decoded["sync_mode"] == 1 else "mesh",
+        "treekem_enabled": decoded["treekem_enabled"],
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": wire_format.signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,
@@ -205,6 +214,7 @@ def _wire_shadow_network_settings(
     server_relay_address: str | None,
     sync_mode: str,
     admin_grant: str | None = None,
+    treekem_enabled: bool = False,
 ) -> None:
     """Validate network_settings fields against the fixed-size wire payload layout."""
     relay_id = crypto.b64decode(server_relay_peer_shared_id) if server_relay_peer_shared_id else None
@@ -217,6 +227,7 @@ def _wire_shadow_network_settings(
         server_relay_address=address_bytes,
         sync_mode=sync_mode_int,
         admin_grant_id=admin_grant_id,
+        treekem_enabled=treekem_enabled,
     )
     decoded = decode_plaintext(plaintext)
     if decoded["network_id"] != crypto.b64decode(network_id):
@@ -233,6 +244,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     network_id = event_data.get('network_id')
     signed_by = event_data.get('signed_by')
     sync_mode = event_data.get('sync_mode', 'mesh')
+    treekem_enabled = event_data.get('treekem_enabled', False)
     server_relay_peer_shared_id = event_data.get('server_relay_peer_shared_id')
     server_relay_address = event_data.get('server_relay_address')
     created_at = event_data.get('created_at')
@@ -241,7 +253,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     if not network_id or not signed_by:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
-    _wire_shadow_network_settings(network_id, server_relay_peer_shared_id, server_relay_address, sync_mode, admin_grant)
+    _wire_shadow_network_settings(network_id, server_relay_peer_shared_id, server_relay_address, sync_mode, admin_grant, treekem_enabled)
 
     # Verify admin authorization (non-bootstrap requires admin_grant)
     signer = ctx.signer or {}
@@ -266,6 +278,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'server_relay_peer_shared_id': server_relay_peer_shared_id,
                 'server_relay_address': server_relay_address,
                 'sync_mode': sync_mode,
+                'treekem_enabled': 1 if treekem_enabled else 0,
                 'created_at': created_at,
                 'recorded_by': ctx.recorded_by,
                 'recorded_at': ctx.recorded_at,
@@ -402,3 +415,111 @@ def get_sync_mode(network_id: str, recorded_by: str, db: Any) -> str:
         return 'mesh'  # Default to mesh
 
     return row['sync_mode']
+
+
+def is_treekem_enabled(network_id: str, recorded_by: str, db: Any) -> bool:
+    """Check if TreeKEM is enabled for a network.
+
+    Args:
+        network_id: Network to query
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if TreeKEM is enabled, False otherwise
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get the most recent settings for this network (by created_at)
+    row = safedb.query_one(
+        """SELECT treekem_enabled FROM network_settings
+           WHERE network_id = ? AND recorded_by = ?
+           ORDER BY created_at DESC
+           LIMIT 1""",
+        (network_id, recorded_by)
+    )
+
+    if not row:
+        return False  # Default to disabled
+
+    return row['treekem_enabled'] == 1
+
+
+def set_treekem_enabled(
+    network_id: str,
+    enabled: bool,
+    peer_id: str,
+    peer_shared_id: str,
+    t_ms: int,
+    db: Any,
+) -> str:
+    """Enable or disable TreeKEM for a network (admin only).
+
+    Args:
+        network_id: The network to configure
+        enabled: True to enable TreeKEM, False to disable
+        peer_id: Local peer ID (for signing)
+        peer_shared_id: Public peer ID (for signing)
+        t_ms: Timestamp
+        db: Database connection
+
+    Returns:
+        network_settings_id: The ID of the created network_settings event
+
+    Raises:
+        ValueError: If caller is not an admin
+    """
+    from events.identity import peer_shared as peer_shared_module
+
+    # Get user_id for admin check
+    user_id = peer_shared_module.get_user_id(peer_shared_id, peer_id, db)
+    if not user_id:
+        raise ValueError("Cannot find user_id for peer")
+
+    # Check admin status
+    if not admin_module.is_user_admin(user_id, network_id, peer_id, db):
+        raise ValueError("Only admins can configure TreeKEM")
+
+    # Get admin grant for authorization chain
+    admin_grant_id = admin_module.my_grant(user_id, network_id, peer_id, db)
+    if not admin_grant_id:
+        raise ValueError("No admin grant found")
+
+    # Get current settings to preserve other values
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    current = safedb.query_one(
+        """SELECT server_relay_peer_shared_id, server_relay_address, sync_mode
+           FROM network_settings
+           WHERE network_id = ? AND recorded_by = ?
+           ORDER BY created_at DESC
+           LIMIT 1""",
+        (network_id, peer_id)
+    )
+
+    server_relay_id = current['server_relay_peer_shared_id'] if current else None
+    server_relay_address = current['server_relay_address'] if current else None
+    sync_mode = current['sync_mode'] if current else 'mesh'
+
+    # Get peer's private key for signing
+    private_key = peer.get_private_key(peer_id, peer_id, db)
+
+    _wire_shadow_network_settings(network_id, server_relay_id, server_relay_address, sync_mode, admin_grant_id, enabled)
+
+    blob = encode_wire_event(
+        network_id_b64=network_id,
+        server_relay_peer_shared_id_b64=server_relay_id,
+        server_relay_address=server_relay_address,
+        sync_mode=sync_mode,
+        signed_by_b64=peer_shared_id,
+        signer_type='peer_shared',
+        admin_grant_id_b64=admin_grant_id,
+        created_at_ms=t_ms,
+        private_key=private_key,
+        treekem_enabled=enabled,
+    )
+    network_settings_id = store.event(blob, peer_id, t_ms, db)
+
+    log.info(f"network_settings.set_treekem_enabled() created network_settings_id={network_settings_id[:20]}..., "
+             f"network_id={network_id[:20]}..., treekem_enabled={enabled}")
+
+    return network_settings_id
