@@ -241,8 +241,15 @@ def send_ack_for_request(
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
         transport.send(wrapped, from_addr, to_addr)
         log.info(f"connection_ack.send_ack_for_request: sent via transport to {to_addr}")
+    elif transport.is_udp_active():
+        # UDP is active but we don't have an address - this is a bug
+        raise RuntimeError(
+            f"connection_ack.send_ack_for_request: UDP active but no address for "
+            f"peer_shared_id={remote_peer_shared_id[:20] if remote_peer_shared_id else 'None'}..., "
+            f"invite_id={remote_invite_id[:20] if remote_invite_id else 'None'}..."
+        )
     else:
-        # Loopback mode - deliver directly to incoming queue
+        # Loopback mode (testing only) - deliver directly to incoming queue
         from_addr = ('127.0.0.1', 0)
         transport.deliver(wrapped, from_addr)
         log.debug(f"connection_ack.send_ack_for_request: sent via loopback")

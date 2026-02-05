@@ -498,6 +498,10 @@ def _send_ack_for_request(
         if to_addr:
             from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
             transport.send(wrapped, from_addr, to_addr)
+        elif transport.is_udp_active():
+            raise RuntimeError(
+                f"connection._send_ack: UDP active but no address for peer {remote_peer_shared_id[:20] if remote_peer_shared_id else 'unknown'}..."
+            )
         else:
             transport.deliver(wrapped, ('127.0.0.1', 0))
 
@@ -555,6 +559,10 @@ def _send_ack_for_request(
     if to_addr:
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
         transport.send(wrapped, from_addr, to_addr)
+    elif transport.is_udp_active():
+        raise RuntimeError(
+            f"connection._send_ack: UDP active but no address for peer {remote_peer_shared_id[:20] if remote_peer_shared_id else 'unknown'}..."
+        )
     else:
         transport.deliver(wrapped, ('127.0.0.1', 0))
 
@@ -932,8 +940,13 @@ def _send_request(
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
         transport.send(wrapped, from_addr, to_addr)
         log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
+    elif transport.is_udp_active():
+        # UDP is active but we don't have an address - this is a bug
+        raise RuntimeError(
+            f"connection_request._send_request: UDP active but no address for peer {to_peer_shared_id[:20]}..."
+        )
     else:
-        # Loopback mode - deliver directly to incoming queue
+        # Loopback mode (testing only) - deliver directly to incoming queue
         from_addr = ('127.0.0.1', 0)
         transport.deliver(wrapped, from_addr)
         log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... (loopback)")
@@ -1451,10 +1464,13 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
         transport.send(wrapped, from_addr, to_addr)
         log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}... to {to_addr}")
+    elif transport.is_udp_active():
+        # UDP is active but we don't have an address - this is a bug
+        raise RuntimeError(
+            f"connection_request.send: UDP active but no address for peer {to_peer_shared_id[:20] if to_peer_shared_id else 'unknown'}..."
+        )
     else:
-        # No address available - use loopback mode (will only work in tests)
-        if transport.is_udp_active():
-            log.warning(f"connection_request.send: no address for {to_peer_shared_id[:20] if to_peer_shared_id else 'unknown'}... using loopback (won't reach remote peer!)")
+        # Loopback mode (testing only) - deliver directly to incoming queue
         transport.deliver(wrapped, ('127.0.0.1', 0))
         log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}... via loopback")
 
