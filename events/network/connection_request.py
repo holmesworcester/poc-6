@@ -410,7 +410,10 @@ def _project_ack(
         for_connection_id, recorded_by
     ))
 
-    if from_addr_ip:
+    # Register learned address in transport registry for future lookups
+    if from_addr_ip and peer_shared_id:
+        from core import transport
+        transport.add_peer_address(peer_shared_id, from_addr_ip, from_addr_port)
         log.info(f"connection.project: activated connection {for_connection_id[:20]}... with ack {event_id[:20]}... at {from_addr_ip}:{from_addr_port}")
     else:
         log.info(f"connection.project: activated connection {for_connection_id[:20]}... with ack {event_id[:20]}...")
@@ -860,17 +863,29 @@ def _send_request(
     )
 
     # Store our outgoing connection (PENDING)
+    # Include from_addr if we know the destination - enables sync before ack arrives
     safedb = create_safe_db(db, recorded_by=from_peer_id)
+
+    # Look up destination address early so we can store it
+    from core import transport
+    to_addr = get_address_for_peer(to_peer_shared_id, from_peer_id, db)
+    if not to_addr:
+        to_addr = transport.get_peer_address(to_peer_shared_id)
+    from_addr_ip = to_addr[0] if to_addr else None
+    from_addr_port = to_addr[1] if to_addr else None
+
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
             connection_id, recorded_by, peer_shared_id, invite_id,
             our_key, their_connection_id, their_key,
-            created_at, last_handshake_ms, ttl_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, last_handshake_ms, ttl_ms,
+            from_addr_ip, from_addr_port
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         connection_id, from_peer_id, to_peer_shared_id, invite_id,
         symmetric_key, None, None,  # PENDING - no their_* yet
-        t_ms, t_ms, CONNECTION_TTL_MS
+        t_ms, t_ms, CONNECTION_TTL_MS,
+        from_addr_ip, from_addr_port
     ))
 
     # Get recipient's connection_prekey - try multiple sources
@@ -883,7 +898,7 @@ def _send_request(
 
     # 2. Look up from connection_prekeys_shared table (normal mode)
     if not to_key:
-        to_key = connection_prekey.get_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
+        to_key = connection_prekey.get_connection_prekey_for_peer(to_peer_shared_id, from_peer_id, db)
 
     # 3. BOOTSTRAP FALLBACK: Check invite_accepteds for inviter's transit prekey
     if not to_key:
@@ -911,13 +926,7 @@ def _send_request(
     request_blob = store.get(connection_id, unsafedb)
     wrapped = crypto.wrap(request_blob, to_key, db)
 
-    from core import transport
-
-    # Try to look up destination address
-    to_addr = get_address_for_peer(to_peer_shared_id, from_peer_id, db)
-    if not to_addr:
-        to_addr = transport.get_peer_address(to_peer_shared_id)
-
+    # to_addr already looked up above when storing the connection
     if to_addr:
         # Real networking - send via transport with addresses
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
@@ -1441,10 +1450,14 @@ def send(recorded_by: str, connection_id: str, blob: bytes, t_ms: int, db: Any) 
     if to_addr:
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
         transport.send(wrapped, from_addr, to_addr)
+        log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}... to {to_addr}")
     else:
+        # No address available - use loopback mode (will only work in tests)
+        if transport.is_udp_active():
+            log.warning(f"connection_request.send: no address for {to_peer_shared_id[:20] if to_peer_shared_id else 'unknown'}... using loopback (won't reach remote peer!)")
         transport.deliver(wrapped, ('127.0.0.1', 0))
+        log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}... via loopback")
 
-    log.debug(f"connection_request.send: sent {len(blob)}B on {connection_id[:20]}...")
     return True
 
 
@@ -1458,15 +1471,28 @@ def _handle_send_connection_ack(args: dict, recorded_by: str, recorded_at: int, 
     Sends a connection ack in response to a connection request.
     """
     from events.network import connection_ack
+    from core.db import create_safe_db
+
+    # Look up the reply address from packet_metadata
+    request_id = args['request_id']
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    packet_meta = safedb.query_one(
+        "SELECT from_addr_ip, from_addr_port FROM packet_metadata WHERE event_id = ? AND recorded_by = ?",
+        (request_id, recorded_by)
+    )
+    reply_addr = None
+    if packet_meta and packet_meta['from_addr_ip']:
+        reply_addr = (packet_meta['from_addr_ip'], packet_meta['from_addr_port'])
 
     connection_ack.send_ack_for_request(
-        request_id=args['request_id'],
+        request_id=request_id,
         remote_peer_shared_id=args.get('remote_peer_shared_id'),
         remote_invite_id=args.get('remote_invite_id'),
         their_key=args['their_key'],
         local_peer_id=recorded_by,
         t_ms=recorded_at,
         db=db,
+        reply_addr=reply_addr,
     )
 
 

@@ -192,16 +192,21 @@ def send_ack_for_request(
     # Our connection_id is the ack_id, their_connection_id is the request_id
     # In bootstrap mode: peer_shared_id is NULL, invite_id is set
     # In normal mode: peer_shared_id is set, invite_id is NULL
+    # Include from_addr so we can send sync messages later
+    from_addr_ip = reply_addr[0] if reply_addr else None
+    from_addr_port = reply_addr[1] if reply_addr else None
     safedb.execute("""
         INSERT OR REPLACE INTO connections (
             connection_id, recorded_by, peer_shared_id, invite_id,
             our_key, their_connection_id, their_key,
-            created_at, last_handshake_ms, ttl_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, last_handshake_ms, ttl_ms,
+            from_addr_ip, from_addr_port
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         ack_id, local_peer_id, remote_peer_shared_id, remote_invite_id,
         ack_key, request_id, their_key,
-        t_ms, t_ms, CONNECTION_TTL_MS
+        t_ms, t_ms, CONNECTION_TTL_MS,
+        from_addr_ip, from_addr_port
     ))
 
     # Wrap ack with their symmetric key and queue for delivery
@@ -218,6 +223,11 @@ def send_ack_for_request(
 
     from core import transport
     from events.network.connection_request import get_address_for_peer
+
+    # Register learned address in transport registry for future lookups
+    # This enables sync_all_connections() to find the peer's address
+    if reply_addr and remote_peer_shared_id:
+        transport.add_peer_address(remote_peer_shared_id, reply_addr[0], reply_addr[1])
 
     # Use reply_addr if provided (from incoming packet), otherwise look up
     to_addr = reply_addr

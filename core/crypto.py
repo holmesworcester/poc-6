@@ -265,18 +265,24 @@ def get_transit_key_by_id(id_bytes: bytes, recorded_by: str, db: Any) -> dict[st
 
     log.debug(f"get_transit_key_by_id() looking up key_id={key_id}, recorded_by={recorded_by[:20]}...")
 
-    # Check connection_prekeys (asymmetric) - DIRECT lookup, no _shared table
-    transit_prekey_row = unsafedb.query_one(
-        "SELECT private_key FROM connection_prekeys WHERE connection_prekey_id = ? AND owner_peer_id = ?",
-        (key_id, recorded_by)
+    # Check connection_prekeys (asymmetric) - use prefix matching because hint is only KEY_ID_SIZE bytes
+    # but connection_prekey_id is the full 32-byte hash
+    prekey_rows = unsafedb.query(
+        "SELECT connection_prekey_id, private_key FROM connection_prekeys WHERE owner_peer_id = ?",
+        (recorded_by,)
     )
-    if transit_prekey_row and transit_prekey_row['private_key']:
-        log.debug(f"get_transit_key_by_id() found transit prekey for prekey_id={key_id}")
-        return {
-            'id': id_bytes,
-            'private_key': transit_prekey_row['private_key'],
-            'type': 'asymmetric'
-        }
+    for prekey_row in prekey_rows:
+        try:
+            prekey_id_bytes = b64decode(prekey_row['connection_prekey_id'])
+            if prekey_id_bytes[:KEY_ID_SIZE] == id_bytes and prekey_row['private_key']:
+                log.debug(f"get_transit_key_by_id() found transit prekey for prekey_id={prekey_row['connection_prekey_id'][:20]}...")
+                return {
+                    'id': id_bytes,
+                    'private_key': prekey_row['private_key'],
+                    'type': 'asymmetric'
+                }
+        except Exception:
+            continue
 
     # Check local_peers (peer private key)
     if key_id == recorded_by:
