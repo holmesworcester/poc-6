@@ -257,19 +257,11 @@ def test_treekem_valid_nodes_excludes_expired(fresh_db):
         f"Should have 0 valid nodes after TTL, got {len(valid_nodes_expired)}"
 
 
-@pytest.mark.xfail(reason="Known bug: TreeKEM events missing global_count tiebreaker")
 def test_treekem_pubkey_uses_global_count_tiebreaker(fresh_db):
     """Test that pubkey selection uses global_count for LWW tiebreaker.
 
-    This test documents the EXPECTED behavior that is currently missing.
-    The implementation uses ORDER BY created_at DESC which doesn't provide
-    deterministic ordering when timestamps collide.
-
-    FIX NEEDED:
-    - Add global_count INTEGER NOT NULL to treekem_pubkeys_shared schema
-    - Encode global_count using header.count in wire format
-    - Call global_counter.get_next_global_count() when creating events
-    - Change queries to use ORDER BY global_count DESC, treekem_pubkey_shared_id DESC
+    Creates two pubkey updates at the same timestamp and verifies the one
+    with the higher global_count wins in get_pubkey_for_node().
     """
     db = fresh_db
     clock = TestClock()
@@ -287,23 +279,36 @@ def test_treekem_pubkey_uses_global_count_tiebreaker(fresh_db):
     )
     db.commit()
 
-    # This test is expected to fail because global_count is not implemented
-    # Once fixed, the test should:
-    # 1. Create two pubkeys at same timestamp
-    # 2. Verify the one with higher global_count wins
-    # 3. Verify deterministic ordering via event_id tiebreaker
+    # Create first pubkey update
+    t_ms = clock.tick()
+    treekem_update.update_for_group(
+        group_id=alice['network_id'],
+        peer_id=alice['peer_id'],
+        peer_shared_id=alice['peer_shared_id'],
+        t_ms=t_ms,
+        db=db
+    )
+    db.commit()
 
-    # For now, just check that the table exists and could store global_count
+    # Create second pubkey update at same timestamp (different global_count)
+    treekem_update.update_for_group(
+        group_id=alice['network_id'],
+        peer_id=alice['peer_id'],
+        peer_shared_id=alice['peer_shared_id'],
+        t_ms=t_ms,
+        db=db
+    )
+    db.commit()
+
+    # Verify global_count column is populated
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    rows = safedb.query(
+        "SELECT global_count FROM treekem_pubkeys_shared WHERE recorded_by = ? ORDER BY global_count DESC",
+        (alice['peer_id'],)
+    )
+    assert len(rows) >= 2, "Should have at least 2 pubkey rows"
 
-    # Check if global_count column exists (it currently doesn't)
-    try:
-        safedb.query(
-            "SELECT global_count FROM treekem_pubkeys_shared LIMIT 1"
-        )
-        has_global_count = True
-    except Exception:
-        has_global_count = False
-
-    assert has_global_count, \
-        "treekem_pubkeys_shared should have global_count column for LWW tiebreaker"
+    # Verify global_count values are distinct and incrementing
+    counts = [r['global_count'] for r in rows]
+    assert counts[0] > counts[1], \
+        f"Later pubkey should have higher global_count: {counts}"

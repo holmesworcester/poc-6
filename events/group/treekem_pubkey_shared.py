@@ -20,6 +20,7 @@ from core import crypto
 from core import store
 from core import wire_format
 from core import treekem
+from core import global_counter
 from core.db import create_safe_db
 from core.projection.types import ProjectorResult, WriteOp
 from events.identity import peer
@@ -107,6 +108,7 @@ def encode_wire_event(
     signer_type: str,
     created_at_ms: int,
     ttl_ms: int,
+    global_count: int = 0,
     private_key: bytes,
 ) -> bytes:
     """Encode a complete treekem_pubkey_shared wire event."""
@@ -126,7 +128,7 @@ def encode_wire_event(
         event_type=WIRE_TYPE_CODE,
         flags=0,
         signer_type=wire_format.signer_type_from_str(signer_type),
-        count=0,
+        count=global_count,
         created_at_ms=created_at_ms,
         ttl_ms=ttl_ms,
         signer_id=wire_format._require_len("signer_id", signer_id, wire_format.SIGNER_ID_SIZE),
@@ -156,6 +158,7 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": wire_format.signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,
+        "global_count": header.count,
         "ttl_ms": header.ttl_ms,
         "_wire_signature": signature,
         "_wire_signed_bytes": wire_format._signing_bytes(header, plaintext),
@@ -189,6 +192,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
     owner_peer_shared_id = event_data.get('owner_peer_shared_id')
     signed_by = event_data.get('signed_by')
     created_at = event_data.get('created_at')
+    global_count = event_data.get('global_count', 0)
     ttl_ms = event_data.get('ttl_ms', 0)
 
     if not group_id or depth is None or not public_key_b64 or not owner_peer_shared_id or not signed_by:
@@ -216,6 +220,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'public_key': public_key,
                 'owner_peer_shared_id': owner_peer_shared_id,
                 'created_at': created_at,
+                'global_count': global_count,
                 'ttl_ms': absolute_ttl,
                 'signed_by': signed_by,
                 'recorded_by': ctx.recorded_by,
@@ -260,6 +265,9 @@ def create(
     # Calculate TTL
     ttl_ms = t_ms + treekem.TREEKEM_PUBKEY_TTL_MS
 
+    # Get global count for deterministic LWW tiebreaker
+    gc = global_counter.get_next_global_count(peer_id, db)
+
     blob = encode_wire_event(
         group_id_b64=group_id,
         depth=depth,
@@ -270,6 +278,7 @@ def create(
         signer_type='peer_shared',
         created_at_ms=t_ms,
         ttl_ms=ttl_ms,
+        global_count=gc,
         private_key=private_key,
     )
 
@@ -335,7 +344,7 @@ def get_pubkey_for_node(
         """SELECT treekem_pubkey_shared_id, public_key, owner_peer_shared_id, ttl_ms
            FROM treekem_pubkeys_shared
            WHERE group_id = ? AND depth = ? AND path_prefix = ? AND recorded_by = ? AND ttl_ms > ?
-           ORDER BY created_at DESC
+           ORDER BY global_count DESC, treekem_pubkey_shared_id DESC
            LIMIT 1""",
         (group_id, depth, path_prefix, peer_id, t_ms)
     )

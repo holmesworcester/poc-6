@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS treekem_pubkeys_shared (
     public_key BLOB NOT NULL,
     owner_peer_shared_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    global_count INTEGER NOT NULL DEFAULT 0,
     ttl_ms INTEGER NOT NULL,
     signed_by TEXT NOT NULL,
     recorded_by TEXT NOT NULL,
