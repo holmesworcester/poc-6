@@ -212,27 +212,58 @@ def decode_wire_event(
 
 
 def _get_treekem_key_by_hint(key_hint: bytes, recorded_by: str, db: Any) -> dict[str, Any] | None:
-    """Get treekem private key by hint (event ID).
+    """Get treekem private key by hint (treekem_pubkey_shared_id).
 
-    The hint is the treekem_pubkey_id that was used to encrypt.
-    We need to find the corresponding local private key.
+    The hint is the treekem_pubkey_shared_id that was used to encrypt.
+    We need to find the corresponding local private key by:
+    1. Looking up the shared pubkey to get (group_id, depth, path_prefix)
+    2. Verifying we own this pubkey (owner_peer_shared_id matches our peer_shared_id)
+    3. Looking up our local keypair by (group_id, depth, path_prefix)
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     key_hint_b64 = crypto.b64encode(key_hint)
 
-    # Look up in local treekem_pubkeys table
-    row = safedb.query_one(
-        """SELECT private_key FROM treekem_pubkeys
-           WHERE treekem_pubkey_id = ? AND recorded_by = ?""",
+    # Look up the shared pubkey to get tree position
+    shared_row = safedb.query_one(
+        """SELECT group_id, depth, path_prefix, owner_peer_shared_id
+           FROM treekem_pubkeys_shared
+           WHERE treekem_pubkey_shared_id = ? AND recorded_by = ?""",
         (key_hint_b64, recorded_by)
     )
 
-    if not row:
+    if not shared_row:
+        log.debug(f"_get_treekem_key_by_hint() no shared pubkey for hint={key_hint_b64[:20]}...")
         return None
 
+    # Check if we own this pubkey (owner matches our peer_shared_id)
+    peer_self_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (recorded_by, recorded_by)
+    )
+    if not peer_self_row:
+        log.debug(f"_get_treekem_key_by_hint() no peer_self for recorded_by={recorded_by[:20]}...")
+        return None
+
+    if peer_self_row['peer_shared_id'] != shared_row['owner_peer_shared_id']:
+        log.debug(f"_get_treekem_key_by_hint() pubkey not owned by us")
+        return None
+
+    # Look up our local keypair by (group_id, depth, path_prefix)
+    local_row = safedb.query_one(
+        """SELECT private_key FROM treekem_pubkeys
+           WHERE group_id = ? AND depth = ? AND path_prefix = ? AND recorded_by = ?""",
+        (shared_row['group_id'], shared_row['depth'],
+         shared_row['path_prefix'], recorded_by)
+    )
+
+    if not local_row or not local_row['private_key']:
+        log.debug(f"_get_treekem_key_by_hint() no local keypair for position")
+        return None
+
+    log.debug(f"_get_treekem_key_by_hint() found private key for hint={key_hint_b64[:20]}...")
     return {
         'id': key_hint,
-        'private_key': row['private_key'],
+        'private_key': local_row['private_key'],
         'type': 'asymmetric',
     }
 
@@ -302,7 +333,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
         peer_id=None,
     )
 
-    writes = (
+    writes = [
         WriteOp(
             op='insert',
             table='treekem_keys_shared',
@@ -318,10 +349,19 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'recorded_at': ctx.recorded_at,
             },
         ),
-    )
+        # Update the recipient's groups table to use this key
+        # This enables key rotation: when a new key is shared via TreeKEM,
+        # the recipient's view of the group's current key is updated
+        WriteOp(
+            op='update',
+            table='groups',
+            values={'key_id': computed_key_id},
+            where={'group_id': group_id},
+        ),
+    ]
 
     return ProjectorResult(
-        writes=writes,
+        writes=tuple(writes),
         valid_event=True,
         emit_events=(emit_group_key,),
     )
@@ -428,8 +468,16 @@ def distribute_via_treekem(
 
     log.info(f"distribute_via_treekem() key={key_id[:20]}..., removed={removed_peer_shared_id[:20]}...")
 
-    # Get valid nodes for this group
-    valid_nodes = treekem_pubkey_shared.get_valid_nodes_for_group(group_id, peer_id, t_ms, db)
+    # For all_users_group, signed_by = network_id. Pubkeys are stored by network_id.
+    safedb = create_safe_db(db, recorded_by=peer_id)
+    group_row = safedb.query_one(
+        "SELECT signed_by FROM groups WHERE group_id = ? AND recorded_by = ?",
+        (group_id, peer_id)
+    )
+    network_id = group_row['signed_by'] if group_row and group_row['signed_by'] else group_id
+
+    # Get valid nodes for this network (pubkeys are stored by network_id)
+    valid_nodes = treekem_pubkey_shared.get_valid_nodes_for_group(network_id, peer_id, t_ms, db)
     log.info(f"distribute_via_treekem() found {len(valid_nodes)} valid nodes")
 
     # Find optimal covering nodes
@@ -443,9 +491,9 @@ def distribute_via_treekem(
     # Create key_shared events for each selected node
     key_shared_ids = []
     for i, (depth, path_prefix) in enumerate(selected_nodes):
-        # Get the pubkey for this node
+        # Get the pubkey for this node (use network_id since pubkeys are stored by network_id)
         pubkey_info = treekem_pubkey_shared.get_pubkey_for_node(
-            group_id=group_id,
+            group_id=network_id,
             depth=depth,
             path_prefix=path_prefix,
             peer_id=peer_id,
@@ -457,19 +505,22 @@ def distribute_via_treekem(
             log.warning(f"distribute_via_treekem() no pubkey for node depth={depth}")
             continue
 
-        key_shared_id = create(
-            key_id=key_id,
-            group_id=group_id,
-            depth=depth,
-            path_prefix=path_prefix,
-            recipient_pubkey_id=pubkey_info['pubkey_shared_id'],
-            recipient_public_key=pubkey_info['public_key'],
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms + i,
-            db=db,
-        )
-        key_shared_ids.append(key_shared_id)
+        try:
+            key_shared_id = create(
+                key_id=key_id,
+                group_id=group_id,
+                depth=depth,
+                path_prefix=path_prefix,
+                recipient_pubkey_id=pubkey_info['pubkey_shared_id'],
+                recipient_public_key=pubkey_info['public_key'],
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms + i,
+                db=db,
+            )
+            key_shared_ids.append(key_shared_id)
+        except Exception as e:
+            log.warning(f"distribute_via_treekem() failed to create key_shared for node depth={depth}: {e}")
 
     log.info(f"distribute_via_treekem() created {len(key_shared_ids)} treekem_key_shared events")
     return key_shared_ids, covered_members
@@ -534,7 +585,13 @@ def get_key_sharing_stats(group_id: str, peer_id: str, db: Any) -> dict[str, Any
     members = members_row['count'] if members_row else 0
 
     # Check if TreeKEM is enabled
-    treekem_enabled = network_settings.is_treekem_enabled(group_id, peer_id, db)
+    # For all_users_group, signed_by = network_id, so look that up
+    group_row = safedb.query_one(
+        "SELECT signed_by FROM groups WHERE group_id = ? AND recorded_by = ?",
+        (group_id, peer_id)
+    )
+    network_id = group_row['signed_by'] if group_row else group_id
+    treekem_enabled = network_settings.is_treekem_enabled(network_id, peer_id, db)
 
     return {
         'group_key_shared_count': gks_count,

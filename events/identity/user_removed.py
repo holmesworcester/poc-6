@@ -370,18 +370,45 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
 
     peer_shared_id = peer_self_row['peer_shared_id']
 
+    # Look up removed user's peer_shared_id for TreeKEM copath calculation
+    removed_peer_row = safedb.query_one(
+        "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+        (removed_user_id, recorded_by)
+    )
+    removed_peer_shared_id = removed_peer_row['peer_shared_id'] if removed_peer_row else None
+    if removed_peer_shared_id:
+        log.info(f"user_removed._rotate_keys_for_removed_user() found peer_shared_id for removed user: {removed_peer_shared_id[:20]}...")
+    else:
+        log.warning(f"user_removed._rotate_keys_for_removed_user() no peer_shared_id found for removed user, TreeKEM will use fallback")
+
     # Rotate key for each group
-    from events.group import group_key
+    from events.group import group_key, group
 
     for group_row in group_memberships:
         group_id = group_row['group_id']
         try:
+            # IDEMPOTENCY CHECK: Only rotate if we haven't already done so for this removal
+            # Check if current key was created BEFORE the removal event
+            # If current key was created AFTER, we've already rotated
+            current_key = group.get_current_key(group_id, recorded_by, db)
+            if current_key:
+                # Look up key's created_at from group_keys table
+                key_row = safedb.query_one(
+                    "SELECT created_at FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+                    (current_key['key_id'], recorded_by)
+                )
+                key_created_at = key_row['created_at'] if key_row else 0
+                if key_created_at >= t_ms:
+                    log.info(f"user_removed._rotate_keys_for_removed_user() skipping rotation for group {group_id[:20]}... - already rotated")
+                    continue
+
             group_key.rotate_for_removal(
                 group_id=group_id,
                 peer_id=recorded_by,
                 peer_shared_id=peer_shared_id,
                 t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 removed_user_id=removed_user_id,
+                removed_peer_shared_id=removed_peer_shared_id,
                 db=db
             )
             log.info(f"user_removed._rotate_keys_for_removed_user() rotated key for group {group_id[:20]}...")

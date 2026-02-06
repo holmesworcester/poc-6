@@ -323,13 +323,16 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
 
     safedb = create_safe_db(db, recorded_by=peer_id)
 
-    # Verify group exists
+    # Verify group exists and get network_id (signed_by for all_users_group)
     group_row = safedb.query_one(
-        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        "SELECT key_id, signed_by FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
         (group_id, peer_id)
     )
     if not group_row:
         raise ValueError(f"Group {group_id} not found")
+
+    # For all_users_group, signed_by = network_id
+    network_id = group_row['signed_by'] if group_row['signed_by'] else group_id
 
     log.info(f"group_key.rotate_for_removal() rotating key for group={group_id[:20]}..., removed_user={removed_user_id[:20]}...")
 
@@ -355,8 +358,9 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
     all_member_ids = [m['peer_shared_id'] for m in all_members]
 
     # Check if TreeKEM is enabled and we have the removed member's peer_shared_id
-    treekem_enabled = network_settings.is_treekem_enabled(group_id, peer_id, db)
+    treekem_enabled = network_settings.is_treekem_enabled(network_id, peer_id, db)
     covered_members: set[str] = set()
+
 
     if treekem_enabled and removed_peer_shared_id and all_member_ids:
         log.info(f"group_key.rotate_for_removal() TreeKEM enabled, attempting O(log n) distribution")
@@ -381,15 +385,21 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
     if uncovered_members:
         log.info(f"group_key.rotate_for_removal() using leaf fallback for {len(uncovered_members)} uncovered members")
 
-        # Share with uncovered members via direct group_key_shared
-        group_key_shared.share_key_with_specific_members(
-            key_id=new_key_id,
-            member_peer_shared_ids=list(uncovered_members),
-            peer_id=peer_id,
-            peer_shared_id=peer_shared_id,
-            t_ms=t_ms + len(covered_members) + 2,  # Offset past TreeKEM events
-            db=db,
-        )
+        try:
+            # Share with uncovered members via direct group_key_shared
+            # Note: Use [*...] instead of list() because group_key.list() shadows the builtin
+            group_key_shared.share_key_with_specific_members(
+                key_id=new_key_id,
+                member_peer_shared_ids=[*uncovered_members],
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms + len(covered_members) + 2,  # Offset past TreeKEM events
+                db=db,
+                group_id=group_id,  # Enable recipients to update their groups.key_id
+            )
+        except Exception as e:
+            log.error(f"group_key.rotate_for_removal() share_key_with_specific_members failed: {e}")
+            raise
 
     log.info(f"group_key.rotate_for_removal() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}... "
              f"(TreeKEM: {len(covered_members)}, leaf: {len(uncovered_members)})")

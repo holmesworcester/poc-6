@@ -420,6 +420,37 @@ def get_key_by_id(id_bytes: bytes, recorded_by: str, db: Any,
             'type': 'asymmetric'
         }
 
+    # Then try treekem_pubkeys (via shared pubkey lookup)
+    # The hint is treekem_pubkey_shared_id - need to find matching local keypair
+    log.debug(f"get_key_by_id() checking treekem_pubkeys_shared for pubkey_shared_id={key_id}")
+    treekem_shared_row = safedb.query_one(
+        """SELECT group_id, depth, path_prefix, owner_peer_shared_id
+           FROM treekem_pubkeys_shared
+           WHERE treekem_pubkey_shared_id = ? AND recorded_by = ?""",
+        (key_id, recorded_by)
+    )
+    if treekem_shared_row:
+        # Check if we own this pubkey (owner matches our peer_shared_id)
+        peer_self_row = safedb.query_one(
+            "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+            (recorded_by, recorded_by)
+        )
+        if peer_self_row and peer_self_row['peer_shared_id'] == treekem_shared_row['owner_peer_shared_id']:
+            # Look up our local keypair by (group_id, depth, path_prefix)
+            treekem_local_row = safedb.query_one(
+                """SELECT private_key FROM treekem_pubkeys
+                   WHERE group_id = ? AND depth = ? AND path_prefix = ? AND recorded_by = ?""",
+                (treekem_shared_row['group_id'], treekem_shared_row['depth'],
+                 treekem_shared_row['path_prefix'], recorded_by)
+            )
+            if treekem_local_row and treekem_local_row['private_key']:
+                log.debug(f"get_key_by_id() found treekem pubkey private key")
+                return {
+                    'id': id_bytes,
+                    'private_key': treekem_local_row['private_key'],
+                    'type': 'asymmetric'
+                }
+
     # Finally, try main peer private key from local_peers (with ownership filter)
     log.debug(f"get_key_by_id() checking local_peers for peer_id={key_id}")
     peer_row = unsafedb.query_one(
