@@ -815,7 +815,7 @@ class TestKeyRotation:
             removed_user_id=bob['user_id'],
             removed_by_peer_id=alice['peer_shared_id'],
             removed_by_local_peer_id=alice['peer_id'],
-            t_ms=10000,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()
@@ -847,7 +847,7 @@ class TestKeyRotation:
             removed_peer_shared_id=bob['peer_shared_id'],
             removed_by_peer_shared_id=alice['peer_shared_id'],
             removed_by_local_peer_id=alice['peer_id'],
-            t_ms=10000,
+            t_ms=clock.tick(),
             db=db
         )
         db.commit()

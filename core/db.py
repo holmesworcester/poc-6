@@ -68,6 +68,9 @@ SUBJECTIVE_TABLES = {
     'trust_anchors',               # Trust anchors: network_ids pre-approved by invite_accepted (peer-scoped)
     'server_relays',               # Server relay peers (peer-scoped)
     'network_settings',            # Network settings for star topology (peer-scoped)
+    'treekem_pubkeys',             # TreeKEM local keypairs (peer-scoped, contains private key)
+    'treekem_pubkeys_shared',      # TreeKEM shared pubkeys from others (peer-scoped)
+    'treekem_keys_shared',         # TreeKEM keys encrypted to tree nodes (peer-scoped)
 }
 
 # Tables that are device-wide (not scoped by recorded_by)

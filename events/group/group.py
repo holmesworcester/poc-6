@@ -320,6 +320,10 @@ def project_pure(ctx: Any) -> ProjectorResult:
         'recorded_at': ctx.recorded_at,
     }
 
+    # UPDATE values exclude key_id - key rotation modifies key_id externally
+    # and we don't want re-projection to overwrite rotated keys
+    update_values = {k: v for k, v in values.items() if k != 'key_id'}
+
     writes = (
         WriteOp(
             op='insert',
@@ -329,7 +333,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
         WriteOp(
             op='update',
             table='groups',
-            values=values,
+            values=update_values,
             where={
                 'group_id': ctx.event_id,
             },

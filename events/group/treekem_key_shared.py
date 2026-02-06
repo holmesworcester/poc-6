@@ -480,16 +480,19 @@ def distribute_via_treekem(
     valid_nodes = treekem_pubkey_shared.get_valid_nodes_for_group(network_id, peer_id, t_ms, db)
     log.info(f"distribute_via_treekem() found {len(valid_nodes)} valid nodes")
 
-    # Find optimal covering nodes
-    selected_nodes, covered_members = treekem.get_covering_nodes_for_removal(
+    # Find optimal covering nodes (geometric coverage)
+    selected_nodes, _geometric_covered = treekem.get_covering_nodes_for_removal(
         removed_peer_shared_id=removed_peer_shared_id,
         members=all_members,
         valid_nodes=valid_nodes,
     )
-    log.info(f"distribute_via_treekem() selected {len(selected_nodes)} nodes covering {len(covered_members)} members")
+    log.info(f"distribute_via_treekem() selected {len(selected_nodes)} nodes (geometric coverage: {len(_geometric_covered)} members)")
 
     # Create key_shared events for each selected node
+    # IMPORTANT: Track actually covered members based on pubkey OWNERSHIP, not geometric coverage
+    # Only the pubkey owner can decrypt the treekem_key_shared event
     key_shared_ids = []
+    actually_covered: set[str] = set()
     for i, (depth, path_prefix) in enumerate(selected_nodes):
         # Get the pubkey for this node (use network_id since pubkeys are stored by network_id)
         pubkey_info = treekem_pubkey_shared.get_pubkey_for_node(
@@ -504,6 +507,11 @@ def distribute_via_treekem(
         if not pubkey_info:
             log.warning(f"distribute_via_treekem() no pubkey for node depth={depth}")
             continue
+
+        # Track that only the pubkey OWNER is actually covered
+        owner = pubkey_info['owner_peer_shared_id']
+        if owner in all_members:
+            actually_covered.add(owner)
 
         try:
             key_shared_id = create(
@@ -522,8 +530,8 @@ def distribute_via_treekem(
         except Exception as e:
             log.warning(f"distribute_via_treekem() failed to create key_shared for node depth={depth}: {e}")
 
-    log.info(f"distribute_via_treekem() created {len(key_shared_ids)} treekem_key_shared events")
-    return key_shared_ids, covered_members
+    log.info(f"distribute_via_treekem() created {len(key_shared_ids)} treekem_key_shared events, actually covering {len(actually_covered)} members")
+    return key_shared_ids, actually_covered
 
 
 def count_for_group(group_id: str, peer_id: str, db: Any) -> int:
