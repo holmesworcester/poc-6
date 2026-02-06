@@ -352,3 +352,93 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
 
     log.info(f"group_key.rotate_for_removal() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}...")
     return new_key_id
+
+
+def rotate_for_split_brain(
+    group_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any
+) -> str:
+    """Rotate key to handle split-brain scenario.
+
+    Creates a new key that excludes ALL currently removed users.
+    Unlike rotate_for_removal(), this doesn't target a specific user.
+
+    Args:
+        group_id: Group whose key should be rotated
+        peer_id: Local peer ID performing the rotation
+        peer_shared_id: Public peer ID performing the rotation
+        t_ms: Timestamp for key creation
+        db: Database connection
+
+    Returns:
+        new_key_id: The newly created group key ID
+
+    Raises:
+        ValueError: If group not found
+    """
+    from events.group import group_key_shared
+
+    safedb = create_safe_db(db, recorded_by=peer_id)
+
+    # Verify group exists
+    group_row = safedb.query_one(
+        "SELECT key_id FROM groups WHERE group_id = ? AND recorded_by = ? LIMIT 1",
+        (group_id, peer_id)
+    )
+    if not group_row:
+        raise ValueError(f"Group {group_id} not found")
+
+    log.info(f"group_key.rotate_for_split_brain() rotating key for group={group_id[:20]}...")
+
+    # Create new key
+    new_key_id = create(peer_id=peer_id, t_ms=t_ms, db=db)
+    log.info(f"group_key.rotate_for_split_brain() created new key_id={new_key_id[:20]}...")
+
+    # Update group's key_id
+    safedb.execute(
+        "UPDATE groups SET key_id = ? WHERE group_id = ? AND recorded_by = ?",
+        (new_key_id, group_id, peer_id)
+    )
+
+    # Get all removed user_ids to exclude
+    removed_users = safedb.query(
+        "SELECT user_id FROM removed_users WHERE recorded_by = ?",
+        (peer_id,)
+    )
+    removed_user_ids = {r['user_id'] for r in removed_users}
+
+    # Get all current members (excluding removed users and self)
+    if removed_user_ids:
+        placeholders = ','.join('?' * len(removed_user_ids))
+        all_members = safedb.query(
+            f"""SELECT DISTINCT ps.peer_shared_id
+               FROM group_members gm
+               JOIN peers_shared ps ON gm.user_id = ps.user_id AND ps.recorded_by = gm.recorded_by
+               WHERE gm.group_id = ? AND ps.peer_shared_id != ?
+                 AND gm.user_id NOT IN ({placeholders}) AND gm.recorded_by = ?""",
+            (group_id, peer_shared_id, *removed_user_ids, peer_id)
+        )
+    else:
+        all_members = safedb.query(
+            """SELECT DISTINCT ps.peer_shared_id
+               FROM group_members gm
+               JOIN peers_shared ps ON gm.user_id = ps.user_id AND ps.recorded_by = gm.recorded_by
+               WHERE gm.group_id = ? AND ps.peer_shared_id != ? AND gm.recorded_by = ?""",
+            (group_id, peer_shared_id, peer_id)
+        )
+
+    member_ids = [m['peer_shared_id'] for m in all_members]
+
+    # Share with all remaining members
+    if member_ids:
+        group_key_shared.share_key_with_specific_members(
+            key_id=new_key_id,
+            member_peer_shared_ids=member_ids,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms + 1,
+            db=db,
+            group_id=group_id,
+        )
+
+    log.info(f"group_key.rotate_for_split_brain() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}..., shared with {len(member_ids)} members")
+    return new_key_id

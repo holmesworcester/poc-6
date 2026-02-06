@@ -398,7 +398,26 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
     # Get key_data for encryption (group.pick_key uses peer_id for access control)
-    key_data = group.pick_key(group_id, peer_id, db)
+    try:
+        key_data = group.pick_key(group_id, peer_id, db)
+    except group.KeyUnsafeError as e:
+        # Key is not safe - check if we're an admin
+        from events.identity import invite
+        if invite.is_admin(peer_shared_id, peer_id, db):
+            # Admin: rotate key first
+            log.info(f"message.create() key unsafe, admin rotating: {e}")
+            from events.group import group_key
+            new_key_id = group_key.rotate_for_split_brain(
+                group_id=e.group_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms,
+                db=db
+            )
+            key_data = group_key.get_key(new_key_id, peer_id, db)
+        else:
+            # Non-admin: cannot send
+            raise ValueError(f"Cannot send message: {e}. Waiting for admin to rotate key.")
 
     blob = encode_wire_event(
         channel_id_b64=channel_id,

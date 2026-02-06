@@ -580,3 +580,67 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
         log.info(f"key_shared.share_key_with_group_members() skipped {skipped_relays} server relay(s)")
 
     return key_shared_ids
+
+
+def share_key_with_specific_members(
+    key_id: str,
+    member_peer_shared_ids: list[str],
+    peer_id: str,
+    peer_shared_id: str,
+    t_ms: int,
+    db: Any,
+    group_id: str | None = None,
+) -> list[str]:
+    """Create key_shared events for specific members.
+
+    Unlike share_key_with_group_members(), this takes an explicit list of
+    peer_shared_ids rather than querying group membership. Used for split-brain
+    rotation where we need precise control over who receives the key.
+
+    IMPORTANT: Server relays are automatically excluded from key distribution.
+    They can sync events but cannot decrypt messages.
+
+    Args:
+        key_id: The symmetric key to share
+        member_peer_shared_ids: Explicit list of peer_shared_ids to share with
+        peer_id: Local peer ID (creator)
+        peer_shared_id: Public peer ID (creator)
+        t_ms: Base timestamp
+        db: Database connection
+        group_id: Optional group ID (for logging)
+
+    Returns:
+        List of key_shared event IDs created
+    """
+    from events.identity import server_relay
+
+    log.info(f"key_shared.share_key_with_specific_members() key={key_id[:20]}..., members={len(member_peer_shared_ids)}")
+
+    key_shared_ids = []
+    skipped_relays = 0
+    for i, recipient_peer_shared_id in enumerate(member_peer_shared_ids):
+        # SECURITY: Never distribute keys to server relays
+        # Server relays can sync events but cannot decrypt messages
+        if server_relay.is_server_relay(recipient_peer_shared_id, peer_id, db):
+            log.info(f"key_shared.share_key_with_specific_members() skipping server relay {recipient_peer_shared_id[:20]}...")
+            skipped_relays += 1
+            continue
+
+        try:
+            key_shared_id = create(
+                key_id=key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                recipient_peer_id=recipient_peer_shared_id,
+                t_ms=t_ms + i + 1,  # Increment timestamp for each member
+                db=db
+            )
+            key_shared_ids.append(key_shared_id)
+            log.info(f"key_shared.share_key_with_specific_members() created key_shared for {recipient_peer_shared_id[:20]}...")
+        except Exception as e:
+            log.warning(f"key_shared.share_key_with_specific_members() failed for {recipient_peer_shared_id[:20]}...: {e}")
+
+    if skipped_relays > 0:
+        log.info(f"key_shared.share_key_with_specific_members() skipped {skipped_relays} server relay(s)")
+
+    return key_shared_ids

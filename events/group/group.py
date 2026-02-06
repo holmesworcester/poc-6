@@ -52,6 +52,14 @@ EVENT_SPEC = {
 log = logging.getLogger(__name__)
 
 
+class KeyUnsafeError(Exception):
+    """Raised when trying to use a key that might include removed users."""
+    def __init__(self, message: str, key_id: str, group_id: str):
+        super().__init__(message)
+        self.key_id = key_id
+        self.group_id = group_id
+
+
 # Wire format functions - encode/decode for group event type
 
 def encode_plaintext(
@@ -357,6 +365,77 @@ def _wire_shadow_group(name: str, key_id: str, is_main: int, network_id: str | N
         raise ValueError("wire shadow decode key_id mismatch")
 
 
+def is_key_safe(key_id: str, recorded_by: str, db: Any) -> tuple[bool, str | None]:
+    """Check if a key is safe from all removed users.
+
+    A key is safe from removed user X if:
+    - key.created_at >= removal.removed_at (created after removal), AND
+    - key_creator == removal_creator (creator knew about removal), OR
+    - key_creator == self (I created it after syncing all removals)
+
+    Args:
+        key_id: The key ID to check
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        (True, None) if safe
+        (False, reason) if not safe
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Get my peer_shared_id
+    peer_self = safedb.query_one(
+        "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+        (recorded_by, recorded_by)
+    )
+    if not peer_self:
+        return (False, "peer_self not found")
+    my_peer_shared_id = peer_self['peer_shared_id']
+
+    # Get key's created_at
+    key_row = safedb.query_one(
+        "SELECT created_at FROM group_keys WHERE key_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
+    )
+    if not key_row:
+        return (False, "key not found")
+    key_created_at = key_row['created_at']
+
+    # Get who created/shared this key
+    key_share = safedb.query_one(
+        "SELECT signed_by FROM group_keys_shared WHERE original_key_id = ? AND recorded_by = ?",
+        (key_id, recorded_by)
+    )
+    # If no share record, I created this key
+    key_creator = key_share['signed_by'] if key_share else my_peer_shared_id
+
+    # Check each removed user
+    removed_users = safedb.query(
+        "SELECT user_id, removed_at, signed_by FROM removed_users WHERE recorded_by = ?",
+        (recorded_by,)
+    )
+
+    for removal in removed_users:
+        removal_time = removal['removed_at']
+        removal_creator = removal['signed_by']
+
+        # Key created before removal? Definitely unsafe
+        if key_created_at < removal_time:
+            return (False, f"key created before removal of {removal['user_id'][:20]}...")
+
+        # Key created after removal - check if creator knew about it
+        if key_creator == removal_creator:
+            continue  # Creator also removed this user, definitely safe
+        if key_creator == my_peer_shared_id:
+            continue  # I created the key after syncing all removals, safe
+
+        # Different person created key vs removal - split-brain possible
+        return (False, f"split-brain: key by {key_creator[:20]}..., removal by {removal_creator[:20]}...")
+
+    return (True, None)
+
+
 def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     """Get the key_data for a group.
 
@@ -370,6 +449,7 @@ def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
 
     Raises:
         ValueError: If group not found or peer doesn't have access
+        KeyUnsafeError: If key is not safe from removed users
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -381,8 +461,15 @@ def pick_key(group_id: str, recorded_by: str, db: Any) -> dict[str, Any]:
     if not row:
         raise ValueError(f"group not found or access denied: {group_id} for peer {recorded_by}")
 
+    key_id = row['key_id']
+
+    # Check if key is safe
+    safe, reason = is_key_safe(key_id, recorded_by, db)
+    if not safe:
+        raise KeyUnsafeError(f"Current key is not safe: {reason}", key_id=key_id, group_id=group_id)
+
     # Get key_data from key (with access control)
-    return group_key.get_key(row['key_id'], recorded_by, db)
+    return group_key.get_key(key_id, recorded_by, db)
 
 
 def list(recorded_by: str, db: Any) -> list[dict[str, Any]]:
