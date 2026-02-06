@@ -336,6 +336,14 @@ def _handle_user_removed_side_effects(
     else:
         log.debug(f"user_removed: skipping key rotation - not the event creator")
 
+    # SPLIT-BRAIN DETECTION: Check if current key was shared with any removed user
+    # This handles the case where concurrent removals in partitions create keys
+    # that don't exclude all removed users
+    if peer_self_row:
+        _check_and_rerotate_for_split_brain(
+            removed_user_id, recorded_by, peer_self_row['peer_shared_id'], removed_at, db
+        )
+
 
 def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:
     """Rotate group keys for all groups a removed user was a member of.
@@ -474,6 +482,125 @@ def _invalidate_invites_for_removal(removed_user_id: str, recorded_by: str, t_ms
     log.info(f"_invalidate_invites_for_removal: invalidated {total_invalidated} invites for removed user {removed_user_id[:20]}...")
 
     return total_invalidated
+
+
+def _check_and_rerotate_for_split_brain(
+    trigger_removed_user_id: str, recorded_by: str, peer_shared_id: str, t_ms: int, db: Any
+) -> None:
+    """Check for split-brain key distribution and re-rotate if needed.
+
+    This handles the case where concurrent removals in network partitions create keys
+    that don't exclude all removed users. For example:
+    - Alice removes Bob -> creates key_A (excludes Bob)
+    - Carol removes Dave (in partition) -> creates key_C (excludes Dave, but includes Bob!)
+    - After partition heals, Bob has key_C but shouldn't
+
+    Solution: When processing any user_removed event, check if the current key was
+    shared with any removed user. If so, trigger a re-rotation.
+
+    Args:
+        trigger_removed_user_id: The user_id that triggered this check (just removed)
+        recorded_by: Local peer ID
+        peer_shared_id: Local peer's shared ID
+        t_ms: Timestamp
+        db: Database connection
+    """
+    from events.group import group_key, group
+    from events.identity import invite
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Only admins can rotate keys
+    if not invite.is_admin(peer_shared_id, recorded_by, db):
+        log.debug(f"user_removed._check_and_rerotate_for_split_brain() not an admin, skipping")
+        return
+
+    # Get all removed users
+    removed_users = safedb.query(
+        "SELECT user_id FROM removed_users WHERE recorded_by = ?",
+        (recorded_by,)
+    )
+    if not removed_users:
+        return
+
+    removed_user_ids = {r['user_id'] for r in removed_users}
+
+    # Get all peer_shared_ids for removed users
+    removed_peer_shared_ids: set[str] = set()
+    for removed_user_id in removed_user_ids:
+        peers = safedb.query(
+            "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
+            (removed_user_id, recorded_by)
+        )
+        for p in peers:
+            removed_peer_shared_ids.add(p['peer_shared_id'])
+
+    if not removed_peer_shared_ids:
+        return
+
+    # Get the network_id for finding groups
+    network_id = network.get_network_id(recorded_by, db)
+    if not network_id:
+        return
+
+    # Check the all_users group
+    all_users_group_id = network.get_all_users_group_id(network_id, recorded_by, db)
+    if not all_users_group_id:
+        return
+
+    current_key = group.get_current_key(all_users_group_id, recorded_by, db)
+    if not current_key:
+        return
+
+    key_id = current_key['key_id']
+
+    # Check if any removed user received this key via group_key_shared
+    # The hint/recipient_prekey_id links to group_prekeys_shared.group_prekey_id
+    # which has peer_id (peer_shared_id)
+    compromised = safedb.query_one(
+        """SELECT 1 FROM group_keys_shared gks
+           JOIN group_prekeys_shared gps ON gks.recipient_prekey_id = gps.group_prekey_id
+               AND gps.recorded_by = gks.recorded_by
+           WHERE gks.original_key_id = ?
+             AND gps.peer_id IN ({})
+             AND gks.recorded_by = ?
+           LIMIT 1""".format(','.join('?' * len(removed_peer_shared_ids))),
+        (key_id, *removed_peer_shared_ids, recorded_by)
+    )
+
+    if compromised:
+        log.warning(f"user_removed._check_and_rerotate_for_split_brain() DETECTED: current key was shared with removed user(s), triggering re-rotation")
+
+        # Find which removed user to exclude (use the first one we find that has the key)
+        # Actually, we need to exclude ALL removed users - rotate_for_removal handles this
+        # by checking group_members and excluding removed_user_id
+
+        # Pick any removed user to pass as the "removed_user_id" for rotation
+        # The rotation will exclude this user AND check current membership
+        for removed_user_id in removed_user_ids:
+            # Find peer_shared_id for this removed user
+            removed_peer_row = safedb.query_one(
+                "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+                (removed_user_id, recorded_by)
+            )
+            removed_peer_shared_id = removed_peer_row['peer_shared_id'] if removed_peer_row else None
+
+            try:
+                group_key.rotate_for_removal(
+                    group_id=all_users_group_id,
+                    peer_id=recorded_by,
+                    peer_shared_id=peer_shared_id,
+                    t_ms=t_ms,
+                    removed_user_id=removed_user_id,
+                    removed_peer_shared_id=removed_peer_shared_id,
+                    db=db
+                )
+                log.info(f"user_removed._check_and_rerotate_for_split_brain() re-rotated key for split-brain recovery")
+                break  # Only need one rotation - it will exclude all removed users
+            except Exception as e:
+                log.warning(f"user_removed._check_and_rerotate_for_split_brain() re-rotation failed: {e}")
+    else:
+        log.debug(f"user_removed._check_and_rerotate_for_split_brain() no compromised keys detected")
 
 
 def _command_handle_user_removed_side_effects(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
