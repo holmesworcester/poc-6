@@ -91,7 +91,6 @@ def test_key_rotation_only_by_remover(fresh_db):
     assert_eventually(charlie_has_keys, db=db, start_t_ms=None)
 
 
-@pytest.mark.skip(reason="Test sensitive to negentropy key format - needs investigation")
 def test_multiple_removals_no_key_explosion(fresh_db):
     """Verify that multiple removals don't cause exponential key growth."""
     db = fresh_db

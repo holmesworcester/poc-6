@@ -70,7 +70,7 @@ class NetworkSimulator:
     scheduled delivery time has passed.
     """
 
-    def __init__(self, config: NetworkConfig = None):
+    def __init__(self, config: NetworkConfig = None, seed: int = None):
         self.config = config or NetworkConfig()
         self._pending: list[PendingPacket] = []
         self._in_burst = False
@@ -84,6 +84,9 @@ class NetworkSimulator:
         self._nat_ttl_ms = 30000  # NAT mapping timeout
         self._nat_mapping_created_at: dict[tuple, int] = {}  # internal -> created_at
 
+        # Own Random instance for isolation from other tests in parallel execution
+        self._rng = random.Random(seed)
+
         # Stats
         self.packets_sent = 0
         self.packets_dropped = 0
@@ -93,7 +96,7 @@ class NetworkSimulator:
         """Update configuration."""
         self.config = config
 
-    def reset(self) -> None:
+    def reset(self, seed: int = None) -> None:
         """Reset simulator state."""
         self._pending.clear()
         self._in_burst = False
@@ -102,6 +105,8 @@ class NetworkSimulator:
         self._nat_mappings.clear()
         self._nat_enabled_addrs.clear()
         self._nat_mapping_created_at.clear()
+        if seed is not None:
+            self._rng = random.Random(seed)
         self.packets_sent = 0
         self.packets_dropped = 0
         self.packets_delivered = 0
@@ -206,7 +211,7 @@ class NetworkSimulator:
 
         # Check if entering burst
         if self.config.burst_loss_probability > 0:
-            if random.random() < self.config.burst_loss_probability:
+            if self._rng.random() < self.config.burst_loss_probability:
                 self._in_burst = True
                 self._burst_remaining = self.config.burst_loss_length - 1
                 log.debug(f"simulator: entering burst loss, dropping packet")
@@ -215,7 +220,7 @@ class NetworkSimulator:
 
         # Check random loss
         if self.config.packet_loss_rate > 0:
-            if random.random() < self.config.packet_loss_rate:
+            if self._rng.random() < self.config.packet_loss_rate:
                 log.debug(f"simulator: dropped packet (random loss)")
                 self.packets_dropped += 1
                 return False
@@ -223,7 +228,7 @@ class NetworkSimulator:
         # Calculate delivery time
         latency = self.config.latency_ms
         if self.config.jitter_ms > 0:
-            latency += random.gauss(0, self.config.jitter_ms)
+            latency += self._rng.gauss(0, self.config.jitter_ms)
             latency = max(1, latency)  # Ensure non-negative
 
         deliver_at = t_ms + int(latency)
