@@ -22,7 +22,7 @@ from core import treekem
 from events.group import group_key, treekem_pubkey
 from events.identity import peer
 from core.db import create_safe_db
-from core.projection.types import ProjectorResult, WriteOp, EmitEvent
+from core.projection.types import ProjectorResult, WriteOp, EmitEvent, Command
 
 log = logging.getLogger(__name__)
 
@@ -349,21 +349,25 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'recorded_at': ctx.recorded_at,
             },
         ),
-        # Update the recipient's groups table to use this key
-        # This enables key rotation: when a new key is shared via TreeKEM,
-        # the recipient's view of the group's current key is updated
-        WriteOp(
-            op='update',
-            table='groups',
-            values={'key_id': computed_key_id},
-            where={'group_id': group_id},
-        ),
     ]
+
+    # Use monotonic command to update group key - same as group_key_shared
+    commands = (
+        Command(
+            command_type='monotonic_update_group_key',
+            args={
+                'group_id': group_id,
+                'key_id': computed_key_id,
+                'key_updated_at': created_at,
+            },
+        ),
+    )
 
     return ProjectorResult(
         writes=tuple(writes),
         valid_event=True,
         emit_events=(emit_group_key,),
+        commands=commands,
     )
 
 

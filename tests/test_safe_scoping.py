@@ -212,8 +212,8 @@ def test_unsafedb_allows_device_operations():
 
     # Should allow insert into device table
     unsafedb.execute(
-        "INSERT INTO local_peers VALUES (?, ?, ?, ?)",
-        ('peer1', 'pubkey1', b'privkey1', 1000)
+        "INSERT INTO local_peers VALUES (?, ?, ?, ?, ?)",
+        ('peer1', 'pubkey1', b'privkey1', 1000, None)
     )
     db.commit()
 

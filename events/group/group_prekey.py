@@ -342,8 +342,8 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
         'errors': []
     }
 
-    # Get all local peers
-    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+    # Get all local peers (with peer_shared_id from device-wide table)
+    local_peer_rows = unsafedb.query("SELECT peer_id, peer_shared_id FROM local_peers")
 
     if not local_peer_rows:
         log.info(f"group_prekey.replenish_for_all_peers() no local peers found")
@@ -353,6 +353,11 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
+        peer_shared_id = peer_row['peer_shared_id']
+        if not peer_shared_id:
+            log.debug(f"group_prekey.replenish_for_all_peers() no peer_shared_id in local_peers for {peer_id[:20]}...")
+            continue
+
         try:
             # Count non-expired group prekeys for this peer
             safedb = create_safe_db(db, recorded_by=peer_id)
@@ -370,21 +375,6 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
             # Replenish if below minimum
             if prekey_count < MIN_GROUP_PREKEYS:
                 log.info(f"group_prekey.replenish_for_all_peers() peer {peer_id[:20]}... has only {prekey_count} prekeys, replenishing with {REPLENISH_GROUP_PREKEYS}")
-
-                # Get peer_shared_id for sharing prekeys
-                peer_shared_row = safedb.query_one(
-                    "SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ? AND peer_shared_id = (SELECT peer_shared_id FROM peers_shared WHERE recorded_by = ? ORDER BY created_at DESC LIMIT 1)",
-                    (peer_id, peer_id)
-                )
-                if not peer_shared_row:
-                    # Fallback: get self from local_peers (device-wide table)
-                    self_row = unsafedb.query_one(
-                        "SELECT peer_id as peer_shared_id FROM local_peers WHERE peer_id = ?",
-                        (peer_id,)
-                    )
-                    peer_shared_id = self_row['peer_shared_id'] if self_row else peer_id
-                else:
-                    peer_shared_id = peer_shared_row['peer_shared_id']
 
                 prekey_ids = generate_batch(peer_id, REPLENISH_GROUP_PREKEYS, t_ms, db)
 
@@ -450,27 +440,21 @@ def share_existing_prekeys_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
         'errors': []
     }
 
-    # Get all local peers
-    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+    # Get all local peers (with peer_shared_id from device-wide table)
+    local_peer_rows = unsafedb.query("SELECT peer_id, peer_shared_id FROM local_peers")
 
     if not local_peer_rows:
         return stats
 
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
+        peer_shared_id = peer_row['peer_shared_id']
+        if not peer_shared_id:
+            log.debug(f"share_existing_prekeys_for_all_peers() no peer_shared_id in local_peers for {peer_id[:20]}...")
+            continue
+
         try:
             safedb = create_safe_db(db, recorded_by=peer_id)
-
-            # Get peer_shared_id
-            peer_self_row = safedb.query_one(
-                "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
-                (peer_id, peer_id)
-            )
-            if not peer_self_row:
-                log.debug(f"share_existing_prekeys_for_all_peers() no peer_self for {peer_id[:20]}...")
-                continue
-
-            peer_shared_id = peer_self_row['peer_shared_id']
 
             # Get all local prekeys that haven't been shared yet
             # Check which prekeys have corresponding shared events

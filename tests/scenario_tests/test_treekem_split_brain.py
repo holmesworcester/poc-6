@@ -27,7 +27,6 @@ from tests.utils.tick_helper import assert_eventually, TestClock, run_ticks
 from core.db import create_safe_db
 
 
-@pytest.mark.xfail(reason="Split-brain key distribution requires re-rotation detection on convergence")
 def test_split_brain_removals_both_excluded_after_convergence(fresh_db):
     """Test that split-brain removals result in both removed members being locked out.
 
@@ -190,17 +189,11 @@ def test_split_brain_removals_both_excluded_after_convergence(fresh_db):
 
     # Note: This test documents expected behavior. If the system doesn't
     # re-rotate after detecting concurrent removals, this will fail.
-    if final_key['key_id'] in bob_key_ids:
-        pytest.xfail(
-            "SECURITY BUG: Bob has access to final key after being removed. "
-            "rotate_for_removal() needs to detect concurrent removals and re-rotate."
-        )
+    assert final_key['key_id'] not in bob_key_ids, \
+        "SECURITY: Bob should NOT have access to the final key after being removed"
 
-    if final_key['key_id'] in dave_key_ids:
-        pytest.xfail(
-            "SECURITY BUG: Dave has access to final key after being removed. "
-            "rotate_for_removal() needs to detect concurrent removals and re-rotate."
-        )
+    assert final_key['key_id'] not in dave_key_ids, \
+        "SECURITY: Dave should NOT have access to the final key after being removed"
 
     # === VERIFY: Eve (not removed) should have the current key ===
     def eve_has_final_key():
@@ -337,7 +330,6 @@ def test_split_brain_messages_after_removal_not_readable_by_removed(fresh_db):
         "SECURITY: Bob should NOT see message sent after his removal"
 
 
-@pytest.mark.xfail(reason="Known bug: Split-brain removals don't re-rotate to exclude all removed members")
 def test_split_brain_needs_rerotation_detection(fresh_db):
     """Test that system detects and handles concurrent removals.
 
@@ -407,12 +399,7 @@ def test_split_brain_needs_rerotation_detection(fresh_db):
 
     all_users_group_id = network.get_all_users_group_id(alice['network_id'], alice['peer_id'], db)
 
-    # Count key rotations before
     safedb = create_safe_db(db, recorded_by=alice['peer_id'])
-    key_count_before = safedb.query_one(
-        "SELECT COUNT(DISTINCT key_id) as count FROM groups WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    )['count']
 
     # Partition Carol
     network_config.partition_peer(carol['peer_id'])
@@ -449,20 +436,28 @@ def test_split_brain_needs_rerotation_detection(fresh_db):
     # Run sync to convergence
     t_ms = run_ticks(db=db, start_t_ms=t_ms, num_rounds=200)
 
-    # The fix should detect concurrent removals and trigger re-rotation
-    # So we expect at least 3 key rotations:
-    # 1. Original key -> key after Bob removal (Alice's view)
-    # 2. Original key -> key after Dave removal (Carol's view)
-    # 3. Re-rotation to exclude BOTH (after convergence)
+    # Verify security property: the final key should not be accessible
+    # to either removed user
+    final_key = group.get_current_key(all_users_group_id, alice['peer_id'], db)
+    assert final_key is not None, "Alice should have a final key"
 
-    # Count key rotations after
-    key_count_after = len(safedb.query(
-        "SELECT DISTINCT key_id FROM group_keys WHERE recorded_by = ?",
-        (alice['peer_id'],)
-    ))
+    # Get keys known to Bob and Dave
+    safedb_bob = create_safe_db(db, recorded_by=members['bob']['peer_id'])
+    bob_keys = safedb_bob.query(
+        "SELECT key_id FROM group_keys WHERE recorded_by = ?",
+        (members['bob']['peer_id'],)
+    )
+    bob_key_ids = {k['key_id'] for k in bob_keys}
 
-    # This assertion documents expected behavior after the fix
-    # Currently it will fail because re-rotation is not implemented
-    assert key_count_after >= key_count_before + 3, \
-        f"Should have at least 3 new keys (2 removals + 1 re-rotation). " \
-        f"Had {key_count_before}, now have {key_count_after}"
+    safedb_dave = create_safe_db(db, recorded_by=members['dave']['peer_id'])
+    dave_keys = safedb_dave.query(
+        "SELECT key_id FROM group_keys WHERE recorded_by = ?",
+        (members['dave']['peer_id'],)
+    )
+    dave_key_ids = {k['key_id'] for k in dave_keys}
+
+    assert final_key['key_id'] not in bob_key_ids, \
+        "SECURITY: Bob should NOT have access to the final key after being removed"
+
+    assert final_key['key_id'] not in dave_key_ids, \
+        "SECURITY: Dave should NOT have access to the final key after being removed"

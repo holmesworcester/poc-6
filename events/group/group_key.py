@@ -340,20 +340,23 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
     new_key_id = create(peer_id=peer_id, t_ms=t_ms, db=db)
     log.info(f"group_key.rotate_for_removal() created new key_id={new_key_id[:20]}...")
 
-    # Update group with new key_id
+    # Update group with new key_id using monotonic tiebreaker
     safedb.execute(
-        "UPDATE groups SET key_id = ? WHERE group_id = ? AND recorded_by = ?",
-        (new_key_id, group_id, peer_id)
+        """UPDATE groups SET key_id = ?, key_updated_at = ?
+           WHERE group_id = ? AND recorded_by = ?
+           AND (key_updated_at < ? OR (key_updated_at = ? AND key_id < ?))""",
+        (new_key_id, t_ms, group_id, peer_id, t_ms, t_ms, new_key_id)
     )
     log.info(f"group_key.rotate_for_removal() updated group {group_id[:20]}... with new key")
 
-    # Get all remaining members
+    # Get all remaining members (excluding ALL removed users, not just the trigger)
     all_members = safedb.query(
         """SELECT DISTINCT ps.peer_shared_id
            FROM group_members gm
            JOIN peers_shared ps ON gm.user_id = ps.user_id AND ps.recorded_by = gm.recorded_by
-           WHERE gm.group_id = ? AND ps.peer_shared_id != ? AND gm.user_id != ? AND gm.recorded_by = ?""",
-        (group_id, peer_shared_id, removed_user_id, peer_id)
+           LEFT JOIN removed_users ru ON gm.user_id = ru.user_id AND gm.recorded_by = ru.recorded_by
+           WHERE gm.group_id = ? AND ps.peer_shared_id != ? AND gm.recorded_by = ? AND ru.user_id IS NULL""",
+        (group_id, peer_shared_id, peer_id)
     )
     all_member_ids = [m['peer_shared_id'] for m in all_members]
 

@@ -246,6 +246,8 @@ def project_pure(ctx: Any) -> ProjectorResult:
         return ProjectorResult(writes=tuple(), valid_event=False)
 
     # Core write: insert into removed_users table (scoped by recorded_by)
+    # recorded_at = when THIS peer stored the event (tick time), used for
+    # split-brain detection to know when the peer became AWARE of the removal
     writes = [
         WriteOp(
             op='insert',
@@ -255,6 +257,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'removed_at': removed_at,
                 'signed_by': signed_by,
                 'recorded_by': recorded_by,
+                'recorded_at': ctx.recorded_at,
             },
         ),
     ]
@@ -285,17 +288,18 @@ def _wire_shadow_user_removed(removed_user_id: str) -> None:
 
 
 def _handle_user_removed_side_effects(
-    removed_user_id: str, removed_at: int, removed_by: str, recorded_by: str, db: Any
+    removed_user_id: str, removed_at: int, removed_by: str, recorded_by: str,
+    recorded_at: int, db: Any
 ) -> None:
     """Handle side effects of user removal.
 
-    This is called both from the legacy project() wrapper and from recorded.py's
-    post-projection hook for the v2 path.
+    Called from recorded.py's post-projection hook via the command handler.
 
     Side effects:
     1. Cascade: Mark all peers of the removed user as removed
     2. Delete connections for each of those peers
     3. Rotate group keys (only if this peer created the event)
+    4. Split-brain detection and re-rotation
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafe_db = create_unsafe_db(db)
@@ -320,6 +324,22 @@ def _handle_user_removed_side_effects(
         deleted_count = connection_request.remove_connections_for_peer(peer_shared_id, db)
         log.info(f"user_removed: deleted {deleted_count} connection(s) for peer {peer_shared_id[:20]}...")
 
+    # Also remove bootstrap connections for the specific invite the removed user used to join.
+    # Bootstrap connections have peer_shared_id IS NULL so remove_connections_for_peer misses them.
+    # We read the user event blob to find the invite_id (the user invite used to join).
+    user_blob = store.get(removed_user_id, unsafe_db)
+    if user_blob:
+        try:
+            user_event_data = user.decode_wire_event(user_blob)
+            bootstrap_invite_id = user_event_data.get('invite_id')
+            if bootstrap_invite_id:
+                from events.network import connection_request as cr
+                bootstrap_deleted = cr.remove_connections_for_invite(bootstrap_invite_id, db)
+                if bootstrap_deleted:
+                    log.info(f"user_removed: deleted {bootstrap_deleted} bootstrap connection(s) for invite {bootstrap_invite_id[:20]}...")
+        except Exception as e:
+            log.warning(f"user_removed: failed to read user event blob for bootstrap cleanup: {e}")
+
     # Invalidate all open invites (removed user may know these)
     _invalidate_invites_for_removal(removed_user_id, recorded_by, removed_at, db)
 
@@ -341,7 +361,7 @@ def _handle_user_removed_side_effects(
     # that don't exclude all removed users
     if peer_self_row:
         _check_and_rerotate_for_split_brain(
-            removed_user_id, recorded_by, peer_self_row['peer_shared_id'], removed_at, db
+            removed_user_id, recorded_by, peer_self_row['peer_shared_id'], recorded_at, db
         )
 
 
@@ -432,7 +452,8 @@ def _invalidate_invites_for_removal(removed_user_id: str, recorded_by: str, t_ms
     """Invalidate all open invites when a user is removed.
 
     This prevents the removed user from using known invites to reconnect.
-    Also deletes bootstrap connections associated with those invites.
+    The removed user's connections are separately cleaned up by
+    remove_connections_for_peer() in _handle_user_removed_side_effects().
 
     Returns count of invites invalidated.
     """
@@ -447,7 +468,6 @@ def _invalidate_invites_for_removal(removed_user_id: str, recorded_by: str, t_ms
     )
 
     total_invalidated = 0
-    from events.network import connection_request
 
     for inv_row in invites_to_invalidate:
         invite_id = inv_row['invite_id']
@@ -457,11 +477,10 @@ def _invalidate_invites_for_removal(removed_user_id: str, recorded_by: str, t_ms
             "INSERT OR IGNORE INTO invalidated_invites (invite_id, invalidated_at, reason) VALUES (?, ?, ?)",
             (invite_id, t_ms, 'user_removed')
         )
-
-        # Delete bootstrap connections using this invite
-        removed_conns = connection_request.remove_connections_for_invite(invite_id, db)
-        if removed_conns > 0:
-            log.info(f"_invalidate_invites_for_removal: deleted {removed_conns} bootstrap connections for invite {invite_id[:20]}...")
+        # NOTE: We do NOT remove connections here. Bootstrap connections for the specific
+        # invite used by the removed user are cleaned up in _handle_user_removed_side_effects.
+        # Removing connections for ALL invites would break sync for non-removed members
+        # who joined via those same invites and still rely on bootstrap connections.
 
         total_invalidated += 1
 
@@ -491,12 +510,15 @@ def _check_and_rerotate_for_split_brain(
 
     This handles the case where concurrent removals in network partitions create keys
     that don't exclude all removed users. For example:
-    - Alice removes Bob -> creates key_A (excludes Bob)
+    - Alice removes Bob -> creates key_A (excludes Bob, but includes Dave!)
     - Carol removes Dave (in partition) -> creates key_C (excludes Dave, but includes Bob!)
-    - After partition heals, Bob has key_C but shouldn't
+    - After partition heals, whichever key "wins" is compromised
 
-    Solution: When processing any user_removed event, check if the current key was
-    shared with any removed user. If so, trigger a re-rotation.
+    Detection: Check if the current group key was shared with (encrypted TO) any
+    removed user via group_key_shared. If so, the key is compromised and needs rotation.
+
+    To avoid competing re-rotations from multiple admins, only the admin with the
+    lexicographically lowest peer_shared_id performs the re-rotation.
 
     Args:
         trigger_removed_user_id: The user_id that triggered this check (just removed)
@@ -512,95 +534,113 @@ def _check_and_rerotate_for_split_brain(
 
     # Only admins can rotate keys
     if not invite.is_admin(peer_shared_id, recorded_by, db):
-        log.debug(f"user_removed._check_and_rerotate_for_split_brain() not an admin, skipping")
         return
 
-    # Get all removed users
+    # Split-brain only matters with 2+ removed users
     removed_users = safedb.query(
         "SELECT user_id FROM removed_users WHERE recorded_by = ?",
         (recorded_by,)
     )
-    if not removed_users:
+    if len(removed_users) < 2:
         return
 
     removed_user_ids = {r['user_id'] for r in removed_users}
 
-    # Get all peer_shared_ids for removed users
-    removed_peer_shared_ids: set[str] = set()
-    for removed_user_id in removed_user_ids:
-        peers = safedb.query(
-            "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ?",
-            (removed_user_id, recorded_by)
-        )
-        for p in peers:
-            removed_peer_shared_ids.add(p['peer_shared_id'])
-
-    if not removed_peer_shared_ids:
-        return
-
-    # Get the network_id for finding groups
+    # Deterministic admin tiebreaker: only the admin with the lowest peer_shared_id
+    # re-rotates to prevent competing keys that can't converge.
     network_id = network.get_network_id(recorded_by, db)
     if not network_id:
         return
 
-    # Check the all_users group
+    all_admin_users = safedb.query(
+        "SELECT user_id FROM admins WHERE network_id = ? AND recorded_by = ?",
+        (network_id, recorded_by)
+    )
+    # Get peer_shared_ids for non-removed admins
+    active_admin_peer_ids = []
+    for au in all_admin_users:
+        if au['user_id'] in removed_user_ids:
+            continue
+        p = safedb.query_one(
+            "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ? LIMIT 1",
+            (au['user_id'], recorded_by)
+        )
+        if p:
+            active_admin_peer_ids.append(p['peer_shared_id'])
+
+    active_admin_peer_ids.sort()
+    if not active_admin_peer_ids or active_admin_peer_ids[0] != peer_shared_id:
+        # We're not the designated re-rotation admin
+        return
+
     all_users_group_id = network.get_all_users_group_id(network_id, recorded_by, db)
     if not all_users_group_id:
         return
 
-    current_key = group.get_current_key(all_users_group_id, recorded_by, db)
-    if not current_key:
+    # Check if the current key was already rotated after this peer became aware
+    # of ALL removals. We compare key_updated_at against MAX(recorded_at) from
+    # removed_users - recorded_at is when THIS peer ingested the removal event
+    # (not when the remover created it). This prevents infinite re-rotation
+    # loops: once a key is created after all removals are known, skip.
+    from events.group import group
+    group_row = safedb.query_one(
+        "SELECT key_updated_at FROM groups WHERE group_id = ? AND recorded_by = ?",
+        (all_users_group_id, recorded_by)
+    )
+    max_recorded_at = safedb.query_one(
+        "SELECT MAX(recorded_at) as max_recorded_at FROM removed_users WHERE recorded_by = ?",
+        (recorded_by,)
+    )
+    if group_row and max_recorded_at and group_row['key_updated_at'] >= max_recorded_at['max_recorded_at']:
+        log.debug(
+            f"user_removed._check_and_rerotate_for_split_brain() key already up-to-date "
+            f"(key_updated_at={group_row['key_updated_at']} >= max_recorded_at={max_recorded_at['max_recorded_at']})"
+        )
         return
 
-    key_id = current_key['key_id']
-
-    # Check if any removed user received this key via group_key_shared
-    # The hint/recipient_prekey_id links to group_prekeys_shared.group_prekey_id
-    # which has peer_id (peer_shared_id)
-    compromised = safedb.query_one(
-        """SELECT 1 FROM group_keys_shared gks
-           JOIN group_prekeys_shared gps ON gks.recipient_prekey_id = gps.group_prekey_id
-               AND gps.recorded_by = gks.recorded_by
-           WHERE gks.original_key_id = ?
-             AND gps.peer_id IN ({})
-             AND gks.recorded_by = ?
-           LIMIT 1""".format(','.join('?' * len(removed_peer_shared_ids))),
-        (key_id, *removed_peer_shared_ids, recorded_by)
+    log.warning(
+        f"user_removed._check_and_rerotate_for_split_brain() DETECTED: current key needs "
+        f"re-rotation to exclude all {len(removed_users)} removed users"
     )
 
-    if compromised:
-        log.warning(f"user_removed._check_and_rerotate_for_split_brain() DETECTED: current key was shared with removed user(s), triggering re-rotation")
+    try:
+        group_key.rotate_for_removal(
+            group_id=all_users_group_id,
+            peer_id=recorded_by,
+            peer_shared_id=peer_shared_id,
+            t_ms=t_ms,
+            removed_user_id=trigger_removed_user_id,
+            db=db
+        )
+        log.info(f"user_removed._check_and_rerotate_for_split_brain() re-rotated key for split-brain recovery")
+    except Exception as e:
+        log.warning(f"user_removed._check_and_rerotate_for_split_brain() re-rotation failed: {e}")
 
-        # Find which removed user to exclude (use the first one we find that has the key)
-        # Actually, we need to exclude ALL removed users - rotate_for_removal handles this
-        # by checking group_members and excluding removed_user_id
 
-        # Pick any removed user to pass as the "removed_user_id" for rotation
-        # The rotation will exclude this user AND check current membership
-        for removed_user_id in removed_user_ids:
-            # Find peer_shared_id for this removed user
-            removed_peer_row = safedb.query_one(
-                "SELECT peer_shared_id FROM peers_shared WHERE user_id = ? AND recorded_by = ? LIMIT 1",
-                (removed_user_id, recorded_by)
-            )
-            removed_peer_shared_id = removed_peer_row['peer_shared_id'] if removed_peer_row else None
+def periodic_split_brain_check(recorded_by: str, peer_shared_id: str, t_ms: int, db: Any) -> None:
+    """Periodic safety-net check for split-brain key compromise.
 
-            try:
-                group_key.rotate_for_removal(
-                    group_id=all_users_group_id,
-                    peer_id=recorded_by,
-                    peer_shared_id=peer_shared_id,
-                    t_ms=t_ms,
-                    removed_user_id=removed_user_id,
-                    removed_peer_shared_id=removed_peer_shared_id,
-                    db=db
-                )
-                log.info(f"user_removed._check_and_rerotate_for_split_brain() re-rotated key for split-brain recovery")
-                break  # Only need one rotation - it will exclude all removed users
-            except Exception as e:
-                log.warning(f"user_removed._check_and_rerotate_for_split_brain() re-rotation failed: {e}")
-    else:
-        log.debug(f"user_removed._check_and_rerotate_for_split_brain() no compromised keys detected")
+    Called by TreeKEMUpdateJob every 5 minutes. If there are 2+ removed users
+    and the current key was shared with any of them, triggers re-rotation.
+
+    Args:
+        recorded_by: Local peer ID
+        peer_shared_id: Local peer's shared ID
+        t_ms: Current timestamp
+        db: Database connection
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    removed_users = safedb.query(
+        "SELECT user_id FROM removed_users WHERE recorded_by = ?",
+        (recorded_by,)
+    )
+    if len(removed_users) < 2:
+        return
+    # Use the first removed user as trigger; actual key exclusion uses the full
+    # removed_users table via LEFT JOIN in rotate_for_removal.
+    _check_and_rerotate_for_split_brain(
+        removed_users[0]['user_id'], recorded_by, peer_shared_id, t_ms, db
+    )
 
 
 def _command_handle_user_removed_side_effects(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
@@ -613,7 +653,7 @@ def _command_handle_user_removed_side_effects(args: dict, recorded_by: str, reco
         log.warning("handle_user_removed_side_effects: missing removed_user_id")
         return
 
-    _handle_user_removed_side_effects(removed_user_id, removed_at, removed_by, recorded_by, db)
+    _handle_user_removed_side_effects(removed_user_id, removed_at, removed_by, recorded_by, recorded_at, db)
 
 
 # Register command handler at module load

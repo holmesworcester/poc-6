@@ -506,6 +506,17 @@ class TreeKEMUpdateJob(Job):
             total_stats['groups_updated'] += stats.get('groups_updated', 0)
             total_stats['pubkeys_shared'] += stats.get('pubkeys_shared', 0)
 
+            # Safety net: check for split-brain key compromise
+            # If concurrent removals in partitions created a compromised key,
+            # this periodic check catches it and triggers re-rotation.
+            from events.identity import user_removed
+            user_removed.periodic_split_brain_check(
+                recorded_by=peer_id,
+                peer_shared_id=peer_shared_id,
+                t_ms=t_ms,
+                db=db,
+            )
+
         db.commit()
         return total_stats
 

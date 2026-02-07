@@ -20,7 +20,7 @@ from events.group import group_key
 from events.identity import peer
 from events.identity import invite
 from core.db import create_safe_db, create_unsafe_db
-from core.projection.types import ProjectorResult, WriteOp, EmitEvent
+from core.projection.types import ProjectorResult, WriteOp, EmitEvent, Command
 from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
@@ -263,24 +263,29 @@ def project_pure(ctx: Any) -> ProjectorResult:
         ),
     ]
 
-    # If group_id is provided, update the recipient's groups table to use this key
-    # This enables key rotation: when a new key is shared, the recipient's view of
-    # the group's current key is updated
+    # If group_id is provided, update the recipient's groups table to use this key.
+    # Uses a Command for monotonic update: only update if this key is newer than
+    # the current one (by created_at). This prevents stale partition-era keys from
+    # overwriting re-rotation keys during out-of-order sync.
     group_id = event_data.get('group_id')
+    commands = ()
     if group_id:
-        writes.append(
-            WriteOp(
-                op='update',
-                table='groups',
-                values={'key_id': computed_key_id},
-                where={'group_id': group_id},
-            )
+        commands = (
+            Command(
+                command_type='monotonic_update_group_key',
+                args={
+                    'group_id': group_id,
+                    'key_id': computed_key_id,
+                    'key_updated_at': created_at,
+                },
+            ),
         )
 
     return ProjectorResult(
         writes=tuple(writes),
         valid_event=True,
         emit_events=(emit_group_key,),
+        commands=commands,
     )
 
 
@@ -541,6 +546,34 @@ def _handle_retry_pending_name_updates(args: dict, recorded_by: str, recorded_at
 
 # Register command handler at module load
 register_command_handler('retry_pending_name_updates', _handle_retry_pending_name_updates)
+
+
+def _handle_monotonic_update_group_key(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Monotonic key_id update for groups table.
+
+    Only updates groups.key_id if the new key is strictly newer, or if timestamps
+    are equal, the key with the lexicographically higher key_id wins.
+    This deterministic tiebreaker ensures all peers converge on the same key
+    even when multiple key shares arrive at the same timestamp.
+
+    Split-brain compromise detection is handled separately by:
+    - _check_and_rerotate_for_split_brain() in user_removed.py (on removal events)
+    - periodic_split_brain_check() in user_removed.py (safety net every 5 minutes)
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    group_id = args['group_id']
+    key_id = args['key_id']
+    key_updated_at = args['key_updated_at']
+
+    safedb.execute(
+        """UPDATE groups SET key_id = ?, key_updated_at = ?
+           WHERE group_id = ? AND recorded_by = ?
+           AND (key_updated_at < ? OR (key_updated_at = ? AND key_id < ?))""",
+        (key_id, key_updated_at, group_id, recorded_by, key_updated_at, key_updated_at, key_id)
+    )
+
+
+register_command_handler('monotonic_update_group_key', _handle_monotonic_update_group_key)
 
 
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
