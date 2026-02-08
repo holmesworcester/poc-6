@@ -338,7 +338,9 @@ def _handle_user_removed_side_effects(
                 if bootstrap_deleted:
                     log.info(f"user_removed: deleted {bootstrap_deleted} bootstrap connection(s) for invite {bootstrap_invite_id[:20]}...")
         except Exception as e:
-            log.warning(f"user_removed: failed to read user event blob for bootstrap cleanup: {e}")
+            log.error(f"SECURITY: user_removed: failed to decode user event blob for bootstrap cleanup: {e}. "
+                      f"Stale bootstrap connections for removed user {removed_user_id[:20]}... may remain, "
+                      f"potentially allowing reconnection.")
 
     # Invalidate all open invites (removed user may know these)
     _invalidate_invites_for_removal(removed_user_id, recorded_by, removed_at, db)
@@ -454,6 +456,13 @@ def _invalidate_invites_for_removal(removed_user_id: str, recorded_by: str, t_ms
     This prevents the removed user from using known invites to reconnect.
     The removed user's connections are separately cleaned up by
     remove_connections_for_peer() in _handle_user_removed_side_effects().
+
+    Security tradeoff: This blanket-invalidates ALL open invites, not just
+    those the removed user might know about. This is intentionally aggressive -
+    we can't know which invites were shared out-of-band with the removed user,
+    so invalidating all of them is the safe default. The cost is that legitimate
+    pending invites must be re-created, but this is acceptable given the
+    security risk of a removed user rejoining via a known invite.
 
     Returns count of invites invalidated.
     """
@@ -573,6 +582,9 @@ def _check_and_rerotate_for_split_brain(
         # We're not the designated re-rotation admin
         return
 
+    # TODO: This check only covers the all_users_group. It should extend to all
+    # groups the removed user was a member of, since those keys are also at risk
+    # of split-brain compromise.
     all_users_group_id = network.get_all_users_group_id(network_id, recorded_by, db)
     if not all_users_group_id:
         return
@@ -580,8 +592,18 @@ def _check_and_rerotate_for_split_brain(
     # Check if the current key was already rotated after this peer became aware
     # of ALL removals. We compare key_updated_at against MAX(recorded_at) from
     # removed_users - recorded_at is when THIS peer ingested the removal event
-    # (not when the remover created it). This prevents infinite re-rotation
-    # loops: once a key is created after all removals are known, skip.
+    # (not when the remover created it).
+    #
+    # Using recorded_at (local ingestion time) is correct here because we need
+    # to know when THIS peer became aware of each removal. The split-brain
+    # scenario is: two partitions each remove a user, then merge. A peer only
+    # needs to re-rotate if its current key was created BEFORE it learned about
+    # all removals. The remover's created_at would be wrong here since a peer
+    # could have a key that post-dates the remote removal's created_at but
+    # pre-dates when it actually synced (and thus learned about) that removal.
+    #
+    # This prevents infinite re-rotation loops: once a key is created after
+    # all removals are known locally, no further rotation is needed.
     from events.group import group
     group_row = safedb.query_one(
         "SELECT key_updated_at FROM groups WHERE group_id = ? AND recorded_by = ?",
@@ -623,6 +645,10 @@ def periodic_split_brain_check(recorded_by: str, peer_shared_id: str, t_ms: int,
     Called by TreeKEMUpdateJob every 5 minutes. If there are 2+ removed users
     and the current key was shared with any of them, triggers re-rotation.
 
+    TODO: This function is only called from TreeKEMUpdateJob, so the periodic
+    check is inactive when TreeKEM is disabled. Consider adding a standalone
+    periodic job so the safety net works regardless of TreeKEM config.
+
     Args:
         recorded_by: Local peer ID
         peer_shared_id: Local peer's shared ID
@@ -638,6 +664,8 @@ def periodic_split_brain_check(recorded_by: str, peer_shared_id: str, t_ms: int,
         return
     # Use the first removed user as trigger; actual key exclusion uses the full
     # removed_users table via LEFT JOIN in rotate_for_removal.
+    # TODO: This only checks the all_users_group (via _check_and_rerotate).
+    # Extend to all groups the removed users were members of.
     _check_and_rerotate_for_split_brain(
         removed_users[0]['user_id'], recorded_by, peer_shared_id, t_ms, db
     )

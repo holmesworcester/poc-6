@@ -509,6 +509,9 @@ class TreeKEMUpdateJob(Job):
             # Safety net: check for split-brain key compromise
             # If concurrent removals in partitions created a compromised key,
             # this periodic check catches it and triggers re-rotation.
+            # TODO: This periodic check only runs inside TreeKEMUpdateJob, which
+            # requires TreeKEM to be enabled. Without TreeKEM, the per-event
+            # check in _handle_user_removed_side_effects is the only protection.
             from events.identity import user_removed
             user_removed.periodic_split_brain_check(
                 recorded_by=peer_id,
