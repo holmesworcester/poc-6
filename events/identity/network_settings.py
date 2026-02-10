@@ -336,7 +336,11 @@ def set_server_relay(
     # Get peer's private key for signing
     private_key = peer.get_private_key(peer_id, peer_id, db)
 
-    _wire_shadow_network_settings(network_id, server_peer_shared_id, server_address, 'star', admin_grant_id)
+    # Carry forward the current treekem_enabled setting so it isn't
+    # silently reset to False when writing new relay settings.
+    current_treekem = is_treekem_enabled(network_id, peer_id, db)
+
+    _wire_shadow_network_settings(network_id, server_peer_shared_id, server_address, 'star', admin_grant_id, current_treekem)
 
     blob = encode_wire_event(
         network_id_b64=network_id,
@@ -348,6 +352,7 @@ def set_server_relay(
         admin_grant_id_b64=admin_grant_id,
         created_at_ms=t_ms,
         private_key=private_key,
+        treekem_enabled=current_treekem,
     )
     network_settings_id = store.event(blob, peer_id, t_ms, db)
 

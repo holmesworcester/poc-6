@@ -225,7 +225,7 @@ def _get_treekem_key_by_hint(key_hint: bytes, recorded_by: str, db: Any) -> dict
 
     # Look up the shared pubkey to get tree position
     shared_row = safedb.query_one(
-        """SELECT group_id, depth, path_prefix, owner_peer_shared_id
+        """SELECT group_id, depth, path_prefix, public_key, owner_peer_shared_id
            FROM treekem_pubkeys_shared
            WHERE treekem_pubkey_shared_id = ? AND recorded_by = ?""",
         (key_hint_b64, recorded_by)
@@ -248,12 +248,16 @@ def _get_treekem_key_by_hint(key_hint: bytes, recorded_by: str, db: Any) -> dict
         log.debug(f"_get_treekem_key_by_hint() pubkey not owned by us")
         return None
 
-    # Look up our local keypair by (group_id, depth, path_prefix)
+    # Look up our local keypair by (group_id, depth, path_prefix, public_key).
+    # Matching on public_key is essential: after a pubkey refresh, multiple
+    # local keypairs can exist at the same (group_id, depth, path_prefix).
+    # The shared row's public_key identifies exactly which keypair was used
+    # to encrypt, so we must find the matching private key.
     local_row = safedb.query_one(
         """SELECT private_key FROM treekem_pubkeys
-           WHERE group_id = ? AND depth = ? AND path_prefix = ? AND recorded_by = ?""",
+           WHERE group_id = ? AND depth = ? AND path_prefix = ? AND public_key = ? AND recorded_by = ?""",
         (shared_row['group_id'], shared_row['depth'],
-         shared_row['path_prefix'], recorded_by)
+         shared_row['path_prefix'], shared_row['public_key'], recorded_by)
     )
 
     if not local_row or not local_row['private_key']:
@@ -512,10 +516,14 @@ def distribute_via_treekem(
             log.warning(f"distribute_via_treekem() no pubkey for node depth={depth}")
             continue
 
-        # Track that only the pubkey OWNER is actually covered
+        # Track that only the pubkey OWNER is actually covered.
+        # Skip if owner is not a current member (e.g., removed user) -
+        # encrypting to their pubkey would leak the rotated key.
         owner = pubkey_info['owner_peer_shared_id']
-        if owner in all_members:
-            actually_covered.add(owner)
+        if owner not in all_members:
+            log.warning(f"distribute_via_treekem() skipping node depth={depth}: owner {owner[:20]}... not in all_members")
+            continue
+        actually_covered.add(owner)
 
         try:
             key_shared_id = create(
