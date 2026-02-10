@@ -193,8 +193,9 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
            wrap_key_data: dict | None = None) -> str:
     """Create a shareable group_prekey_shared event from a local group prekey.
 
-    Context must be either group-based (for user invites) or user-based (for link invites).
-    Exactly one context type must be provided.
+    Context parameters (group_id, key_id, user_id) are optional and used for
+    documentation/logging purposes. The event itself is signed, not encrypted,
+    so no context is required for the wire format.
 
     Args:
         prekey_id: Local group_prekey event ID (to get public key from)
@@ -202,28 +203,15 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
-        group_id: Group context (for mode=user invites). Requires key_id.
-        key_id: Key reference (for mode=user invites). Requires group_id.
-        user_id: User context (for mode=link invites - device linking)
-        wrap_key_data: Optional key dict for wrapping (used when network key not available yet)
+        group_id: Optional group context (for logging/documentation)
+        key_id: Optional key reference (for logging/documentation)
+        user_id: Optional user context (for logging/documentation)
+        wrap_key_data: Optional key dict for wrapping (unused - event is signed not encrypted)
 
     Returns:
         group_prekey_shared_id: The stored group_prekey_shared event ID
-
-    Raises:
-        ValueError: If neither group context nor user context is provided,
-                    or if both are provided
     """
-    # Validate context - must have exactly one type
-    has_group_context = group_id is not None
-    has_user_context = user_id is not None
-
-    if not has_group_context and not has_user_context:
-        raise ValueError("group_prekey_shared requires either group context (group_id, key_id) or user context (user_id)")
-    if has_group_context and has_user_context:
-        raise ValueError("group_prekey_shared cannot have both group context and user context")
-    if has_group_context and key_id is None:
-        raise ValueError("group context requires both group_id and key_id")
+    # Context is optional - used for logging only, not in the actual event
 
     log.info(f"group_prekey_shared.create() creating group_prekey_shared for prekey_id={prekey_id}, t_ms={t_ms}")
 

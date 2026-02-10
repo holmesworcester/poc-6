@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS groups (
     signed_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     key_id TEXT NOT NULL,
+    key_updated_at INTEGER NOT NULL DEFAULT 0,  -- Monotonic timestamp for key rotation LWW
     is_main INTEGER DEFAULT 0,  -- 1 if this is the peer's main group for inviting
     network_id TEXT DEFAULT '',  -- Network this group belongs to (if any)
     recorded_by TEXT NOT NULL,

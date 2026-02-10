@@ -20,7 +20,7 @@ from events.group import group_key
 from events.identity import peer
 from events.identity import invite
 from core.db import create_safe_db, create_unsafe_db
-from core.projection.types import ProjectorResult, WriteOp, EmitEvent
+from core.projection.types import ProjectorResult, WriteOp, EmitEvent, Command
 from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
@@ -32,8 +32,17 @@ def encode_plaintext(
     key_id: bytes,
     symmetric_key: bytes,
     recipient_prekey_id: bytes,
+    group_id: bytes | None = None,
 ) -> bytes:
-    """Encode a group_key_shared payload plaintext (pre-encryption)."""
+    """Encode a group_key_shared payload plaintext (pre-encryption).
+
+    Layout (312 bytes):
+    - key_id (16 bytes)
+    - symmetric_key (32 bytes)
+    - recipient_prekey_id (16 bytes)
+    - group_id (16 bytes) - optional, zeros if not provided
+    - pad (remaining bytes)
+    """
     wire_format._require_len("key_id", key_id, 16)
     wire_format._require_len("symmetric_key", symmetric_key, wire_format.SECRET_SIZE)
     wire_format._require_len("recipient_prekey_id", recipient_prekey_id, 16)
@@ -41,6 +50,9 @@ def encode_plaintext(
     payload[0:16] = key_id
     payload[16:48] = symmetric_key
     payload[48:64] = recipient_prekey_id
+    if group_id:
+        wire_format._require_len("group_id", group_id, 16)
+        payload[64:80] = group_id
     return bytes(payload)
 
 
@@ -50,10 +62,14 @@ def decode_plaintext(data: bytes) -> dict[str, Any]:
         raise ValueError(
             f"group_key_shared plaintext must be {WIRE_PLAINTEXT_SIZE} bytes, got {len(data)}"
         )
+    group_id = data[64:80]
+    # Check if group_id is all zeros (not provided)
+    has_group_id = group_id != b'\x00' * 16
     return {
         "key_id": data[0:16],
         "symmetric_key": data[16:48],
         "recipient_prekey_id": data[48:64],
+        "group_id": group_id if has_group_id else None,
     }
 
 
@@ -100,16 +116,19 @@ def encode_wire_event(
     created_at_ms: int,
     recipient_prekey: dict[str, Any],
     private_key: bytes,
+    group_id_b64: str | None = None,
 ) -> bytes:
     """Encode a complete group_key_shared wire event."""
     key_id = crypto.b64decode(key_id_b64)
     symmetric_key = crypto.b64decode(symmetric_key_b64)
     recipient_prekey_id = crypto.b64decode(recipient_prekey_id_b64)
     signer_id = crypto.b64decode(signed_by_b64)
+    group_id = crypto.b64decode(group_id_b64) if group_id_b64 else None
     plaintext = encode_plaintext(
         key_id=key_id,
         symmetric_key=symmetric_key,
         recipient_prekey_id=recipient_prekey_id,
+        group_id=group_id,
     )
     header = wire_format.WireHeader(
         version=1,
@@ -152,6 +171,7 @@ def decode_wire_event(
         "key_id": crypto.b64encode(decoded["key_id"]),
         "symmetric_key": crypto.b64encode(decoded["symmetric_key"]),
         "recipient_prekey_id": crypto.b64encode(decoded["recipient_prekey_id"]),
+        "group_id": crypto.b64encode(decoded["group_id"]) if decoded.get("group_id") else None,
         "signed_by": crypto.b64encode(header.signer_id),
         "signer_type": wire_format.signer_type_to_str(header.signer_type),
         "created_at": header.created_at_ms,
@@ -228,7 +248,7 @@ def project_pure(ctx: Any) -> ProjectorResult:
 
     # Insert into group_keys_shared tracking table
     # Use computed_key_id (not claimed key_id) since that's the actual event hash
-    writes = (
+    writes = [
         WriteOp(
             op='insert',
             table='group_keys_shared',
@@ -241,17 +261,37 @@ def project_pure(ctx: Any) -> ProjectorResult:
                 'recorded_at': ctx.recorded_at,
             },
         ),
-    )
+    ]
+
+    # If group_id is provided, update the recipient's groups table to use this key.
+    # Uses a Command for monotonic update: only update if this key is newer than
+    # the current one (by created_at). This prevents stale partition-era keys from
+    # overwriting re-rotation keys during out-of-order sync.
+    group_id = event_data.get('group_id')
+    commands = ()
+    if group_id:
+        commands = (
+            Command(
+                command_type='monotonic_update_group_key',
+                args={
+                    'group_id': group_id,
+                    'key_id': computed_key_id,
+                    'key_updated_at': created_at,
+                },
+            ),
+        )
 
     return ProjectorResult(
-        writes=writes,
+        writes=tuple(writes),
         valid_event=True,
         emit_events=(emit_group_key,),
+        commands=commands,
     )
 
 
 def create(key_id: str, peer_id: str, peer_shared_id: str,
-           recipient_peer_id: str, t_ms: int, db: Any) -> str:
+           recipient_peer_id: str, t_ms: int, db: Any,
+           group_id: str | None = None) -> str:
     """Create a shareable key_shared event from a local symmetric key.
 
     The symmetric key is sealed to the recipient's prekey using asymmetric encryption.
@@ -263,11 +303,12 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
         recipient_peer_id: Recipient's peer_id (to get their prekey for sealing)
         t_ms: Timestamp
         db: Database connection
+        group_id: Optional group ID (enables recipient to update their groups.key_id)
 
     Returns:
         key_shared_id: The stored key_shared event ID
     """
-    log.info(f"key_shared.create() creating key_shared for key_id={key_id}, recipient={recipient_peer_id}, t_ms={t_ms}")
+    log.info(f"key_shared.create() creating key_shared for key_id={key_id}, recipient={recipient_peer_id}, group={group_id[:20] + '...' if group_id else None}, t_ms={t_ms}")
 
     # Get symmetric key from local key event
     key_blob = store.get(key_id, db)
@@ -300,6 +341,7 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
         created_at_ms=t_ms,
         recipient_prekey=recipient_prekey,
         private_key=private_key,
+        group_id_b64=group_id,
     )
 
     # Store event with recorded wrapper and projection
@@ -506,6 +548,34 @@ def _handle_retry_pending_name_updates(args: dict, recorded_by: str, recorded_at
 register_command_handler('retry_pending_name_updates', _handle_retry_pending_name_updates)
 
 
+def _handle_monotonic_update_group_key(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Monotonic key_id update for groups table.
+
+    Only updates groups.key_id if the new key is strictly newer, or if timestamps
+    are equal, the key with the lexicographically higher key_id wins.
+    This deterministic tiebreaker ensures all peers converge on the same key
+    even when multiple key shares arrive at the same timestamp.
+
+    Split-brain compromise detection is handled separately by:
+    - _check_and_rerotate_for_split_brain() in user_removed.py (on removal events)
+    - periodic_split_brain_check() in user_removed.py (safety net every 5 minutes)
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    group_id = args['group_id']
+    key_id = args['key_id']
+    key_updated_at = args['key_updated_at']
+
+    safedb.execute(
+        """UPDATE groups SET key_id = ?, key_updated_at = ?
+           WHERE group_id = ? AND recorded_by = ?
+           AND (key_updated_at < ? OR (key_updated_at = ? AND key_id < ?))""",
+        (key_id, key_updated_at, group_id, recorded_by, key_updated_at, key_updated_at, key_id)
+    )
+
+
+register_command_handler('monotonic_update_group_key', _handle_monotonic_update_group_key)
+
+
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
                                    peer_shared_id: str, t_ms: int, db: Any,
                                    exclude_user_id: str | None = None) -> list[str]:
@@ -569,7 +639,8 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
                 peer_shared_id=peer_shared_id,
                 recipient_peer_id=recipient_peer_shared_id,
                 t_ms=t_ms + i + 1,  # Increment timestamp for each member
-                db=db
+                db=db,
+                group_id=group_id,  # Include group_id so recipient can update their groups.key_id
             )
             key_shared_ids.append(key_shared_id)
             log.info(f"key_shared.share_key_with_group_members() created key_shared for {recipient_peer_shared_id}")
@@ -578,5 +649,59 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
 
     if skipped_relays > 0:
         log.info(f"key_shared.share_key_with_group_members() skipped {skipped_relays} server relay(s)")
+
+    return key_shared_ids
+
+
+def share_key_with_specific_members(key_id: str, member_peer_shared_ids: list[str],
+                                     peer_id: str, peer_shared_id: str, t_ms: int,
+                                     db: Any, group_id: str | None = None) -> list[str]:
+    """Create key_shared events for specific members (leaf fallback for TreeKEM).
+
+    IMPORTANT: Server relays are automatically excluded from key distribution.
+
+    Args:
+        key_id: The symmetric key to share
+        member_peer_shared_ids: List of peer_shared_ids to share with
+        peer_id: Local peer ID (creator)
+        peer_shared_id: Public peer ID (creator)
+        t_ms: Base timestamp
+        db: Database connection
+        group_id: Optional group ID (enables recipient to update their groups.key_id)
+
+    Returns:
+        List of key_shared event IDs created
+    """
+    from events.identity import server_relay
+
+    log.info(f"key_shared.share_key_with_specific_members() key={key_id[:20]}..., members={len(member_peer_shared_ids)}, group={group_id[:20] + '...' if group_id else None}")
+
+    key_shared_ids = []
+    skipped_relays = 0
+
+    for i, recipient_peer_shared_id in enumerate(member_peer_shared_ids):
+        # SECURITY: Never distribute keys to server relays
+        if server_relay.is_server_relay(recipient_peer_shared_id, peer_id, db):
+            log.info(f"key_shared.share_key_with_specific_members() skipping server relay {recipient_peer_shared_id[:20]}...")
+            skipped_relays += 1
+            continue
+
+        try:
+            key_shared_id = create(
+                key_id=key_id,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id,
+                recipient_peer_id=recipient_peer_shared_id,
+                t_ms=t_ms + i + 1,
+                db=db,
+                group_id=group_id,
+            )
+            key_shared_ids.append(key_shared_id)
+            log.info(f"key_shared.share_key_with_specific_members() created key_shared for {recipient_peer_shared_id[:20]}...")
+        except Exception as e:
+            log.warning(f"key_shared.share_key_with_specific_members() failed for {recipient_peer_shared_id[:20]}...: {e}")
+
+    if skipped_relays > 0:
+        log.info(f"key_shared.share_key_with_specific_members() skipped {skipped_relays} server relay(s)")
 
     return key_shared_ids

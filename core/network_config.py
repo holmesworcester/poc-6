@@ -72,6 +72,15 @@ def get_simulator() -> NetworkSimulator:
     return _simulator
 
 
+def set_simulator(sim: NetworkSimulator) -> None:
+    """Set the global simulator instance.
+
+    This allows tests to share a single simulator across transport and network_config.
+    """
+    global _simulator
+    _simulator = sim
+
+
 def set_network_config(config: NetworkConfig) -> None:
     """Set the global network configuration."""
     global _config

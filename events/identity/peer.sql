@@ -2,12 +2,15 @@
 -- Contains private keys for signing (NOT for key exchange - see local_prekeys)
 -- In tests: May contain multiple identities (Alice, Bob, Charlie)
 -- In production: Typically one identity per device
--- Note: peer_id → peer_shared_id mapping is stored in the subjective peer_self table
+-- Note: peer_id → peer_shared_id mapping is also stored in the subjective peer_self table
+-- The peer_shared_id column here provides a device-wide (non-subjective) lookup
+-- that works before the peer's blocked events resolve in their own perspective.
 CREATE TABLE IF NOT EXISTS local_peers (
     peer_id TEXT PRIMARY KEY,
     public_key TEXT NOT NULL,
     private_key BLOB NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    peer_shared_id TEXT DEFAULT NULL  -- Set after peer_shared event is created
 );
 
 -- Index for looking up by public key

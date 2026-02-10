@@ -1,5 +1,5 @@
 -- Network settings table - stores network-level configuration
--- Used for star topology sync mode configuration
+-- Used for star topology sync mode configuration and TreeKEM feature toggle
 
 CREATE TABLE IF NOT EXISTS network_settings (
     network_settings_id TEXT NOT NULL,
@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS network_settings (
     server_relay_peer_shared_id TEXT,  -- The relay's peer_shared_id (NULL for mesh mode)
     server_relay_address TEXT,  -- Connection info (e.g., 'relay.example.com:5000')
     sync_mode TEXT NOT NULL DEFAULT 'mesh' CHECK (sync_mode IN ('star', 'mesh')),
+    treekem_enabled INTEGER NOT NULL DEFAULT 0,  -- 1 if TreeKEM O(log n) key distribution is enabled
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,
     recorded_at INTEGER NOT NULL,

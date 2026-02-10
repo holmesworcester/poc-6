@@ -7,7 +7,7 @@ and should still be queryable and usable.
 """
 import sqlite3
 import pytest
-from core.db import Database
+from core.db import Database, create_unsafe_db
 from core import schema
 from events.identity import user
 from events.content import message
@@ -39,6 +39,20 @@ def test_network_without_explicit_name():
     assert len(alice['user_id']) == 24
     assert len(alice['group_id']) == 24
     assert len(alice['channel_id']) == 24
+
+    # Verify local_peers.peer_shared_id was set by the Command-based update.
+    # This catches regressions in the peer_shared Command handler that would
+    # otherwise only surface as an opaque convergence failure.
+    unsafedb = create_unsafe_db(db)
+    lp_row = unsafedb.query_one(
+        "SELECT peer_shared_id FROM local_peers WHERE peer_id = ?",
+        (alice['peer_id'],)
+    )
+    assert lp_row is not None, "local_peers row missing for alice"
+    assert lp_row['peer_shared_id'] == alice['peer_shared_id'], (
+        f"local_peers.peer_shared_id mismatch: expected {alice['peer_shared_id'][:20]}..., "
+        f"got {lp_row['peer_shared_id']}"
+    )
 
     # Verify network is queryable
     from events.identity import network

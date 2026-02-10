@@ -308,6 +308,7 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
     For each local peer:
     1. Count non-expired group prekeys
     2. If count < MIN_GROUP_PREKEYS, generate REPLENISH_GROUP_PREKEYS new ones
+    3. Create group_prekey_shared events so other peers can encrypt to them
 
     Args:
         t_ms: Current time in milliseconds
@@ -318,6 +319,7 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
             'peers_processed': int,
             'peers_replenished': int,
             'total_prekeys_generated': int,
+            'total_prekeys_shared': int,
             'errors': list[str]
         }
 
@@ -325,6 +327,8 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
     prekeys, no action is taken. Errors for one peer do not stop processing
     of other peers.
     """
+    from events.group import group_prekey_shared
+
     log.info(f"group_prekey.replenish_for_all_peers() t_ms={t_ms}")
 
     from core.db import create_unsafe_db
@@ -334,11 +338,12 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
         'peers_processed': 0,
         'peers_replenished': 0,
         'total_prekeys_generated': 0,
+        'total_prekeys_shared': 0,
         'errors': []
     }
 
-    # Get all local peers
-    local_peer_rows = unsafedb.query("SELECT peer_id FROM local_peers")
+    # Get all local peers (with peer_shared_id from device-wide table)
+    local_peer_rows = unsafedb.query("SELECT peer_id, peer_shared_id FROM local_peers")
 
     if not local_peer_rows:
         log.info(f"group_prekey.replenish_for_all_peers() no local peers found")
@@ -348,6 +353,11 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
     for peer_row in local_peer_rows:
         peer_id = peer_row['peer_id']
+        peer_shared_id = peer_row['peer_shared_id']
+        if not peer_shared_id:
+            log.debug(f"group_prekey.replenish_for_all_peers() no peer_shared_id in local_peers for {peer_id[:20]}...")
+            continue
+
         try:
             # Count non-expired group prekeys for this peer
             safedb = create_safe_db(db, recorded_by=peer_id)
@@ -368,9 +378,23 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
 
                 prekey_ids = generate_batch(peer_id, REPLENISH_GROUP_PREKEYS, t_ms, db)
 
-                # Project each prekey
+                # Project each prekey and create shared version
                 for i, prekey_id in enumerate(prekey_ids):
-                    project(prekey_id, peer_id, t_ms + i, db)
+                    timestamp = t_ms + i
+                    project(prekey_id, peer_id, timestamp, db)
+
+                    # Create shareable prekey event so other peers can encrypt to us
+                    try:
+                        group_prekey_shared.create(
+                            prekey_id=prekey_id,
+                            peer_id=peer_id,
+                            peer_shared_id=peer_shared_id,
+                            t_ms=timestamp + 1,  # Offset to avoid collision
+                            db=db,
+                        )
+                        stats['total_prekeys_shared'] += 1
+                    except Exception as share_error:
+                        log.warning(f"group_prekey.replenish_for_all_peers() failed to share prekey {prekey_id[:20]}...: {share_error}")
 
                 stats['peers_replenished'] += 1
                 stats['total_prekeys_generated'] += len(prekey_ids)
@@ -382,7 +406,90 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
             stats['errors'].append(error)
             continue
 
-    log.info(f"group_prekey.replenish_for_all_peers() complete: {stats['peers_processed']} peers processed, {stats['peers_replenished']} replenished, {stats['total_prekeys_generated']} prekeys generated")
+    log.info(f"group_prekey.replenish_for_all_peers() complete: {stats['peers_processed']} peers processed, {stats['peers_replenished']} replenished, {stats['total_prekeys_generated']} prekeys generated, {stats['total_prekeys_shared']} shared")
+    return stats
+
+
+def share_existing_prekeys_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
+    """Share any existing group prekeys that haven't been shared yet.
+
+    This is useful for ensuring prekeys created during join or other flows
+    get shared with other network members.
+
+    Args:
+        t_ms: Current time in milliseconds
+        db: Database connection
+
+    Returns:
+        Dict with stats: {
+            'peers_processed': int,
+            'total_prekeys_shared': int,
+            'errors': list[str]
+        }
+    """
+    from events.group import group_prekey_shared
+
+    log.info(f"group_prekey.share_existing_prekeys_for_all_peers() t_ms={t_ms}")
+
+    from core.db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+
+    stats = {
+        'peers_processed': 0,
+        'total_prekeys_shared': 0,
+        'errors': []
+    }
+
+    # Get all local peers (with peer_shared_id from device-wide table)
+    local_peer_rows = unsafedb.query("SELECT peer_id, peer_shared_id FROM local_peers")
+
+    if not local_peer_rows:
+        return stats
+
+    for peer_row in local_peer_rows:
+        peer_id = peer_row['peer_id']
+        peer_shared_id = peer_row['peer_shared_id']
+        if not peer_shared_id:
+            log.debug(f"share_existing_prekeys_for_all_peers() no peer_shared_id in local_peers for {peer_id[:20]}...")
+            continue
+
+        try:
+            safedb = create_safe_db(db, recorded_by=peer_id)
+
+            # Get all local prekeys that haven't been shared yet
+            # Check which prekeys have corresponding shared events
+            unshared_prekeys = safedb.query(
+                """SELECT prekey_id, public_key FROM group_prekeys
+                   WHERE owner_peer_id = ? AND recorded_by = ? AND ttl_ms > ?
+                   AND prekey_id NOT IN (
+                       SELECT group_prekey_id FROM group_prekeys_shared
+                       WHERE recorded_by = ?
+                   )""",
+                (peer_id, peer_id, t_ms, peer_id)
+            )
+
+            stats['peers_processed'] += 1
+
+            for i, prekey_row in enumerate(unshared_prekeys):
+                try:
+                    group_prekey_shared.create(
+                        prekey_id=prekey_row['prekey_id'],
+                        peer_id=peer_id,
+                        peer_shared_id=peer_shared_id,
+                        t_ms=t_ms + i,
+                        db=db,
+                    )
+                    stats['total_prekeys_shared'] += 1
+                except Exception as share_error:
+                    log.warning(f"Failed to share prekey {prekey_row['prekey_id'][:20]}...: {share_error}")
+
+        except Exception as e:
+            error = f"Error processing peer {peer_id[:20]}...: {e}"
+            log.error(f"group_prekey.share_existing_prekeys_for_all_peers() {error}")
+            stats['errors'].append(error)
+            continue
+
+    log.info(f"group_prekey.share_existing_prekeys_for_all_peers() complete: {stats['peers_processed']} peers, {stats['total_prekeys_shared']} shared")
     return stats
 
 

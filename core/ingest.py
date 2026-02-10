@@ -128,12 +128,19 @@ def queue_incoming(
             }
             key_map.setdefault(peer_id, []).append((peer_id, key_data))
 
+        # Import partition checker (lazy import to avoid circular dependency)
+        from core import network_config
+
         for blob, from_addr, _key_id_bytes, key_id_b64 in entries:
             candidates = key_map.get(key_id_b64, [])
             if not candidates:
                 continue
             source_ip, source_port = (from_addr if from_addr else (None, None))
             for recorded_by, key_data in candidates:
+                # Check if peer is partitioned - skip if so
+                if network_config.is_partitioned(recorded_by):
+                    continue
+
                 event_blob = _unwrap_transit_with_key(blob, key_data)
                 if not event_blob:
                     continue

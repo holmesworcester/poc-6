@@ -12,7 +12,8 @@ from core import store
 from core import wire_format
 from events.identity import peer
 from core.db import create_safe_db, create_unsafe_db
-from core.projection.types import ProjectorResult, WriteOp
+from core.projection.types import ProjectorResult, WriteOp, Command
+from core.projection.apply import register_command_handler
 
 log = logging.getLogger(__name__)
 
@@ -223,7 +224,31 @@ def project_pure(ctx: Any) -> ProjectorResult:
             )
         )
 
-    return ProjectorResult(writes=tuple(writes), valid_event=True)
+    # Update local_peers.peer_shared_id for reliable device-wide lookup.
+    # This is a no-op if owner_peer_id is not in local_peers (non-local peer).
+    commands = (
+        Command(
+            command_type='update_local_peer_shared_id',
+            args={'peer_shared_id': ctx.event_id, 'peer_id': owner_peer_id}
+        ),
+    )
+
+    return ProjectorResult(writes=tuple(writes), valid_event=True, commands=commands)
+
+
+def _handle_update_local_peer_shared_id(args: dict, recorded_by: str, recorded_at: int, db: Any) -> None:
+    """Update local_peers.peer_shared_id for device-wide lookup.
+
+    Idempotent: no-op if peer_id is not in local_peers (non-local peer).
+    """
+    unsafedb = create_unsafe_db(db)
+    unsafedb.execute(
+        "UPDATE local_peers SET peer_shared_id = ? WHERE peer_id = ?",
+        (args['peer_shared_id'], args['peer_id'])
+    )
+
+
+register_command_handler('update_local_peer_shared_id', _handle_update_local_peer_shared_id)
 
 
 def create(peer_id: str, t_ms: int, db: Any,

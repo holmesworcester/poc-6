@@ -108,7 +108,8 @@ COMMANDS = [
     'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
     'status', 'accounts', 'channels', 'users', 'messages', 'keys', 'whoami', 'connections',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
-    'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit'
+    'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit',
+    'treekem'  # TreeKEM management
 ]
 
 # Command argument hints for context-aware completion
@@ -121,7 +122,8 @@ COMMAND_ARGS = {
     'send': ['--repeat'],
     'disappear': ['--days', '--time', '--off'],
     'fast-forward': ['--days'],
-    'keys': ['--summary'],
+    'keys': ['--summary', '--stats'],
+    'treekem': ['on', 'off', 'status'],
 }
 
 
@@ -1790,9 +1792,13 @@ def cmd_quit(session: CLISession):
     sys.exit(0)
 
 
-def cmd_keys(session: CLISession, summary: bool = False):
+def cmd_keys(session: CLISession, summary: bool = False, stats: bool = False):
     """Display key state for forward secrecy demo."""
     account = session.get_selected_account()
+
+    if stats:
+        display_key_stats(session, account)
+        return
 
     # Get group keys
     keys = group_key.list(account.peer_id, session.db)
@@ -1858,6 +1864,89 @@ def display_keys_summary(account: AccountContext, keys: list, prekeys: list, cha
     print(f"  group_keys: {active_keys} active, {pending_keys} pending_purge")
     print(f"  prekeys: {active_prekeys} active, {pending_prekeys} pending_purge")
     print(f"  channels: {len(channel_keys)}")
+
+
+def display_key_stats(session: CLISession, account: AccountContext):
+    """Display key sharing statistics for TreeKEM observability."""
+    from events.group import treekem_key_shared
+
+    print(f"KEY SHARING STATISTICS ({account.full_name}):")
+    print()
+
+    # Use API function to get stats
+    stats = treekem_key_shared.get_network_key_stats(account.peer_id, session.db)
+
+    gks_count = stats['total_group_key_shared']
+    tks_count = stats['total_treekem_key_shared']
+    members_count = stats['total_members']
+    treekem_enabled = stats['groups_with_treekem'] > 0
+
+    print(f"  Total group_key_shared events: {gks_count} (O(n) distribution)")
+    print(f"  Total treekem_key_shared events: {tks_count} (O(log n) distribution)")
+    print(f"  Members in groups: {members_count}")
+    print(f"  TreeKEM enabled: {'yes' if treekem_enabled else 'no'}")
+    print()
+
+    if tks_count > 0:
+        print(f"  TreeKEM efficiency: {tks_count} tree events vs {gks_count} leaf events")
+
+
+def cmd_treekem(session: CLISession, subcmd: str):
+    """Manage TreeKEM settings."""
+    from events.identity import network_settings
+    from events.group import treekem_pubkey, treekem_pubkey_shared
+
+    account = session.get_selected_account()
+
+    # Get current network using API
+    network_id = network.get_network_id(account.peer_id, session.db)
+    if not network_id:
+        print("No network found")
+        return
+
+    if subcmd == "status":
+        enabled = network_settings.is_treekem_enabled(network_id, account.peer_id, session.db)
+        print(f"TreeKEM: {'enabled' if enabled else 'disabled'}")
+
+        # Show TreeKEM pubkey stats using API
+        local_pubkeys = treekem_pubkey.list_for_group(network_id, account.peer_id, session.current_time_ms, session.db)
+        shared_pubkeys = treekem_pubkey_shared.list_for_group(network_id, account.peer_id, session.current_time_ms, session.db)
+
+        print(f"  Local pubkeys: {len(local_pubkeys)}")
+        print(f"  Received pubkeys: {len(shared_pubkeys)}")
+
+    elif subcmd == "on":
+        try:
+            network_settings.set_treekem_enabled(
+                network_id=network_id,
+                enabled=True,
+                peer_id=account.peer_id,
+                peer_shared_id=account.peer_shared_id,
+                t_ms=session.current_time_ms,
+                db=session.db,
+            )
+            session.db.commit()
+            print("TreeKEM enabled")
+        except ValueError as e:
+            print(f"Error: {e}")
+
+    elif subcmd == "off":
+        try:
+            network_settings.set_treekem_enabled(
+                network_id=network_id,
+                enabled=False,
+                peer_id=account.peer_id,
+                peer_shared_id=account.peer_shared_id,
+                t_ms=session.current_time_ms,
+                db=session.db,
+            )
+            session.db.commit()
+            print("TreeKEM disabled")
+        except ValueError as e:
+            print(f"Error: {e}")
+
+    else:
+        print("usage: treekem on|off|status")
 
 
 def cmd_delete_message(session: CLISession, message_num: int):
@@ -2607,7 +2696,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "keys":
             summary = "--summary" in parts
-            cmd_keys(session, summary=summary)
+            stats = "--stats" in parts
+            cmd_keys(session, summary=summary, stats=stats)
 
         elif cmd == "connections":
             verbose = "-v" in parts or "--verbose" in parts
@@ -2773,6 +2863,13 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
                 name = parts[1]
                 cmd_save_session(session, name)
 
+        elif cmd == "treekem":
+            if len(parts) < 2:
+                print("usage: treekem on|off|status")
+            else:
+                subcmd = parts[1].lower()
+                cmd_treekem(session, subcmd)
+
         elif cmd == "help":
             print("available commands:")
             print()
@@ -2822,8 +2919,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print("    connections [-v]               Show all connections (active/pending/bootstrap)")
             print()
             print("  Keys/sync:")
-            print("    keys [--summary]")
+            print("    keys [--summary|--stats]       Show key state or TreeKEM stats")
             print("    purge-keys")
+            print("    treekem on|off|status          Enable/disable/show TreeKEM O(log n) distribution")
             print("    tick <n>")
             print("    sync --ticks <n>")
             print("    sync-realtime [--ticks N|--until-file N]  Wall-clock sync with perf report")

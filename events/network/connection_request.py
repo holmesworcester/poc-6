@@ -1323,7 +1323,12 @@ def remove_connections_for_peer(peer_shared_id: str, db: Any) -> int:
 
 
 def remove_connections_for_invite(invite_id: str, db: Any) -> int:
-    """Remove all bootstrap connections using a specific invite.
+    """Remove bootstrap-only connections using a specific invite.
+
+    Only removes connections that haven't been upgraded (peer_shared_id IS NULL).
+    Upgraded connections have both invite_id and peer_shared_id set, and are
+    still needed by non-removed peers for sync. Those are cleaned up separately
+    by remove_connections_for_peer().
 
     Called when an invite is invalidated (e.g., user removal).
     Returns total number of connections removed.
@@ -1339,14 +1344,14 @@ def remove_connections_for_invite(invite_id: str, db: Any) -> int:
 
         # Count before delete
         count_row = safedb.query_one(
-            "SELECT COUNT(*) as cnt FROM connections WHERE invite_id = ? AND recorded_by = ?",
+            "SELECT COUNT(*) as cnt FROM connections WHERE invite_id = ? AND recorded_by = ? AND peer_shared_id IS NULL",
             (invite_id, peer_id)
         )
         count = count_row['cnt'] if count_row else 0
 
         if count > 0:
             safedb.execute(
-                "DELETE FROM connections WHERE invite_id = ? AND recorded_by = ?",
+                "DELETE FROM connections WHERE invite_id = ? AND recorded_by = ? AND peer_shared_id IS NULL",
                 (invite_id, peer_id)
             )
             total_removed += count
