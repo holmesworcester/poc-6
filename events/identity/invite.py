@@ -149,7 +149,8 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
     return admin_row is not None
 
 
-def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
+def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None,
+           ip: str | None = None, port: int | None = None) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -166,6 +167,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         db: Database connection
         mode: 'user' for network join invites, 'peer' for device linking invites
         user_id: Required for mode='peer', target user to link to. Must be None for mode='user'.
+        ip: Inviter's IP address for connection. Defaults to '127.0.0.1' if not specified.
+        port: Inviter's port for connection. Defaults to 6100 if not specified.
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -310,10 +313,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     inviter_transit_prekey_shared_id = inviter_prekey_shared_row['transit_prekey_shared_id']
     inviter_transit_prekey_shared_created_at = inviter_prekey_shared_row['created_at']
 
-    # TODO: Address info should come from an address table or network discovery
-    # Currently hardcoded for local testing; production needs proper address resolution
-    inviter_ip = '127.0.0.1'
-    inviter_port = 6100
+    # Address info from parameters, with defaults for backward compatibility
+    inviter_ip = ip if ip is not None else '127.0.0.1'
+    inviter_port = port if port is not None else 6100
 
     # Create minimal invite event (signed by Alice, proves authorization)
     # SLIM INVITE: Only essential fields for sync. Transit prekey + address info moved to link.

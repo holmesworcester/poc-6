@@ -210,8 +210,63 @@ class Client:
         # Also add to the UDPSocket's peer map for convenience
         self.network.add_peer(peer_shared_id, (host, port))
 
+    def learn_address_from_packet(self, packet_data: bytes, source_addr: tuple) -> str | None:
+        """Try to learn the sender's address from a packet.
+
+        Attempts to extract the sender's peer_shared_id from the packet and
+        registers their address if successful.
+
+        Args:
+            packet_data: The raw packet bytes
+            source_addr: (host, port) tuple from UDP source
+
+        Returns:
+            The peer_shared_id if learned, None otherwise
+        """
+        from core import crypto
+
+        # Try to extract sender info from the packet
+        # Packets may be:
+        # 1. Plaintext JSON (signed_by field)
+        # 2. Asymmetric wrapped (needs our prekey to unwrap)
+        # 3. Symmetric wrapped (needs connection key to unwrap)
+
+        peer_shared_id = None
+
+        # First try: plaintext JSON with signed_by
+        try:
+            event_data = crypto.parse_json(packet_data)
+            if isinstance(event_data, dict) and 'signed_by' in event_data:
+                peer_shared_id = event_data['signed_by']
+        except Exception:
+            pass
+
+        # Second try: Look for peer_shared_id in unwrapped events
+        # This requires attempting to unwrap with our keys
+        if not peer_shared_id and self.peer_id:
+            try:
+                unwrapped, _key_id = crypto.unwrap(packet_data, self.peer_id, self.db)
+                if unwrapped:
+                    event_data = crypto.parse_json(unwrapped)
+                    if isinstance(event_data, dict) and 'signed_by' in event_data:
+                        peer_shared_id = event_data['signed_by']
+            except Exception:
+                pass
+
+        # Register address if we found a peer_shared_id
+        if peer_shared_id:
+            host, port = source_addr
+            if peer_shared_id not in self.peer_addresses:
+                log.info(f"Client {self.name}: learned address for {peer_shared_id[:20]}... -> {source_addr}")
+            self.add_peer_address(peer_shared_id, host, port)
+            return peer_shared_id
+
+        return None
+
     def receive_udp_packets(self, t_ms: int) -> int:
         """Move incoming UDP packets into this client's SQLite queue.
+
+        Also learns sender addresses from incoming packets.
 
         Thread safety:
         - UDP recv thread puts packets into _incoming queue (thread-safe)
@@ -225,6 +280,9 @@ class Client:
         # INSERT into this client's SQLite queue (main thread - safe)
         unsafedb = create_unsafe_db(self.db)
         for data, addr in packets:
+            # Learn sender's address before queueing
+            self.learn_address_from_packet(data, addr)
+
             queues.incoming.add_immediate(data, t_ms, unsafedb)
             log.debug(f"Client {self.name}: queued UDP packet from {addr}")
 
@@ -309,15 +367,15 @@ class UDPTransport:
         log.info("UDPTransport: disabled")
 
     def _transport_callback(self, blob: bytes, from_peer: str, to_peer: str, t_ms: int) -> bool:
-        """Transport callback that routes packets via UDP."""
-        # Find the destination client
-        dest_client = self.clients.get(to_peer)
-        if dest_client is None:
-            # Unknown destination - let simulator handle it
-            log.debug(f"UDPTransport: unknown dest {to_peer[:20] if to_peer else 'None'}..., using simulator")
-            return False
+        """Transport callback that routes packets via UDP.
 
-        # Find the source client to send from
+        Routing priority:
+        1. Source client's peer_addresses (from invite_accepteds, learned addresses)
+        2. Fall back to central client registry (for convenience in some tests)
+
+        This design makes connections the source of truth for routing.
+        """
+        # Find the source client
         source_client = None
         for client in self.clients.values():
             if client.peer_id == from_peer or client.peer_shared_id == from_peer:
@@ -328,11 +386,23 @@ class UDPTransport:
             log.debug(f"UDPTransport: unknown source {from_peer[:20] if from_peer else 'None'}..., using simulator")
             return False
 
-        # Send via UDP
-        dest_addr = (dest_client.network.host, dest_client.network.port)
-        source_client.network.send_to_addr(dest_addr, blob)
-        log.debug(f"UDPTransport: sent {len(blob)}B from {source_client.name} to {dest_client.name}")
-        return True
+        # Priority 1: Check source client's known peer addresses
+        if to_peer and to_peer in source_client.peer_addresses:
+            dest_addr = source_client.peer_addresses[to_peer]
+            source_client.network.send_to_addr(dest_addr, blob)
+            log.debug(f"UDPTransport: sent {len(blob)}B from {source_client.name} to {to_peer[:20]}... at {dest_addr}")
+            return True
+
+        # Priority 2: Fall back to central client registry
+        dest_client = self.clients.get(to_peer)
+        if dest_client:
+            dest_addr = (dest_client.network.host, dest_client.network.port)
+            source_client.network.send_to_addr(dest_addr, blob)
+            log.debug(f"UDPTransport: sent {len(blob)}B from {source_client.name} to {dest_client.name} (registry)")
+            return True
+
+        log.debug(f"UDPTransport: no route from {source_client.name} to {to_peer[:20] if to_peer else 'None'}...")
+        return False
 
 
 # =============================================================================
