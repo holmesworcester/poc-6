@@ -73,6 +73,7 @@ def _discover_events() -> None:
                 'module': module,
                 'module_name': module_name,
                 'shareable': getattr(module, 'SHAREABLE', False),  # Safe default
+                'sync_indexed': getattr(module, 'SYNC_INDEXED', getattr(module, 'SHAREABLE', False)),
                 'projection_table': getattr(module, 'PROJECTION_TABLE', None),
                 'event_spec': getattr(module, 'EVENT_SPEC', None),
                 'project_pure': getattr(module, 'project_pure', None),
@@ -140,6 +141,19 @@ def is_shareable(event_type: str) -> bool:
         return False
 
     return _registry[event_type]['shareable']
+
+
+def is_sync_indexed(event_type: str) -> bool:
+    """Check if an event type should be indexed for negentropy sync.
+
+    Defaults to SHAREABLE if SYNC_INDEXED is not provided by the module.
+    """
+    _discover_events()
+
+    if event_type not in _registry:
+        return False
+
+    return _registry[event_type]['sync_indexed']
 
 
 def get_projection_table(event_type: str) -> tuple[str, str] | None:

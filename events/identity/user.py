@@ -849,6 +849,28 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
     connection_prekey_shared_id = peer_shared_join_result['connection_prekey_shared_id']
     log.info(f"join() delegated to peer_shared.join(): peer_shared_id={peer_shared_id[:20]}...")
 
+    # === Create shareable group prekeys so other members can encrypt to us ===
+    # The invite prekey is only for initial key decryption - we need our OWN prekeys
+    # for future key rotations (e.g., when members are removed)
+    from events.group import group_prekey, group_prekey_shared
+
+    # Generate batch of group prekeys for this peer
+    group_prekey_count = 5  # Enough for multiple key rotations before replenishment
+    group_prekey_ids = group_prekey.generate_batch(peer_id, count=group_prekey_count, t_ms=t_ms, db=db)
+
+    # Project and share each prekey
+    for i, gp_id in enumerate(group_prekey_ids):
+        gp_timestamp = t_ms + i
+        group_prekey.project(gp_id, peer_id, gp_timestamp, db)
+        group_prekey_shared.create(
+            prekey_id=gp_id,
+            peer_id=peer_id,
+            peer_shared_id=peer_shared_id,
+            t_ms=gp_timestamp + 1,  # Offset to avoid collision
+            db=db,
+        )
+    log.info(f"join() created {group_prekey_count} group prekeys and shared them")
+
     # Try to create username_update event (encrypted with group key)
     # If key is not available yet, store in pending_name_updates table for later
     from events.identity import username_update

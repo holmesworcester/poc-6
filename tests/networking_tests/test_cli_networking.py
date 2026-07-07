@@ -54,7 +54,7 @@ def wait_for_condition(condition_fn, timeout: float = 30.0, interval: float = 1.
 
 def run_cli(db_path: str, command: str, listen_port: int = None, peer_addrs: list = None, timeout: float = 10.0) -> str:
     """Run a CLI command and return output."""
-    cmd = [sys.executable, 'cli.py', '--db', db_path, '-e', command]
+    cmd = [sys.executable, 'cli.py', '--db-path', db_path, '-e', command]
     
     if listen_port:
         cmd.extend(['--listen', f'127.0.0.1:{listen_port}'])
@@ -72,30 +72,51 @@ def run_cli(db_path: str, command: str, listen_port: int = None, peer_addrs: lis
         text=True,
         timeout=timeout,
         env=env,
-        cwd='/home/holmes/poc-6-api'
+        cwd='/home/holmes/poc-6-sync-perf'
     )
     return result.stdout + result.stderr
 
 
-def run_cli_daemon(db_path: str, listen_port: int, peer_addrs: list = None, duration: float = 5.0) -> subprocess.Popen:
-    """Start CLI in sync daemon mode. Returns Popen object."""
-    cmd = [sys.executable, 'cli.py', '--db', db_path, '--listen', f'127.0.0.1:{listen_port}', '--sync-only']
-    
+def run_cli_daemon(db_path: str, listen_port: int, peer_addrs: list = None, duration: float = 5.0, log_dir: str = None) -> tuple:
+    """Start CLI in sync daemon mode. Returns (Popen, stdout_path, stderr_path).
+
+    Note: We use file output instead of PIPE because PIPE causes the recv thread
+    to block indefinitely (Python subprocess + daemon thread interaction issue).
+    """
+    cmd = [sys.executable, 'cli.py', '--db-path', db_path, '--listen', f'127.0.0.1:{listen_port}', '--sync-only']
+
     if peer_addrs:
         for addr in peer_addrs:
             cmd.extend(['--peer', addr])
-    
+
     env = os.environ.copy()
     env['PYTHONPATH'] = '.'
-    
+
+    # Create log files in the same directory as the database
+    if log_dir is None:
+        log_dir = os.path.dirname(db_path)
+    base_name = os.path.basename(db_path).replace('.db', '')
+    stdout_path = os.path.join(log_dir, f'{base_name}_stdout.log')
+    stderr_path = os.path.join(log_dir, f'{base_name}_stderr.log')
+
+    stdout_file = open(stdout_path, 'w')
+    stderr_file = open(stderr_path, 'w')
+
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
         text=True,
         env=env,
-        cwd='/home/holmes/poc-6-api'
+        cwd='/home/holmes/poc-6-sync-perf'
     )
+
+    # Store file handles on proc for cleanup
+    proc._stdout_file = stdout_file
+    proc._stderr_file = stderr_file
+    proc._stdout_path = stdout_path
+    proc._stderr_path = stderr_path
+
     return proc
 
 
@@ -144,6 +165,23 @@ class TestCLITwoPlayer:
         bob_daemon = run_cli_daemon(bob_db, bob_port, peer_addrs=[f"{alice_peer_shared_id}@127.0.0.1:{alice_port}"])
         
         try:
+            # Wait for Bob's channel to be ready (sync must complete first)
+            def check_bob_channel():
+                out = run_cli(bob_db, "messages")
+                # If we see "#general" channel info or "no messages", sync is complete
+                if "#general" in out or "no messages" in out.lower():
+                    return True, out
+                if "no channel selected" in out.lower():
+                    return False, out
+                return True, out  # Any other output means channel is ready
+
+            wait_for_condition(
+                check_bob_channel,
+                timeout=30.0,
+                interval=1.0,
+                description="Bob's channel to be ready"
+            )
+
             # Alice sends a message
             send_output = run_cli(alice_db, "send Hello Bob from CLI!")
             print(f"Send output: {send_output}")
@@ -164,18 +202,28 @@ class TestCLITwoPlayer:
             print(f"Bob messages: {bob_messages}")
 
         finally:
-            # Terminate and capture daemon outputs for debugging
+            # Terminate daemons and read logs from files
             alice_daemon.terminate()
             bob_daemon.terminate()
+            alice_daemon.wait(timeout=2)
+            bob_daemon.wait(timeout=2)
+
+            # Close file handles
+            alice_daemon._stdout_file.close()
+            alice_daemon._stderr_file.close()
+            bob_daemon._stdout_file.close()
+            bob_daemon._stderr_file.close()
+
+            # Read and print logs
             try:
-                alice_out, alice_err = alice_daemon.communicate(timeout=2)
-                print(f"Alice daemon stdout: {alice_out[:1000] if alice_out else '(empty)'}")
+                with open(alice_daemon._stderr_path) as f:
+                    alice_err = f.read()
                 print(f"Alice daemon stderr: {alice_err[:1000] if alice_err else '(empty)'}")
             except:
                 print("Alice daemon: could not get output")
             try:
-                bob_out, bob_err = bob_daemon.communicate(timeout=2)
-                print(f"Bob daemon stdout: {bob_out[:1000] if bob_out else '(empty)'}")
+                with open(bob_daemon._stderr_path) as f:
+                    bob_err = f.read()
                 print(f"Bob daemon stderr: {bob_err[:1000] if bob_err else '(empty)'}")
             except:
                 print("Bob daemon: could not get output")
@@ -302,3 +350,11 @@ class TestCLIThreePlayer:
             alice_daemon.wait(timeout=2)
             bob_daemon.wait(timeout=2)
             charlie_daemon.wait(timeout=2)
+
+            # Close file handles
+            alice_daemon._stdout_file.close()
+            alice_daemon._stderr_file.close()
+            bob_daemon._stdout_file.close()
+            bob_daemon._stderr_file.close()
+            charlie_daemon._stdout_file.close()
+            charlie_daemon._stderr_file.close()

@@ -322,15 +322,37 @@ def replenish_for_all_peers(t_ms: int, db: Any) -> dict[str, Any]:
             if prekey_count < MIN_GROUP_PREKEYS:
                 log.info(f"group_prekey.replenish_for_all_peers() peer {peer_id[:20]}... has only {prekey_count} prekeys, replenishing with {REPLENISH_GROUP_PREKEYS}")
 
+                # Get peer_shared_id for sharing prekeys
+                peer_shared_row = safedb.query_one(
+                    "SELECT peer_shared_id FROM peer_self WHERE peer_id = ? AND recorded_by = ?",
+                    (peer_id, peer_id)
+                )
+                peer_shared_id = peer_shared_row['peer_shared_id'] if peer_shared_row else None
+
                 prekey_ids = generate_batch(peer_id, REPLENISH_GROUP_PREKEYS, t_ms, db)
 
-                # Project each prekey
+                # Project and share each prekey
+                from events.group import group_prekey_shared
                 for i, prekey_id in enumerate(prekey_ids):
-                    project(prekey_id, peer_id, t_ms + i, db)
+                    gp_timestamp = t_ms + i
+                    project(prekey_id, peer_id, gp_timestamp, db)
+
+                    # Share the prekey so other members can encrypt to us
+                    if peer_shared_id:
+                        group_prekey_shared.create(
+                            prekey_id=prekey_id,
+                            peer_id=peer_id,
+                            peer_shared_id=peer_shared_id,
+                            t_ms=gp_timestamp + 1,
+                            db=db,
+                        )
 
                 stats['peers_replenished'] += 1
                 stats['total_prekeys_generated'] += len(prekey_ids)
-                log.info(f"group_prekey.replenish_for_all_peers() generated {len(prekey_ids)} prekeys for peer {peer_id[:20]}...")
+                if peer_shared_id:
+                    log.info(f"group_prekey.replenish_for_all_peers() generated and shared {len(prekey_ids)} prekeys for peer {peer_id[:20]}...")
+                else:
+                    log.warning(f"group_prekey.replenish_for_all_peers() generated {len(prekey_ids)} prekeys for peer {peer_id[:20]}... but could not share (no peer_shared_id)")
 
         except Exception as e:
             error = f"Error processing peer {peer_id[:20]}...: {e}"

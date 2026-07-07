@@ -268,14 +268,14 @@ def udp_transfer() -> int:
         for blob, from_addr, to_addr in _outgoing:
             _udp_socket.send_to(to_addr, blob)
             count += 1
-            log.debug(f"transport: UDP sent {len(blob)}B to {to_addr}")
+            log.warning(f"transport: UDP sent {len(blob)}B to {to_addr}")
         _outgoing.clear()
 
         # Receive incoming packets from UDP
         for data, addr in _udp_socket.drain():
             _incoming.append((data, addr))
             count += 1
-            log.debug(f"transport: UDP received {len(data)}B from {addr}")
+            log.warning(f"transport: UDP received {len(data)}B from {addr}")
 
     return count
 

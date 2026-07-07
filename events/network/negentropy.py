@@ -19,7 +19,8 @@ Bucket hierarchy (by hash prefix):
 - prefix_4: first 4 hex chars (65536 buckets)
 - prefix_6 through prefix_6: progressively finer hash buckets
 
-The unified key is: BLAKE2b(event_id)[:8] as 16 hex chars
+The unified key is: event_id_hash[:8] as 16 hex chars
+(If event_id is already a 16-byte BLAKE2b hash, use it directly.)
 This provides uniform distribution across all bucket levels.
 
 Trade-offs vs time-based bucketing:
@@ -186,10 +187,21 @@ class EventsMessage:
 # Unified key computation
 # ============================================================================
 
+def _decode_event_id_bytes(event_id: str) -> bytes | None:
+    """Return decoded event_id bytes if it's a canonical 16-byte base64 hash."""
+    try:
+        decoded = crypto.b64decode(event_id)
+        if len(decoded) == 16 and crypto.b64encode(decoded) == event_id:
+            return decoded
+    except Exception:
+        pass
+    return None
+
+
 def compute_unified_key(event_id: str, created_at: int = 0) -> str:
     """Compute the unified hash key for an event.
 
-    The unified key is derived purely from the event_id using BLAKE2b hash.
+    The unified key is derived purely from the event_id hash.
     This ensures that all peers compute the same key for the same event,
     regardless of when they received it or what timestamp metadata they have.
 
@@ -200,10 +212,13 @@ def compute_unified_key(event_id: str, created_at: int = 0) -> str:
     Returns:
         16 character hex string (64 bits of hash)
     """
-    # Hash the event_id to get uniform distribution
-    # Use 8 bytes (64 bits) = 16 hex chars
+    decoded = _decode_event_id_bytes(event_id)
+    if decoded is not None:
+        return decoded[:8].hex()
+
+    # Fallback for non-hash event IDs (tests/fixtures).
     h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
-    return h.hex()  # 16 hex chars
+    return h.hex()
 
 
 def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
@@ -248,17 +263,23 @@ ZERO_HASH = b'\x00' * 16
 def compute_fingerprint(event_id: str) -> bytes:
     """Compute fingerprint for an event.
 
-    Returns a 16-byte BLAKE2b hash of the event_id.
+    Returns a 16-byte hash for the event_id.
     This is O(1) and works with any event_id format.
 
-    Note: While production event_ids are already hashes, this handles
-    arbitrary formats (like test strings "event_0") consistently.
+    Note: If event_id is already a hash (base64-encoded 16 bytes),
+    we use it directly. Otherwise we hash the string.
     """
+    decoded = _decode_event_id_bytes(event_id)
+    if decoded is not None:
+        return decoded
     return hashlib.blake2b(event_id.encode('utf-8'), digest_size=16).digest()
 
 
 def xor_bytes(a: bytes, b: bytes) -> bytes:
-    """XOR two byte strings of equal length."""
+    """XOR two byte strings of equal length (optimized for 16-byte hashes)."""
+    # Use int operations for 16-byte hashes (10x faster than generator)
+    if len(a) == 16:
+        return (int.from_bytes(a, 'big') ^ int.from_bytes(b, 'big')).to_bytes(16, 'big')
     return bytes(x ^ y for x, y in zip(a, b))
 
 
@@ -303,7 +324,8 @@ def add_events_to_sync_batch(
     db,
     recorded_by: str,
     events: list[tuple[str, int]],  # List of (event_id, created_at)
-    defer_buckets: bool = False
+    defer_buckets: bool = False,
+    incremental_buckets: bool = False
 ) -> None:
     """Add multiple events to the sync system efficiently.
 
@@ -315,27 +337,140 @@ def add_events_to_sync_batch(
         recorded_by: Peer ID
         events: List of (event_id, created_at) tuples
         defer_buckets: If True, skip bucket updates (caller must call rebuild_buckets_for_peer).
-                       If False (default), rebuild buckets immediately.
+                       If False (default), update buckets immediately.
+        incremental_buckets: If True, update buckets incrementally instead of rebuilding.
     """
     if not events:
         return
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
 
     # Build batch data for executemany
     batch_data = []
     for event_id, created_at in events:
         unified_key = compute_unified_key(event_id, created_at)
-        batch_data.append((recorded_by, event_id, unified_key, created_at))
+        fingerprint = compute_fingerprint(event_id)  # Decode once, store forever
+        batch_data.append((recorded_by, event_id, unified_key, created_at, fingerprint))
 
-    # Batch insert using executemany (much faster than individual inserts)
-    db._conn.executemany("""
-        INSERT OR IGNORE INTO negentropy_events
-        (recorded_by, event_id, unified_key, created_at)
-        VALUES (?, ?, ?, ?)
-    """, batch_data)
+    insert_chunk_size = 200
+    inserted: list[tuple[str, str, bytes]] = []  # (event_id, unified_key, fingerprint)
+    supports_returning = True
+
+    for i in range(0, len(batch_data), insert_chunk_size):
+        chunk = batch_data[i:i + insert_chunk_size]
+        placeholders = ",".join(["(?, ?, ?, ?, ?)"] * len(chunk))
+        params: list[Any] = []
+        for row in chunk:
+            params.extend(row)
+
+        if supports_returning:
+            try:
+                rows = safedb.execute_returning(
+                    f"""
+                    INSERT OR IGNORE INTO negentropy_events
+                    (recorded_by, event_id, unified_key, created_at, fingerprint)
+                    VALUES {placeholders}
+                    RETURNING event_id, unified_key, fingerprint
+                    """,
+                    tuple(params)
+                )
+                inserted.extend([(row['event_id'], row['unified_key'], row['fingerprint']) for row in rows])
+                continue
+            except Exception as e:
+                supports_returning = False
+                log.debug(f"negentropy.add_events_to_sync_batch: RETURNING not supported, using fallback: {e}")
+
+        # Fallback: preselect existing IDs so we can avoid double-XOR on duplicates
+        event_ids = [row[1] for row in chunk]
+        existing = set()
+        if event_ids:
+            id_placeholders = ",".join(["?"] * len(event_ids))
+            existing_rows = safedb.query(
+                f"""
+                SELECT event_id FROM negentropy_events
+                WHERE recorded_by = ? AND event_id IN ({id_placeholders})
+                """,
+                (recorded_by, *event_ids)
+            )
+            existing = {row['event_id'] for row in existing_rows}
+
+        db._conn.executemany("""
+            INSERT OR IGNORE INTO negentropy_events
+            (recorded_by, event_id, unified_key, created_at, fingerprint)
+            VALUES (?, ?, ?, ?, ?)
+        """, chunk)
+
+        seen_new = set()
+        for _, event_id, unified_key, _, fingerprint in chunk:
+            if event_id in existing or event_id in seen_new:
+                continue
+            seen_new.add(event_id)
+            inserted.append((event_id, unified_key, fingerprint))
 
     # Optionally update buckets immediately (for small batches or single events)
-    if not defer_buckets:
+    if defer_buckets or not inserted:
+        return
+
+    if not incremental_buckets:
         rebuild_buckets_for_peer(db, recorded_by)
+        return
+
+    t_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    bucket_deltas: dict[tuple[str, str], bytes] = {}
+    bucket_counts: dict[tuple[str, str], int] = {}
+    level_prefixes: dict[str, set[str]] = {}
+
+    for event_id, unified_key, fingerprint in inserted:
+        for level in LEVELS:
+            prefix_len = LEVEL_PREFIX_LEN[level]
+            prefix = unified_key[:prefix_len]
+            bucket_key = (level, prefix)
+
+            if bucket_key in bucket_deltas:
+                bucket_deltas[bucket_key] = xor_bytes(bucket_deltas[bucket_key], fingerprint)
+                bucket_counts[bucket_key] += 1
+            else:
+                bucket_deltas[bucket_key] = fingerprint
+                bucket_counts[bucket_key] = 1
+
+            level_prefixes.setdefault(level, set()).add(prefix)
+
+    existing_buckets: dict[tuple[str, str], tuple[bytes | None, int]] = {}
+    for level, prefixes in level_prefixes.items():
+        prefix_list = list(prefixes)
+        for i in range(0, len(prefix_list), insert_chunk_size):
+            chunk_prefixes = prefix_list[i:i + insert_chunk_size]
+            prefix_placeholders = ",".join(["?"] * len(chunk_prefixes))
+            rows = safedb.query(
+                f"""
+                SELECT prefix, hash, event_count FROM negentropy_buckets
+                WHERE recorded_by = ? AND level = ? AND prefix IN ({prefix_placeholders})
+                """,
+                (recorded_by, level, *chunk_prefixes)
+            )
+            for row in rows:
+                existing_buckets[(level, row['prefix'])] = (row['hash'], row['event_count'])
+
+    bucket_batch = []
+    for (level, prefix), delta_hash in bucket_deltas.items():
+        existing_hash, existing_count = existing_buckets.get((level, prefix), (None, 0))
+        if existing_hash:
+            new_hash = xor_bytes(existing_hash, delta_hash)
+        else:
+            new_hash = delta_hash
+
+        new_count = existing_count + bucket_counts[(level, prefix)]
+        bucket_batch.append((recorded_by, level, prefix, new_hash, new_count, t_ms))
+
+    db._conn.executemany("""
+        INSERT INTO negentropy_buckets
+        (recorded_by, level, prefix, hash, event_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
+            hash = excluded.hash,
+            event_count = excluded.event_count,
+            updated_at = excluded.updated_at
+    """, bucket_batch)
 
 
 def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
@@ -350,9 +485,9 @@ def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
     safedb = create_safe_db(db, recorded_by=recorded_by)
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
 
-    # Load all events for this peer
+    # Load all events for this peer (fingerprint is cached, no decoding needed)
     rows = safedb.query("""
-        SELECT event_id, unified_key FROM negentropy_events
+        SELECT event_id, unified_key, fingerprint FROM negentropy_events
         WHERE recorded_by = ?
     """, (recorded_by,))
 
@@ -361,9 +496,11 @@ def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
     bucket_counts: dict[tuple[str, str], int] = {}
 
     for row in rows:
-        event_id = row['event_id']
         unified_key = row['unified_key']
-        fingerprint = compute_fingerprint(event_id)
+        # Use cached fingerprint if available, otherwise compute (for legacy data)
+        fingerprint = row['fingerprint']
+        if fingerprint is None:
+            fingerprint = compute_fingerprint(row['event_id'])
 
         for level in LEVELS:
             prefix_len = LEVEL_PREFIX_LEN[level]
@@ -440,14 +577,18 @@ def add_shareable_events_batch(
     safedb = create_safe_db(db, recorded_by=can_share_peer_id)
 
     # Batch insert into shareable_events
+    batch_rows = []
     for event_id, created_at, recorded_at in events:
         event_id_bytes = crypto.b64decode(event_id)
         window_id = sync_window.SyncWindow.storage_window_from_event_id(event_id_bytes)
+        batch_rows.append((event_id, can_share_peer_id, created_at, recorded_at, window_id))
 
-        safedb.execute(
+    chunk_size = 2000
+    for i in range(0, len(batch_rows), chunk_size):
+        db._conn.executemany(
             """INSERT OR IGNORE INTO shareable_events (event_id, can_share_peer_id, created_at, recorded_at, window_id)
                VALUES (?, ?, ?, ?, ?)""",
-            (event_id, can_share_peer_id, created_at, recorded_at, window_id)
+            batch_rows[i:i + chunk_size],
         )
 
     # Batch add to negentropy (unless skipped)

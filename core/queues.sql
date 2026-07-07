@@ -50,3 +50,12 @@ CREATE TABLE IF NOT EXISTS incoming_blobs (
 -- Partial index excludes dropped packets which are never queried
 CREATE INDEX IF NOT EXISTS idx_incoming_blobs_deliver_at
     ON incoming_blobs(deliver_at) WHERE NOT dropped;
+
+-- Raw ingest queue for fast-path transport (e.g., WSS/QUIC).
+-- No unwrap/parse, materializer job hashes and records later.
+CREATE TABLE IF NOT EXISTS ingest_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_by TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    blob BLOB NOT NULL
+);

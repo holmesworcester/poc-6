@@ -54,6 +54,7 @@ import shlex
 import readline
 import atexit
 import os
+import time
 from typing import Optional, Dict, List, Any
 
 # Configure logging BEFORE importing any modules that use logging
@@ -315,7 +316,7 @@ class CLISession:
         self.accounts: Dict[str, AccountContext] = {}  # full_name -> AccountContext
         self.selected_account: Optional[str] = None    # Currently selected account full_name
         self.selected_channel_id: Optional[str] = None  # Currently selected channel ID
-        self.current_time_ms: int = 0
+        self.current_time_ms: int = int(time.time() * 1000)  # Use real wall clock time
         self.auto_tick_count: int = 10  # Number of auto-ticks after event commands (default 10 = 1 second)
         self.invites: List[Dict[str, Any]] = []  # List of invite links for convenience
         self.event_log: EventLog = EventLog()  # Event log for debugging/visibility
@@ -350,6 +351,117 @@ class CLISession:
 
         self.db = Database(conn)
         schema.create_all(self.db)
+        # Load any existing accounts from the database
+        self._load_existing_accounts()
+
+    def _load_existing_accounts(self):
+        """Load existing accounts from the database and auto-select if one exists.
+
+        This allows CLI commands to work across separate invocations when using
+        a persistent database file.
+        """
+        # Query local_peers joined with peer_self to get account info
+        # peer_names.name is the device name (peer display name)
+        # Note: peer_self may not exist yet for joiners who haven't synced
+        rows = self.db._conn.execute("""
+            SELECT lp.peer_id, ps.peer_shared_id, ps.user_id,
+                   u.name AS user_name, pn.name AS device_name
+            FROM local_peers lp
+            LEFT JOIN peer_self ps ON ps.peer_id = lp.peer_id AND ps.recorded_by = lp.peer_id
+            LEFT JOIN users u ON u.user_id = ps.user_id AND u.recorded_by = lp.peer_id
+            LEFT JOIN peer_names pn ON pn.peer_id = ps.peer_shared_id AND pn.recorded_by = lp.peer_id
+        """).fetchall()
+
+        for row in rows:
+            peer_id, peer_shared_id, user_id, user_name, device_name = row
+
+            # For joiners before sync completes, try to get info from invite_accepteds and pending_name_updates
+            network_id = None
+            if not peer_shared_id:
+                # Check invite_accepteds for joiner's network_id
+                ia_row = self.db._conn.execute("""
+                    SELECT ia.network_id
+                    FROM invite_accepteds ia
+                    WHERE ia.recorded_by = ?
+                    LIMIT 1
+                """, (peer_id,)).fetchone()
+                if ia_row:
+                    network_id = ia_row[0]
+
+                # Get peer_shared_id from peers_shared (local peer's own record)
+                ps_row = self.db._conn.execute("""
+                    SELECT peer_shared_id FROM peers_shared
+                    WHERE peer_id = ? AND recorded_by = ?
+                    LIMIT 1
+                """, (peer_id, peer_id)).fetchone()
+                if ps_row:
+                    peer_shared_id = ps_row[0]
+                else:
+                    # Fallback: scan store for peer_shared event with our peer_id
+                    import json
+                    for store_row in self.db._conn.execute("""
+                        SELECT id, blob FROM store
+                    """).fetchall():
+                        try:
+                            data = json.loads(store_row[1])
+                            if data.get('type') == 'peer_shared' and data.get('peer_id') == peer_id:
+                                peer_shared_id = store_row[0]
+                                break
+                        except:
+                            pass
+
+                # Get username and devicename from pending_name_updates
+                pnu_username = self.db._conn.execute("""
+                    SELECT name FROM pending_name_updates
+                    WHERE type = 'username' AND recorded_by = ?
+                    LIMIT 1
+                """, (peer_id,)).fetchone()
+                if pnu_username:
+                    user_name = pnu_username[0]
+
+                pnu_devicename = self.db._conn.execute("""
+                    SELECT name FROM pending_name_updates
+                    WHERE type = 'peer_name' AND recorded_by = ?
+                    LIMIT 1
+                """, (peer_id,)).fetchone()
+                if pnu_devicename:
+                    device_name = pnu_devicename[0]
+
+                if not peer_shared_id:
+                    continue  # Skip if no peer_shared_id available
+
+            # Use fallbacks for missing names
+            user_name = user_name or "unknown"
+            device_name = device_name or "device"
+
+            account = AccountContext(
+                user_name=user_name,
+                device_name=device_name,
+                peer_id=peer_id,
+                peer_shared_id=peer_shared_id
+            )
+            account.user_id = user_id
+
+            # Get network_id if available
+            net_row = self.db._conn.execute("""
+                SELECT network_id FROM networks WHERE recorded_by = ? LIMIT 1
+            """, (peer_id,)).fetchone()
+            if net_row:
+                account.network_id = net_row[0]
+            elif 'network_id' in dir() and network_id:
+                account.network_id = network_id
+
+            self.accounts[account.full_name] = account
+
+        # Auto-select first account if any exist and none selected
+        if self.accounts and not self.selected_account:
+            first_account = list(self.accounts.values())[0]
+            self.selected_account = first_account.full_name
+
+            # Also auto-select first channel if available
+            channels = channel.list(recorded_by=first_account.peer_id, db=self.db)
+            if channels:
+                self.selected_channel_id = channels[0]['channel_id']
 
     def get_selected_account(self) -> AccountContext:
         """Get the currently selected account context."""
@@ -1178,6 +1290,7 @@ def cmd_create_invite(session: CLISession):
     session.last_invite_link = invite_link
 
     print(f"✓ created invite #{invite_num}")
+    print(f"  link: {invite_link}")
     print(f"  use: accept-invite --username <name> --devicename <device> --invite {invite_num}")
     session.event_log.display()
 
@@ -1440,10 +1553,12 @@ def cmd_whoami(session: CLISession):
     account = session.get_selected_account()
     print(f"peer_id: {account.peer_id}")
 
-    # Get peer_shared_id
-    ps = peer_shared.get_for_peer(account.peer_id, account.peer_id, session.db)
+    # Get peer_shared_id - try database first, fall back to account object
+    ps = peer_shared.get_self(account.peer_id, session.db)
     if ps:
         print(f"peer_shared_id: {ps['peer_shared_id']}")
+    elif account.peer_shared_id:
+        print(f"peer_shared_id: {account.peer_shared_id}")
 
     if account.user_id:
         print(f"user_id: {account.user_id}")
@@ -2904,6 +3019,13 @@ def run_sync_daemon(session: CLISession):
     """
     import time
     from core import tick as tick_module
+    from core.db import create_unsafe_db
+
+    # Clear job_state to avoid "time went backwards" issues
+    # CLI sync uses simulated time which may be ahead of wall clock
+    unsafedb = create_unsafe_db(session.db)
+    unsafedb.execute("DELETE FROM job_state")
+    session.db.commit()
 
     print("Sync daemon mode - press Ctrl+C to stop")
 

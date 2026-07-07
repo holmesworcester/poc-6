@@ -68,8 +68,9 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
            wrap_key_data: dict | None = None) -> str:
     """Create a shareable group_prekey_shared event from a local group prekey.
 
-    Context must be either group-based (for user invites) or user-based (for link invites).
-    Exactly one context type must be provided.
+    Context parameters are optional - they are stored in the event for reference
+    but are not required for the prekey to function. The prekey can be used for
+    encrypting group keys to any member regardless of context.
 
     Args:
         prekey_id: Local group_prekey event ID (to get public key from)
@@ -77,28 +78,21 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
-        group_id: Group context (for mode=user invites). Requires key_id.
-        key_id: Key reference (for mode=user invites). Requires group_id.
-        user_id: User context (for mode=link invites - device linking)
+        group_id: Optional group context (for mode=user invites)
+        key_id: Optional key reference (for mode=user invites)
+        user_id: Optional user context (for mode=link invites - device linking)
         wrap_key_data: Optional key dict for wrapping (used when network key not available yet)
 
     Returns:
         group_prekey_shared_id: The stored group_prekey_shared event ID
-
-    Raises:
-        ValueError: If neither group context nor user context is provided,
-                    or if both are provided
     """
-    # Validate context - must have exactly one type
+    # Context parameters are optional - validate consistency if group context provided
     has_group_context = group_id is not None
     has_user_context = user_id is not None
 
-    if not has_group_context and not has_user_context:
-        raise ValueError("group_prekey_shared requires either group context (group_id, key_id) or user context (user_id)")
-    if has_group_context and has_user_context:
-        raise ValueError("group_prekey_shared cannot have both group context and user context")
+    # If group context is provided, key_id should also be provided (but not required)
     if has_group_context and key_id is None:
-        raise ValueError("group context requires both group_id and key_id")
+        log.warning("group_prekey_shared.create() group_id provided without key_id")
 
     log.info(f"group_prekey_shared.create() creating group_prekey_shared for prekey_id={prekey_id}, t_ms={t_ms}")
 
@@ -122,13 +116,15 @@ def create(prekey_id: str, peer_id: str, peer_shared_id: str,
         'created_at': t_ms,
     }
 
-    # Add context fields based on invite type:
+    # Add context fields if provided (all optional):
     # - mode=user: group context (group_id, key_id)
     # - mode=link: user context (user_id)
+    # - no context: standalone prekey for key rotation
     if has_group_context:
         event_data['group_id'] = group_id
-        event_data['key_id'] = key_id
-    else:
+        if key_id:
+            event_data['key_id'] = key_id
+    if has_user_context:
         event_data['user_id'] = user_id
 
     # Sign the event with local peer's private key

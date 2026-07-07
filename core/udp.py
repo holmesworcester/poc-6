@@ -51,14 +51,17 @@ class UDPSocket:
 
     def _recv_loop(self):
         """Background thread: receive packets and queue them."""
+        log.info(f"UDPSocket: _recv_loop started on {self.host}:{self.port}")
         while self._running:
             try:
                 data, addr = self._sock.recvfrom(65535)
+                log.info(f"UDPSocket: received {len(data)}B from {addr}")
                 self._incoming.put((data, addr))
             except socket.timeout:
                 continue
             except OSError:
                 break  # Socket closed
+        log.info(f"UDPSocket: _recv_loop ended")
 
     def send_to(self, addr: tuple, data: bytes):
         """Send packet to an address.
@@ -68,7 +71,11 @@ class UDPSocket:
             data: Packet data
         """
         if self._sock:
-            self._sock.sendto(data, addr)
+            try:
+                bytes_sent = self._sock.sendto(data, addr)
+                log.info(f"UDPSocket: sendto {addr} returned {bytes_sent}B")
+            except Exception as e:
+                log.error(f"UDPSocket: sendto {addr} failed: {e}")
 
     def drain(self) -> list:
         """Drain all queued packets.

@@ -44,7 +44,6 @@ def project_ids(recorded_ids: list[str], db: Any, _recursion_depth: int = 0,
         log.error(f"[PROJECT_IDS] RECURSION LIMIT EXCEEDED depth={_recursion_depth} - possible infinite loop!")
         return []
 
-    log.info(f"recorded.project_ids() projecting {len(recorded_ids)} recorded events (depth={_recursion_depth}, skip_neg={skip_negentropy})")
     projected_ids = []
     for recorded_id in recorded_ids:
         try:
@@ -184,20 +183,27 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         should_mark_shareable = True
 
     if should_mark_shareable:
-        # Mark event as shareable in shareable_events table
-        # Always use created_at=None for simplicity and determinism
-        # Sync protocol doesn't need created_at - it uses recorded_at for ordering
-        # UI lazy loading will use separate projected_events table with created_at
-        from events.network import negentropy
-        log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None (skip_neg={skip_negentropy})")
-        negentropy.add_shareable_event(
-            ref_id,
-            recorded_by,
-            created_at=None,  # Always None for determinism (encrypted events don't have created_at)
-            recorded_at=recorded_at,
-            db=db,
-            skip_negentropy=skip_negentropy
-        )
+        should_index = True
+        if event_type:
+            should_index = registry.is_sync_indexed(event_type)
+
+        if should_index:
+            # Mark event as shareable in shareable_events table
+            # Always use created_at=None for simplicity and determinism
+            # Sync protocol doesn't need created_at - it uses recorded_at for ordering
+            # UI lazy loading will use separate projected_events table with created_at
+            from events.network import negentropy
+            log.debug(f"Adding {event_type or 'unknown'} {ref_id[:20]}... to shareable_events with created_at=None (skip_neg={skip_negentropy})")
+            negentropy.add_shareable_event(
+                ref_id,
+                recorded_by,
+                created_at=None,  # Always None for determinism (encrypted events don't have created_at)
+                recorded_at=recorded_at,
+                db=db,
+                skip_negentropy=skip_negentropy
+            )
+        else:
+            log.debug(f"Skipping negentropy indexing for {event_type} {ref_id[:20]}...")
 
     # Handle crypto blocking (after shareable marking)
     # Block events we can't decrypt - they'll still be shareable and sent during sync

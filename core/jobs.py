@@ -5,6 +5,8 @@ its own logic. The tick() function asks each job if it should_run() and
 executes those that say yes.
 """
 import logging
+import os
+import time
 from typing import Any, Dict
 from abc import ABC, abstractmethod
 from .db import create_unsafe_db
@@ -108,6 +110,12 @@ class ReceiveJob(Job):
         from core import transport, receive
         from events.network import recorded
 
+        skip_store = os.getenv("SYNC_PERF_SKIP_STORE") == "1"
+        skip_unwrap = os.getenv("SYNC_PERF_SKIP_UNWRAP") == "1"
+        skip_projection = os.getenv("SYNC_PERF_SKIP_PROJECTION") == "1"
+        skip_negentropy = os.getenv("SYNC_PERF_SKIP_NEGENTROPY") == "1"
+        batch_size = int(os.getenv("SYNC_PERF_RECEIVE_BATCH_SIZE", "100"))
+
         # 1. Transfer packets (loopback for testing, UDP for production)
         if transport.is_udp_active():
             transport.udp_transfer()
@@ -115,22 +123,69 @@ class ReceiveJob(Job):
             transport.loopback_transfer()
 
         # 2. Grab batch from incoming (pure - no DB)
-        batch = transport.drain_incoming(100)
+        batch = transport.drain_incoming(batch_size)
         if not batch:
             return {'received': 0}
 
         # 3. Store all (touches DB)
         all_recorded_ids = []
         for blob, from_addr in batch:
-            recorded_ids = receive.store_incoming(blob, from_addr, t_ms, db)
+            recorded_ids = receive.store_incoming(
+                blob,
+                from_addr,
+                t_ms,
+                db,
+                skip_store=skip_store,
+                skip_unwrap=skip_unwrap,
+            )
             all_recorded_ids.extend(recorded_ids)
 
+        if not skip_store:
+            buffered_ids = receive.flush_write_behind(t_ms, db)
+            all_recorded_ids.extend(buffered_ids)
+
         # 4. Project all (touches DB)
-        if all_recorded_ids:
-            recorded.project_ids(all_recorded_ids, db)
+        import logging
+        job_log = logging.getLogger(__name__)
+        job_log.warning(f"ReceiveJob: all_recorded_ids={len(all_recorded_ids)}, skip_projection={skip_projection}")
+        if all_recorded_ids and not skip_projection:
+            job_log.warning(f"ReceiveJob: calling project_ids for {len(all_recorded_ids)} recorded_ids")
+            recorded.project_ids(all_recorded_ids, db, skip_negentropy=True)
+            if not skip_negentropy:
+                receive._batch_add_negentropy_for_recorded(t_ms, db)
 
         db.commit()
         return {'received': len(batch)}
+
+
+class IngestMaterializeJob(Job):
+    """Materialize raw ingest queue into store/recorded with optional projection."""
+
+    def __init__(self):
+        super().__init__('ingest_materialize', every_ms=50)
+
+    def run(self, t_ms: int, db: Any) -> dict:
+        from core import ingest
+        from events.network import recorded
+
+        batch_size = int(os.getenv("SYNC_INGEST_MATERIALIZE_BATCH", "1000"))
+        project_budget_ms = int(os.getenv("SYNC_INGEST_PROJECT_BUDGET_MS", "0"))
+        project_batch = int(os.getenv("SYNC_INGEST_PROJECT_BATCH", "200"))
+
+        recorded_ids = ingest.materialize_ingest_queue(t_ms, db, batch_size=batch_size)
+
+        if project_budget_ms > 0 and recorded_ids:
+            start = time.perf_counter()
+            idx = 0
+            while idx < len(recorded_ids):
+                if (time.perf_counter() - start) * 1000 >= project_budget_ms:
+                    break
+                batch = recorded_ids[idx:idx + project_batch]
+                recorded.project_ids(batch, db, skip_negentropy=True)
+                idx += project_batch
+
+        db.commit()
+        return {'materialized': len(recorded_ids)}
 
 
 class MessageRekeyAndPurgeJob(Job):
@@ -355,6 +410,7 @@ class NegentropySyncJob(Job):
 JOBS = [
     ConnectionSendJob(),
     ReceiveJob(),
+    IngestMaterializeJob(),
     NegentropySyncJob(),
     ConnectionPurgeJob(),
     SelfAddressAnnounceJob(),

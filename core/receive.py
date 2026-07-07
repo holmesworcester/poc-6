@@ -8,6 +8,8 @@ This module handles the receive side of the sync protocol:
 """
 
 from typing import Any
+import os
+import json
 from core.db import create_safe_db, create_unsafe_db
 from core import queues
 from core import crypto
@@ -16,6 +18,166 @@ import logging
 
 log = logging.getLogger(__name__)
 
+
+_WRITE_BEHIND_BUFFER_FAST: list[dict[str, Any]] = []
+_WRITE_BEHIND_BUFFER_SLOW: list[dict[str, Any]] = []
+_WRITE_BEHIND_FAST_COUNT = 0
+_WRITE_BEHIND_SLOW_COUNT = 0
+_WRITE_BEHIND_FAST_START_MS: int | None = None
+_WRITE_BEHIND_SLOW_START_MS: int | None = None
+
+
+def _write_behind_enabled() -> bool:
+    return os.getenv("SYNC_PERF_WRITE_BEHIND") == "1"
+
+
+def _write_behind_should_flush(t_ms: int) -> bool:
+    max_events = int(os.getenv("SYNC_PERF_WRITE_BEHIND_MAX_EVENTS", "0"))
+    max_ms = int(os.getenv("SYNC_PERF_WRITE_BEHIND_MAX_MS", "0"))
+    force_flush = os.getenv("SYNC_PERF_WRITE_BEHIND_FLUSH") == "1"
+
+    if force_flush:
+        return True
+    if max_events and _WRITE_BEHIND_FAST_COUNT >= max_events:
+        return True
+    if max_ms and _WRITE_BEHIND_FAST_START_MS is not None and t_ms - _WRITE_BEHIND_FAST_START_MS >= max_ms:
+        return True
+    return False
+
+
+def _file_slice_should_flush(t_ms: int) -> bool:
+    max_events = int(os.getenv("SYNC_PERF_FILE_SLICE_MAX_EVENTS", "0"))
+    max_ms = int(os.getenv("SYNC_PERF_FILE_SLICE_MAX_MS", "0"))
+    force_flush = os.getenv("SYNC_PERF_FILE_SLICE_FLUSH") == "1"
+
+    if force_flush:
+        return True
+    if max_events == 0 and max_ms == 0:
+        return _write_behind_should_flush(t_ms)
+    if max_events and _WRITE_BEHIND_SLOW_COUNT >= max_events:
+        return True
+    if max_ms and _WRITE_BEHIND_SLOW_START_MS is not None and t_ms - _WRITE_BEHIND_SLOW_START_MS >= max_ms:
+        return True
+    return False
+
+
+def _buffer_write_behind(unwrapped_blob: bytes, recorded_by_peers: list[str],
+                         from_addr: tuple[str, int] | None, t_ms: int,
+                         is_file_slice: bool) -> None:
+    global _WRITE_BEHIND_FAST_COUNT, _WRITE_BEHIND_SLOW_COUNT
+    global _WRITE_BEHIND_FAST_START_MS, _WRITE_BEHIND_SLOW_START_MS
+
+    entry = {
+        'blob': unwrapped_blob,
+        'recorded_by_peers': recorded_by_peers,
+        'from_addr': from_addr,
+        't_ms': t_ms,
+    }
+
+    if is_file_slice:
+        _WRITE_BEHIND_BUFFER_SLOW.append(entry)
+        _WRITE_BEHIND_SLOW_COUNT += 1
+        if _WRITE_BEHIND_SLOW_START_MS is None:
+            _WRITE_BEHIND_SLOW_START_MS = t_ms
+    else:
+        _WRITE_BEHIND_BUFFER_FAST.append(entry)
+        _WRITE_BEHIND_FAST_COUNT += 1
+        if _WRITE_BEHIND_FAST_START_MS is None:
+            _WRITE_BEHIND_FAST_START_MS = t_ms
+
+
+def _parse_unwrapped_json(unwrapped_blob: bytes) -> dict[str, Any] | None:
+    if not unwrapped_blob or unwrapped_blob[:1] != b'{':
+        return None
+    try:
+        return crypto.parse_json(unwrapped_blob)
+    except Exception:
+        return None
+
+
+def _handle_negentropy_envelope(envelope: dict[str, Any],
+                                recorded_by_peers: list[str],
+                                t_ms: int,
+                                db: Any) -> bool:
+    if envelope.get('type') != 'negentropy':
+        return False
+
+    connection_id = envelope.get('reply_connection_id')
+    if not connection_id:
+        return False
+
+    from events.network import negentropy
+    for recorded_by in recorded_by_peers:
+        negentropy.handle_incoming(db, recorded_by, connection_id, envelope, t_ms)
+    return True
+
+
+def _flush_write_behind_entries(entries: list[dict[str, Any]], db: Any) -> list[str]:
+    """Flush buffered events to the store and return recorded_ids for projection.
+
+    Perf-only write-behind path: stores event + recorded blobs in batch.
+    """
+    event_rows: list[tuple[str, bytes, int]] = []
+    recorded_rows: list[tuple[str, bytes, int]] = []
+    recorded_ids: list[str] = []
+
+    for entry in entries:
+        blob = entry['blob']
+        stored_at = entry['t_ms']
+        recorded_by_peers = entry['recorded_by_peers']
+
+        event_id_bytes = crypto.hash(blob)
+        event_id = crypto.b64encode(event_id_bytes)
+        event_rows.append((event_id, blob, stored_at))
+
+        for recorded_by in recorded_by_peers:
+            recorded_blob = json.dumps({
+                'type': 'recorded',
+                'ref_id': event_id,
+                'recorded_by': recorded_by,
+            }).encode('utf-8')
+            recorded_id = crypto.b64encode(crypto.hash(recorded_blob))
+            recorded_rows.append((recorded_id, recorded_blob, stored_at))
+            recorded_ids.append(recorded_id)
+
+    db._conn.executemany(
+        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+        event_rows
+    )
+    db._conn.executemany(
+        "INSERT OR IGNORE INTO store (id, blob, stored_at) VALUES (?, ?, ?)",
+        recorded_rows
+    )
+
+    return list(dict.fromkeys(recorded_ids))
+
+
+def flush_write_behind(t_ms: int, db: Any, force: bool = False) -> list[str]:
+    """Flush buffered events to the store and return recorded_ids for projection."""
+    global _WRITE_BEHIND_FAST_COUNT, _WRITE_BEHIND_SLOW_COUNT
+    global _WRITE_BEHIND_FAST_START_MS, _WRITE_BEHIND_SLOW_START_MS
+
+    if not _write_behind_enabled():
+        return []
+
+    flush_fast = force or _write_behind_should_flush(t_ms)
+    flush_slow = force or _file_slice_should_flush(t_ms)
+
+    recorded_ids: list[str] = []
+
+    if flush_fast and _WRITE_BEHIND_BUFFER_FAST:
+        recorded_ids.extend(_flush_write_behind_entries(_WRITE_BEHIND_BUFFER_FAST, db))
+        _WRITE_BEHIND_BUFFER_FAST.clear()
+        _WRITE_BEHIND_FAST_COUNT = 0
+        _WRITE_BEHIND_FAST_START_MS = None
+
+    if flush_slow and _WRITE_BEHIND_BUFFER_SLOW:
+        recorded_ids.extend(_flush_write_behind_entries(_WRITE_BEHIND_BUFFER_SLOW, db))
+        _WRITE_BEHIND_BUFFER_SLOW.clear()
+        _WRITE_BEHIND_SLOW_COUNT = 0
+        _WRITE_BEHIND_SLOW_START_MS = None
+
+    return list(dict.fromkeys(recorded_ids))
 
 def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
     """Device-wide routing: determine which local peers can decrypt this blob.
@@ -33,6 +195,8 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
 
     hint = blob[:crypto.KEY_ID_SIZE]
     hint_b64 = crypto.b64encode(hint)
+
+    log.debug(f"route_blob_to_peers: looking for hint_b64={hint_b64}")
 
     # Try connections first (symmetric keys from connection handshake)
     # The hint is first KEY_ID_SIZE bytes of connection_id
@@ -56,13 +220,26 @@ def route_blob_to_peers(blob: bytes, db: Any) -> list[str]:
         log.warning(f"route_blob_to_peers: Failed to query connections: {e}")
 
     # Try transit prekeys (asymmetric) - look up OWNER, not who knows about it
-    # Hint is KEY_ID_SIZE bytes, matches connection_prekey_id
+    # Hint is first KEY_ID_SIZE bytes of the full prekey_id, so we need prefix matching
     try:
         cursor = db._conn.execute(
-            "SELECT DISTINCT owner_peer_id FROM connection_prekeys WHERE connection_prekey_id = ?",
-            (hint_b64,)
+            "SELECT DISTINCT connection_prekey_id, owner_peer_id FROM connection_prekeys"
         )
-        recorded_by_peers = [row[0] for row in cursor.fetchall()]
+        recorded_by_peers = []
+        prekey_count = 0
+        for row in cursor.fetchall():
+            prekey_id = row[0]
+            prekey_count += 1
+            try:
+                prekey_id_bytes = crypto.b64decode(prekey_id)
+                prekey_prefix = prekey_id_bytes[:crypto.KEY_ID_SIZE]
+                if prekey_prefix == hint:
+                    log.info(f"route_blob_to_peers: MATCH! prekey_id={prekey_id[:20]}... matches hint={hint_b64}")
+                    recorded_by_peers.append(row[1])
+            except Exception as e:
+                log.warning(f"route_blob_to_peers: error decoding prekey {prekey_id[:20]}...: {e}")
+                continue
+        log.warning(f"route_blob_to_peers: checked {prekey_count} prekeys, found {len(recorded_by_peers)} matches for hint={hint_b64}")
         if recorded_by_peers:
             log.debug(f"route_blob_to_peers: routed to {len(recorded_by_peers)} peers via transit_prekey")
     except Exception as e:
@@ -96,7 +273,14 @@ def store_packet_from_addr(event_id: str, recorded_by: str, from_addr: tuple[str
     log.debug(f"store_packet_from_addr: stored {ip}:{port} for {event_id[:20]}...")
 
 
-def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db: Any) -> list[str]:
+def store_incoming(
+    blob: bytes,
+    from_addr: tuple[str, int] | None,
+    t_ms: int,
+    db: Any,
+    skip_store: bool = False,
+    skip_unwrap: bool = False,
+) -> list[str]:
     """Unwrap transit blob, store event, create recorded events for all peers who can decrypt.
 
     This is the unified receive function that:
@@ -117,27 +301,59 @@ def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db
     """
     from events.network import recorded
 
+    if skip_unwrap:
+        return []
+
+    # Calculate hint for logging
+    hint_b64 = crypto.b64encode(blob[:crypto.KEY_ID_SIZE]) if len(blob) >= crypto.KEY_ID_SIZE else "too_short"
+
     # Route to peers who can decrypt (device-wide lookup)
     recorded_by_peers = route_blob_to_peers(blob, db)
 
     if not recorded_by_peers:
-        log.debug(f"store_incoming: no peers can decrypt blob (unknown key)")
+        log.warning(f"store_incoming: no peers can decrypt blob (unknown key), hint_b64={hint_b64}")
         return []
+    else:
+        log.warning(f"store_incoming: found {len(recorded_by_peers)} peers for hint_b64={hint_b64}")
 
     # Try to unwrap with each peer who has access
     unwrapped_blob = None
     for peer_id in recorded_by_peers:
+        log.warning(f"store_incoming: trying unwrap with peer_id={peer_id[:20]}...")
         unwrapped_blob, missing_keys = crypto.unwrap_transit(blob, peer_id, db)
         if unwrapped_blob is not None:
+            log.warning(f"store_incoming: unwrap SUCCESS, blob size={len(unwrapped_blob)}")
             break
+        else:
+            log.warning(f"store_incoming: unwrap FAILED for peer_id={peer_id[:20]}..., missing_keys={missing_keys}")
 
     if unwrapped_blob is None:
-        log.debug(f"store_incoming: unwrap failed for {len(recorded_by_peers)} peers")
+        log.warning(f"store_incoming: unwrap failed for ALL {len(recorded_by_peers)} peers")
+        return []
+
+    log.warning(f"store_incoming: proceeding to store unwrapped blob size={len(unwrapped_blob)}")
+
+    parsed = None
+    is_file_slice = False
+    if _write_behind_enabled():
+        log.warning(f"store_incoming: write_behind enabled, buffering")
+        parsed = _parse_unwrapped_json(unwrapped_blob)
+        if parsed and _handle_negentropy_envelope(parsed, recorded_by_peers, t_ms, db):
+            return []
+        if parsed and parsed.get('type') == 'file_slice':
+            is_file_slice = True
+
+    if skip_store:
+        log.warning(f"store_incoming: skip_store=True, returning empty")
+        return []
+
+    if _write_behind_enabled():
+        _buffer_write_behind(unwrapped_blob, recorded_by_peers, from_addr, t_ms, is_file_slice)
         return []
 
     # Store the unwrapped event blob (once)
     event_id = store.blob(unwrapped_blob, t_ms, True, db)
-    log.debug(f"store_incoming: stored event {event_id[:20]}..., creating recorded for {len(recorded_by_peers)} peers")
+    log.warning(f"store_incoming: stored event {event_id[:20]}..., creating recorded for {len(recorded_by_peers)} peers")
 
     # Create recorded event for EACH peer who can decrypt + store from_addr in staging
     recorded_ids = []
@@ -145,7 +361,9 @@ def store_incoming(blob: bytes, from_addr: tuple[str, int] | None, t_ms: int, db
         recorded_id = recorded.create(event_id, peer_id, t_ms, db, True)
         store_packet_from_addr(event_id, peer_id, from_addr, db)
         recorded_ids.append(recorded_id)
+        log.warning(f"store_incoming: created recorded_id={recorded_id[:20]}... for peer_id={peer_id[:20]}...")
 
+    log.warning(f"store_incoming: returning {len(recorded_ids)} recorded_ids")
     return recorded_ids
 
 
@@ -262,9 +480,44 @@ def _process_address_observations(transit_packets: list[dict], t_ms: int, db: An
         log.debug(f"_process_address_observations: error: {e}")
 
 
+def _batch_add_negentropy_for_recorded(t_ms: int, db: Any) -> None:
+    """Batch-add shareable events for this tick to negentropy with incremental buckets."""
+    from events.network import negentropy
+
+    # Query shareable_events for events just added (recorded_at = t_ms)
+    # Use raw connection to bypass scoping (we need to query across all peers)
+    cursor = db._conn.execute(
+        "SELECT event_id, can_share_peer_id, recorded_at FROM shareable_events WHERE recorded_at = ?",
+        (t_ms,)
+    )
+    new_shareable = [{'event_id': r[0], 'can_share_peer_id': r[1], 'recorded_at': r[2]} for r in cursor.fetchall()]
+
+    if not new_shareable:
+        return
+
+    # Group by peer_id for batch processing
+    by_peer: dict[str, list[tuple[str, int]]] = {}
+    for row in new_shareable:
+        peer_id = row['can_share_peer_id']
+        if peer_id not in by_peer:
+            by_peer[peer_id] = []
+        by_peer[peer_id].append((row['event_id'], row['recorded_at']))
+
+    if os.getenv("SYNC_PERF_SKIP_BUCKETS") == "1":
+        for peer_id, events in by_peer.items():
+            negentropy.add_events_to_sync_batch(db, peer_id, events, defer_buckets=True)
+            log.debug(f"receive: batch-added {len(events)} events to negentropy for peer {peer_id[:20]}... (buckets skipped)")
+        return
+
+    # Batch-add to negentropy for each peer with incremental bucket updates
+    for peer_id, events in by_peer.items():
+        negentropy.add_events_to_sync_batch(db, peer_id, events, incremental_buckets=True)
+        log.debug(f"receive: batch-added {len(events)} events to negentropy for peer {peer_id[:20]}...")
+
+
 def receive(batch_size: int, t_ms: int, db: Any) -> None:
     """Receive and process a batch of incoming transit blobs."""
-    from events.network import recorded, negentropy
+    from events.network import recorded
 
     transit_packets = queues.incoming.drain(batch_size, t_ms, db)
     log.info(f"receive: processing {len(transit_packets)} blobs")
@@ -298,32 +551,7 @@ def receive(batch_size: int, t_ms: int, db: Any) -> None:
         _update_connection_request_addresses(event_source_addresses, t_ms, db)
         log.debug(f"receive: processed {len(event_source_addresses)} events for address learning")
 
-    # Batch-add all received events to negentropy (grouped by peer)
-    # Query shareable_events for events just added (recorded_at = t_ms)
-    # Use raw connection to bypass scoping (we need to query across all peers)
-    cursor = db._conn.execute(
-        "SELECT event_id, can_share_peer_id, recorded_at FROM shareable_events WHERE recorded_at = ?",
-        (t_ms,)
-    )
-    new_shareable = [{'event_id': r[0], 'can_share_peer_id': r[1], 'recorded_at': r[2]} for r in cursor.fetchall()]
-
-    if new_shareable:
-        # Group by peer_id for batch processing
-        by_peer: dict[str, list[tuple[str, int]]] = {}
-        for row in new_shareable:
-            peer_id = row['can_share_peer_id']
-            if peer_id not in by_peer:
-                by_peer[peer_id] = []
-            by_peer[peer_id].append((row['event_id'], row['recorded_at']))
-
-        # Batch-add to negentropy for each peer (defer bucket rebuilds for efficiency)
-        for peer_id, events in by_peer.items():
-            negentropy.add_events_to_sync_batch(db, peer_id, events, defer_buckets=True)
-            log.debug(f"receive: batch-added {len(events)} events to negentropy for peer {peer_id[:20]}...")
-
-        # Rebuild buckets once per peer at the end (much faster than per-event)
-        for peer_id in by_peer.keys():
-            negentropy.rebuild_buckets_for_peer(db, peer_id)
+    _batch_add_negentropy_for_recorded(t_ms, db)
 
     # Try to integrate with network layer for address observations (optional)
     try:
