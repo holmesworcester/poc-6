@@ -167,77 +167,24 @@ class ReceiveJob(Job):
         return {'received': total_received, 'queued': total_queued}
 
 
-class SyncRespondJob(Job):
-    """Handle incoming negentropy protocol messages quickly."""
-
-    def __init__(self):
-        super().__init__('sync_respond', every_ms=50, budget_ms=5)
-
-    def run(self, t_ms: int, db: Any) -> dict:
-        from core import ingest, crypto
-        from events.network import negentropy
-
-        batch_size = int(os.getenv("SYNC_RESPOND_BATCH", "500"))
-        budget_ms = self.budget_limit_ms("SYNC_RESPOND_BUDGET_MS")
-
-        last_log_id = ingest.get_stream_cursor(db, "sync_respond")
-        start = time.perf_counter()
-        processed = 0
-        handled = 0
-
-        while (time.perf_counter() - start) * 1000 < budget_ms:
-            rows = db._conn.execute(
-                "SELECT id, recorded_by, blob, transit_wrapped "
-                "FROM incoming_event_log "
-                "WHERE id > ? AND (event_type IS NULL OR event_type != 'negentropy') "
-                "ORDER BY id LIMIT ?",
-                (last_log_id, batch_size),
-            ).fetchall()
-            if not rows:
-                break
-
-            handled_log_ids: list[tuple[int]] = []
-            for log_id, recorded_by, blob, transit_wrapped in rows:
-                if transit_wrapped:
-                    event_blob, _missing = crypto.unwrap_transit(blob, recorded_by, db)
-                else:
-                    event_blob = blob
-                if not event_blob:
-                    continue
-                if event_blob[:1] in (b'{', b'['):
-                    raise ValueError("JSON event blobs are no longer supported")
-                if not negentropy.is_wire_envelope(event_blob):
-                    continue
-                event_data = negentropy.decode_wire_event(event_blob)
-                connection_id = event_data.get("reply_connection_id")
-                if not connection_id:
-                    continue
-                negentropy.handle_incoming(db, recorded_by, connection_id, event_data, t_ms)
-                handled += 1
-                handled_log_ids.append((log_id,))
-
-            if handled_log_ids:
-                db._conn.executemany(
-                    "UPDATE incoming_event_log SET event_type = 'negentropy' WHERE id = ?",
-                    handled_log_ids,
-                )
-
-            processed += len(rows)
-            last_log_id = rows[-1][0]
-            ingest.set_stream_cursor(db, "sync_respond", last_log_id, t_ms)
-
-        db.commit()
-        return {'processed': processed, 'handled': handled}
+# DEPRECATED: SyncRespondJob merged into SyncUpdateJob
+# Negentropy responses now happen AFTER blob materialization so hash is current
 
 
 class SyncUpdateJob(Job):
-    """Materialize ingest log into store/recorded/index and add shareable events."""
+    """Materialize ingest log, add shareable events, then handle negentropy messages.
+
+    Order matters: we materialize blobs BEFORE responding to negentropy, so our
+    hash reflects the latest state including blobs we just received.
+    """
 
     def __init__(self):
         super().__init__('sync_update', every_ms=50, budget_ms=50)
 
     def run(self, t_ms: int, db: Any) -> dict:
         from core import ingest
+        from events.network import negentropy
+
         batch_size = int(os.getenv("SYNC_UPDATE_BATCH", "8000"))
         max_batch = int(os.getenv("SYNC_UPDATE_BATCH_MAX", str(batch_size)))
         budget_ms = self.budget_limit_ms("SYNC_UPDATE_BUDGET_MS")
@@ -253,11 +200,14 @@ class SyncUpdateJob(Job):
                     budget_ms = min(max_budget, max(budget_ms, int(budget_ms * scale)))
 
         processed = 0
+        neg_handled = 0
         shareable_by_peer: dict[str, list[tuple[str, int | None, int]]] = {}
+        all_protocol_rows: list[tuple[int, str, dict]] = []
         start = time.perf_counter()
 
+        # Stage 1: Materialize all incoming blobs (collect protocol messages)
         while True:
-            recorded_ids, max_log_id, _plaintext_recorded_ids, shareable_rows, _protocol_rows = ingest.materialize_log_batch(
+            recorded_ids, max_log_id, _plaintext_recorded_ids, shareable_rows, protocol_rows = ingest.materialize_log_batch(
                 db,
                 start_log_id,
                 batch_size,
@@ -274,13 +224,16 @@ class SyncUpdateJob(Job):
                 for event_id, recorded_by, recorded_at in shareable_rows:
                     shareable_by_peer.setdefault(recorded_by, []).append((event_id, None, recorded_at))
 
+            # Collect protocol rows for later handling
+            all_protocol_rows.extend(protocol_rows)
+
             processed += len(recorded_ids)
 
             if budget_ms > 0 and (time.perf_counter() - start) * 1000 >= budget_ms:
                 break
 
+        # Stage 2: Add shareable events to negentropy
         if shareable_by_peer:
-            from events.network import negentropy
             for peer_id, events in shareable_by_peer.items():
                 negentropy.add_shareable_events_batch(
                     events,
@@ -289,8 +242,16 @@ class SyncUpdateJob(Job):
                     skip_negentropy=False,
                 )
 
+        # Stage 3: Handle negentropy protocol messages (AFTER blobs are materialized)
+        # This ensures our hash is current when we respond
+        for _log_id, recorded_by, event_data in all_protocol_rows:
+            connection_id = event_data.get("reply_connection_id")
+            if connection_id:
+                negentropy.handle_incoming(db, recorded_by, connection_id, event_data, t_ms)
+                neg_handled += 1
+
         db.commit()
-        return {'materialized': processed}
+        return {'materialized': processed, 'negentropy_handled': neg_handled}
 
 
 class ProjectionStreamJob(Job):
@@ -598,8 +559,7 @@ HIGH_PRIORITY_DEFAULT_TYPES = [
 JOBS = [
     ConnectionSendJob(),
     ReceiveJob(),
-    SyncRespondJob(),
-    SyncUpdateJob(),
+    SyncUpdateJob(),  # Handles negentropy responses after materializing blobs
     ProjectionStreamJob(
         name="high_priority_project",
         stream_name="high_priority",

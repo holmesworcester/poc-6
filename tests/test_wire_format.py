@@ -361,28 +361,28 @@ def test_invite_accepted_payload_roundtrip():
 
 
 def test_negentropy_payload_roundtrip():
+    # Test range_mismatched with new range-based protocol
     plaintext = negentropy.encode_plaintext(
         connection_id=b"\x3d" * 16,
         reply_connection_id=b"\x3e" * 16,
-        msg_type=negentropy.MSG_RANGE_EVENTS,
+        msg_type=negentropy.MSG_RANGE_MISMATCHED,
         range_id=b"\x3f" * negentropy.RANGE_ID_SIZE,
-        level=negentropy.LEVEL_PREFIX_4,
-        prefix_bytes=b"\x01\x02",
+        range_start=1000000,
+        range_end=2000000,
         hash_bytes=b"\x04" * 16,
         root_hash=b"\x05" * 16,
         total_events=123,
-        parent_range_id=b"\x06" * negentropy.RANGE_ID_SIZE,
-        event_ids=[b"\x07" * 16, b"\x08" * 16],
+        event_count=50,
     )
     decoded = negentropy.decode_plaintext(plaintext)
     assert decoded["connection_id"] == b"\x3d" * 16
     assert decoded["reply_connection_id"] == b"\x3e" * 16
-    assert decoded["msg_type"] == negentropy.MSG_RANGE_EVENTS
+    assert decoded["msg_type"] == negentropy.MSG_RANGE_MISMATCHED
     assert decoded["range_id"] == b"\x3f" * negentropy.RANGE_ID_SIZE
-    assert decoded["level"] == negentropy.LEVEL_PREFIX_4
-    assert decoded["prefix_bytes"] == b"\x01\x02"
+    assert decoded["range_start"] == 1000000
+    assert decoded["range_end"] == 2000000
     assert decoded["total_events"] == 123
-    assert decoded["event_ids"] == [b"\x07" * 16, b"\x08" * 16]
+    assert decoded["event_count"] == 50
 
 
 def test_username_update_payload_roundtrip():

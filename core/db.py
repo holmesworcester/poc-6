@@ -61,10 +61,11 @@ SUBJECTIVE_TABLES = {
     'connections',                 # Peer connections (peer-scoped, keyed by key_id + recorded_by)
     'pending_connection_requests', # Pending acks for incoming connection requests (peer-scoped)
     'packet_metadata',             # Packet metadata staging for from_addr (peer-scoped)
-    'negentropy_buckets',          # Negentropy sync: bucket hashes (peer-scoped)
-    'negentropy_events',           # Negentropy sync: event-to-bucket mapping (peer-scoped)
-    'negentropy_sync_state',       # Negentropy sync: per-connection sync state (peer-scoped)
+    'negentropy_events',           # Negentropy sync: event tracking (peer-scoped)
+    'negentropy_sync_state',       # Negentropy sync: per-connection range state (peer-scoped)
     'negentropy_checkpoints',      # Negentropy sync: completion checkpoints (peer-scoped)
+    'negentropy_chunks',           # Negentropy sync: precomputed XOR fingerprints per chunk (peer-scoped)
+    'negentropy_streaming_state',  # Negentropy sync: cursor-based streaming state (peer-scoped)
     'trust_anchors',               # Trust anchors: network_ids pre-approved by invite_accepted (peer-scoped)
 }
 

@@ -1,38 +1,27 @@
 """
-Negentropy-style deterministic sync protocol - HASH-ONLY BUCKETS variant.
+Negentropy-style deterministic sync protocol - UNIFIED TIME+HASH variant.
 
-This variant uses pure hash-based bucketing - the unified key is derived
-entirely from the event_id (hash bytes), with no timestamp dependency. This ensures
-that all peers compute identical keys for the same events, enabling
-accurate root hash comparison for sync detection.
+Uses requester-driven bisection with a unified time+hash key:
+- unified_key = (timestamp_ms << 16) | hash_16bits = 64-bit integer
+- Ranges are arbitrary [start, end) intervals, not fixed buckets
+- Requester controls bisection: on mismatch, split range in half
+- Responder is stateless: just compares hashes and sends blobs
 
 Design goals:
 - Deterministic: no false positives, exact set reconciliation
 - Finality: clear "done" state when synced (root hashes match)
-- UI-inspectable: track state per connection for visibility
-- Connection-scoped: ranges tracked by connection_id
-- Peer-consistent: same event_id always produces same unified_key
-
-Bucket hierarchy (by hash prefix):
-- root: all events
-- prefix_2: first 2 hex chars (256 buckets)
-- prefix_4: first 4 hex chars (65536 buckets)
-- prefix_6 through prefix_6: progressively finer hash buckets
-
-The unified key is: event_id_bytes[:8] as 16 hex chars
-This provides uniform distribution across all bucket levels.
-
-Trade-offs vs time-based bucketing:
-- Loses temporal locality (can't efficiently sync "just recent events")
-- Gains peer consistency (same event = same bucket on all peers)
-- Better for encrypted events where created_at is unavailable
+- Temporal locality: time is high-order bits, recent events cluster
+- Requester-driven: responder is stateless, requester controls subdivision
 
 Protocol flow:
-1. On new connection: send root hash
-2. Receive their hash, compare ranges
-3. For mismatched ranges: drill down by hash prefix until bucket has ≤EVENTS_THRESHOLD events
-4. At threshold: send actual event IDs
-5. When root hashes match: sync complete for this connection
+1. On connection: requester sends range_request(0, MAX, hash)
+2. Responder compares hashes:
+   - Match → range_matched
+   - Mismatch + few events → send blobs, return range_matched
+   - Mismatch + many events → range_mismatched
+3. On range_mismatched: requester bisects and sends two child requests
+4. Continue until all ranges matched
+5. When root hashes match: sync complete
 """
 
 import hashlib
@@ -68,19 +57,27 @@ WIRE_PLAINTEXT_SIZE = 344  # NEGENTROPY_PLAINTEXT_SIZE
 # Negentropy message types
 MSG_RANGE_REQUEST = 1
 MSG_RANGE_MATCHED = 2
-MSG_RANGE_EVENTS = 3
+MSG_RANGE_MISMATCHED = 3
+MSG_RANGE_GET = 4    # GET(range_id, start, end, cursor, limit) - cursor-based streaming
+MSG_RANGE_PAGE = 5   # PAGE(range_id, items_count, cursor, has_more) - response to GET
 
-# Negentropy level constants
-LEVEL_ROOT = 0
-LEVEL_PREFIX_2 = 1
-LEVEL_PREFIX_4 = 2
-LEVEL_PREFIX_6 = 3
-LEVEL_PREFIX_8 = 4
-LEVEL_PREFIX_10 = 5
+# Range constants (use signed 64-bit range for SQLite compatibility)
+MIN_UNIFIED_KEY = 0
+MAX_UNIFIED_KEY = (1 << 63) - 1  # Max signed 64-bit integer
 
-# Negentropy wire format sizes
+# Threshold for sending blobs vs bisecting
+EVENTS_THRESHOLD = 50
+
+# Batch size for bulk transfer (when their_hash is ZERO_HASH)
+# Increased from 100 to 1000 for cursor-based streaming to reduce round-trips
+BULK_BATCH_SIZE = 1000
+
+# Chunk size for precomputed fingerprints (must be power of 2)
+# 4096 chunks give ~16 million events per chunk at 48-bit timestamp resolution
+CHUNK_SIZE = 4096
+
+# Wire format sizes
 RANGE_ID_SIZE = 8
-PREFIX_BYTES = 5  # 5 bytes = 10 hex chars for prefix_10
 EVENT_ID_MAX = 15
 
 # v2 event specification - minimal, as this is a sync protocol message
@@ -106,67 +103,56 @@ def encode_plaintext(
     reply_connection_id: bytes,
     msg_type: int,
     range_id: bytes,
-    level: int,
-    prefix_bytes: bytes,
+    range_start: int,
+    range_end: int,
     hash_bytes: bytes,
     root_hash: bytes,
     total_events: int,
-    parent_range_id: bytes,
-    event_ids: list[bytes],
+    event_count: int = 0,
+    cursor: int = 0,
+    has_more: bool = False,
 ) -> bytes:
     """Encode a negentropy payload plaintext.
 
-    Layout (344 bytes):
+    Layout (113 bytes, padded to WIRE_PLAINTEXT_SIZE):
     - connection_id (16)
     - reply_connection_id (16)
     - msg_type (1)
     - range_id (8)
-    - level (1)
-    - prefix_len (1)
-    - prefix_bytes (3)
+    - range_start (8) - 64-bit signed integer
+    - range_end (8) - 64-bit signed integer
     - hash_bytes (16)
     - root_hash (16)
     - total_events (u32)
-    - parent_range_id (8)
-    - event_count (1)
-    - event_ids (15 * 16 = 240)
+    - event_count (u32) - for range_mismatched, or items_count for PAGE
+    - cursor (8) - 64-bit signed integer for GET/PAGE
+    - has_more (1) - boolean for PAGE
     """
     _require_len("connection_id", connection_id, 16)
     _require_len("reply_connection_id", reply_connection_id, 16)
-    if msg_type not in (MSG_RANGE_REQUEST, MSG_RANGE_MATCHED, MSG_RANGE_EVENTS):
+    if msg_type not in (MSG_RANGE_REQUEST, MSG_RANGE_MATCHED, MSG_RANGE_MISMATCHED, MSG_RANGE_GET, MSG_RANGE_PAGE):
         raise ValueError("invalid negentropy msg_type")
     _require_len("range_id", range_id, RANGE_ID_SIZE)
-    if level not in (LEVEL_ROOT, LEVEL_PREFIX_2, LEVEL_PREFIX_4, LEVEL_PREFIX_6):
-        raise ValueError("invalid negentropy level")
-    if len(prefix_bytes) > PREFIX_BYTES:
-        raise ValueError("prefix_bytes exceeds max")
     _require_len("hash_bytes", hash_bytes, 16)
     _require_len("root_hash", root_hash, 16)
     if total_events < 0 or total_events > 0xFFFFFFFF:
         raise ValueError("total_events must fit in u32")
-    _require_len("parent_range_id", parent_range_id, RANGE_ID_SIZE)
-    if len(event_ids) > EVENT_ID_MAX:
-        raise ValueError("event_ids exceeds max")
-    for event_id in event_ids:
-        _require_len("event_id", event_id, 16)
+    if event_count < 0 or event_count > 0xFFFFFFFF:
+        raise ValueError("event_count must fit in u32")
 
     payload = bytearray(WIRE_PLAINTEXT_SIZE)
     payload[0:16] = connection_id
     payload[16:32] = reply_connection_id
     payload[32] = msg_type
     payload[33:41] = range_id
-    payload[41] = level
-    payload[42] = len(prefix_bytes)
-    payload[43:43 + len(prefix_bytes)] = prefix_bytes
-    payload[46:62] = hash_bytes
-    payload[62:78] = root_hash
-    struct.pack_into("<I", payload, 78, total_events)
-    payload[82:90] = parent_range_id
-    payload[90] = len(event_ids)
-    cursor = 91
-    for event_id in event_ids:
-        payload[cursor:cursor + 16] = event_id
-        cursor += 16
+    struct.pack_into("<q", payload, 41, range_start)  # signed 64-bit
+    struct.pack_into("<q", payload, 49, range_end)    # signed 64-bit
+    payload[57:73] = hash_bytes
+    payload[73:89] = root_hash
+    struct.pack_into("<I", payload, 89, total_events)
+    struct.pack_into("<I", payload, 93, event_count)
+    struct.pack_into("<q", payload, 97, cursor)       # signed 64-bit cursor
+    payload[105] = 1 if has_more else 0
     return bytes(payload)
 
 
@@ -180,35 +166,31 @@ def decode_plaintext(data: bytes) -> dict[str, Any]:
     reply_connection_id = data[16:32]
     msg_type = data[32]
     range_id = data[33:41]
-    level = data[41]
-    prefix_len = data[42]
-    if prefix_len > PREFIX_BYTES:
-        raise ValueError("invalid prefix length")
-    prefix_bytes_data = data[43:43 + prefix_len]
-    hash_bytes = data[46:62]
-    root_hash = data[62:78]
-    (total_events,) = struct.unpack_from("<I", data, 78)
-    parent_range_id = data[82:90]
-    event_count = data[90]
-    if event_count > EVENT_ID_MAX:
-        raise ValueError("negentropy event_count exceeds max")
-    event_ids_list: list[bytes] = []
-    cursor = 91
-    for _ in range(event_count):
-        event_ids_list.append(data[cursor:cursor + 16])
-        cursor += 16
+    (range_start,) = struct.unpack_from("<q", data, 41)
+    (range_end,) = struct.unpack_from("<q", data, 49)
+    hash_bytes = data[57:73]
+    root_hash = data[73:89]
+    (total_events,) = struct.unpack_from("<I", data, 89)
+    (event_count,) = struct.unpack_from("<I", data, 93)
+    # New fields for GET/PAGE
+    cursor = 0
+    has_more = False
+    if len(data) >= 106:
+        (cursor,) = struct.unpack_from("<q", data, 97)
+        has_more = data[105] != 0
     return {
         "connection_id": connection_id,
         "reply_connection_id": reply_connection_id,
         "msg_type": msg_type,
         "range_id": range_id,
-        "level": level,
-        "prefix_bytes": prefix_bytes_data,
+        "range_start": range_start,
+        "range_end": range_end,
         "hash_bytes": hash_bytes,
         "root_hash": root_hash,
         "total_events": total_events,
-        "parent_range_id": parent_range_id,
-        "event_ids": event_ids_list,
+        "event_count": event_count,
+        "cursor": cursor,
+        "has_more": has_more,
     }
 
 
@@ -233,21 +215,6 @@ def _encode_range_id(range_id: str | None) -> bytes:
 def _decode_range_id(data: bytes) -> str:
     _require_len("range_id", data, RANGE_ID_SIZE)
     return data.hex()
-
-
-def _encode_prefix(prefix: str | None) -> bytes:
-    if not prefix:
-        return b""
-    if len(prefix) % 2 != 0:
-        raise ValueError("prefix must be even-length hex")
-    raw = bytes.fromhex(prefix)
-    if len(raw) > PREFIX_BYTES:
-        raise ValueError("prefix too long")
-    return raw
-
-
-def _decode_prefix(prefix_bytes_data: bytes) -> str:
-    return prefix_bytes_data.hex()
 
 
 def _encode_hash(hex_value: str | None) -> bytes:
@@ -277,52 +244,47 @@ def encode_wire_event(
         msg_type_id = MSG_RANGE_REQUEST
     elif msg_type == "range_matched":
         msg_type_id = MSG_RANGE_MATCHED
-    elif msg_type == "range_events":
-        msg_type_id = MSG_RANGE_EVENTS
+    elif msg_type == "range_mismatched":
+        msg_type_id = MSG_RANGE_MISMATCHED
+    elif msg_type == "range_get":
+        msg_type_id = MSG_RANGE_GET
+    elif msg_type == "range_page":
+        msg_type_id = MSG_RANGE_PAGE
     else:
-        raise ValueError("unknown negentropy msg type")
-
-    level_name = msg.get("level")
-    if level_name == "root":
-        level_id = LEVEL_ROOT
-    elif level_name == "prefix_2":
-        level_id = LEVEL_PREFIX_2
-    elif level_name == "prefix_4":
-        level_id = LEVEL_PREFIX_4
-    elif level_name == "prefix_6":
-        level_id = LEVEL_PREFIX_6
-    else:
-        level_id = LEVEL_ROOT
+        raise ValueError(f"unknown negentropy msg type: {msg_type}")
 
     range_id = _encode_range_id(msg.get("range_id"))
-    prefix_bytes_encoded = _encode_prefix(msg.get("prefix"))
-
-    if msg_type_id == MSG_RANGE_EVENTS:
-        hash_bytes = _encode_hash(msg.get("our_hash"))
-    else:
-        hash_bytes = _encode_hash(msg.get("hash"))
-
+    range_start = int(msg.get("start", 0))
+    range_end = int(msg.get("end", 0))
+    hash_bytes = _encode_hash(msg.get("hash"))
     root_hash = _encode_hash(msg.get("root_hash"))
     total_events = int(msg.get("total_events") or 0)
-    parent_range_id = _encode_range_id(msg.get("parent_range_id"))
 
-    event_ids: list[bytes] = []
-    if msg_type_id == MSG_RANGE_EVENTS:
-        for event_id_b64 in msg.get("event_ids", []):
-            event_ids.append(_require_len("event_id", crypto.b64decode(event_id_b64), 16))
+    # For batch requests, encode batch number in event_count field (with high bit set)
+    batch = msg.get("batch")
+    if batch is not None:
+        event_count = (1 << 31) | batch  # High bit set indicates batch request
+    else:
+        # event_count is also used for: items_count (PAGE), limit (GET)
+        event_count = int(msg.get("event_count") or msg.get("items_count") or msg.get("limit") or 0)
+
+    # GET/PAGE fields
+    cursor = int(msg.get("cursor", 0))
+    has_more = bool(msg.get("has_more", False))
 
     plaintext = encode_plaintext(
         connection_id=crypto.b64decode(connection_id_b64),
         reply_connection_id=crypto.b64decode(reply_connection_id_b64),
         msg_type=msg_type_id,
         range_id=range_id,
-        level=level_id,
-        prefix_bytes=prefix_bytes_encoded,
+        range_start=range_start,
+        range_end=range_end,
         hash_bytes=hash_bytes,
         root_hash=root_hash,
         total_events=total_events,
-        parent_range_id=parent_range_id,
-        event_ids=event_ids,
+        event_count=event_count,
+        cursor=cursor,
+        has_more=has_more,
     )
     header = wire_format.WireHeader(
         version=1,
@@ -352,22 +314,14 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         msg_type_str = "range_request"
     elif msg_type == MSG_RANGE_MATCHED:
         msg_type_str = "range_matched"
-    elif msg_type == MSG_RANGE_EVENTS:
-        msg_type_str = "range_events"
+    elif msg_type == MSG_RANGE_MISMATCHED:
+        msg_type_str = "range_mismatched"
+    elif msg_type == MSG_RANGE_GET:
+        msg_type_str = "range_get"
+    elif msg_type == MSG_RANGE_PAGE:
+        msg_type_str = "range_page"
     else:
         raise ValueError("invalid negentropy msg_type")
-
-    level_value = decoded["level"]
-    if level_value == LEVEL_ROOT:
-        level_str = "root"
-    elif level_value == LEVEL_PREFIX_2:
-        level_str = "prefix_2"
-    elif level_value == LEVEL_PREFIX_4:
-        level_str = "prefix_4"
-    elif level_value == LEVEL_PREFIX_6:
-        level_str = "prefix_6"
-    else:
-        raise ValueError("invalid negentropy level")
 
     msg_result: dict[str, Any] = {
         "type": msg_type_str,
@@ -375,22 +329,28 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         "root_hash": _decode_hash(decoded["root_hash"]) or "",
         "total_events": decoded["total_events"],
     }
-    prefix_str = _decode_prefix(decoded["prefix_bytes"])
-    if prefix_str:
-        msg_result["prefix"] = prefix_str
+
     if msg_type_str == "range_request":
-        msg_result["level"] = level_str
-        msg_result["prefix"] = prefix_str
+        msg_result["start"] = decoded["range_start"]
+        msg_result["end"] = decoded["range_end"]
         msg_result["hash"] = _decode_hash(decoded["hash_bytes"]) or ""
-        parent_range = _decode_range_id(decoded["parent_range_id"])
-        if parent_range != "0000000000000000":
-            msg_result["parent_range_id"] = parent_range
-    elif msg_type_str == "range_events":
-        msg_result["our_hash"] = _decode_hash(decoded["hash_bytes"]) or ""
-        msg_result["event_ids"] = [crypto.b64encode(event_id) for event_id in decoded["event_ids"]]
-        msg_result["prefix"] = prefix_str
-    else:
-        pass
+        # Check if this is a batch request (high bit set in event_count)
+        event_count = decoded["event_count"]
+        if event_count & (1 << 31):
+            msg_result["batch"] = event_count & ((1 << 31) - 1)
+    elif msg_type_str == "range_mismatched":
+        msg_result["event_count"] = decoded["event_count"]
+        msg_result["start"] = decoded["range_start"]
+        msg_result["end"] = decoded["range_end"]
+    elif msg_type_str == "range_get":
+        msg_result["start"] = decoded["range_start"]
+        msg_result["end"] = decoded["range_end"]
+        msg_result["cursor"] = decoded["cursor"]
+        msg_result["limit"] = decoded["event_count"]  # Reuse event_count as limit
+    elif msg_type_str == "range_page":
+        msg_result["items_count"] = decoded["event_count"]
+        msg_result["cursor"] = decoded["cursor"]
+        msg_result["has_more"] = decoded["has_more"]
 
     event_data = {
         "type": "negentropy",
@@ -444,124 +404,21 @@ def _handle_negentropy_sync(args: dict, recorded_by: str, recorded_at: int, db: 
 register_command_handler('handle_negentropy_sync', _handle_negentropy_sync)
 
 
-# Hierarchy levels - time prefix (6 chars) + hash suffix (up to 4 chars)
-# root (0) -> prefix_2 -> prefix_4 -> prefix_6 -> prefix_8 -> prefix_10
-#
-# For file slices with same created_at (same time prefix):
-# - prefix_6: all in 1 bucket (time only)
-# - prefix_8: 256 sub-buckets by hash
-# - prefix_10: 65,536 sub-buckets by hash
-#
-# For 1GB file (2.4M slices):
-# - prefix_6: 1 bucket × 2.4M events (too many!)
-# - prefix_8: 256 buckets × ~9,400 events each
-# - prefix_10: 65,536 buckets × ~37 events each (under threshold)
-LEVELS = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
-
-# Hex characters per level
-LEVEL_PREFIX_LEN = {
-    'root': 0,
-    'prefix_2': 2,     # 256 buckets (coarse time)
-    'prefix_4': 4,     # 65,536 buckets (medium time)
-    'prefix_6': 6,     # 16.7M buckets (fine time, ~4.4 min)
-    'prefix_8': 8,     # time + 2 hash chars (256 sub-buckets per time)
-    'prefix_10': 10,   # time + 4 hash chars (65,536 sub-buckets per time)
-}
-
-# When bucket has this many events or fewer, send event IDs instead of drilling down
-# 100 is a good balance: small enough for reliable delivery, large enough for efficiency
-EVENTS_THRESHOLD = 50
 
 
 # ============================================================================
-# Congestion Control State
+# Congestion Control - FUTURE WORK
 # ============================================================================
-# Per-connection adaptive windowing based on RTT measurement.
-# See docs/quiet-protocol-specification.md "Congestion control" section.
-
-@dataclass
-class CCState:
-    """Congestion control state for a single connection."""
-    window: int = 1              # Max in-flight range operations
-    in_flight: int = 0           # Currently awaiting response
-    rtt_ms: float = 200.0        # RTT estimate (exponential moving average)
-    last_send_ms: int = 0        # Time of oldest in-flight request
-
-
-# Constants for congestion control
-CC_MIN_WINDOW = 1
-CC_MAX_WINDOW = 32
-CC_RTT_ALPHA = 0.2               # EMA smoothing factor
-CC_TIMEOUT_MULTIPLIER = 3        # Timeout = 3 * RTT
-
-
-# Module-level CC state per connection
-# Key: (recorded_by, connection_id) tuple
-_cc_state: dict[tuple[str, str], CCState] = {}
-
-
-def _get_cc_state(recorded_by: str, connection_id: str) -> CCState:
-    """Get or create CC state for a connection."""
-    key = (recorded_by, connection_id)
-    if key not in _cc_state:
-        _cc_state[key] = CCState()
-    return _cc_state[key]
-
-
-def _cc_can_send(recorded_by: str, connection_id: str) -> bool:
-    """Check if congestion control allows sending more requests."""
-    state = _get_cc_state(recorded_by, connection_id)
-    return state.in_flight < state.window
-
-
-def _cc_on_send(recorded_by: str, connection_id: str, t_ms: int) -> None:
-    """Record that we sent a range request."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight == 0:
-        state.last_send_ms = t_ms
-    state.in_flight += 1
-
-
-def _cc_on_response(recorded_by: str, connection_id: str, t_ms: int) -> None:
-    """Record that we received a response (range_matched or range_response)."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0:
-        state.in_flight -= 1
-
-    if state.in_flight == 0 and state.last_send_ms > 0:
-        # All requests answered - measure RTT and grow window
-        rtt_sample = t_ms - state.last_send_ms
-        if rtt_sample > 0:
-            state.rtt_ms = (1 - CC_RTT_ALPHA) * state.rtt_ms + CC_RTT_ALPHA * rtt_sample
-        state.window = min(state.window + 1, CC_MAX_WINDOW)
-        log.debug(f"CC: conn={connection_id[:16]}... RTT={state.rtt_ms:.0f}ms window={state.window}")
-
-
-def _cc_check_timeout(recorded_by: str, connection_id: str, t_ms: int) -> bool:
-    """Check for timeout and shrink window if needed. Returns True if timed out."""
-    state = _get_cc_state(recorded_by, connection_id)
-    if state.in_flight > 0 and state.last_send_ms > 0:
-        timeout_ms = CC_TIMEOUT_MULTIPLIER * state.rtt_ms
-        if (t_ms - state.last_send_ms) > timeout_ms:
-            # Timeout - shrink window and reset in_flight
-            old_window = state.window
-            state.window = max(CC_MIN_WINDOW, state.window // 2)
-            state.in_flight = 0
-            log.info(f"CC: timeout conn={connection_id[:16]}... window {old_window}->{state.window}")
-            return True
-    return False
-
-
-def _cc_reset(recorded_by: str, connection_id: str) -> None:
-    """Reset CC state for a connection (e.g., on disconnect)."""
-    key = (recorded_by, connection_id)
-    if key in _cc_state:
-        del _cc_state[key]
-
-
-def _cc_reset_all() -> None:
-    """Reset all CC state. For testing only."""
-    _cc_state.clear()
+# Congestion control should be implemented at the transport layer, not here.
+# The sync protocol is stateless and doesn't need to track in-flight requests.
+#
+# Future CC design goals:
+# - Transport-level windowing (not per-protocol)
+# - RTT measurement via transport heartbeats
+# - Backpressure from transport to protocol layer
+# - Separate from sync semantics
+#
+# For now, sync sends requests freely and relies on transport for delivery.
 
 
 class RangeStatus(Enum):
@@ -602,68 +459,40 @@ class EventsMessage:
 # Unified key computation
 # ============================================================================
 
-def compute_unified_key(event_id: str, created_at: int = 0) -> str:
-    """Compute the unified hash key for an event.
+def compute_unified_key(event_id: str, created_at: int) -> int:
+    """Compute the unified time+hash key for an event.
 
-    The unified key is derived from the event_id hash bytes.
-    This avoids re-hashing event_ids and remains peer-consistent.
+    The unified key combines timestamp and event hash:
+    - High 48 bits: timestamp in milliseconds
+    - Low 16 bits: hash of event_id (for uniform distribution)
+
+    This provides temporal clustering (events sorted by time) with
+    uniform distribution within same-timestamp events.
 
     Args:
         event_id: The event identifier
-        created_at: Ignored (kept for API compatibility during transition)
+        created_at: Event timestamp in milliseconds
 
     Returns:
-        16 character hex string (64 bits of hash)
+        64-bit integer unified key
     """
-    # Use the event_id hash bytes directly when possible
-    try:
-        raw = crypto.b64decode(event_id)
-        if len(raw) >= 8:
-            return raw[:8].hex()
-    except Exception:
-        pass
+    # Always hash the event_id to get uniformly distributed bits
+    # This ensures different events get different hash values
+    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=2).digest()
+    hash_bits = int.from_bytes(h, 'big')
 
-    # Fallback for non-standard test IDs
-    h = hashlib.blake2b(event_id.encode('utf-8'), digest_size=8).digest()
-    return h.hex()  # 16 hex chars
-
-
-def get_prefix_for_level(event_id: str, created_at: int, level: str) -> str:
-    """Get the bucket prefix for an event at a given level."""
-    unified_key = compute_unified_key(event_id, created_at)
-    prefix_len = LEVEL_PREFIX_LEN.get(level, 0)
-    return unified_key[:prefix_len]
-
-
-def get_child_level(level: str) -> Optional[str]:
-    """Get the next finer level."""
-    idx = LEVELS.index(level)
-    if idx >= len(LEVELS) - 1:
-        return None
-    return LEVELS[idx + 1]
-
-
-def get_parent_level(level: str) -> Optional[str]:
-    """Get the next coarser level."""
-    idx = LEVELS.index(level)
-    if idx <= 0:
-        return None
-    return LEVELS[idx - 1]
-
-
-def get_child_prefix_len(level: str) -> int:
-    """Get the prefix length for children of this level."""
-    child_level = get_child_level(level)
-    if child_level is None:
-        return LEVEL_PREFIX_LEN[level]
-    return LEVEL_PREFIX_LEN[child_level]
+    # Combine: timestamp in high 47 bits, hash in low 16 bits
+    # Use 47 bits for timestamp to fit in signed 64-bit SQLite INTEGER
+    # This supports timestamps up to year 6429 (47 bits of milliseconds)
+    timestamp_masked = created_at & 0x7FFFFFFFFFFF  # 47 bits
+    return (timestamp_masked << 16) | hash_bits
 
 
 # ============================================================================
-# XOR Fingerprint Hashing (O(1) bucket updates)
+# XOR Fingerprint Hashing
 # ============================================================================
 
-# Zero hash for empty buckets (16 bytes)
+# Zero hash for empty ranges (16 bytes)
 ZERO_HASH = b'\x00' * 16
 
 
@@ -688,37 +517,305 @@ def xor_bytes(a: bytes, b: bytes) -> bytes:
     return bytes(x ^ y for x, y in zip(a, b))
 
 
-def xor_into_bucket(db, recorded_by: str, level: str, prefix: str, fingerprint: bytes, t_ms: int) -> None:
-    """XOR a fingerprint into a bucket hash.
+# ============================================================================
+# Chunk-based fingerprint functions for O(1) range queries
+# ============================================================================
 
-    Creates bucket with the fingerprint if it doesn't exist.
-    Updates existing bucket by XORing the fingerprint into its hash.
+def get_chunk_start(unified_key: int) -> int:
+    """Get the chunk boundary for a unified key.
+
+    Chunks are aligned to CHUNK_SIZE boundaries.
+    """
+    return (unified_key // CHUNK_SIZE) * CHUNK_SIZE
+
+
+def update_chunk_on_insert(db, recorded_by: str, event_id: str, unified_key: int) -> None:
+    """Update chunk fingerprint when inserting an event.
+
+    XORs the event's fingerprint into the appropriate chunk.
+    Creates the chunk if it doesn't exist.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    chunk_start = get_chunk_start(unified_key)
+    fingerprint = compute_fingerprint(event_id)
+
+    # Try to update existing chunk
+    existing = safedb.query_one("""
+        SELECT fp, cnt FROM negentropy_chunks
+        WHERE recorded_by = ? AND chunk_start = ?
+    """, (recorded_by, chunk_start))
+
+    if existing:
+        # XOR new fingerprint into existing
+        new_fp = xor_bytes(existing['fp'], fingerprint)
+        safedb.execute("""
+            UPDATE negentropy_chunks
+            SET fp = ?, cnt = cnt + 1
+            WHERE recorded_by = ? AND chunk_start = ?
+        """, (new_fp, recorded_by, chunk_start))
+    else:
+        # Create new chunk
+        safedb.execute("""
+            INSERT INTO negentropy_chunks (recorded_by, chunk_start, cnt, fp)
+            VALUES (?, ?, 1, ?)
+        """, (recorded_by, chunk_start, fingerprint))
+
+
+def update_chunk_on_delete(db, recorded_by: str, event_id: str, unified_key: int) -> None:
+    """Update chunk fingerprint when deleting an event.
+
+    XORs the event's fingerprint out of the chunk (XOR is self-inverse).
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    chunk_start = get_chunk_start(unified_key)
+    fingerprint = compute_fingerprint(event_id)
+
+    existing = safedb.query_one("""
+        SELECT fp, cnt FROM negentropy_chunks
+        WHERE recorded_by = ? AND chunk_start = ?
+    """, (recorded_by, chunk_start))
+
+    if existing:
+        new_fp = xor_bytes(existing['fp'], fingerprint)
+        new_cnt = existing['cnt'] - 1
+
+        if new_cnt <= 0:
+            # Delete empty chunk
+            safedb.execute("""
+                DELETE FROM negentropy_chunks
+                WHERE recorded_by = ? AND chunk_start = ?
+            """, (recorded_by, chunk_start))
+        else:
+            safedb.execute("""
+                UPDATE negentropy_chunks
+                SET fp = ?, cnt = ?
+                WHERE recorded_by = ? AND chunk_start = ?
+            """, (new_fp, new_cnt, recorded_by, chunk_start))
+
+
+def compute_range_hash_chunked(db, recorded_by: str, start: int, end: int) -> bytes:
+    """Compute XOR fingerprint for range [start, end) using chunk summaries.
+
+    For ranges that span complete chunks, uses precomputed chunk fingerprints.
+    For partial chunks at edges, scans individual events.
+
+    A complete chunk is one where [chunk_start, chunk_start + CHUNK_SIZE) is
+    entirely within [start, end). Partial chunks at edges are scanned event-by-event.
+
+    This provides O(chunks) performance instead of O(events).
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    result = ZERO_HASH
+
+    # Find first complete chunk: the first chunk boundary >= start
+    first_chunk = get_chunk_start(start)
+    if first_chunk < start:
+        first_chunk += CHUNK_SIZE  # First complete chunk starts after start
+
+    # Find last complete chunk: the last chunk boundary where chunk_end <= end
+    # A chunk is complete if chunk_start + CHUNK_SIZE <= end
+    # So last_chunk is the largest chunk_start where chunk_start + CHUNK_SIZE <= end
+    # Which means last_chunk <= end - CHUNK_SIZE
+    if end <= CHUNK_SIZE:
+        last_chunk = first_chunk - CHUNK_SIZE  # No complete chunks
+    else:
+        last_chunk = get_chunk_start(end - CHUNK_SIZE)
+        # Ensure last_chunk + CHUNK_SIZE <= end
+        if last_chunk + CHUNK_SIZE > end:
+            last_chunk -= CHUNK_SIZE
+
+    # Scan leading edge (before first complete chunk)
+    edge_start = start
+    edge_end = min(first_chunk, end)
+    if edge_start < edge_end:
+        rows = safedb.query("""
+            SELECT event_id FROM negentropy_events
+            WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+        """, (recorded_by, edge_start, edge_end))
+        for row in rows:
+            fp = compute_fingerprint(row['event_id'])
+            result = xor_bytes(result, fp)
+
+    # XOR in complete chunks (only those fully contained in range)
+    if first_chunk <= last_chunk:
+        chunks = safedb.query("""
+            SELECT fp FROM negentropy_chunks
+            WHERE recorded_by = ? AND chunk_start >= ? AND chunk_start <= ?
+        """, (recorded_by, first_chunk, last_chunk))
+        for chunk in chunks:
+            if chunk['fp']:
+                result = xor_bytes(result, chunk['fp'])
+
+    # Scan trailing edge (after last complete chunk)
+    if first_chunk <= last_chunk:
+        edge_start = last_chunk + CHUNK_SIZE
+    else:
+        edge_start = first_chunk  # No complete chunks
+
+    edge_end = end
+    if edge_start < edge_end:
+        rows = safedb.query("""
+            SELECT event_id FROM negentropy_events
+            WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+        """, (recorded_by, edge_start, edge_end))
+        for row in rows:
+            fp = compute_fingerprint(row['event_id'])
+            result = xor_bytes(result, fp)
+
+    return result
+
+
+def compute_range_hash(db, recorded_by: str, start: int, end: int) -> bytes:
+    """Compute XOR fingerprint hash for events in range [start, end).
+
+    Uses chunk summaries for efficiency when the range spans multiple chunks.
+    Falls back to individual event scanning for small ranges.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive)
+        end: Range end (exclusive)
+
+    Returns:
+        16-byte XOR of all event fingerprints in range, or ZERO_HASH if empty
+    """
+    # Use chunked computation for ranges spanning multiple chunks
+    range_size = end - start
+    if range_size >= CHUNK_SIZE * 2:
+        return compute_range_hash_chunked(db, recorded_by, start, end)
+
+    # For small ranges, scan individual events
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    rows = safedb.query("""
+        SELECT event_id FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+    """, (recorded_by, start, end))
+
+    result = ZERO_HASH
+    for row in rows:
+        fingerprint = compute_fingerprint(row['event_id'])
+        result = xor_bytes(result, fingerprint)
+
+    return result
+
+
+def get_events_in_range(db, recorded_by: str, start: int, end: int) -> list[str]:
+    """Get all event IDs in range [start, end).
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive)
+        end: Range end (exclusive)
+
+    Returns:
+        List of event IDs sorted by unified_key
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get current hash (or zero if bucket doesn't exist)
-    row = safedb.query_one("""
-        SELECT hash FROM negentropy_buckets
-        WHERE recorded_by = ? AND level = ? AND prefix = ?
-    """, (recorded_by, level, prefix))
+    rows = safedb.query("""
+        SELECT event_id FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+        ORDER BY unified_key
+    """, (recorded_by, start, end))
 
-    if row and row['hash']:
-        current_hash = row['hash']
-        new_hash = xor_bytes(current_hash, fingerprint)
+    return [row['event_id'] for row in rows]
+
+
+def get_events_in_range_batch(
+    db, recorded_by: str, start: int, end: int, batch: int, batch_size: int
+) -> list[str]:
+    """Get a batch of event IDs in range [start, end) using LIMIT/OFFSET.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive)
+        end: Range end (exclusive)
+        batch: Batch number (0-indexed)
+        batch_size: Number of events per batch
+
+    Returns:
+        List of event IDs for this batch, sorted by unified_key
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    offset = batch * batch_size
+
+    rows = safedb.query("""
+        SELECT event_id FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+        ORDER BY unified_key
+        LIMIT ? OFFSET ?
+    """, (recorded_by, start, end, batch_size, offset))
+
+    return [row['event_id'] for row in rows]
+
+
+def get_events_after_cursor(
+    db, recorded_by: str, start: int, end: int, cursor: int, limit: int
+) -> tuple[list[str], int, bool]:
+    """Get events in range [start, end) after cursor using keyset pagination.
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive)
+        end: Range end (exclusive)
+        cursor: Last seen unified_key (0 means start from beginning)
+        limit: Maximum number of events to return
+
+    Returns:
+        Tuple of (event_ids, next_cursor, has_more)
+        - event_ids: List of event IDs for this page
+        - next_cursor: unified_key of last returned event (for next GET)
+        - has_more: True if more events exist after this page
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Keyset pagination: WHERE unified_key > cursor
+    # Fetch limit+1 to check if there are more
+    rows = safedb.query("""
+        SELECT event_id, unified_key FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+          AND unified_key > ?
+        ORDER BY unified_key
+        LIMIT ?
+    """, (recorded_by, start, end, cursor, limit + 1))
+
+    event_ids = [row['event_id'] for row in rows[:limit]]
+    has_more = len(rows) > limit
+
+    if event_ids:
+        # Next cursor is the unified_key of the last event we're returning
+        next_cursor = rows[min(len(rows) - 1, limit - 1)]['unified_key']
     else:
-        # New bucket starts with just this fingerprint
-        new_hash = fingerprint
+        next_cursor = cursor
 
-    # Upsert the bucket with new hash
-    safedb.execute("""
-        INSERT INTO negentropy_buckets
-        (recorded_by, level, prefix, hash, event_count, updated_at)
-        VALUES (?, ?, ?, ?, 1, ?)
-        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
-            hash = excluded.hash,
-            event_count = event_count + 1,
-            updated_at = excluded.updated_at
-    """, (recorded_by, level, prefix, new_hash, t_ms))
+    return event_ids, next_cursor, has_more
+
+
+def get_event_count_in_range(db, recorded_by: str, start: int, end: int) -> int:
+    """Get count of events in range [start, end).
+
+    Args:
+        db: Database connection
+        recorded_by: Peer ID
+        start: Range start (inclusive)
+        end: Range end (exclusive)
+
+    Returns:
+        Number of events in range
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    row = safedb.query_one("""
+        SELECT COUNT(*) as cnt FROM negentropy_events
+        WHERE recorded_by = ? AND unified_key >= ? AND unified_key < ?
+    """, (recorded_by, start, end))
+
+    return row['cnt'] if row else 0
 
 
 # ============================================================================
@@ -750,161 +847,6 @@ def _fetch_existing_event_ids(db, recorded_by: str, event_ids: list[str]) -> set
         existing.update(row['event_id'] for row in rows)
 
     return existing
-
-
-def _apply_bucket_deltas(
-    db,
-    recorded_by: str,
-    new_events: list[tuple[str, str]],
-) -> None:
-    if not new_events:
-        return
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    bucket_xors: dict[tuple[str, str], bytes] = {}
-    bucket_counts: dict[tuple[str, str], int] = {}
-
-    for event_id, unified_key in new_events:
-        fingerprint = compute_fingerprint(event_id)
-
-        for level in LEVELS:
-            prefix_len = LEVEL_PREFIX_LEN[level]
-            prefix = unified_key[:prefix_len]
-            bucket_key = (level, prefix)
-            if bucket_key in bucket_xors:
-                bucket_xors[bucket_key] = xor_bytes(bucket_xors[bucket_key], fingerprint)
-                bucket_counts[bucket_key] += 1
-            else:
-                bucket_xors[bucket_key] = fingerprint
-                bucket_counts[bucket_key] = 1
-
-    if not bucket_xors:
-        return
-
-    chunk_size = int(os.getenv("NEGENTROPY_BUCKET_CHUNK", "400"))
-    existing: dict[tuple[str, str], tuple[bytes, int]] = {}
-    bucket_keys = list(bucket_xors.keys())
-
-    for chunk in _chunked(bucket_keys, chunk_size):
-        placeholders = ",".join("(?, ?)" for _ in chunk)
-        sql = (
-            "SELECT level, prefix, hash, event_count FROM negentropy_buckets "
-            f"WHERE recorded_by = ? AND (level, prefix) IN ({placeholders})"
-        )
-        params: list[Any] = [recorded_by]
-        for level, prefix in chunk:
-            params.extend([level, prefix])
-        rows = safedb.query(sql, tuple(params))
-        for row in rows:
-            existing[(row['level'], row['prefix'])] = (row['hash'], row['event_count'] or 0)
-
-    upsert_batch: list[tuple[str, str, str, bytes, int, int]] = []
-    for bucket_key, delta_hash in bucket_xors.items():
-        existing_hash, existing_count = existing.get(bucket_key, (None, 0))
-        if existing_hash:
-            new_hash = xor_bytes(existing_hash, delta_hash)
-        else:
-            new_hash = delta_hash
-        new_count = existing_count + bucket_counts[bucket_key]
-        level, prefix = bucket_key
-        upsert_batch.append((recorded_by, level, prefix, new_hash, new_count, now))
-
-    safedb.executemany(
-        """
-        INSERT INTO negentropy_buckets
-        (recorded_by, level, prefix, hash, event_count, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (recorded_by, level, prefix) DO UPDATE SET
-            hash = excluded.hash,
-            event_count = excluded.event_count,
-            updated_at = excluded.updated_at
-        """,
-        upsert_batch,
-    )
-
-
-def _apply_bucket_removals(
-    db,
-    recorded_by: str,
-    removed_events: list[tuple[str, str]],
-) -> None:
-    if not removed_events:
-        return
-
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    bucket_xors: dict[tuple[str, str], bytes] = {}
-    bucket_counts: dict[tuple[str, str], int] = {}
-
-    for event_id, unified_key in removed_events:
-        fingerprint = compute_fingerprint(event_id)
-        for level in LEVELS:
-            prefix_len = LEVEL_PREFIX_LEN[level]
-            prefix = unified_key[:prefix_len]
-            bucket_key = (level, prefix)
-            if bucket_key in bucket_xors:
-                bucket_xors[bucket_key] = xor_bytes(bucket_xors[bucket_key], fingerprint)
-                bucket_counts[bucket_key] += 1
-            else:
-                bucket_xors[bucket_key] = fingerprint
-                bucket_counts[bucket_key] = 1
-
-    if not bucket_xors:
-        return
-
-    chunk_size = int(os.getenv("NEGENTROPY_BUCKET_CHUNK", "400"))
-    existing: dict[tuple[str, str], tuple[bytes, int]] = {}
-    bucket_keys = list(bucket_xors.keys())
-
-    for chunk in _chunked(bucket_keys, chunk_size):
-        placeholders = ",".join("(?, ?)" for _ in chunk)
-        sql = (
-            "SELECT level, prefix, hash, event_count FROM negentropy_buckets "
-            f"WHERE recorded_by = ? AND (level, prefix) IN ({placeholders})"
-        )
-        params: list[Any] = [recorded_by]
-        for level, prefix in chunk:
-            params.extend([level, prefix])
-        rows = safedb.query(sql, tuple(params))
-        for row in rows:
-            existing[(row['level'], row['prefix'])] = (row['hash'], row['event_count'] or 0)
-
-    update_batch: list[tuple[bytes, int, int, str, str, str]] = []
-    delete_batch: list[tuple[str, str, str]] = []
-
-    for bucket_key, delta_hash in bucket_xors.items():
-        existing_hash, existing_count = existing.get(bucket_key, (None, 0))
-        if not existing_hash or existing_count <= 0:
-            continue
-        new_hash = xor_bytes(existing_hash, delta_hash)
-        new_count = existing_count - bucket_counts[bucket_key]
-        level, prefix = bucket_key
-        if new_count <= 0:
-            delete_batch.append((recorded_by, level, prefix))
-        else:
-            update_batch.append((new_hash, new_count, now, recorded_by, level, prefix))
-
-    if update_batch:
-        safedb.executemany(
-            """
-            UPDATE negentropy_buckets
-            SET hash = ?, event_count = ?, updated_at = ?
-            WHERE recorded_by = ? AND level = ? AND prefix = ?
-            """,
-            update_batch,
-        )
-
-    if delete_batch:
-        safedb.executemany(
-            """
-            DELETE FROM negentropy_buckets
-            WHERE recorded_by = ? AND level = ? AND prefix = ?
-            """,
-            delete_batch,
-        )
 
 
 def _insert_negentropy_events_returning(
@@ -939,59 +881,75 @@ def add_events_to_sync_batch(
     db,
     recorded_by: str,
     events: list[tuple[str, int]],  # List of (event_id, created_at)
-    defer_buckets: bool = False
+    defer_buckets: bool = False  # Ignored, kept for API compatibility
 ) -> None:
     """Add multiple events to the sync system efficiently.
-
-    For large batches, set defer_buckets=True and call rebuild_buckets_for_peer()
-    once after all events are added.
 
     Args:
         db: Database connection
         recorded_by: Peer ID
         events: List of (event_id, created_at) tuples
-        defer_buckets: If True, skip bucket updates (caller must call rebuild_buckets_for_peer).
-                       If False (default), apply bucket deltas incrementally.
+        defer_buckets: Ignored (no bucket precomputation in bisection protocol)
     """
     if not events:
         return
 
-    # Build batch data for insert and cache unified keys
-    batch_data: list[tuple[str, str, str, int]] = []
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Build batch data with integer unified keys
+    batch_data: list[tuple[str, str, int, int]] = []
     seen_event_ids: set[str] = set()
+    unified_keys: list[tuple[str, int]] = []  # (event_id, unified_key) for chunk updates
+
     for event_id, created_at in events:
         if event_id in seen_event_ids:
             continue
         seen_event_ids.add(event_id)
         unified_key = compute_unified_key(event_id, created_at)
         batch_data.append((recorded_by, event_id, unified_key, created_at))
+        unified_keys.append((event_id, unified_key))
 
-    # Batch insert and get inserted rows for bucket deltas
-    if not defer_buckets:
-        try:
-            inserted_rows = _insert_negentropy_events_returning(db, recorded_by, batch_data)
-        except sqlite3.OperationalError:
-            db._conn.executemany("""
-                INSERT OR IGNORE INTO negentropy_events
-                (recorded_by, event_id, unified_key, created_at)
-                VALUES (?, ?, ?, ?)
-            """, batch_data)
-            event_ids = [event_id for _recorded_by, event_id, _unified_key, _created_at in batch_data]
-            existing_event_ids = _fetch_existing_event_ids(db, recorded_by, event_ids)
-            inserted_rows = [
-                (event_id, unified_key)
-                for _recorded_by, event_id, unified_key, _created_at in batch_data
-                if event_id not in existing_event_ids
-            ]
-        _apply_bucket_deltas(db, recorded_by, inserted_rows)
-        return
-
-    # Deferred path: insert only
+    # Batch insert into negentropy_events
     db._conn.executemany("""
         INSERT OR IGNORE INTO negentropy_events
         (recorded_by, event_id, unified_key, created_at)
         VALUES (?, ?, ?, ?)
     """, batch_data)
+
+    # Update chunk fingerprints for each inserted event
+    # Group events by chunk for efficient batch updates
+    chunks: dict[int, list[str]] = {}
+    for event_id, unified_key in unified_keys:
+        chunk_start = get_chunk_start(unified_key)
+        if chunk_start not in chunks:
+            chunks[chunk_start] = []
+        chunks[chunk_start].append(event_id)
+
+    for chunk_start, event_ids in chunks.items():
+        # Compute combined fingerprint for all events in this chunk
+        combined_fp = ZERO_HASH
+        for event_id in event_ids:
+            fp = compute_fingerprint(event_id)
+            combined_fp = xor_bytes(combined_fp, fp)
+
+        # Update chunk
+        existing = safedb.query_one("""
+            SELECT fp, cnt FROM negentropy_chunks
+            WHERE recorded_by = ? AND chunk_start = ?
+        """, (recorded_by, chunk_start))
+
+        if existing:
+            new_fp = xor_bytes(existing['fp'], combined_fp)
+            safedb.execute("""
+                UPDATE negentropy_chunks
+                SET fp = ?, cnt = cnt + ?
+                WHERE recorded_by = ? AND chunk_start = ?
+            """, (new_fp, len(event_ids), recorded_by, chunk_start))
+        else:
+            safedb.execute("""
+                INSERT INTO negentropy_chunks (recorded_by, chunk_start, cnt, fp)
+                VALUES (?, ?, ?, ?)
+            """, (recorded_by, chunk_start, len(event_ids), combined_fp))
 
 
 def remove_events_from_sync_batch(
@@ -1001,7 +959,7 @@ def remove_events_from_sync_batch(
 ) -> int:
     """Remove events from the sync system (negentropy tables only).
 
-    Deletes from negentropy_events and updates bucket hashes/counts.
+    Deletes from negentropy_events and updates chunk fingerprints.
     Returns the number of events removed.
     """
     if not event_ids:
@@ -1010,87 +968,69 @@ def remove_events_from_sync_batch(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unique_ids = list(dict.fromkeys(event_ids))
 
-    removed_rows: list[tuple[str, str]] = []
-    chunk_size = int(os.getenv("NEGENTROPY_EVENT_CHUNK", "400"))
+    # First, get unified_keys for all events to update chunks
+    chunk_size_env = int(os.getenv("NEGENTROPY_EVENT_CHUNK", "400"))
+    events_to_remove: list[tuple[str, int]] = []  # (event_id, unified_key)
 
-    for chunk in _chunked(unique_ids, chunk_size):
+    for chunk in _chunked(unique_ids, chunk_size_env):
         placeholders = ",".join("?" for _ in chunk)
         rows = safedb.query(
-            f"SELECT event_id, unified_key FROM negentropy_events "
-            f"WHERE recorded_by = ? AND event_id IN ({placeholders})",
+            f"SELECT event_id, unified_key FROM negentropy_events WHERE recorded_by = ? AND event_id IN ({placeholders})",
             tuple([recorded_by, *chunk]),
         )
         for row in rows:
-            removed_rows.append((row["event_id"], row["unified_key"]))
+            events_to_remove.append((row['event_id'], row['unified_key']))
 
-    if not removed_rows:
+    if not events_to_remove:
         return 0
 
-    _apply_bucket_removals(db, recorded_by, removed_rows)
+    # Group events by chunk for batch chunk updates
+    chunks: dict[int, list[str]] = {}
+    for event_id, unified_key in events_to_remove:
+        chunk_start = get_chunk_start(unified_key)
+        if chunk_start not in chunks:
+            chunks[chunk_start] = []
+        chunks[chunk_start].append(event_id)
 
-    for chunk in _chunked([row[0] for row in removed_rows], chunk_size):
+    # Update chunk fingerprints
+    for chunk_start, chunk_event_ids in chunks.items():
+        combined_fp = ZERO_HASH
+        for event_id in chunk_event_ids:
+            fp = compute_fingerprint(event_id)
+            combined_fp = xor_bytes(combined_fp, fp)
+
+        existing = safedb.query_one("""
+            SELECT fp, cnt FROM negentropy_chunks
+            WHERE recorded_by = ? AND chunk_start = ?
+        """, (recorded_by, chunk_start))
+
+        if existing:
+            new_fp = xor_bytes(existing['fp'], combined_fp)
+            new_cnt = existing['cnt'] - len(chunk_event_ids)
+
+            if new_cnt <= 0:
+                safedb.execute("""
+                    DELETE FROM negentropy_chunks
+                    WHERE recorded_by = ? AND chunk_start = ?
+                """, (recorded_by, chunk_start))
+            else:
+                safedb.execute("""
+                    UPDATE negentropy_chunks
+                    SET fp = ?, cnt = ?
+                    WHERE recorded_by = ? AND chunk_start = ?
+                """, (new_fp, new_cnt, recorded_by, chunk_start))
+
+    # Delete from negentropy_events
+    total_removed = 0
+    for chunk in _chunked(unique_ids, chunk_size_env):
         placeholders = ",".join("?" for _ in chunk)
         safedb.execute(
             f"DELETE FROM negentropy_events WHERE recorded_by = ? AND event_id IN ({placeholders})",
             tuple([recorded_by, *chunk]),
         )
+        total_removed += len(chunk)
 
-    return len(removed_rows)
-
-
-def rebuild_buckets_for_peer(db, recorded_by: str) -> None:
-    """Rebuild all bucket hashes for a peer from scratch.
-
-    Efficiently computes XOR fingerprints for all events in one pass.
-    This is O(n) in events + O(b) in buckets, much faster than
-    incremental updates for large batches.
-
-    Call this after add_events_to_sync_batch() when defer_buckets=True.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    now = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-    # Load all events for this peer
-    rows = safedb.query("""
-        SELECT event_id, unified_key FROM negentropy_events
-        WHERE recorded_by = ?
-    """, (recorded_by,))
-
-    # Accumulate XOR fingerprints per bucket in memory
-    bucket_xors: dict[tuple[str, str], bytes] = {}
-    bucket_counts: dict[tuple[str, str], int] = {}
-
-    for row in rows:
-        event_id = row['event_id']
-        unified_key = row['unified_key']
-        fingerprint = compute_fingerprint(event_id)
-
-        for level in LEVELS:
-            prefix_len = LEVEL_PREFIX_LEN[level]
-            prefix = unified_key[:prefix_len]
-            bucket_key = (level, prefix)
-
-            if bucket_key in bucket_xors:
-                bucket_xors[bucket_key] = xor_bytes(bucket_xors[bucket_key], fingerprint)
-                bucket_counts[bucket_key] += 1
-            else:
-                bucket_xors[bucket_key] = fingerprint
-                bucket_counts[bucket_key] = 1
-
-    # Clear existing buckets and write new ones in batch
-    db._conn.execute("DELETE FROM negentropy_buckets WHERE recorded_by = ?", (recorded_by,))
-
-    # Build batch data for executemany
-    bucket_batch = [
-        (recorded_by, level, prefix, xor_hash, bucket_counts[(level, prefix)], now)
-        for (level, prefix), xor_hash in bucket_xors.items()
-    ]
-
-    db._conn.executemany("""
-        INSERT INTO negentropy_buckets
-        (recorded_by, level, prefix, hash, event_count, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, bucket_batch)
+    return len(events_to_remove)
 
 
 def add_event_to_sync(
@@ -1131,8 +1071,7 @@ def add_shareable_events_batch(
         can_share_peer_id: The peer who recorded/has these events
         db: Database connection
         skip_negentropy: If True, skip negentropy entirely
-        defer_buckets: If True, skip bucket computation (caller must call
-                       rebuild_buckets_for_peer after all events added)
+        defer_buckets: Ignored (kept for API compatibility)
     """
     if not events:
         return
@@ -1199,127 +1138,6 @@ def add_shareable_event(event_id: str, can_share_peer_id: str, created_at: int, 
     add_shareable_events_batch([(event_id, created_at, recorded_at)], can_share_peer_id, db, skip_negentropy)
 
 
-def get_bucket_hash(
-    db,
-    recorded_by: str,
-    level: str,
-    prefix: str
-) -> bytes:
-    """Get hash for a bucket.
-
-    With XOR fingerprinting, hashes are always current - just read from DB.
-    Returns empty bytes if bucket doesn't exist.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    row = safedb.query_one("""
-        SELECT hash FROM negentropy_buckets
-        WHERE recorded_by = ? AND level = ? AND prefix = ?
-    """, (recorded_by, level, prefix))
-
-    if row and row['hash']:
-        return row['hash']
-    return b''
-
-
-# Alias for backwards compatibility
-recompute_bucket_hash = get_bucket_hash
-
-
-def get_hashes_at_level(
-    db,
-    recorded_by: str,
-    level: str,
-    parent_prefix: Optional[str] = None
-) -> dict[str, bytes]:
-    """Get all bucket hashes at a level, optionally filtered by parent prefix.
-
-    With XOR fingerprinting, hashes are always current - just read from DB.
-
-    Returns:
-        Dict mapping prefix -> hash (excludes empty buckets)
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-    level_prefix_len = LEVEL_PREFIX_LEN[level]
-
-    if parent_prefix is not None:
-        # Children with matching prefix start
-        prefix_pattern = parent_prefix + '%'
-        rows = safedb.query("""
-            SELECT prefix, hash FROM negentropy_buckets
-            WHERE recorded_by = ? AND level = ?
-            AND prefix LIKE ? AND length(prefix) = ?
-            AND hash IS NOT NULL
-        """, (recorded_by, level, prefix_pattern, level_prefix_len))
-    else:
-        # All buckets at this level
-        rows = safedb.query("""
-            SELECT prefix, hash FROM negentropy_buckets
-            WHERE recorded_by = ? AND level = ?
-            AND hash IS NOT NULL
-        """, (recorded_by, level))
-
-    return {row['prefix']: row['hash'] for row in rows}
-
-
-def get_events_in_bucket(
-    db,
-    recorded_by: str,
-    prefix: str,
-    level: str = 'prefix_6'
-) -> list[str]:
-    """Get all event IDs in a bucket at any level.
-
-    Returns all events whose unified_key starts with the given prefix.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    if level == 'root' or prefix == '':
-        # Root - all events
-        rows = safedb.query("""
-            SELECT event_id FROM negentropy_events
-            WHERE recorded_by = ?
-            ORDER BY event_id
-        """, (recorded_by,))
-    else:
-        # Prefix match
-        prefix_pattern = prefix + '%'
-        rows = safedb.query("""
-            SELECT event_id FROM negentropy_events
-            WHERE recorded_by = ? AND unified_key LIKE ?
-            ORDER BY event_id
-        """, (recorded_by, prefix_pattern))
-
-    return [r['event_id'] for r in rows]
-
-
-def get_event_count_in_bucket(
-    db,
-    recorded_by: str,
-    prefix: str,
-    level: str
-) -> int:
-    """Get count of events in a bucket at any level.
-
-    Used to decide whether to drill down or send events.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    if level == 'root' or prefix == '':
-        row = safedb.query_one("""
-            SELECT COUNT(*) as cnt FROM negentropy_events
-            WHERE recorded_by = ?
-        """, (recorded_by,))
-    else:
-        prefix_pattern = prefix + '%'
-        row = safedb.query_one("""
-            SELECT COUNT(*) as cnt FROM negentropy_events
-            WHERE recorded_by = ? AND unified_key LIKE ?
-        """, (recorded_by, prefix_pattern))
-
-    return row['cnt'] if row else 0
-
-
 def get_total_event_count(db, recorded_by: str) -> int:
     """Get total number of events being synced."""
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -1331,8 +1149,11 @@ def get_total_event_count(db, recorded_by: str) -> int:
 
 
 def get_root_hash(db, recorded_by: str) -> bytes:
-    """Get the root hash for this peer's event set."""
-    return recompute_bucket_hash(db, recorded_by, 'root', '')
+    """Get the root hash for this peer's event set.
+
+    This is the XOR fingerprint of all events (full range).
+    """
+    return compute_range_hash(db, recorded_by, MIN_UNIFIED_KEY, MAX_UNIFIED_KEY)
 
 
 # ============================================================================
@@ -1353,34 +1174,51 @@ def init_sync_for_connection(
 ) -> list[dict]:
     """Initialize sync state for a new connection.
 
-    Returns a root-level range request to start sync.
-    Includes root_hash and total_events for progress tracking.
+    Returns a full-range request to start sync.
+    Only starts a new sync if there's no recent sync already in progress.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
-    # Get root hash
+    # Don't start new sync if one is actively in progress (updated recently)
+    # Stale entries (>5 seconds old) are ignored - sync may have been interrupted
+    stale_threshold = t_ms - 5000
+
+    pending = safedb.query_one("""
+        SELECT 1 FROM negentropy_sync_state
+        WHERE recorded_by = ? AND connection_id = ?
+        AND status IN ('pending', 'mismatched', 'batching')
+        AND updated_at > ?
+        LIMIT 1
+    """, (recorded_by, connection_id, stale_threshold))
+
+    if pending:
+        return []  # Let existing sync complete
+
+    # Clear old sync state before starting fresh
+    safedb.execute("""
+        DELETE FROM negentropy_sync_state
+        WHERE recorded_by = ? AND connection_id = ?
+    """, (recorded_by, connection_id))
+
+    # Get root hash (full range)
     root_hash = get_root_hash(db, recorded_by)
     total_events = get_total_event_count(db, recorded_by)
 
-    if not root_hash:
-        # No events, nothing to sync
-        return []
-
     range_id = generate_range_id()
 
-    # Record sync state
+    # Record sync state with full range
     safedb.execute("""
         INSERT INTO negentropy_sync_state
-        (recorded_by, connection_id, range_id, level, prefix,
+        (recorded_by, connection_id, range_id, range_start, range_end,
          our_hash, their_hash, status, created_at, updated_at)
-        VALUES (?, ?, ?, 'root', '', ?, NULL, 'pending', ?, ?)
-    """, (recorded_by, connection_id, range_id, root_hash, t_ms, t_ms))
+        VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+    """, (recorded_by, connection_id, range_id, MIN_UNIFIED_KEY, MAX_UNIFIED_KEY, root_hash, t_ms, t_ms))
 
     return [{
         'type': 'range_request',
         'range_id': range_id,
-        'level': 'root',
-        'prefix': '',
+        'start': MIN_UNIFIED_KEY,
+        'end': MAX_UNIFIED_KEY,
         'hash': root_hash.hex() if root_hash else '',
         'root_hash': root_hash.hex() if root_hash else '',
         'total_events': total_events,
@@ -1394,43 +1232,108 @@ def handle_range_request(
     msg: dict,
     t_ms: int
 ) -> list[dict]:
-    """Handle an incoming range request.
+    """Handle an incoming range request (responder side).
 
-    Compares our hash with theirs and returns appropriate response.
-    All responses include root_hash and total_events for progress tracking.
+    Compares our hash with theirs and returns:
+    - range_matched: hashes match, range is synced
+    - range_matched + blobs: hashes differ but few events, sent blobs
+    - range_mismatched: hashes differ, many events, requester should bisect/batch
+
+    Optimization: When their_hash is ZERO_HASH (they have nothing), we skip
+    hash computation entirely. If they request a specific batch, we send that
+    batch of events directly.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
     range_id = msg['range_id']
-    level = msg['level']
-    prefix = msg.get('prefix', '')
-    their_hash = bytes.fromhex(msg['hash']) if msg['hash'] else b''
+    start = msg['start']
+    end = msg['end']
+    their_hash = bytes.fromhex(msg['hash']) if msg['hash'] else ZERO_HASH
+    batch = msg.get('batch')  # Optional batch number for bulk transfer
 
     # Get root hash and total events for all responses
     root_hash = get_root_hash(db, recorded_by)
     total_events = get_total_event_count(db, recorded_by)
 
-    # Compute our hash for this bucket
-    our_hash = recompute_bucket_hash(db, recorded_by, level, prefix)
-    log.info(f"negentropy.handle_range_request: level={level} prefix={prefix} our_hash={our_hash.hex()[:16] if our_hash else 'empty'} their_hash={their_hash.hex()[:16] if their_hash else 'empty'} match={our_hash == their_hash}")
+    # Handle batch request (bulk transfer mode)
+    if batch is not None:
+        # Use efficient LIMIT/OFFSET query instead of fetching all events
+        batch_ids = get_events_in_range_batch(db, recorded_by, start, end, batch, BULK_BATCH_SIZE)
+
+        if batch_ids:
+            sent = _send_event_blobs(db, recorded_by, connection_id, batch_ids, t_ms)
+            log.info(f"negentropy: sent batch {batch} ({sent} events) for range [{start}, {end})")
+
+        return [{
+            'type': 'range_matched',
+            'range_id': range_id,
+            'batch': batch,
+            'root_hash': root_hash.hex() if root_hash else '',
+            'total_events': total_events,
+        }]
+
+    # Fast path: if their_hash is ZERO_HASH, skip hash computation
+    if their_hash == ZERO_HASH:
+        event_count = get_event_count_in_range(db, recorded_by, start, end)
+
+        if event_count == 0:
+            # Both empty - matched
+            log.info(f"negentropy.handle_range_request: range=[{start}, {end}) both empty")
+            return [{
+                'type': 'range_matched',
+                'range_id': range_id,
+                'root_hash': root_hash.hex() if root_hash else '',
+                'total_events': total_events,
+            }]
+
+        if event_count <= EVENTS_THRESHOLD:
+            # Few events - send blobs directly
+            event_ids = get_events_in_range(db, recorded_by, start, end)
+            if event_ids:
+                sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+                log.info(f"negentropy: sent {sent} event blobs for range [{start}, {end}) (their_hash=ZERO)")
+
+            return [{
+                'type': 'range_matched',
+                'range_id': range_id,
+                'root_hash': root_hash.hex() if root_hash else '',
+                'total_events': total_events,
+            }]
+
+        # Many events, they have nothing - signal mismatch with count for batching
+        log.info(f"negentropy.handle_range_request: range=[{start}, {end}) events={event_count} their_hash=ZERO, signaling mismatch")
+        return [{
+            'type': 'range_mismatched',
+            'range_id': range_id,
+            'start': start,
+            'end': end,
+            'event_count': event_count,
+            'root_hash': root_hash.hex() if root_hash else '',
+            'total_events': total_events,
+        }]
+
+    # Normal path: compute hash and compare
+    our_hash = compute_range_hash(db, recorded_by, start, end)
+    event_count = get_event_count_in_range(db, recorded_by, start, end)
+
+    log.info(f"negentropy.handle_range_request: range=[{start}, {end}) events={event_count} "
+             f"our_hash={our_hash.hex()[:16]} their_hash={their_hash.hex()[:16]} match={our_hash == their_hash}")
 
     # Record the range
     safedb.execute("""
         INSERT INTO negentropy_sync_state
-        (recorded_by, connection_id, range_id, level, prefix,
+        (recorded_by, connection_id, range_id, range_start, range_end,
          our_hash, their_hash, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         ON CONFLICT (recorded_by, connection_id, range_id) DO UPDATE SET
             their_hash = excluded.their_hash,
             updated_at = excluded.updated_at
-    """, (recorded_by, connection_id, range_id, level, prefix, our_hash, their_hash, t_ms, t_ms))
+    """, (recorded_by, connection_id, range_id, start, end, our_hash, their_hash, t_ms, t_ms))
 
     # Check for checkpoint: if their root hash matches ours
     their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
     if their_root_hash and their_root_hash == root_hash:
         _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
-
-    responses = []
 
     if our_hash == their_hash:
         # Hashes match - this range is synced!
@@ -1440,82 +1343,209 @@ def handle_range_request(
             WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
         """, (t_ms, recorded_by, connection_id, range_id))
 
-        responses.append({
+        return [{
             'type': 'range_matched',
             'range_id': range_id,
             'root_hash': root_hash.hex() if root_hash else '',
             'total_events': total_events,
-        })
+        }]
+
+    # Hashes differ - check if we should send blobs or signal mismatch
+    if event_count <= EVENTS_THRESHOLD:
+        # Few events - send blobs directly
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'complete', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
+
+        event_ids = get_events_in_range(db, recorded_by, start, end)
+
+        # Send actual event blobs
+        if event_ids:
+            sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+            log.info(f"negentropy: sent {sent} event blobs for range [{start}, {end})")
+
+        # Return range_matched - the other side will request from us to get our events
+        return [{
+            'type': 'range_matched',
+            'range_id': range_id,
+            'root_hash': root_hash.hex() if root_hash else '',
+            'total_events': total_events,
+        }]
 
     else:
-        # Hashes differ - check if we should send events or drill down
-        event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
+        # Many events - signal mismatch, requester will bisect
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'mismatched', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
 
-        # At finest level OR bucket has few enough events to send directly
-        max_events = EVENT_ID_MAX
-        if level == 'prefix_6' or event_count <= max_events:
-            safedb.execute("""
-                UPDATE negentropy_sync_state
-                SET status = 'events_sent', updated_at = ?
-                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-            """, (t_ms, recorded_by, connection_id, range_id))
+        return [{
+            'type': 'range_mismatched',
+            'range_id': range_id,
+            'event_count': event_count,
+            'root_hash': root_hash.hex() if root_hash else '',
+            'total_events': total_events,
+        }]
 
-            event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
-            if len(event_ids) > max_events:
-                log.warning(
-                    f"negentropy: truncating {len(event_ids)} event_ids to {max_events} for wire payload"
-                )
-                event_ids = event_ids[:max_events]
 
-            # Send actual event blobs - they'll dedupe on their side
-            if event_ids:
-                sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-                log.info(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events in bucket)")
+def handle_range_mismatched(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int
+) -> list[dict]:
+    """Handle range_mismatched response (requester side).
 
-            # Also send the event IDs so they know what we have (for bidirectional sync)
-            responses.append({
-                'type': 'range_events',
-                'range_id': range_id,
-                'prefix': prefix,
-                'event_ids': event_ids,
-                'our_hash': our_hash.hex() if our_hash else '',
-                'root_hash': root_hash.hex() if root_hash else '',
-                'total_events': total_events,
-            })
+    If we have nothing in this range (our_hash was ZERO_HASH), use cursor-based
+    streaming with a single GET request. Otherwise, bisect and send child requests.
 
-        else:
-            # Drill down: send child hashes
-            child_level = get_child_level(level)
-            child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
+    Cursor-based streaming is more efficient than generating all batch requests
+    at once because:
+    1. Only one request is in flight at a time (lightweight)
+    2. No memory pressure from generating thousands of batch requests
+    3. Each round-trip transfers BULK_BATCH_SIZE events
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
 
-            safedb.execute("""
-                UPDATE negentropy_sync_state
-                SET status = 'diverged', updated_at = ?
-                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-            """, (t_ms, recorded_by, connection_id, range_id))
+    range_id = msg['range_id']
+    their_event_count = msg.get('event_count', 0)
 
-            # Create child ranges
-            for child_prefix, child_hash in child_hashes.items():
-                child_range_id = generate_range_id()
+    # Get the range we sent
+    range_row = safedb.query_one("""
+        SELECT range_start, range_end, our_hash FROM negentropy_sync_state
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (recorded_by, connection_id, range_id))
 
-                safedb.execute("""
-                    INSERT INTO negentropy_sync_state
-                    (recorded_by, connection_id, range_id, level, prefix,
-                     our_hash, their_hash, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-                """, (recorded_by, connection_id, child_range_id, child_level, child_prefix, child_hash, t_ms, t_ms))
+    if not range_row:
+        log.warning(f"negentropy.handle_range_mismatched: unknown range_id {range_id}")
+        return []
 
-                responses.append({
-                    'type': 'range_request',
-                    'range_id': child_range_id,
-                    'level': child_level,
-                    'prefix': child_prefix,
-                    'hash': child_hash.hex() if child_hash else '',
-                    'parent_range_id': range_id,
-                    'root_hash': root_hash.hex() if root_hash else '',
-                    'total_events': total_events,
-                })
+    start = range_row['range_start']
+    end = range_row['range_end']
+    our_hash = range_row['our_hash']
 
+    # Count our events in this range for streaming decision
+    our_event_count = get_event_count_in_range(db, recorded_by, start, end)
+
+    # Use streaming if:
+    # 1. We have nothing (our_hash == ZERO_HASH), OR
+    # 2. They have many more events than us (difference > BULK_BATCH_SIZE)
+    # This handles "newcomer to range" and "catch-up" cases efficiently
+    # Note: Streaming sends ALL their events, so we may receive duplicates,
+    # but this is more efficient than bisection when difference is large
+    event_difference = their_event_count - our_event_count
+    use_streaming = (
+        (our_hash == ZERO_HASH and their_event_count > 0) or
+        (event_difference > BULK_BATCH_SIZE)
+    )
+
+    log.info(f"negentropy.handle_range_mismatched: range=[{start}, {end}) "
+             f"our_count={our_event_count} their_count={their_event_count} "
+             f"our_hash={our_hash.hex()[:16] if our_hash else 'None'} "
+             f"use_streaming={use_streaming}")
+
+    if use_streaming:
+        # Always use start/end from our stored range state
+        # (msg start/end might be 0 from wire encoding defaults)
+        req_start = start
+        req_end = end
+
+        log.info(f"negentropy: cursor-based streaming for range [{req_start}, {req_end}): "
+                 f"{their_event_count} events")
+
+        # Update parent range status to streaming
+        safedb.execute("""
+            UPDATE negentropy_sync_state
+            SET status = 'streaming', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
+
+        # Create streaming state to track cursor position
+        streaming_range_id = generate_range_id()
+        safedb.execute("""
+            INSERT INTO negentropy_streaming_state
+            (recorded_by, connection_id, range_id, range_start, range_end,
+             cursor, items_received, expected_total, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, 0, ?, 'streaming', ?, ?)
+        """, (recorded_by, connection_id, streaming_range_id, req_start, req_end,
+              their_event_count, t_ms, t_ms))
+
+        # Send single GET request with cursor=0 to start streaming
+        return [{
+            'type': 'range_get',
+            'range_id': streaming_range_id,
+            'start': req_start,
+            'end': req_end,
+            'cursor': 0,  # Start from beginning
+            'limit': BULK_BATCH_SIZE,
+        }]
+
+    # Normal path: bisect the range
+    mid = (start + end) // 2
+
+    if mid == start or mid == end:
+        # Can't bisect further - this shouldn't happen with proper thresholds
+        log.warning(f"negentropy: can't bisect range [{start}, {end})")
+        return []
+
+    # Get root hash and total events
+    root_hash = get_root_hash(db, recorded_by)
+    total_events = get_total_event_count(db, recorded_by)
+
+    # Update parent range status
+    safedb.execute("""
+        UPDATE negentropy_sync_state
+        SET status = 'mismatched', updated_at = ?
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (t_ms, recorded_by, connection_id, range_id))
+
+    responses = []
+
+    # Create left child range
+    left_range_id = generate_range_id()
+    left_hash = compute_range_hash(db, recorded_by, start, mid)
+    safedb.execute("""
+        INSERT INTO negentropy_sync_state
+        (recorded_by, connection_id, range_id, range_start, range_end,
+         our_hash, their_hash, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+    """, (recorded_by, connection_id, left_range_id, start, mid, left_hash, t_ms, t_ms))
+
+    responses.append({
+        'type': 'range_request',
+        'range_id': left_range_id,
+        'start': start,
+        'end': mid,
+        'hash': left_hash.hex() if left_hash else '',
+        'root_hash': root_hash.hex() if root_hash else '',
+        'total_events': total_events,
+    })
+
+    # Create right child range
+    right_range_id = generate_range_id()
+    right_hash = compute_range_hash(db, recorded_by, mid, end)
+    safedb.execute("""
+        INSERT INTO negentropy_sync_state
+        (recorded_by, connection_id, range_id, range_start, range_end,
+         our_hash, their_hash, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+    """, (recorded_by, connection_id, right_range_id, mid, end, right_hash, t_ms, t_ms))
+
+    responses.append({
+        'type': 'range_request',
+        'range_id': right_range_id,
+        'start': mid,
+        'end': end,
+        'hash': right_hash.hex() if right_hash else '',
+        'root_hash': root_hash.hex() if root_hash else '',
+        'total_events': total_events,
+    })
+
+    log.info(f"negentropy: bisected range [{start}, {end}) at {mid}")
     return responses
 
 
@@ -1569,9 +1599,6 @@ def handle_range_matched(
     safedb = create_safe_db(db, recorded_by=recorded_by)
     range_id = msg['range_id']
 
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
-
     safedb.execute("""
         UPDATE negentropy_sync_state
         SET status = 'complete', updated_at = ?
@@ -1585,6 +1612,190 @@ def handle_range_matched(
         _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
 
     return []  # No response needed
+
+
+def handle_range_get(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int
+) -> list[dict]:
+    """Handle incoming range GET request (responder side - cursor-based streaming).
+
+    Returns a PAGE response with event blobs and cursor for next page.
+    """
+    range_id = msg['range_id']
+    start = msg.get('start', MIN_UNIFIED_KEY)
+    end = msg.get('end', MAX_UNIFIED_KEY)
+    cursor = msg.get('cursor', 0)
+    limit = msg.get('limit', BULK_BATCH_SIZE)
+
+    # Get root hash and total events
+    root_hash = get_root_hash(db, recorded_by)
+    total_events = get_total_event_count(db, recorded_by)
+
+    # Get page of events using keyset pagination
+    event_ids, next_cursor, has_more = get_events_after_cursor(db, recorded_by, start, end, cursor, limit)
+
+    # Send event blobs
+    if event_ids:
+        sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
+        log.info(f"negentropy: GET handler sent {sent} events, cursor={cursor} -> {next_cursor}, has_more={has_more}")
+
+    return [{
+        'type': 'range_page',
+        'range_id': range_id,
+        'items_count': len(event_ids),
+        'cursor': next_cursor,
+        'has_more': has_more,
+        'root_hash': root_hash.hex() if root_hash else '',
+        'total_events': total_events,
+    }]
+
+
+def handle_range_page(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int
+) -> list[dict]:
+    """Handle incoming range PAGE response (requester side - cursor-based streaming).
+
+    If has_more is true, sends another GET request with updated cursor.
+    Otherwise, marks the streaming complete.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    range_id = msg['range_id']
+    items_count = msg.get('items_count', 0)
+    cursor = msg.get('cursor', 0)
+    has_more = msg.get('has_more', False)
+
+    # Get streaming state
+    stream = safedb.query_one("""
+        SELECT range_start, range_end, items_received, expected_total
+        FROM negentropy_streaming_state
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (recorded_by, connection_id, range_id))
+
+    if not stream:
+        log.warning(f"negentropy.handle_range_page: unknown stream range_id {range_id}")
+        return []
+
+    start = stream['range_start']
+    end = stream['range_end']
+    new_items_received = stream['items_received'] + items_count
+
+    # Update streaming state
+    safedb.execute("""
+        UPDATE negentropy_streaming_state
+        SET cursor = ?, items_received = ?, updated_at = ?
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (cursor, new_items_received, t_ms, recorded_by, connection_id, range_id))
+
+    log.info(f"negentropy: PAGE received {items_count} items, total={new_items_received}, has_more={has_more}")
+
+    if has_more:
+        # Send next GET request
+        return [{
+            'type': 'range_get',
+            'range_id': range_id,
+            'start': start,
+            'end': end,
+            'cursor': cursor,
+            'limit': BULK_BATCH_SIZE,
+        }]
+    else:
+        # Streaming complete
+        safedb.execute("""
+            UPDATE negentropy_streaming_state
+            SET status = 'complete', updated_at = ?
+            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+        """, (t_ms, recorded_by, connection_id, range_id))
+
+        # Check if root hashes match
+        root_hash = get_root_hash(db, recorded_by)
+        their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
+
+        if their_root_hash and their_root_hash == root_hash:
+            # Hashes match - mark parent range as complete and log checkpoint
+            _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
+
+            # Find and update parent range in negentropy_sync_state
+            # (ranges with status='streaming' for this connection)
+            safedb.execute("""
+                UPDATE negentropy_sync_state
+                SET status = 'complete', updated_at = ?
+                WHERE recorded_by = ? AND connection_id = ? AND status = 'streaming'
+            """, (t_ms, recorded_by, connection_id))
+
+            return []
+        else:
+            # Hashes don't match - bisect the streaming range to find remaining differences
+            # This is more efficient than restarting with a full-range request
+            log.info(f"negentropy: streaming complete but hashes differ, bisecting range [{start}, {end})")
+
+            # Update existing streaming ranges to complete so they don't block
+            safedb.execute("""
+                UPDATE negentropy_sync_state
+                SET status = 'complete', updated_at = ?
+                WHERE recorded_by = ? AND connection_id = ? AND status = 'streaming'
+            """, (t_ms, recorded_by, connection_id))
+
+            # Bisect the range to find the remaining differences
+            mid = (start + end) // 2
+            if mid == start or mid == end:
+                # Can't bisect further - shouldn't happen normally
+                log.warning(f"negentropy: can't bisect range [{start}, {end}) after streaming")
+                return []
+
+            total_events = get_total_event_count(db, recorded_by)
+            responses = []
+
+            # Create left child range
+            left_range_id = generate_range_id()
+            left_hash = compute_range_hash(db, recorded_by, start, mid)
+            safedb.execute("""
+                INSERT INTO negentropy_sync_state
+                (recorded_by, connection_id, range_id, range_start, range_end,
+                 our_hash, their_hash, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+            """, (recorded_by, connection_id, left_range_id, start, mid, left_hash, t_ms, t_ms))
+
+            responses.append({
+                'type': 'range_request',
+                'range_id': left_range_id,
+                'start': start,
+                'end': mid,
+                'hash': left_hash.hex() if left_hash else '',
+                'root_hash': root_hash.hex() if root_hash else '',
+                'total_events': total_events,
+            })
+
+            # Create right child range
+            right_range_id = generate_range_id()
+            right_hash = compute_range_hash(db, recorded_by, mid, end)
+            safedb.execute("""
+                INSERT INTO negentropy_sync_state
+                (recorded_by, connection_id, range_id, range_start, range_end,
+                 our_hash, their_hash, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+            """, (recorded_by, connection_id, right_range_id, mid, end, right_hash, t_ms, t_ms))
+
+            responses.append({
+                'type': 'range_request',
+                'range_id': right_range_id,
+                'start': mid,
+                'end': end,
+                'hash': right_hash.hex() if right_hash else '',
+                'root_hash': root_hash.hex() if root_hash else '',
+                'total_events': total_events,
+            })
+
+            log.info(f"negentropy: post-streaming bisection at {mid}")
+            return responses
 
 
 def _send_event_blobs(
@@ -1623,60 +1834,6 @@ def _send_event_blobs(
     return sent
 
 
-def handle_range_events(
-    db,
-    recorded_by: str,
-    connection_id: str,
-    msg: dict,
-    t_ms: int
-) -> list[dict]:
-    """Handle incoming events for a bucket.
-
-    Sends actual event blobs for events they need.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
-
-    range_id = msg['range_id']
-    prefix = msg.get('prefix', '')
-    their_event_ids = set(msg['event_ids'])
-
-    # Get root hash and total events for responses
-    root_hash = get_root_hash(db, recorded_by)
-    total_events = get_total_event_count(db, recorded_by)
-
-    # Check for checkpoint
-    their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
-    if their_root_hash and their_root_hash == root_hash:
-        _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
-
-    # Get our events for this bucket
-    our_event_ids = set(get_events_in_bucket(db, recorded_by, prefix))
-
-    # Events they have that we don't -> we need to request/store
-    events_we_need = their_event_ids - our_event_ids
-
-    # Events we have that they don't -> send blobs
-    events_they_need = our_event_ids - their_event_ids
-
-    # Mark range complete
-    safedb.execute("""
-        UPDATE negentropy_sync_state
-        SET status = 'complete', updated_at = ?
-        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-    """, (t_ms, recorded_by, connection_id, range_id))
-
-    # Send actual event blobs they need
-    if events_they_need:
-        sent = _send_event_blobs(db, recorded_by, connection_id, list(events_they_need), t_ms)
-        log.info(f"negentropy: sent {sent} event blobs to connection {connection_id[:20]}...")
-
-    # No protocol response needed - we sent the blobs directly
-    return []
-
-
 def handle_sync_message(
     db,
     recorded_by: str,
@@ -1694,9 +1851,14 @@ def handle_sync_message(
         return handle_range_request(db, recorded_by, connection_id, msg, t_ms)
     elif msg_type == 'range_matched':
         return handle_range_matched(db, recorded_by, connection_id, msg, t_ms)
-    elif msg_type == 'range_events':
-        return handle_range_events(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'range_mismatched':
+        return handle_range_mismatched(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'range_get':
+        return handle_range_get(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'range_page':
+        return handle_range_page(db, recorded_by, connection_id, msg, t_ms)
     else:
+        log.warning(f"negentropy: unknown message type: {msg_type}")
         return []  # Unknown message type
 
 
@@ -1738,8 +1900,6 @@ def sync_connection(
         )
         if conn_module.send(recorded_by, conn.key_id, blob, t_ms, db):
             sent += 1
-            # Track for congestion control
-            _cc_on_send(recorded_by, conn.key_id, t_ms)
     return sent
 
 
@@ -1829,14 +1989,6 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
                 continue
 
             total_connections += 1
-
-            # Check for CC timeout first (shrinks window if needed)
-            _cc_check_timeout(peer_id, conn.key_id, t_ms)
-
-            # Congestion control: only send if window allows
-            if not _cc_can_send(peer_id, conn.key_id):
-                log.debug(f"CC: skipping conn={conn.key_id[:16]}... (window full)")
-                continue
 
             sent = sync_connection(db, peer_id, conn, t_ms)
             total_messages += sent

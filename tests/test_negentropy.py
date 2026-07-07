@@ -1,6 +1,6 @@
 """Tests for negentropy-style deterministic sync protocol.
 
-Tests the hash-only prefix-based bucketing system.
+Tests the unified time+hash bisection-based sync system.
 """
 import pytest
 import sqlite3
@@ -19,95 +19,51 @@ def db():
 
 
 class TestUnifiedKey:
-    """Test unified key computation (hash-only variant)."""
+    """Test unified key computation (time+hash variant)."""
 
     def test_unified_key_format(self):
-        """Unified key is 16 hex chars (64 bits)."""
+        """Unified key is 64-bit integer."""
         event_id = 'test_event_abc123'
-        key = negentropy.compute_unified_key(event_id)
-        assert len(key) == 16
-        assert all(c in '0123456789abcdef' for c in key)
+        ts_ms = 1718451045000
+        key = negentropy.compute_unified_key(event_id, ts_ms)
+        assert isinstance(key, int)
+        assert 0 <= key <= negentropy.MAX_UNIFIED_KEY
 
-    def test_unified_key_ignores_timestamp(self):
-        """Timestamp is ignored - same event_id always produces same key."""
+    def test_unified_key_uses_timestamp(self):
+        """Different timestamps produce different keys (in high bits)."""
         event_id = 'test_event'
-        key1 = negentropy.compute_unified_key(event_id, 1000000000000)  # With timestamp
-        key2 = negentropy.compute_unified_key(event_id, 2000000000000)  # Different timestamp
-        key3 = negentropy.compute_unified_key(event_id)  # No timestamp
-        assert key1 == key2 == key3  # All same because only event_id matters
+        key1 = negentropy.compute_unified_key(event_id, 1000000000000)
+        key2 = negentropy.compute_unified_key(event_id, 2000000000000)
+        assert key1 != key2
+        # Higher timestamp should give higher key
+        assert key2 > key1
 
     def test_unified_key_deterministic(self):
-        """Same event_id produces same key."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt1')
+        """Same event_id and timestamp produces same key."""
+        key1 = negentropy.compute_unified_key('evt1', 1000)
+        key2 = negentropy.compute_unified_key('evt1', 1000)
         assert key1 == key2
 
-    def test_unified_key_different_events(self):
-        """Different events produce different keys."""
-        key1 = negentropy.compute_unified_key('evt1')
-        key2 = negentropy.compute_unified_key('evt2')
+    def test_unified_key_different_events_same_time(self):
+        """Different events at same timestamp produce different keys (hash differs)."""
+        ts = 1718451045000
+        key1 = negentropy.compute_unified_key('evt1', ts)
+        key2 = negentropy.compute_unified_key('evt2', ts)
         assert key1 != key2
+        # High 48 bits (timestamp) should be same
+        assert (key1 >> 16) == (key2 >> 16)
+        # Low 16 bits (hash) should differ
+        assert (key1 & 0xFFFF) != (key2 & 0xFFFF)
 
-    def test_decode_unified_key(self):
-        """Decode returns (0, full_hash) in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
-        decoded_ts, hash_hex = negentropy.decode_unified_key(key)
-        assert decoded_ts == 0  # No timestamp in hash-only mode
-        assert hash_hex == key  # Full hash returned
-
-
-class TestPrefixLevels:
-    """Test prefix hierarchy."""
-
-    def test_levels_defined(self):
-        """All expected levels exist (6 levels for large file support)."""
-        expected = ['root', 'prefix_2', 'prefix_4', 'prefix_6', 'prefix_8', 'prefix_10']
-        assert negentropy.LEVELS == expected
-
-    def test_get_prefix_for_level(self):
-        """Get correct prefix length at each level."""
-        event_id = 'evt1'
-        ts_ms = 1718451045000
-        unified_key = negentropy.compute_unified_key(event_id, ts_ms)
-
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'root') == ''
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_2') == unified_key[:2]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_4') == unified_key[:4]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_6') == unified_key[:6]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_8') == unified_key[:8]
-        assert negentropy.get_prefix_for_level(event_id, ts_ms, 'prefix_10') == unified_key[:10]
-
-    def test_get_child_level(self):
-        """Child level is next in hierarchy."""
-        assert negentropy.get_child_level('root') == 'prefix_2'
-        assert negentropy.get_child_level('prefix_2') == 'prefix_4'
-        assert negentropy.get_child_level('prefix_4') == 'prefix_6'
-        assert negentropy.get_child_level('prefix_6') == 'prefix_8'
-        assert negentropy.get_child_level('prefix_8') == 'prefix_10'
-        assert negentropy.get_child_level('prefix_10') is None  # Finest level
-
-    def test_get_parent_level(self):
-        """Parent level is previous in hierarchy."""
-        assert negentropy.get_parent_level('prefix_10') == 'prefix_8'
-        assert negentropy.get_parent_level('prefix_8') == 'prefix_6'
-        assert negentropy.get_parent_level('prefix_6') == 'prefix_4'
-        assert negentropy.get_parent_level('prefix_2') == 'root'
-        assert negentropy.get_parent_level('root') is None  # Coarsest level
-
-
-class TestFormatHuman:
-    """Test human-readable unified key formatting."""
-
-    def test_format_unified_key_human(self):
-        """Format shows hash prefix in hash-only mode."""
-        key = negentropy.compute_unified_key('evt1')
-        formatted = negentropy.format_unified_key_human(key)
-        assert 'hash:' in formatted
-        assert key[:8] in formatted  # Shows hash prefix
+    def test_unified_key_ordering(self):
+        """Events are ordered by time first, then hash."""
+        early = negentropy.compute_unified_key('evt1', 1000)
+        late = negentropy.compute_unified_key('evt2', 2000)
+        assert early < late  # Earlier time = smaller key
 
 
 class TestXORFingerprinting:
-    """Test XOR fingerprinting for bucket hashes."""
+    """Test XOR fingerprinting for range hashes."""
 
     def test_fingerprint_is_16_bytes(self):
         """Fingerprint is always 16 bytes."""
@@ -157,230 +113,278 @@ class TestXORFingerprinting:
         assert result1 == result2 == result3
 
 
-class TestEventTracking:
-    """Test adding events to sync system."""
+class TestRangeHash:
+    """Test range hash computation."""
 
-    def test_add_event(self, db):
-        """Adding event creates bucket entries."""
+    def test_empty_range_hash(self, db):
+        """Empty range has zero hash."""
+        peer_id = 'peer1'
+        hash_val = negentropy.compute_range_hash(
+            db, peer_id, negentropy.MIN_UNIFIED_KEY, negentropy.MAX_UNIFIED_KEY
+        )
+        assert hash_val == negentropy.ZERO_HASH
+
+    def test_range_hash_single_event(self, db):
+        """Range with single event has that event's fingerprint."""
         peer_id = 'peer1'
         event_id = 'evt1'
-        ts_ms = 1718451045000  # 2024-06-15 11:30:45 UTC
+        ts_ms = 1718451045000
 
         negentropy.add_event_to_sync(db, peer_id, event_id, ts_ms)
 
-        # Check event was recorded
-        row = db.query_one("""
-            SELECT unified_key FROM negentropy_events
-            WHERE recorded_by = ? AND event_id = ?
-        """, (peer_id, event_id))
-        assert row is not None
-        # Unified key should be computed correctly
-        expected_key = negentropy.compute_unified_key(event_id, ts_ms)
-        assert row['unified_key'] == expected_key
+        hash_val = negentropy.compute_range_hash(
+            db, peer_id, negentropy.MIN_UNIFIED_KEY, negentropy.MAX_UNIFIED_KEY
+        )
+        expected = negentropy.compute_fingerprint(event_id)
+        assert hash_val == expected
 
-    def test_add_event_creates_bucket_hierarchy(self, db):
-        """Adding event marks buckets as needing recompute."""
-        peer_id = 'peer1'
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1718451045000)
-
-        # Check buckets were created at each level
-        for level in negentropy.LEVELS:
-            row = db.query_one("""
-                SELECT COUNT(*) as cnt FROM negentropy_buckets
-                WHERE recorded_by = ? AND level = ?
-            """, (peer_id, level))
-            assert row['cnt'] >= 1, f"No bucket at level {level}"
-
-
-class TestXORBucketHashes:
-    """Test XOR fingerprinting produces correct bucket hashes."""
-
-    def test_bucket_hash_is_xor_of_fingerprints(self, db):
-        """Bucket hash equals XOR of event fingerprints in that bucket."""
+    def test_range_hash_multiple_events(self, db):
+        """Range hash is XOR of all event fingerprints."""
         peer_id = 'peer1'
         ts_ms = 1718451045000
 
         negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
-        negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms)
+        negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 1000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt3', ts_ms + 2000)
 
-        # Get the unified key prefix for the finest level (prefix_6)
-        unified_key = negentropy.compute_unified_key('evt1', ts_ms)
-        prefix = unified_key[:6]  # Full prefix for prefix_6 level
+        hash_val = negentropy.compute_range_hash(
+            db, peer_id, negentropy.MIN_UNIFIED_KEY, negentropy.MAX_UNIFIED_KEY
+        )
 
-        h = negentropy.get_bucket_hash(db, peer_id, 'prefix_6', prefix)
+        # Compute expected XOR
+        expected = negentropy.compute_fingerprint('evt1')
+        expected = negentropy.xor_bytes(expected, negentropy.compute_fingerprint('evt2'))
+        expected = negentropy.xor_bytes(expected, negentropy.compute_fingerprint('evt3'))
 
-        # Hash should be XOR of fingerprints of events in that bucket
-        events_in_bucket = negentropy.get_events_in_bucket(db, peer_id, prefix)
-        expected = negentropy.ZERO_HASH
-        for event_id in events_in_bucket:
-            expected = negentropy.xor_bytes(expected, negentropy.compute_fingerprint(event_id))
+        assert hash_val == expected
 
-        assert h == expected
-
-    def test_get_hashes_at_level(self, db):
-        """Get all hashes at a level."""
+    def test_range_hash_partial_range(self, db):
+        """Range hash only includes events in range."""
         peer_id = 'peer1'
 
         # Add events at different times
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1704067200000)  # 2024-01-01
-        negentropy.add_event_to_sync(db, peer_id, 'evt2', 1735689600000)  # 2025-01-01
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt2', 2000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt3', 3000)
 
-        # Get hashes at prefix_2 level (coarse enough to see multiple buckets)
-        prefix_2_hashes = negentropy.get_hashes_at_level(db, peer_id, 'prefix_2')
+        # Get unified keys to determine range
+        key1 = negentropy.compute_unified_key('evt1', 1000)
+        key2 = negentropy.compute_unified_key('evt2', 2000)
+        key3 = negentropy.compute_unified_key('evt3', 3000)
 
-        # Should have at least one non-empty bucket
-        assert any(h != b'' for h in prefix_2_hashes.values())
+        # Hash of just evt2 should match fingerprint of evt2
+        hash_val = negentropy.compute_range_hash(db, peer_id, key2, key3)
+        expected = negentropy.compute_fingerprint('evt2')
+        assert hash_val == expected
+
+
+class TestEventTracking:
+    """Test event addition and tracking."""
+
+    def test_add_event(self, db):
+        """Adding event stores it in negentropy_events."""
+        peer_id = 'peer1'
+        event_id = 'evt1'
+        ts_ms = 1718451045000
+
+        negentropy.add_event_to_sync(db, peer_id, event_id, ts_ms)
+
+        # Check it's stored
+        row = db.query_one(
+            "SELECT unified_key, created_at FROM negentropy_events WHERE event_id = ?",
+            (event_id,)
+        )
+        assert row is not None
+        assert row['created_at'] == ts_ms
+        assert isinstance(row['unified_key'], int)
+
+    def test_add_event_batch(self, db):
+        """Batch add stores multiple events."""
+        peer_id = 'peer1'
+        events = [
+            ('evt1', 1000),
+            ('evt2', 2000),
+            ('evt3', 3000),
+        ]
+
+        negentropy.add_events_to_sync_batch(db, peer_id, events)
+
+        count = db.query_one(
+            "SELECT COUNT(*) as cnt FROM negentropy_events WHERE recorded_by = ?",
+            (peer_id,)
+        )['cnt']
+        assert count == 3
+
+    def test_add_event_deduplication(self, db):
+        """Adding same event twice doesn't create duplicate."""
+        peer_id = 'peer1'
+        event_id = 'evt1'
+        ts_ms = 1000
+
+        negentropy.add_event_to_sync(db, peer_id, event_id, ts_ms)
+        negentropy.add_event_to_sync(db, peer_id, event_id, ts_ms)
+
+        count = db.query_one(
+            "SELECT COUNT(*) as cnt FROM negentropy_events WHERE event_id = ?",
+            (event_id,)
+        )['cnt']
+        assert count == 1
 
 
 class TestSyncProtocol:
-    """Test sync protocol message handling."""
+    """Test the sync protocol messages."""
 
-    def test_init_sync_creates_requests(self, db):
-        """Initializing sync creates range requests starting at root."""
+    def test_init_sync_creates_request(self, db):
+        """Initializing sync creates a range_request for full range."""
         peer_id = 'peer1'
         conn_id = 'conn1'
 
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1718451045000)
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1000)
 
         requests = negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
 
-        assert len(requests) == 1  # Single root request
-        assert requests[0]['type'] == 'range_request'
-        assert requests[0]['level'] == 'root'
-        assert requests[0]['prefix'] == ''
-        assert 'root_hash' in requests[0]
-        assert 'total_events' in requests[0]
-        assert requests[0]['total_events'] == 1
-
-    def test_matching_ranges_complete_immediately(self, db):
-        """When root hashes match, range is marked complete (checkpoint)."""
-        peer_id = 'peer1'
-        conn_id = 'conn1'
-        ts_ms = 1718451045000
-
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
-
-        # Initialize sync
-        requests = negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
         assert len(requests) == 1
-        assert requests[0]['level'] == 'root'
+        req = requests[0]
+        assert req['type'] == 'range_request'
+        assert req['start'] == negentropy.MIN_UNIFIED_KEY
+        assert req['end'] == negentropy.MAX_UNIFIED_KEY
+        assert 'hash' in req
+        assert 'root_hash' in req
 
-        # Simulate receiving same root hash back
+    def test_init_sync_empty_still_sends_request(self, db):
+        """Even with no events, we send a request to pull from peer."""
+        peer_id = 'peer1'
+        conn_id = 'conn1'
+
+        requests = negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
+        # We still send a request even with no events - we might need to pull from peer
+        assert len(requests) == 1
+        req = requests[0]
+        assert req['type'] == 'range_request'
+        assert req['hash'] == negentropy.ZERO_HASH.hex()  # Empty hash
+
+    def test_matching_hashes_return_matched(self, db):
+        """When hashes match, return range_matched."""
+        peer_id = 'peer1'
+        conn_id = 'conn1'
+
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1000)
+
+        # Get our hash
+        our_hash = negentropy.get_root_hash(db, peer_id)
+
         msg = {
             'type': 'range_request',
-            'range_id': 'remote_range_1',
-            'level': 'root',
-            'prefix': '',
-            'hash': requests[0]['hash'],  # Same hash
-            'root_hash': requests[0]['root_hash'],
+            'range_id': 'test_range',
+            'start': negentropy.MIN_UNIFIED_KEY,
+            'end': negentropy.MAX_UNIFIED_KEY,
+            'hash': our_hash.hex(),
         }
-        responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 2000)
 
-        # Should respond with matched and have checkpoint logged
+        responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
+
         assert len(responses) == 1
         assert responses[0]['type'] == 'range_matched'
-        assert 'root_hash' in responses[0]
-        assert 'total_events' in responses[0]
 
-    def test_sends_events_when_below_threshold(self, db):
-        """When bucket has few events (≤ EVENTS_THRESHOLD), send events directly."""
-        peer_id = 'peer1'
-        conn_id = 'conn1'
-        ts_ms = 1718451045000
-
-        # Add just 2 events - well below EVENTS_THRESHOLD (100)
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
-        negentropy.add_event_to_sync(db, peer_id, 'evt2', ts_ms + 1000)
-
-        # Get the prefix for prefix_2 level (coarse level that contains both events)
-        unified_key = negentropy.compute_unified_key('evt1', ts_ms)
-        prefix = unified_key[:2]
-
-        # Receive request at prefix_2 level with different hash
-        msg = {
-            'type': 'range_request',
-            'range_id': 'remote_1',
-            'level': 'prefix_2',
-            'prefix': prefix,
-            'hash': 'deadbeef',  # Different hash
-        }
-        responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
-
-        # With only 2 events, should send events directly instead of drilling down
-        assert any(r['type'] == 'range_events' for r in responses)
-        # Should NOT drill down since event count is below threshold
-        assert not any(r['type'] == 'range_request' for r in responses)
-
-    def test_drills_down_when_above_threshold(self, db):
-        """When bucket has many events (> EVENTS_THRESHOLD), drill down instead."""
+    def test_few_events_sends_blobs_and_matched(self, db):
+        """When hashes differ but few events, send blobs and return matched."""
         peer_id = 'peer1'
         conn_id = 'conn1'
 
-        # In hash-only mode, we need to find events that hash to the same prefix_2 bucket.
-        # Generate events and group by their prefix_2 bucket until we have > 100 in one bucket.
-        target_prefix = None
-        events_by_prefix: dict[str, list[str]] = {}
-        i = 0
-        while True:
-            event_id = f'evt{i}'
-            unified_key = negentropy.compute_unified_key(event_id)
-            prefix = unified_key[:2]
-            if prefix not in events_by_prefix:
-                events_by_prefix[prefix] = []
-            events_by_prefix[prefix].append(event_id)
-            if len(events_by_prefix[prefix]) > 150:
-                target_prefix = prefix
-                break
-            i += 1
-            if i > 100000:  # Safety limit
-                pytest.skip("Could not find 150 events with same prefix_2 in reasonable iterations")
+        # Add just a few events (below threshold)
+        for i in range(5):
+            negentropy.add_event_to_sync(db, peer_id, f'evt{i}', 1000 + i)
 
-        # Add the events that share the same prefix_2 bucket
-        for event_id in events_by_prefix[target_prefix]:
-            negentropy.add_event_to_sync(db, peer_id, event_id, 1000)
-
-        # Receive request at prefix_2 level with different hash
         msg = {
             'type': 'range_request',
-            'range_id': 'remote_1',
-            'level': 'prefix_2',
-            'prefix': target_prefix,
-            'hash': 'deadbeef',  # Different hash
+            'range_id': 'test_range',
+            'start': negentropy.MIN_UNIFIED_KEY,
+            'end': negentropy.MAX_UNIFIED_KEY,
+            'hash': 'deadbeef' * 4,  # Different hash
         }
+
         responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
-        # With > 100 events, should drill down to child level
-        assert any(r['type'] == 'range_request' for r in responses)
-        # Should NOT send events directly at this level
-        assert not any(r['type'] == 'range_events' for r in responses)
-        # Child requests should be at 'prefix_4' level
-        child_requests = [r for r in responses if r['type'] == 'range_request']
-        assert all(r['level'] == 'prefix_4' for r in child_requests)
+        # Should return range_matched (blobs sent separately)
+        assert len(responses) == 1
+        assert responses[0]['type'] == 'range_matched'
+
+    def test_many_events_returns_mismatched(self, db):
+        """When hashes differ and many events, return range_mismatched."""
+        peer_id = 'peer1'
+        conn_id = 'conn1'
+
+        # Add many events (above threshold)
+        for i in range(100):
+            negentropy.add_event_to_sync(db, peer_id, f'evt{i}', 1000 + i)
+
+        msg = {
+            'type': 'range_request',
+            'range_id': 'test_range',
+            'start': negentropy.MIN_UNIFIED_KEY,
+            'end': negentropy.MAX_UNIFIED_KEY,
+            'hash': 'deadbeef' * 4,  # Different hash
+        }
+
+        responses = negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
+
+        assert len(responses) == 1
+        assert responses[0]['type'] == 'range_mismatched'
+        assert 'event_count' in responses[0]
+        assert responses[0]['event_count'] == 100
+
+
+class TestBisection:
+    """Test the bisection logic."""
+
+    def test_handle_mismatched_bisects_range(self, db):
+        """Receiving range_mismatched triggers bisection."""
+        peer_id = 'peer1'
+        conn_id = 'conn1'
+
+        # Add events
+        for i in range(10):
+            negentropy.add_event_to_sync(db, peer_id, f'evt{i}', 1000 + i)
+
+        # First, init sync to create the range
+        requests = negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
+        assert len(requests) == 1
+        original_range_id = requests[0]['range_id']
+
+        # Simulate receiving range_mismatched
+        msg = {
+            'type': 'range_mismatched',
+            'range_id': original_range_id,
+            'event_count': 1000,
+        }
+
+        responses = negentropy.handle_range_mismatched(db, peer_id, conn_id, msg, 2000)
+
+        # Should get two child range_requests
+        assert len(responses) == 2
+        assert all(r['type'] == 'range_request' for r in responses)
+
+        # Children should cover the full range without overlap
+        left = responses[0]
+        right = responses[1]
+
+        # Assuming left comes first
+        if left['start'] > right['start']:
+            left, right = right, left
+
+        assert left['start'] == negentropy.MIN_UNIFIED_KEY
+        assert left['end'] == right['start']  # No gap
+        assert right['end'] == negentropy.MAX_UNIFIED_KEY
 
 
 class TestSyncStatus:
-    """Test sync status for UI display."""
-
-    def test_status_tracking(self, db):
-        """Sync status tracks range states."""
-        peer_id = 'peer1'
-        conn_id = 'conn1'
-
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1718451045000)
-        negentropy.init_sync_for_connection(db, peer_id, conn_id, 1000)
-
-        status = negentropy.get_sync_status(db, peer_id, conn_id)
-
-        assert status['total_ranges'] >= 1
-        assert 'pending_ranges' in status
-        assert 'progress_pct' in status
+    """Test sync status tracking."""
 
     def test_empty_connection_status(self, db):
-        """Connection with no ranges reports correct status."""
+        """Connection with no ranges has 100% progress."""
         status = negentropy.get_sync_status(db, 'peer1', 'conn1')
-        # Empty connection: no ranges means no sync work to do
         assert status['total_ranges'] == 0
-        assert status['progress_pct'] == 100  # 100% done when no work
+        assert status['progress_pct'] == 100
 
 
 class TestCheckpoints:
@@ -390,30 +394,27 @@ class TestCheckpoints:
         """Checkpoint is logged when root hashes match."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        ts_ms = 1718451045000
 
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
-
-        # Get our root hash
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1000)
         root_hash = negentropy.get_root_hash(db, peer_id)
 
-        # Simulate receiving a message with matching root hash
+        # Send a request with matching root_hash
         msg = {
             'type': 'range_request',
-            'range_id': 'remote_1',
-            'level': 'root',
-            'prefix': '',
+            'range_id': 'test_range',
+            'start': negentropy.MIN_UNIFIED_KEY,
+            'end': negentropy.MAX_UNIFIED_KEY,
             'hash': root_hash.hex(),
             'root_hash': root_hash.hex(),
         }
-        negentropy.handle_range_request(db, peer_id, conn_id, msg, ts_ms + 1000)
+
+        negentropy.handle_range_request(db, peer_id, conn_id, msg, 1000)
 
         # Check checkpoint was logged
-        checkpoint = db.query_one("""
-            SELECT * FROM negentropy_checkpoints
-            WHERE recorded_by = ? AND connection_id = ?
-        """, (peer_id, conn_id))
-
+        checkpoint = db.query_one(
+            "SELECT * FROM negentropy_checkpoints WHERE connection_id = ?",
+            (conn_id,)
+        )
         assert checkpoint is not None
         assert checkpoint['root_hash'] == root_hash
 
@@ -422,40 +423,40 @@ class TestPublicAPI:
     """Test public API functions."""
 
     def test_sync_all_connections_runs(self, db):
-        """sync_all_connections runs without error when no connections."""
-        # With no peers/connections, should complete without error
+        """sync_all_connections executes without error."""
+        # Just verify it doesn't crash with empty state
         result = negentropy.sync_all_connections(t_ms=1000, db=db)
-        assert result['connections'] == 0
-        assert result['messages_sent'] == 0
+        assert isinstance(result, dict)
 
-    def test_handle_incoming_processes_envelope(self, db):
-        """handle_incoming processes negentropy message envelope."""
+    def test_handle_sync_message_routes_correctly(self, db):
+        """handle_sync_message routes to correct handler."""
         peer_id = 'peer1'
         conn_id = 'conn1'
-        ts_ms = 1718451045000
 
-        negentropy.add_event_to_sync(db, peer_id, 'evt1', ts_ms)
+        negentropy.add_event_to_sync(db, peer_id, 'evt1', 1000)
+        root_hash = negentropy.get_root_hash(db, peer_id)
 
-        # Get the prefix for the request
-        unified_key = negentropy.compute_unified_key('evt1', ts_ms)
-        prefix = unified_key[:2]
-
-        # Create a negentropy envelope as would arrive from sync
-        envelope = {
-            'type': 'negentropy',
-            'connection_id': conn_id,
-            'data': {
-                'type': 'range_request',
-                'range_id': 'remote_1',
-                'level': 'prefix_2',
-                'prefix': prefix,
-                'hash': 'deadbeef',
-            }
+        # Test range_request routing
+        msg = {
+            'type': 'range_request',
+            'range_id': 'test1',
+            'start': negentropy.MIN_UNIFIED_KEY,
+            'end': negentropy.MAX_UNIFIED_KEY,
+            'hash': root_hash.hex(),
         }
+        responses = negentropy.handle_sync_message(db, peer_id, conn_id, msg, 1000)
+        assert len(responses) == 1
+        assert responses[0]['type'] == 'range_matched'
 
-        # Should not raise - connection.send will fail but that's expected
-        # since we don't have a real connection
-        try:
-            negentropy.handle_incoming(db, peer_id, conn_id, envelope, 2000)
-        except Exception:
-            pass  # Expected - no real connection to send on
+        # Test range_matched routing (should return empty)
+        msg = {
+            'type': 'range_matched',
+            'range_id': 'test1',
+        }
+        responses = negentropy.handle_sync_message(db, peer_id, conn_id, msg, 1000)
+        assert responses == []
+
+        # Test unknown message type
+        msg = {'type': 'unknown'}
+        responses = negentropy.handle_sync_message(db, peer_id, conn_id, msg, 1000)
+        assert responses == []

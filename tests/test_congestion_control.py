@@ -1,14 +1,18 @@
 """
 Congestion control behavior tests.
 
-These tests verify that the sync protocol adapts to network conditions:
+SKIPPED: CC has been removed from negentropy.py (see "Congestion Control - FUTURE WORK"
+comment in that file). CC should be implemented at the transport layer, not in the
+sync protocol. These tests are kept for reference when implementing transport-level CC.
+
+Original goals:
 - Backs off under packet loss (sends fewer packets over time)
 - Recovers when conditions improve
 - Achieves reasonable efficiency (doesn't waste bandwidth)
-
-CC is implemented in negentropy.py using adaptive windowing based on RTT.
 """
 import pytest
+
+pytestmark = pytest.mark.skip(reason="CC removed from negentropy - implement at transport layer")
 import random
 from core.simulator import NetworkSimulator, NetworkConfig
 from core import transport
@@ -17,14 +21,6 @@ from events.network import negentropy
 
 # Fixed seed for reproducible tests
 TEST_SEED = 42
-
-
-@pytest.fixture(autouse=True)
-def reset_cc_state():
-    """Reset CC state before each test for isolation."""
-    negentropy._cc_reset_all()
-    yield
-    negentropy._cc_reset_all()
 
 
 def run_sync_rounds(db, sim: NetworkSimulator, rounds: int, t_ms_start: int, round_interval_ms: int = 100):

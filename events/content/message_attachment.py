@@ -707,13 +707,10 @@ def create_from_file(peer_id: str, message_id: str, file_path: str,
                     peer_id=peer_id,
                     t_ms=t_ms,
                     db=db,
-                    defer_bucket_rebuild=True
                 )
                 slices_created += len(slices_batch)
 
-        # Rebuild negentropy buckets once after all batches (much more efficient)
-        from events.network import negentropy
-        negentropy.rebuild_buckets_for_peer(db, peer_id)
+        # In bisection protocol, hashes are computed on demand - no bucket rebuild needed
 
         log.info(f"create_from_file() created {slices_created} slices, file_id={file_id[:20]}...")
 

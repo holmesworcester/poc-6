@@ -28,6 +28,8 @@ BENCH_DIR = Path(__file__).parent.parent / ".bench_dbs"
 
 
 def reset_state():
+    from core import transport
+    transport.enable_loopback()
     network_config.reset_network_config()
     jobs.reset_frequency_multiplier()
 

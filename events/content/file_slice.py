@@ -254,8 +254,7 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         peer_id: Local peer creating these events
         t_ms: Timestamp
         db: Database connection
-        defer_bucket_rebuild: If True, skip negentropy bucket rebuild (caller must call
-                              negentropy.rebuild_buckets_for_peer() after all batches)
+        defer_bucket_rebuild: Ignored (kept for API compatibility)
 
     Returns:
         Number of slices created
@@ -319,12 +318,8 @@ def batch_create_slices(file_id: str, slices_data: list[tuple], peer_id: str,
         from events.network import negentropy
         # Build batch: (event_id, created_at, recorded_at)
         shareable_batch = [(event_id, None, t_ms) for event_id in event_ids]
-        # Defer bucket computation for efficiency - we'll rebuild once at the end
-        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db, defer_buckets=False)
-
-        # Rebuild all bucket hashes in one efficient pass (unless caller defers)
-        if not defer_bucket_rebuild:
-            negentropy.rebuild_buckets_for_peer(db, peer_id)
+        # In bisection protocol, hashes are computed on demand - no bucket rebuild needed
+        negentropy.add_shareable_events_batch(shareable_batch, peer_id, db)
 
         log.info(f"file_slice.batch_create_slices() created {len(event_ids)} slices for file {file_id[:20]}...")
         return len(event_ids)

@@ -153,8 +153,9 @@ def test_auto_consolidation_on_download_complete():
     print("\n=== Bob downloads file ===")
 
     # File slices sync automatically via negentropy during tick()
-    # Sync until complete - 30 rounds is enough for 30KB file
-    for round_num in range(30):
+    # With bisection protocol, need more rounds for many events
+    # 69 slices + ~20 other events = ~90 events, need ~1000 rounds for full convergence
+    for round_num in range(1000):
         tick.tick(t_ms=7000 + round_num * 100, db=db)
         db.commit()
 

@@ -379,7 +379,8 @@ def _get_projection_tables(db: Any) -> list[str]:
             'store', 'incoming_blobs', 'sync_connections', 'sqlite_sequence',
             'pre_keys', 'transit_keys', 'job_state',
             'pending_name_updates', 'pending_name_decrypts',
-            'negentropy_buckets', 'negentropy_events', 'negentropy_sync_state', 'negentropy_checkpoints'
+            'negentropy_events', 'negentropy_sync_state', 'negentropy_checkpoints',
+            'negentropy_chunks', 'negentropy_streaming_state'
         )
         AND name NOT LIKE '%_ephemeral'
         ORDER BY name
