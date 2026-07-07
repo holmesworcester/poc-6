@@ -467,19 +467,28 @@ Client                              Server
   │◄──────── QUIC/WS sync ────────────►│
 ```
 
+The invite should be a normal invite link but without distributing message
+group keys, so the server can relay opaque blobs without reading content. If a
+community wants the server to read messages, that should be an explicit opt-in
+(e.g. adding a member role or group key distribution change).
+
+The submit endpoint can live on a separate public port from the relay transport
+to keep onboarding and relay traffic isolated.
+
 **Production considerations** (not needed for initial implementation):
 - Auth (API key, OAuth) or CAPTCHA on invite endpoint
 - Rate limiting
 - TLS certificates
 
-### CLI Flag (Placeholder)
+### CLI Flag
 
 ```bash
-# Future: run in server mode
-python cli.py --db server.db --server --port 443
+# Run helper server mode with invite endpoint
+python cli.py --db server.db --server --invite-listen 0.0.0.0:8443 --listen 0.0.0.0:6100
 ```
 
-**Implementation deferred** - Focus on UDP-based real networking tests first. Server mode can reuse the same packet processing pattern (call `sync.unwrap_and_store()` directly on received packets).
+Server mode starts the invite onboarding endpoint and runs the background sync
+loop. The invite endpoint can be on a separate port from the relay transport.
 
 ---
 
@@ -510,6 +519,6 @@ python cli.py --db server.db --server --port 443
 | Unified packet queue | `add()` INSERTs to SQLite, `drain()` SELECTs from SQLite | Core change |
 | Stateless simulator | New `calculate_delivery()` method, remove in-memory queue | Refactor |
 | Real networking tests | UDP recv → thread-safe buffer → main thread INSERTs | Test infra |
-| Server mode | Future work | Deferred |
+| Server mode | Basic helper server (invite endpoint + sync loop) | Implemented |
 
 **Key insight**: One queue (`incoming_blobs` table), multiple sources. The simulator becomes a stateless physics calculator. Each client's database provides automatic isolation. No special code paths for "simulated" vs "real" - just different sources writing to the same SQLite queue.

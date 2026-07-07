@@ -42,7 +42,7 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
     schema.create_all(db)
     db.commit()
 
-    # Start UDP
+    # Start UDP by default (tests may switch to QUIC later)
     transport.start_udp('127.0.0.1', udp_port)
     log.warning(f"Started UDP on port {udp_port}")
 
@@ -86,6 +86,19 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                     db.commit()
                     result_queue.put({'ok': True, 'invite_id': invite_id, 'invite_link': invite_link})
 
+                elif action == 'create_helper_invite':
+                    invite_id, invite_link, invite_data = invite.create(
+                        peer_id=state['peer_id'],
+                        t_ms=cmd['t_ms'],
+                        db=db,
+                        address=cmd.get('address'),
+                        port=cmd.get('port'),
+                        include_group=False,
+                        share_group_keys=False
+                    )
+                    db.commit()
+                    result_queue.put({'ok': True, 'invite_id': invite_id, 'invite_link': invite_link})
+
                 elif action == 'create_peer':
                     peer_id = peer.create(t_ms=cmd['t_ms'], db=db)
                     db.commit()
@@ -113,6 +126,14 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                     transport.add_peer_address(cmd['peer_shared_id'], cmd['host'], cmd['port'])
                     result_queue.put({'ok': True})
 
+                elif action == 'start_quic':
+                    transport.start_quic_relay(
+                        cmd['relay_url'],
+                        state['peer_shared_id'],
+                        insecure=cmd.get('insecure', False)
+                    )
+                    result_queue.put({'ok': True})
+
                 elif action == 'tick':
                     tick_module.tick(t_ms=cmd['t_ms'], db=db)
                     db.commit()
@@ -138,6 +159,11 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
                     else:
                         msgs = []
                     result_queue.put({'ok': True, 'messages': msgs})
+
+                elif action == 'get_group_keys':
+                    from events.group import group_key
+                    keys = group_key.list(state['peer_id'], db)
+                    result_queue.put({'ok': True, 'keys': keys})
 
                 elif action == 'get_connections':
                     conns = conn_module.get_connections(
@@ -245,6 +271,7 @@ def client_worker(cmd_queue: Queue, result_queue: Queue, db_path: str, udp_port:
 
     finally:
         transport.stop_udp()
+        transport.stop_quic_relay()
         conn.close()
         log.warning("Worker stopped")
 
@@ -327,6 +354,16 @@ class RemoteClient:
         result = self._send({'action': 'create_invite', 't_ms': t_ms})
         return result['invite_link']
 
+    def create_helper_invite(self, t_ms: int, address: str = None, port: int = None) -> str:
+        """Create a helper invite (no group access) and return the link."""
+        result = self._send({
+            'action': 'create_helper_invite',
+            't_ms': t_ms,
+            'address': address,
+            'port': port
+        })
+        return result['invite_link']
+
     def create_peer(self, t_ms: int) -> str:
         """Create a peer and return the peer_id."""
         result = self._send({'action': 'create_peer', 't_ms': t_ms})
@@ -352,6 +389,10 @@ class RemoteClient:
         result = self._send({'action': 'tick', 't_ms': t_ms})
         return {'incoming': result.get('incoming', 0), 'outgoing': result.get('outgoing', 0)}
 
+    def start_quic(self, relay_url: str, insecure: bool = False):
+        """Switch transport to QUIC relay for this client."""
+        self._send({'action': 'start_quic', 'relay_url': relay_url, 'insecure': insecure})
+
     def send_message(self, content: str, t_ms: int, channel_id: str = None) -> str:
         """Send a message and return the message_id."""
         result = self._send({
@@ -370,6 +411,11 @@ class RemoteClient:
             'channel_id': channel_id
         })
         return result['messages']
+
+    def get_group_keys(self) -> list:
+        """Get group keys available to this peer."""
+        result = self._send({'action': 'get_group_keys'})
+        return result['keys']
 
     def get_connections(self, t_ms: int) -> list:
         """Get connection status."""

@@ -155,7 +155,8 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 
 def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None,
-           address: str | None = None, port: int | None = None) -> tuple[str, str, dict[str, Any]]:
+           address: str | None = None, port: int | None = None,
+           include_group: bool = True, share_group_keys: bool = True) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -174,6 +175,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         user_id: Required for mode='peer', target user to link to. Must be None for mode='user'.
         address: Inviter's IP address (for connection bootstrapping)
         port: Inviter's port (for connection bootstrapping)
+        include_group: For mode='user', include all_users group membership metadata
+            (False keeps the invitee out of message groups by default).
+        share_group_keys: Whether to create group_key_shared events for the invite.
+            Only applies when include_group is True.
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -203,9 +208,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     if not network_id:
         raise ValueError(f"No network found for peer {peer_id}. Cannot create invite.")
 
-    # Get all_users group by signature (network-signed group = all_users)
-    all_users_group_id = network.get_all_users_group_id(network_id, peer_id, db)
-
     # Get inviter's user_id
     inviter_user_id = peer_shared.get_user_id(peer_shared_id, peer_id, db)
     if not inviter_user_id:
@@ -232,22 +234,31 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         # This shouldn't happen if is_admin() passed, but warn just in case
         log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
 
-    # Get key from all_users group
-    group_row = group.get_current_key(all_users_group_id, peer_id, db)
-    if not group_row:
-        raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
+    all_users_group_id = None
+    key_id = None
+    channel_id = None
+    if include_group:
+        # Get all_users group by signature (network-signed group = all_users)
+        all_users_group_id = network.get_all_users_group_id(network_id, peer_id, db)
 
-    key_id = group_row['key_id']
+        # Get key from all_users group
+        group_row = group.get_current_key(all_users_group_id, peer_id, db)
+        if not group_row:
+            raise ValueError(f"No key found for all_users group {all_users_group_id}. Cannot create invite.")
 
-    # Get main channel
-    channel_row = safedb.query_one(
-        "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
-        (peer_id,)
-    )
-    if not channel_row:
-        raise ValueError(f"No main channel found for peer {peer_id}. Cannot create invite.")
+        key_id = group_row['key_id']
 
-    channel_id = channel_row['channel_id']
+        # Get main channel
+        channel_row = safedb.query_one(
+            "SELECT channel_id FROM channels WHERE recorded_by = ? AND is_main = 1 LIMIT 1",
+            (peer_id,)
+        )
+        if not channel_row:
+            raise ValueError(f"No main channel found for peer {peer_id}. Cannot create invite.")
+
+        channel_id = channel_row['channel_id']
+    else:
+        share_group_keys = False
 
     # Create a group_prekey (generates keypair) then share it via group_prekey_shared
     # The invite_prekey_id is the local group_prekey_id (for crypto hint lookup)
@@ -276,7 +287,7 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
             db=db,
             user_id=user_id  # User context for device linking
         )
-    else:
+    elif include_group:
         # User invite: context is the all_users group
         group_prekey_shared.create(
             prekey_id=local_prekey_id,
@@ -331,7 +342,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'mode': mode,
         'invite_pubkey': invite_pubkey_b64,  # For user proof signature
         'invite_prekey_id': invite_prekey_id,  # Crypto hint for GKS (deterministic hash)
-        'group_id': all_users_group_id,  # All users group (for adding joiner)
+        # Optional: include group_id when granting group membership
+        # (helper/server invites omit this to avoid group access by default)
         'inviter_user_id': inviter_user_id,  # For admin validation during projection
         'signed_by': peer_shared_id,  # Also serves as inviter_peer_shared_id (redundancy removed)
         'signer_type': 'peer_shared',  # v2: ongoing invites are signed by peer_shared
@@ -339,6 +351,8 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'address': inviter_ip,  # Network address for bootstrap
         'port': inviter_port,  # Network port for bootstrap
     }
+    if include_group:
+        invite_event_data['group_id'] = all_users_group_id
 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     if admin_grant_id:
@@ -357,39 +371,40 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     invite_blob = crypto.canonicalize_json(signed_invite_event)
     invite_id = store.event(invite_blob, peer_id, t_ms, db)
 
-    # Create group_key_shared sealed to invite proof prekey
-    # The create_for_invite function will extract the prekey from the invite event
-    from events.group import group_key_shared
+    if share_group_keys:
+        # Create group_key_shared sealed to invite proof prekey
+        # The create_for_invite function will extract the prekey from the invite event
+        from events.group import group_key_shared
 
-    # Share ALL historical keys for the all_users group, not just the current key
-    # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
-    # and all historical content that may have been encrypted with older keys
-    all_group_keys = safedb.query(
-        "SELECT key_id FROM group_keys WHERE recorded_by = ?",
-        (peer_id,)
-    )
+        # Share ALL historical keys for the all_users group, not just the current key
+        # This ensures new joiners can decrypt the group event (which was encrypted with the original key)
+        # and all historical content that may have been encrypted with older keys
+        all_group_keys = safedb.query(
+            "SELECT key_id FROM group_keys WHERE recorded_by = ?",
+            (peer_id,)
+        )
 
-    keys_shared = 0
-    for key_row in all_group_keys:
-        historical_key_id = key_row['key_id']
-        try:
-            group_key_shared.create_for_invite(
-                key_id=historical_key_id,
-                peer_id=peer_id,
-                peer_shared_id=peer_shared_id,
-                invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
-                t_ms=t_ms,  # No offset needed - DAG deps handle ordering
-                db=db
-            )
-            keys_shared += 1
-        except Exception as e:
-            log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
+        keys_shared = 0
+        for key_row in all_group_keys:
+            historical_key_id = key_row['key_id']
+            try:
+                group_key_shared.create_for_invite(
+                    key_id=historical_key_id,
+                    peer_id=peer_id,
+                    peer_shared_id=peer_shared_id,
+                    invite_id=invite_id,  # Pass invite_id to extract prekey from stored invite
+                    t_ms=t_ms,  # No offset needed - DAG deps handle ordering
+                    db=db
+                )
+                keys_shared += 1
+            except Exception as e:
+                log.warning(f"invite.create() failed to share key {historical_key_id[:20]}...: {e}")
 
-    log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
+        log.info(f"invite.create() shared {keys_shared} group key(s) for all_users group")
 
     # For mode='peer', share keys for ALL groups this user is a member of
     # This ensures the new device can decrypt all groups the user belongs to
-    if mode == 'peer':
+    if mode == 'peer' and share_group_keys:
         log.info(f"invite.create() mode='peer' - sharing keys for user {user_id[:20]}...'s group memberships")
 
         # Query groups that THIS USER is a member of (not all groups peer knows about)
@@ -433,8 +448,6 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'invite_private_key': crypto.b64encode(invite_private_key),
         'inviter_peer_shared_id': peer_shared_id,
         'network_id': network_id,
-        'channel_id': channel_id,
-        'key_id': key_id,
         'ip': inviter_ip,
         'port': inviter_port,
         # Transit prekey for encrypting initial sync_connect to Alice
@@ -442,6 +455,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         'inviter_connection_prekey_shared_id': inviter_connection_prekey_shared_id,
         'inviter_connection_prekey_id': inviter_prekey_id,
     }
+    if channel_id:
+        invite_link_data['channel_id'] = channel_id
+    if key_id:
+        invite_link_data['key_id'] = key_id
 
     # For mode='peer', include user_id so acceptor knows which user to link to
     if mode == 'peer':

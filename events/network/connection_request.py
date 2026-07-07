@@ -379,7 +379,7 @@ def _send_ack_for_request(
             to_addr = transport.get_peer_address(remote_peer_shared_id)
 
         from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-        transport.send(wrapped, from_addr, to_addr)
+        transport.send_to_peer(remote_peer_shared_id, wrapped, from_addr=from_addr, to_addr=to_addr)
 
         log.info(f"connection._send_ack: updated existing connection and sent ack {ack_id[:20]}... for request {request_id[:20]}...")
         return
@@ -433,7 +433,7 @@ def _send_ack_for_request(
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
     from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-    transport.send(wrapped, from_addr, to_addr)
+    transport.send_to_peer(remote_peer_shared_id, wrapped, from_addr=from_addr, to_addr=to_addr)
 
     log.info(f"connection._send_ack: sent ack {ack_id[:20]}... for request {request_id[:20]}...")
 
@@ -800,7 +800,7 @@ def _send_request(
         to_addr = transport.get_peer_address(to_peer_shared_id)
 
     from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-    transport.send(wrapped, from_addr, to_addr)
+    transport.send_to_peer(to_peer_shared_id, wrapped, from_addr=from_addr, to_addr=to_addr)
     log.info(f"connection_request._send_request: sent {connection_id[:20]}... to {to_peer_shared_id[:20]}... at {to_addr}")
 
 
@@ -1313,7 +1313,7 @@ def send(recorded_by: str, key_id: str, blob: bytes, t_ms: int, db: Any) -> bool
         to_addr = transport.get_peer_address(to_peer_shared_id)
 
     from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-    transport.send(wrapped, from_addr, to_addr)
+    transport.send_to_peer(to_peer_shared_id, wrapped, from_addr=from_addr, to_addr=to_addr)
 
     log.debug(f"connection_request.send: sent {len(blob)}B on {key_id[:20]}...")
     return True

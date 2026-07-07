@@ -1193,6 +1193,12 @@ We add servers with a normal invite (see: [Joining](#Joining)). The file associa
 
 The invite secret is provided to the server out of band. At this point the server can request payment, account creation, ToS and Privacy Policy approval, or CAPTCHA out of band.
 
+In practice, "out of band" can be a simple public onboarding endpoint on the
+server, e.g. `POST /submit-invite { "invite_link": "quiet://..." }`. The submit
+endpoint can run on a separate public port from the relay transport. By default
+the server should join without being added to any message groups, so it can
+relay opaque blobs without decrypting message content.
+
 If privacy from the server is not desired, we create a "member" role tag and encapsulate keys to it.
 
 For reliability across a range of networks, peers can connect to servers over conventional transports such as WebSockets or [QUIC Streams](https://quic-go.net/docs/quic/streams/)

@@ -491,6 +491,7 @@ Via Helper Server:             Client A ←─QUIC/WS─→ Helper ←─QUIC/WS
 **Implementation** (Phase 4+):
 - Python: `aioquic` for QUIC, `websockets` for WebSocket
 - Helper server is just a relay - no decryption, no event parsing
+- Detailed proposal: `docs/planning/websocket-quic-transport-proposal.md`
 - Clients treat helper server as another "transport", events flow same way
 
 ### 9. New CLI Commands

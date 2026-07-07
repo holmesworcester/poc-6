@@ -105,10 +105,11 @@ from events.network import connection_request
 # All available commands for tab completion
 COMMANDS = [
     'new-network', 'switch', 'send', 'tick', 'sync', 'sync-realtime', 'sync-status', 'auto-tick',
-    'channel', 'new-channel', 'invite', 'link', 'accept-invite', 'accept-link',
+    'channel', 'new-channel', 'invite', 'helper-add', 'link', 'accept-invite', 'accept-link',
     'status', 'accounts', 'channels', 'users', 'messages', 'keys', 'whoami', 'connections',
     'delete', 'edit', 'purge-keys', 'ban', 'react', 'unreact', 'reactions',
-    'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit'
+    'time', 'log', 'disappear', 'fast-forward', 'save-session', 'help', 'quit', 'exit',
+    'quic-connect', 'quic-disconnect'
 ]
 
 # Command argument hints for context-aware completion
@@ -116,6 +117,8 @@ COMMAND_ARGS = {
     'new-network': ['--name', '--username', '--devicename'],
     'accept-invite': ['--username', '--devicename', '--invite'],
     'accept-link': ['--devicename', '--invite'],
+    'helper-add': ['--endpoint', '--address', '--port'],
+    'quic-connect': ['--relay', '--insecure'],
     'sync': ['--ticks'],
     'sync-realtime': ['--ticks', '--until-file'],
     'send': ['--repeat'],
@@ -381,10 +384,8 @@ class CLISession:
             user_name = 'unknown'
             network_id = None
             if user_id:
-                user_info = user_module.get(user_id, peer_id, self.db)
-                if user_info:
-                    user_name = user_info.get('name', 'unknown')
-                    network_id = user_info.get('network_id')
+                user_name = user_module.get_display_name(user_id, peer_id, self.db) or 'unknown'
+                network_id = network_module.get_network_id_for_peer(peer_id, self.db)
 
             # Create account context (works even with None peer_shared_id during bootstrap)
             account = AccountContext(
@@ -1241,6 +1242,100 @@ def cmd_create_invite(session: CLISession):
     session.event_log.display()
 
 
+def cmd_helper_add(session: CLISession, endpoint: str, address: str | None = None, port: int | None = None):
+    """Create a helper invite (no group access) and submit it to a server endpoint."""
+    account = session.get_selected_account()
+
+    if not account.network_id:
+        print("✗ no network joined")
+        print("  hint: use 'switch' to select an account that has joined a network")
+        return
+
+    if not (endpoint.startswith("http://") or endpoint.startswith("https://")):
+        print("✗ endpoint must start with http:// or https://")
+        return
+
+    try:
+        invite_id, invite_link, invite_data = invite.create(
+            peer_id=account.peer_id,
+            t_ms=session.current_time_ms,
+            db=session.db,
+            address=address,
+            port=port,
+            include_group=False,
+            share_group_keys=False
+        )
+    except ValueError as e:
+        if "not an admin" in str(e).lower() or "admin" in str(e).lower():
+            print("✗ only admins can add helper servers")
+        else:
+            print(f"✗ {e}")
+        return
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    # Store in invites list for convenient reference
+    session.add_invite(invite_link, f"{account.user_name} (helper)")
+    invite_num = len(session.invites)
+    session.last_invite_link = invite_link
+
+    # Submit invite to helper server endpoint
+    import json
+    from urllib import request
+
+    payload = json.dumps({"invite_link": invite_link}).encode("utf-8")
+    req = request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    try:
+        with request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8").strip()
+    except Exception as e:
+        print(f"✗ failed to submit invite: {e}")
+        print(f"  link: {invite_link}")
+        return
+
+    # Log event
+    session.event_log.log("helper_invite", created_by=f"<{account.user_name}>")
+
+    print(f"✓ submitted helper invite #{invite_num} to {endpoint} (status {status})")
+    print(f"  link: {invite_link}")
+    if body:
+        print(f"  response: {body}")
+    session.event_log.display()
+
+
+def cmd_quic_connect(session: CLISession, relay_url: str, insecure: bool = False):
+    """Connect to a QUIC relay for transport."""
+    account = session.get_selected_account()
+    if not account.peer_shared_id:
+        print("✗ current account has no peer_shared_id yet")
+        print("  hint: run after join completes")
+        return
+
+    from core import transport
+    try:
+        transport.start_quic_relay(relay_url, account.peer_shared_id, insecure=insecure)
+    except Exception as e:
+        print(f"✗ failed to start QUIC relay: {e}")
+        return
+
+    print(f"✓ connected to QUIC relay: {relay_url}")
+
+
+def cmd_quic_disconnect(session: CLISession):
+    """Disconnect from QUIC relay transport."""
+    from core import transport
+    transport.stop_quic_relay()
+    print("✓ QUIC relay disconnected")
+
+
 def cmd_create_link_invite(session: CLISession):
     """Create a device linking invite for the current user (admin only).
 
@@ -1476,6 +1571,45 @@ def cmd_join(session: CLISession, username: str, devicename: str, invite_ref: st
 
     session.run_auto_tick()
     display_state(session)
+
+
+def join_server_from_invite(session: CLISession, username: str, devicename: str, invite_link: str) -> AccountContext:
+    """Join a network for helper server mode without interactive display."""
+    devicename = devicename.lower()
+
+    peer_id = peer.create(t_ms=session.current_time_ms, db=session.db)
+    session.db.commit()
+    session.current_time_ms += 100
+
+    result = user.join(
+        peer_id=peer_id,
+        invite_link=invite_link,
+        name=username,
+        t_ms=session.current_time_ms,
+        db=session.db,
+        device_name=devicename
+    )
+
+    session.db.commit()
+    session.current_time_ms += 100
+
+    account = AccountContext(
+        user_name=username.lower(),
+        device_name=devicename,
+        peer_id=result['peer_id'],
+        peer_shared_id=result['peer_shared_id']
+    )
+    account.user_id = result['user_id']
+    account.network_id = result.get('network_id')
+
+    session.add_account(account)
+    session.selected_account = account.full_name
+
+    channels = channel.list(recorded_by=account.peer_id, db=session.db)
+    if channels:
+        session.selected_channel_id = channels[0]['channel_id']
+
+    return account
 
 
 def cmd_list_accounts(session: CLISession):
@@ -2556,6 +2690,29 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
 
         elif cmd == "invite":
             cmd_create_invite(session)
+        elif cmd == "helper-add":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--endpoint", required=True)
+            parser.add_argument("--address", type=str, default=None)
+            parser.add_argument("--port", type=int, default=None)
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_helper_add(session, args.endpoint, address=args.address, port=args.port)
+            except SystemExit:
+                print("usage: helper-add --endpoint <http(s)://host:port/submit-invite> [--address <ip>] [--port <port>]")
+
+        elif cmd == "quic-connect":
+            parser = argparse.ArgumentParser(add_help=False)
+            parser.add_argument("--relay", required=True)
+            parser.add_argument("--insecure", action="store_true")
+            try:
+                args = parser.parse_args(parts[1:])
+                cmd_quic_connect(session, args.relay, insecure=args.insecure)
+            except SystemExit:
+                print("usage: quic-connect --relay <host:port|quic://host:port> [--insecure]")
+
+        elif cmd == "quic-disconnect":
+            cmd_quic_disconnect(session)
 
         elif cmd == "link":
             cmd_create_link_invite(session)
@@ -2775,6 +2932,8 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Joining/linking:")
             print("    invite                         Create invite for new user to join network")
+            print("    helper-add --endpoint <url>    Create helper invite and submit to server")
+            print("               [--address <ip>] [--port <port>]")
             print("    accept-invite --username <name> --devicename <device> --invite <n|link>")
             print("                                   Join network as NEW user")
             print("    link                           Create device link invite for current user")
@@ -2814,6 +2973,9 @@ def execute_command(session: CLISession, line: str, show_prompt: bool = True) ->
             print()
             print("  Network/connections:")
             print("    connections [-v]               Show all connections (active/pending/bootstrap)")
+            print("    quic-connect --relay <url>     Connect to QUIC relay")
+            print("                 [--insecure]")
+            print("    quic-disconnect                Disconnect from QUIC relay")
             print()
             print("  Keys/sync:")
             print("    keys [--summary]")
@@ -2937,6 +3099,143 @@ def run_sync_daemon(session: CLISession):
 
 
 # ============================================================================
+# HELPER SERVER MODE
+# ============================================================================
+
+def decode_invite_link(invite_link: str) -> Dict[str, Any]:
+    """Decode invite link into its embedded JSON payload."""
+    import base64
+    import json
+
+    if not invite_link.startswith("quiet://invite/"):
+        raise ValueError("Invite link must start with quiet://invite/")
+
+    code = invite_link.replace("quiet://invite/", "")
+    padding = "=" * ((4 - len(code) % 4) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(code + padding).decode()
+        return json.loads(decoded)
+    except Exception as exc:
+        raise ValueError(f"Invalid invite link: {exc}") from exc
+
+
+def run_helper_server(
+    session: CLISession,
+    invite_host: str,
+    invite_port: int,
+    server_name: str,
+    server_device: str,
+    quic_relay: str | None,
+    quic_insecure: bool,
+) -> None:
+    """Run helper server mode with invite endpoint and background sync."""
+    import json
+    import queue
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from core import transport
+    from core import tick as tick_module
+
+    invite_queue: "queue.Queue[tuple[str, queue.Queue]]" = queue.Queue()
+
+    class InviteHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != "/submit-invite":
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = self.rfile.read(length)
+            try:
+                data = json.loads(payload or b"{}")
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            invite_link = data.get("invite_link")
+            if not invite_link:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            response_queue: "queue.Queue[tuple[int, dict]]" = queue.Queue(maxsize=1)
+            invite_queue.put((invite_link, response_queue))
+
+            try:
+                status, body = response_queue.get(timeout=10)
+            except queue.Empty:
+                self.send_response(504)
+                self.end_headers()
+                return
+
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            return
+
+    server = HTTPServer((invite_host, invite_port), InviteHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    print(f"Helper server invite endpoint listening on http://{invite_host}:{invite_port}/submit-invite")
+
+    if quic_relay and session.selected_account and not transport.is_quic_active():
+        cmd_quic_connect(session, quic_relay, insecure=quic_insecure)
+
+    try:
+        while True:
+            try:
+                invite_link, response_queue = invite_queue.get(timeout=0.1)
+            except queue.Empty:
+                invite_link = None
+                response_queue = None
+
+            if invite_link and response_queue:
+                if session.selected_account:
+                    response_queue.put((409, {"ok": False, "error": "server already joined"}))
+                else:
+                    try:
+                        invite_data = decode_invite_link(invite_link)
+                        inviter_id = invite_data.get("inviter_peer_shared_id")
+                        inviter_ip = invite_data.get("ip")
+                        inviter_port = invite_data.get("port")
+                        if inviter_id and inviter_ip and inviter_port:
+                            transport.add_peer_address(inviter_id, inviter_ip, int(inviter_port))
+
+                        join_server_from_invite(session, server_name, server_device, invite_link)
+
+                        if quic_relay and not transport.is_quic_active():
+                            cmd_quic_connect(session, quic_relay, insecure=quic_insecure)
+
+                        account = session.get_selected_account()
+                        response_queue.put((
+                            200,
+                            {
+                                "ok": True,
+                                "peer_shared_id": account.peer_shared_id,
+                                "network_id": account.network_id,
+                            },
+                        ))
+                    except Exception as exc:
+                        response_queue.put((400, {"ok": False, "error": str(exc)}))
+
+            t_ms = int(time.time() * 1000)
+            tick_module.tick(t_ms=t_ms, db=session.db)
+            session.db.commit()
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print("\nStopping helper server...")
+    finally:
+        server.shutdown()
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -2954,8 +3253,14 @@ def main():
     # Networking options
     parser.add_argument("--listen", type=str, help="UDP listen address (host:port)")
     parser.add_argument("--peer", type=str, action="append", help="Peer address (peer_shared_id@host:port)")
+    parser.add_argument("--quic-relay", type=str, help="QUIC relay address (host:port or quic://host:port)")
+    parser.add_argument("--quic-insecure", action="store_true", help="Disable QUIC TLS verification (testing only)")
     parser.add_argument("--exec", "-e", dest="exec_cmd", type=str, help="Execute single command and exit")
     parser.add_argument("--sync-only", action="store_true", help="Run sync daemon mode without REPL")
+    parser.add_argument("--server", action="store_true", help="Run helper server mode with invite endpoint")
+    parser.add_argument("--invite-listen", type=str, help="Invite endpoint listen address (host:port)")
+    parser.add_argument("--server-name", type=str, default="helper", help="Helper server username")
+    parser.add_argument("--server-device", type=str, default="server", help="Helper server device name")
 
     args = parser.parse_args()
 
@@ -2979,8 +3284,29 @@ def main():
             transport.add_peer_address(peer_id, host, int(port))
             print(f"Added peer {peer_id[:20]}... at {host}:{port}", flush=True)
 
+    # Connect to QUIC relay if requested (non-server mode only)
+    if args.quic_relay and not args.server:
+        if session.selected_account and session.get_selected_account().peer_shared_id:
+            cmd_quic_connect(session, args.quic_relay, insecure=args.quic_insecure)
+        else:
+            print("QUIC relay requested but no account is ready; run 'quic-connect' after join.", flush=True)
+
     try:
-        if args.exec_cmd:
+        if args.server:
+            if not args.invite_listen:
+                print("error: --invite-listen is required in --server mode", flush=True)
+                return
+            host, port = args.invite_listen.rsplit(":", 1)
+            run_helper_server(
+                session,
+                invite_host=host,
+                invite_port=int(port),
+                server_name=args.server_name,
+                server_device=args.server_device,
+                quic_relay=args.quic_relay,
+                quic_insecure=args.quic_insecure,
+            )
+        elif args.exec_cmd:
             # Execute single command and exit
             execute_command(session, args.exec_cmd, show_prompt=False)
         elif args.sync_only:
@@ -2993,6 +3319,7 @@ def main():
     finally:
         # Cleanup
         transport.stop_udp()
+        transport.stop_quic_relay()
 
 
 if __name__ == "__main__":

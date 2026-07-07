@@ -68,6 +68,19 @@ def charlie(tmp_path):
     client.stop()
 
 
+@pytest.fixture
+def helper_server(tmp_path):
+    """Create helper server client in separate process."""
+    client = RemoteClient(
+        name="helper",
+        db_path=str(tmp_path / "helper.db"),
+        udp_port=get_free_port()
+    )
+    client.start()
+    yield client
+    client.stop()
+
+
 class TestRealNetworking:
     """Tests that verify real UDP networking between separate processes."""
 
@@ -251,6 +264,50 @@ class TestRealNetworking:
 
         assert bob_has_alice, f"Bob should have Alice's message, got {bob_messages}"
         assert alice_has_bob, f"Alice should have Bob's message, got {alice_messages}"
+
+    def test_helper_server_no_group_keys(self, alice, helper_server):
+        """Helper server syncs over UDP but does not receive group keys or messages."""
+        t_ms = 1000
+
+        # Setup network
+        alice.new_network(name='Alice', t_ms=t_ms)
+        t_ms += 100
+
+        invite_link = alice.create_helper_invite(
+            t_ms=t_ms,
+            address='127.0.0.1',
+            port=alice.udp_port
+        )
+        t_ms += 100
+
+        helper_server.add_peer_address(alice.peer_shared_id, '127.0.0.1', alice.udp_port)
+        helper_server.create_peer(t_ms=t_ms)
+        t_ms += 100
+
+        helper_server.join(invite_link=invite_link, name='Helper', t_ms=t_ms)
+        t_ms += 100
+
+        # Establish connection
+        tick_all(alice, helper_server, t_ms=t_ms, rounds=50)
+        t_ms += 5000
+
+        helper_conns = helper_server.get_connections(t_ms=t_ms)
+        helper_active = [c for c in helper_conns if c['can_send']]
+        assert len(helper_active) >= 1, f"Helper should have active connection, got {helper_conns}"
+
+        # Send message from Alice
+        alice.send_message(content="Hello helper", t_ms=t_ms)
+        t_ms += 100
+
+        # Sync message
+        tick_all(alice, helper_server, t_ms=t_ms, rounds=50)
+        t_ms += 5000
+
+        helper_messages = helper_server.get_messages(channel_id=alice.channel_id)
+        helper_keys = helper_server.get_group_keys()
+
+        assert helper_messages == [], f"Helper should not decrypt messages, got {helper_messages}"
+        assert helper_keys == [], f"Helper should not receive group keys, got {helper_keys}"
 
 
 class TestThreePlayerNetworking:

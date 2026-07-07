@@ -233,7 +233,7 @@ def send_ack_for_request(
         to_addr = transport.get_peer_address(remote_peer_shared_id)
 
     from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
-    transport.send(wrapped, from_addr, to_addr)
+    transport.send_to_peer(remote_peer_shared_id, wrapped, from_addr=from_addr, to_addr=to_addr)
     log.info(f"connection_ack.send_ack_for_request: sent via transport to {to_addr}")
 
     # Remove from pending requests since we successfully acked

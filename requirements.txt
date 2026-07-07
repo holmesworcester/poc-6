@@ -1,0 +1,6 @@
+-r api/requirements.txt
+aioquic>=0.9.25
+pytest>=8.0.0
+pytest-xdist>=3.0.0
+pytest-typeguard>=4.0.0
+anyio>=4.0.0

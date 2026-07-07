@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 
 from api.core.database import get_db, init_db, set_peer_id
 from api.core.auth import AuthMiddleware, init_auth, disable_auth
-from api.routes import channels, messages, networks, users, files, sync
+from api.routes import channels, messages, networks, users, files, sync, transport
 
 DEFAULT_SOCKET = "/tmp/quiet-api.sock"
 
@@ -101,6 +101,7 @@ app.include_router(messages.router, prefix="/api", tags=["messages"])
 app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(files.router, prefix="/api", tags=["files"])
 app.include_router(sync.router, prefix="/api", tags=["sync"])
+app.include_router(transport.router, prefix="/api", tags=["transport"])
 
 
 @app.get("/api/health")

@@ -24,6 +24,7 @@ class TransportMode(Enum):
     LOOPBACK = auto()  # Testing: outgoing -> incoming directly
     SIMULATOR = auto() # Testing: outgoing -> simulator -> incoming
     UDP = auto()       # Production: real UDP sockets
+    QUIC = auto()      # Production: QUIC relay transport
 
 
 # Current mode
@@ -37,6 +38,7 @@ _lock = Lock()
 # UDP networking state
 _udp_socket: Optional['UDPSocket'] = None
 _peer_addresses: dict[str, tuple[str, int]] = {}  # peer_shared_id -> (host, port)
+_quic_client: Optional['QuicRelayClient'] = None
 
 # Simulator state
 _simulator: Optional['NetworkSimulator'] = None
@@ -114,7 +116,7 @@ def send(blob: bytes, from_addr: tuple[str, int], to_addr: tuple[str, int]) -> b
     """
     if _mode == TransportMode.NONE:
         raise TransportNotConfiguredError(
-            "Transport not configured. Call enable_loopback(), start_udp(), or set_simulator() first."
+            "Transport not configured. Call enable_loopback(), start_udp(), start_quic_relay(), or set_simulator() first."
         )
 
     # Only validate address for modes that need real routing
@@ -124,10 +126,30 @@ def send(blob: bytes, from_addr: tuple[str, int], to_addr: tuple[str, int]) -> b
             raise NoAddressError(
                 f"Cannot send via UDP: no destination address. from_addr={from_addr}, to_addr={to_addr}"
             )
+    if _mode == TransportMode.QUIC:
+        raise TransportError("Use send_to_peer() for QUIC relay transport.")
 
     with _lock:
         _outgoing.append((blob, from_addr, to_addr))
     return True
+
+
+def send_to_peer(peer_shared_id: str, blob: bytes, from_addr: tuple[str, int] | None = None,
+                 to_addr: tuple[str, int] | None = None) -> bool:
+    """Send a blob to a peer, routing via address or QUIC relay as needed."""
+    if _mode == TransportMode.QUIC:
+        if not _quic_client:
+            raise TransportError("QUIC relay not started. Call start_quic_relay() first.")
+        _quic_client.send(peer_shared_id, blob)
+        return True
+
+    if not to_addr:
+        to_addr = get_peer_address(peer_shared_id)
+    if not to_addr:
+        raise NoAddressError(f"Cannot send: no destination for peer {peer_shared_id[:20]}...")
+    if not from_addr:
+        from_addr = get_listen_address() or ('127.0.0.1', 0)
+    return send(blob, from_addr, to_addr)
 
 
 def deliver(blob: bytes, from_addr: tuple[str, int]) -> None:
@@ -214,6 +236,8 @@ def transfer() -> int:
         return _simulator_transfer(_simulator_time_ms)
     elif _mode == TransportMode.UDP:
         return _udp_transfer()
+    elif _mode == TransportMode.QUIC:
+        return _quic_transfer()
     else:
         raise TransportError(f"Unknown transport mode: {_mode}")
 
@@ -413,17 +437,65 @@ def get_listen_address() -> Optional[tuple[str, int]]:
 
 
 # ============================================================================
+# QUIC Networking Functions
+# ============================================================================
+
+def start_quic_relay(relay_url: str, peer_shared_id: str, insecure: bool = False) -> None:
+    """Start QUIC relay client and set mode to QUIC."""
+    global _quic_client, _mode
+    from core.quic import QuicRelayClient
+    _quic_client = QuicRelayClient(relay_url, peer_shared_id, insecure=insecure)
+    _quic_client.start()
+    _mode = TransportMode.QUIC
+    log.info(f"transport: QUIC relay started at {relay_url}, mode set to QUIC")
+
+
+def stop_quic_relay() -> None:
+    """Stop QUIC relay client."""
+    global _quic_client, _mode
+    if _quic_client:
+        _quic_client.stop()
+        _quic_client = None
+        if _mode == TransportMode.QUIC:
+            _mode = TransportMode.NONE
+        log.info("transport: QUIC relay stopped")
+
+
+def is_quic_active() -> bool:
+    """Check if QUIC relay client is active."""
+    return _quic_client is not None
+
+
+def _quic_transfer() -> int:
+    """Transfer: receive incoming from QUIC relay."""
+    if not _quic_client:
+        raise TransportError("QUIC transfer called but QUIC relay not started")
+    count = 0
+    relay_addr = _quic_client.relay_addr
+    with _lock:
+        for blob in _quic_client.drain():
+            _incoming.append((blob, relay_addr))
+            count += 1
+    return count
+
+
+# ============================================================================
 # Reset
 # ============================================================================
 
 def reset():
     """Clear all queues, stop UDP, clear simulator, reset mode to NONE."""
-    global _simulator, _simulator_time_ms, _udp_socket, _mode, _peer_addresses
+    global _simulator, _simulator_time_ms, _udp_socket, _mode, _peer_addresses, _quic_client
 
     # Stop UDP if running
     if _udp_socket:
         _udp_socket.stop()
         _udp_socket = None
+
+    # Stop QUIC if running
+    if _quic_client:
+        _quic_client.stop()
+        _quic_client = None
 
     # Clear queues
     with _lock:
