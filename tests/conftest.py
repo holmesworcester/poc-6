@@ -46,6 +46,10 @@ def reset_global_state():
     transport.reset()
     transport.enable_loopback()
 
+    # Ensure connection limit is cleared (transport.reset() handles this,
+    # but be explicit for safety)
+    transport.set_max_sync_connections(None)
+
     # Reset job frequency multiplier
     jobs.reset_frequency_multiplier()
 
@@ -62,6 +66,7 @@ def reset_global_state():
     # Also reset after test to catch tests that modify global state
     jobs.reset_frequency_multiplier()
     network_config.reset_network_config()
+    transport.set_max_sync_connections(None)
     transport.reset()
 
 

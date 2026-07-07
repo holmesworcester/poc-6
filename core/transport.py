@@ -96,6 +96,29 @@ _simulator_time_ms: int = 0  # Current simulation time
 _pacer_config: Optional[PacerConfig] = None
 _pacer_buckets: dict[tuple[str, int], _LeakyBucket] = {}
 
+# Connection limiting (for scale tests)
+_max_sync_connections: Optional[int] = None  # None = unlimited
+
+
+def set_max_sync_connections(k: Optional[int]) -> None:
+    """Limit each peer to k sync connections. None = unlimited.
+
+    When set, sync_all_connections() will only sync with the first k
+    connections (sorted by key_id for determinism). This reduces O(n²)
+    full mesh to O(n×k) sparse graph, enabling 1000+ peer scale tests.
+    """
+    global _max_sync_connections
+    _max_sync_connections = k
+    if k is not None:
+        log.info(f"transport: max_sync_connections set to {k}")
+    else:
+        log.info("transport: max_sync_connections unlimited")
+
+
+def get_max_sync_connections() -> Optional[int]:
+    """Get current connection limit. None = unlimited."""
+    return _max_sync_connections
+
 
 # ============================================================================
 # Flow Control (credit-based, per flow_key)
@@ -638,7 +661,7 @@ def get_listen_address() -> Optional[tuple[str, int]]:
 def reset():
     """Clear all queues, stop UDP, clear simulator, reset mode to NONE."""
     global _simulator, _simulator_time_ms, _udp_socket, _mode, _peer_addresses
-    global _pacer_config, _pacer_buckets
+    global _pacer_config, _pacer_buckets, _max_sync_connections
 
     # Stop UDP if running
     if _udp_socket:
@@ -663,5 +686,8 @@ def reset():
     _mode = TransportMode.NONE
     _pacer_config = None
     _pacer_buckets.clear()
+
+    # Reset connection limit
+    _max_sync_connections = None
 
     log.info("transport: reset complete")

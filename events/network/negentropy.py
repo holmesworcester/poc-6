@@ -1343,10 +1343,14 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
     Sync is initiated for ALL established connections, even if our root hash
     hasn't changed - the remote peer may have new events we need to pull.
 
+    Connection limiting is handled at the connection layer (connection_request.py),
+    not here. This ensures the sparse graph topology is enforced at creation time.
+
     Returns:
         Stats dict with counts
     """
     from core.db import create_unsafe_db
+    from core import transport
     from events.network import connection_request as conn_module
 
     unsafedb = create_unsafe_db(db)
@@ -1364,16 +1368,13 @@ def sync_all_connections(t_ms: int, db: Any) -> dict:
         # Get all active connections using connection module interface
         connections = conn_module.get_connections(peer_id, t_ms, db)
 
-        for conn in connections:
-            # Only sync on established bidirectional connections
-            if not conn.can_send():
-                continue
+        # Filter to sendable connections with identity
+        sendable = [
+            c for c in connections
+            if c.can_send() and (c.peer_shared_id or c.invite_id)
+        ]
 
-            # Skip connections without any identity
-            # But allow bootstrap connections (have invite_id even if peer_shared_id is NULL)
-            if not conn.peer_shared_id and not conn.invite_id:
-                continue
-
+        for conn in sendable:
             total_connections += 1
 
             sent = sync_connection(db, peer_id, conn, t_ms)
