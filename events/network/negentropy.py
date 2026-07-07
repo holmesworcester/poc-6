@@ -67,6 +67,8 @@ WIRE_PLAINTEXT_SIZE = 344  # NEGENTROPY_PLAINTEXT_SIZE
 MSG_RANGE_REQUEST = 1
 MSG_RANGE_MATCHED = 2
 MSG_RANGE_EVENTS = 3
+MSG_RANGE_BLOBS_SENT = 4
+MSG_RANGE_MISMATCHED = 5
 
 # Negentropy level constants
 LEVEL_ROOT = 0
@@ -142,7 +144,8 @@ def encode_plaintext(
     """
     _require_len("connection_id", connection_id, 16)
     _require_len("reply_connection_id", reply_connection_id, 16)
-    if msg_type not in (MSG_RANGE_REQUEST, MSG_RANGE_MATCHED, MSG_RANGE_EVENTS):
+    if msg_type not in (MSG_RANGE_REQUEST, MSG_RANGE_MATCHED, MSG_RANGE_EVENTS,
+                        MSG_RANGE_BLOBS_SENT, MSG_RANGE_MISMATCHED):
         raise ValueError("invalid negentropy msg_type")
     _require_len("range_id", range_id, RANGE_ID_SIZE)
     if level not in (LEVEL_ROOT, LEVEL_PREFIX_2, LEVEL_PREFIX_4, LEVEL_PREFIX_6, LEVEL_ADAPTIVE):
@@ -326,8 +329,12 @@ def encode_wire_event(
         msg_type_id = MSG_RANGE_MATCHED
     elif msg_type == "range_events":
         msg_type_id = MSG_RANGE_EVENTS
+    elif msg_type == "range_blobs_sent":
+        msg_type_id = MSG_RANGE_BLOBS_SENT
+    elif msg_type == "range_mismatched":
+        msg_type_id = MSG_RANGE_MISMATCHED
     else:
-        raise ValueError("unknown negentropy msg type")
+        raise ValueError(f"unknown negentropy msg type: {msg_type}")
 
     level_name = msg.get("level")
     if level_name == "root":
@@ -348,6 +355,8 @@ def encode_wire_event(
 
     if msg_type_id == MSG_RANGE_EVENTS:
         hash_bytes = _encode_hash(msg.get("our_hash"))
+    elif msg_type_id == MSG_RANGE_BLOBS_SENT:
+        hash_bytes = _encode_hash(msg.get("expected_hash"))
     else:
         hash_bytes = _encode_hash(msg.get("hash"))
 
@@ -409,6 +418,10 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         msg_type_str = "range_matched"
     elif msg_type == MSG_RANGE_EVENTS:
         msg_type_str = "range_events"
+    elif msg_type == MSG_RANGE_BLOBS_SENT:
+        msg_type_str = "range_blobs_sent"
+    elif msg_type == MSG_RANGE_MISMATCHED:
+        msg_type_str = "range_mismatched"
     else:
         raise ValueError("invalid negentropy msg_type")
 
@@ -455,8 +468,11 @@ def decode_wire_event(data: bytes) -> dict[str, Any]:
         msg_result["our_hash"] = _decode_hash(decoded["hash_bytes"]) or ""
         msg_result["event_ids"] = [crypto.b64encode(event_id) for event_id in decoded["event_ids"]]
         msg_result["prefix"] = prefix_str
-    else:
-        pass
+    elif msg_type_str in ("range_matched", "range_blobs_sent", "range_mismatched"):
+        # Response messages include level/prefix for range tracking
+        msg_result["level"] = level_str
+        msg_result["prefix"] = prefix_str
+        msg_result["hash"] = _decode_hash(decoded["hash_bytes"]) or ""
 
     event_data = {
         "type": "negentropy",
@@ -1645,11 +1661,14 @@ def handle_range_request(
     msg: dict,
     t_ms: int
 ) -> list[dict]:
-    """Handle an incoming range request.
+    """Handle an incoming range request (responder logic).
 
-    Compares our hash with theirs and returns appropriate response.
-    Uses adaptive splitting at prefix_6 level for large buckets.
-    All responses include root_hash and total_events for progress tracking.
+    Requester-driven protocol: responder is passive.
+    - If hashes match: return range_matched
+    - If mismatch and small (≤ THRESHOLD): send blobs
+    - If mismatch and large (> THRESHOLD): return range_mismatched with our hash
+
+    Responder NEVER subdivides. Requester controls subdivision.
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
 
@@ -1666,15 +1685,13 @@ def handle_range_request(
 
     # Compute our hash for this range
     if level == 'adaptive':
-        # Adaptive range: compute hash for lo_key/hi_key bounds
         our_hash = compute_range_hash(db, recorded_by, prefix, lo_key, hi_key)
         event_count = get_event_count_in_range(db, recorded_by, prefix, lo_key, hi_key)
     else:
-        # Prefix-based bucket
         our_hash = recompute_bucket_hash(db, recorded_by, level, prefix)
         event_count = get_event_count_in_bucket(db, recorded_by, prefix, level)
 
-    log.debug(f"negentropy.handle_range_request: level={level} prefix={prefix} lo={lo_key} hi={hi_key} count={event_count}")
+    log.debug(f"negentropy.handle_range_request: level={level} prefix={prefix} count={event_count}")
 
     # Record the range
     safedb.execute("""
@@ -1687,31 +1704,29 @@ def handle_range_request(
             updated_at = excluded.updated_at
     """, (recorded_by, connection_id, range_id, level, prefix, our_hash, their_hash, t_ms, t_ms))
 
-    # Check for checkpoint: if their root hash matches ours
+    # Check for checkpoint
     their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
     if their_root_hash and their_root_hash == root_hash:
         _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
 
-    responses = []
-
+    # Case 1: Hashes match - synced!
     if our_hash == their_hash:
-        # Hashes match - this range is synced!
         safedb.execute("""
             UPDATE negentropy_sync_state
             SET status = 'matched', updated_at = ?
             WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
         """, (t_ms, recorded_by, connection_id, range_id))
 
-        responses.append({
+        return [{
             'type': 'range_matched',
             'range_id': range_id,
+            'prefix': prefix,
             'root_hash': root_hash.hex() if root_hash else '',
             'total_events': total_events,
-        })
+        }]
 
-    elif not their_hash and our_hash:
-        # Fast path: peer has no events in this range, we have some
-        # Skip negotiation and send all events directly (they need everything)
+    # Case 2: Mismatch, small enough - send blobs and expected hash
+    if event_count <= EVENTS_THRESHOLD:
         safedb.execute("""
             UPDATE negentropy_sync_state
             SET status = 'events_sent', updated_at = ?
@@ -1723,165 +1738,55 @@ def handle_range_request(
         else:
             event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
 
-        # Send event blobs directly - no point negotiating
         if event_ids:
             sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-            log.debug(f"negentropy: fast path - peer has no events, sent {sent} blobs directly")
+            log.debug(f"negentropy: sent {sent} blobs at threshold")
 
-        wire_event_ids = event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids
-
-        responses.append({
-            'type': 'range_events',
+        # Tell requester: "after receiving my blobs, your hash should match mine"
+        # Requester can verify and retry if there was packet loss
+        return [{
+            'type': 'range_blobs_sent',
             'range_id': range_id,
+            'level': level,
             'prefix': prefix,
-            'event_ids': wire_event_ids,
-            'our_hash': our_hash.hex() if our_hash else '',
+            'lo_key': lo_key,
+            'hi_key': hi_key,
+            'expected_hash': our_hash.hex() if our_hash else '',
             'root_hash': root_hash.hex() if root_hash else '',
             'total_events': total_events,
-        })
+        }]
 
-    elif event_count <= EVENTS_THRESHOLD:
-        # Bucket/range has few enough events - send blobs directly
-        safedb.execute("""
-            UPDATE negentropy_sync_state
-            SET status = 'events_sent', updated_at = ?
-            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-        """, (t_ms, recorded_by, connection_id, range_id))
+    # Case 3: Mismatch, too large - tell requester to subdivide
+    # Include split point so requester can subdivide even with no data
+    safedb.execute("""
+        UPDATE negentropy_sync_state
+        SET status = 'diverged', updated_at = ?
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (t_ms, recorded_by, connection_id, range_id))
 
-        if level == 'adaptive':
-            event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
-        else:
-            event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
-
-        # Send actual event blobs - they'll dedupe on their side
-        if event_ids:
-            sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-            log.debug(f"negentropy: sent {sent} event blobs at {level} level ({event_count} events)")
-
-        # Limit event_ids in wire message (blobs already sent)
-        wire_event_ids = event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids
-
-        responses.append({
-            'type': 'range_events',
-            'range_id': range_id,
-            'prefix': prefix,
-            'event_ids': wire_event_ids,
-            'our_hash': our_hash.hex() if our_hash else '',
-            'root_hash': root_hash.hex() if root_hash else '',
-            'total_events': total_events,
-        })
-
-    elif level == 'prefix_6' or level == 'adaptive':
-        # At prefix_6 or adaptive with many events: use adaptive binary split
-
-        # Check MAX_RANGES cap to prevent runaway splitting
-        active_ranges = safedb.query_one("""
-            SELECT COUNT(*) as c FROM negentropy_sync_state
-            WHERE recorded_by = ? AND connection_id = ? AND status IN ('pending', 'diverged')
-        """, (recorded_by, connection_id))
-
-        if active_ranges['c'] >= MAX_RANGES:
-            # Hit range cap - send events directly instead of splitting further
-            log.debug(f"negentropy: MAX_RANGES cap hit ({active_ranges['c']}), sending {event_count} events directly")
-            if level == 'adaptive':
-                event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
-            else:
-                event_ids = get_events_in_bucket(db, recorded_by, prefix, level)
-            if event_ids:
-                _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-            safedb.execute("""
-                UPDATE negentropy_sync_state
-                SET status = 'events_sent', updated_at = ?
-                WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-            """, (t_ms, recorded_by, connection_id, range_id))
-            responses.append({
-                'type': 'range_events',
-                'range_id': range_id,
-                'prefix': prefix,
-                'event_ids': event_ids[:EVENT_ID_MAX] if len(event_ids) > EVENT_ID_MAX else event_ids,
-                'our_hash': our_hash.hex() if our_hash else '',
-                'root_hash': root_hash.hex() if root_hash else '',
-                'total_events': total_events,
-            })
-            return responses
-
-        safedb.execute("""
-            UPDATE negentropy_sync_state
-            SET status = 'diverged', updated_at = ?
-            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-        """, (t_ms, recorded_by, connection_id, range_id))
-
-        # Find median to split on
+    # Compute split point for the requester (they may have no data)
+    split_key = None
+    child_hashes = None
+    if level == 'adaptive' or level == 'prefix_6':
         split_key = find_split_point(db, recorded_by, prefix, lo_key, hi_key)
-        if not split_key:
-            # Can't split further, send what we have
-            event_ids = get_events_in_range(db, recorded_by, prefix, lo_key, hi_key)
-            if event_ids:
-                sent = _send_event_blobs(db, recorded_by, connection_id, event_ids, t_ms)
-                log.debug(f"negentropy: sent {sent} blobs (no split point)")
-            return responses
-
-        # Create two child ranges: [lo, split) and [split, hi)
-        for child_lo, child_hi in [(lo_key, split_key), (split_key, hi_key)]:
-            child_hash = compute_range_hash(db, recorded_by, prefix, child_lo, child_hi)
-            if not child_hash:
-                continue  # Empty range
-
-            child_range_id = generate_range_id()
-            safedb.execute("""
-                INSERT INTO negentropy_sync_state
-                (recorded_by, connection_id, range_id, level, prefix,
-                 our_hash, their_hash, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-            """, (recorded_by, connection_id, child_range_id, 'adaptive', prefix, child_hash, t_ms, t_ms))
-
-            responses.append({
-                'type': 'range_request',
-                'range_id': child_range_id,
-                'level': 'adaptive',
-                'prefix': prefix,
-                'lo_key': child_lo,
-                'hi_key': child_hi,
-                'hash': child_hash.hex() if child_hash else '',
-                'parent_range_id': range_id,
-                'root_hash': root_hash.hex() if root_hash else '',
-                'total_events': total_events,
-            })
-
     else:
-        # Drill down: send child prefix hashes (root → prefix_2 → prefix_4 → prefix_6)
         child_level = get_child_level(level)
-        child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
+        if child_level:
+            child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
 
-        safedb.execute("""
-            UPDATE negentropy_sync_state
-            SET status = 'diverged', updated_at = ?
-            WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-        """, (t_ms, recorded_by, connection_id, range_id))
-
-        # Create child ranges
-        for child_prefix, child_hash in child_hashes.items():
-            child_range_id = generate_range_id()
-
-            safedb.execute("""
-                INSERT INTO negentropy_sync_state
-                (recorded_by, connection_id, range_id, level, prefix,
-                 our_hash, their_hash, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
-            """, (recorded_by, connection_id, child_range_id, child_level, child_prefix, child_hash, t_ms, t_ms))
-
-            responses.append({
-                'type': 'range_request',
-                'range_id': child_range_id,
-                'level': child_level,
-                'prefix': child_prefix,
-                'hash': child_hash.hex() if child_hash else '',
-                'parent_range_id': range_id,
-                'root_hash': root_hash.hex() if root_hash else '',
-                'total_events': total_events,
-            })
-
-    return responses
+    return [{
+        'type': 'range_mismatched',
+        'range_id': range_id,
+        'level': level,
+        'prefix': prefix,
+        'lo_key': lo_key,
+        'hi_key': hi_key,
+        'hash': our_hash.hex() if our_hash else '',
+        'split_key': split_key,  # For adaptive splitting
+        'child_hashes': {k: v.hex() for k, v in child_hashes.items()} if child_hashes else None,
+        'root_hash': root_hash.hex() if root_hash else '',
+        'total_events': total_events,
+    }]
 
 
 def _log_checkpoint(
@@ -1952,6 +1857,146 @@ def handle_range_matched(
     return []  # No response needed
 
 
+def handle_range_blobs_sent(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int
+) -> list[dict]:
+    """Handle range_blobs_sent notification.
+
+    Responder has sent us blobs for this range. Mark as complete and
+    verify our hash matches after processing the blobs.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    range_id = msg['range_id']
+
+    # Track for congestion control
+    _cc_on_response(recorded_by, connection_id, t_ms)
+
+    # Mark range as complete - blobs were sent (we'll verify hash after processing)
+    safedb.execute("""
+        UPDATE negentropy_sync_state
+        SET status = 'complete', updated_at = ?
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (t_ms, recorded_by, connection_id, range_id))
+
+    # Check for checkpoint
+    root_hash = get_root_hash(db, recorded_by)
+    their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
+    if their_root_hash and their_root_hash == root_hash:
+        _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
+
+    return []  # No response needed
+
+
+def handle_range_mismatched(
+    db,
+    recorded_by: str,
+    connection_id: str,
+    msg: dict,
+    t_ms: int
+) -> list[dict]:
+    """Handle range mismatch response (requester subdivision logic).
+
+    When responder says 'mismatched', requester subdivides and sends child requests.
+    Uses split_key/child_hashes from responder if we have no local data.
+    """
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    range_id = msg['range_id']
+    level = msg['level']
+    prefix = msg.get('prefix', '')
+    lo_key = msg.get('lo_key')
+    hi_key = msg.get('hi_key')
+
+    # Responder provides split info for peers with no data
+    responder_split_key = msg.get('split_key')
+    responder_child_hashes = msg.get('child_hashes')  # dict prefix -> hash_hex
+
+    # Track for congestion control - we received a response
+    _cc_on_response(recorded_by, connection_id, t_ms)
+
+    # Get root hash for child requests
+    root_hash = get_root_hash(db, recorded_by)
+    total_events = get_total_event_count(db, recorded_by)
+
+    # Mark parent range as diverged
+    safedb.execute("""
+        UPDATE negentropy_sync_state
+        SET status = 'diverged', updated_at = ?
+        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
+    """, (t_ms, recorded_by, connection_id, range_id))
+
+    responses = []
+
+    # Subdivision strategy: use prefix-based levels or adaptive splitting
+    if level == 'adaptive' or level == 'prefix_6':
+        # At adaptive/prefix_6 level: use binary split
+        # First try our own split point, then fall back to responder's
+        split_key = find_split_point(db, recorded_by, prefix, lo_key, hi_key)
+        if not split_key:
+            split_key = responder_split_key
+        if split_key:
+            for child_lo, child_hi in [(lo_key, split_key), (split_key, hi_key)]:
+                # Compute our hash for this range (may be empty/zero)
+                child_hash = compute_range_hash(db, recorded_by, prefix, child_lo, child_hi)
+
+                child_range_id = generate_range_id()
+                safedb.execute("""
+                    INSERT INTO negentropy_sync_state
+                    (recorded_by, connection_id, range_id, level, prefix,
+                     our_hash, their_hash, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+                """, (recorded_by, connection_id, child_range_id, 'adaptive', prefix, child_hash, t_ms, t_ms))
+
+                responses.append({
+                    'type': 'range_request',
+                    'range_id': child_range_id,
+                    'level': 'adaptive',
+                    'prefix': prefix,
+                    'lo_key': child_lo,
+                    'hi_key': child_hi,
+                    'hash': child_hash.hex() if child_hash else '',
+                    'root_hash': root_hash.hex() if root_hash else '',
+                    'total_events': total_events,
+                })
+    else:
+        # Prefix-based levels: drill down to child level
+        child_level = get_child_level(level)
+        if child_level:
+            # Get our hashes, or use responder's prefixes if we have none
+            child_hashes = get_hashes_at_level(db, recorded_by, child_level, prefix)
+            if not child_hashes and responder_child_hashes:
+                # Use responder's prefixes but compute our (empty) hashes
+                child_hashes = {p: b'' for p in responder_child_hashes.keys()}
+
+            for child_prefix, child_hash in child_hashes.items():
+                child_range_id = generate_range_id()
+
+                safedb.execute("""
+                    INSERT INTO negentropy_sync_state
+                    (recorded_by, connection_id, range_id, level, prefix,
+                     our_hash, their_hash, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, 'pending', ?, ?)
+                """, (recorded_by, connection_id, child_range_id, child_level, child_prefix, child_hash, t_ms, t_ms))
+
+                responses.append({
+                    'type': 'range_request',
+                    'range_id': child_range_id,
+                    'level': child_level,
+                    'prefix': child_prefix,
+                    'hash': child_hash.hex() if child_hash else '',
+                    'root_hash': root_hash.hex() if root_hash else '',
+                    'total_events': total_events,
+                })
+
+    log.debug(f"negentropy: requester subdivided {level} prefix={prefix} into {len(responses)} children")
+    return responses
+
+
 def _send_event_blobs(
     db,
     recorded_by: str,
@@ -1994,60 +2039,6 @@ def _send_event_blobs(
     return conn_module.send_batch(recorded_by, connection_id, blobs, t_ms, db)
 
 
-def handle_range_events(
-    db,
-    recorded_by: str,
-    connection_id: str,
-    msg: dict,
-    t_ms: int
-) -> list[dict]:
-    """Handle incoming events for a bucket.
-
-    Sends actual event blobs for events they need.
-    """
-    safedb = create_safe_db(db, recorded_by=recorded_by)
-
-    # Track for congestion control - we received a response
-    _cc_on_response(recorded_by, connection_id, t_ms)
-
-    range_id = msg['range_id']
-    prefix = msg.get('prefix', '')
-    their_event_ids = set(msg['event_ids'])
-
-    # Get root hash and total events for responses
-    root_hash = get_root_hash(db, recorded_by)
-    total_events = get_total_event_count(db, recorded_by)
-
-    # Check for checkpoint
-    their_root_hash = bytes.fromhex(msg.get('root_hash', '')) if msg.get('root_hash') else None
-    if their_root_hash and their_root_hash == root_hash:
-        _log_checkpoint(db, recorded_by, connection_id, root_hash, t_ms)
-
-    # Get our events for this bucket
-    our_event_ids = set(get_events_in_bucket(db, recorded_by, prefix))
-
-    # Events they have that we don't -> we need to request/store
-    events_we_need = their_event_ids - our_event_ids
-
-    # Events we have that they don't -> send blobs
-    events_they_need = our_event_ids - their_event_ids
-
-    # Mark range complete
-    safedb.execute("""
-        UPDATE negentropy_sync_state
-        SET status = 'complete', updated_at = ?
-        WHERE recorded_by = ? AND connection_id = ? AND range_id = ?
-    """, (t_ms, recorded_by, connection_id, range_id))
-
-    # Send actual event blobs they need
-    if events_they_need:
-        sent = _send_event_blobs(db, recorded_by, connection_id, list(events_they_need), t_ms)
-        log.info(f"negentropy: sent {sent} event blobs to connection {connection_id[:20]}...")
-
-    # No protocol response needed - we sent the blobs directly
-    return []
-
-
 def handle_sync_message(
     db,
     recorded_by: str,
@@ -2065,9 +2056,12 @@ def handle_sync_message(
         return handle_range_request(db, recorded_by, connection_id, msg, t_ms)
     elif msg_type == 'range_matched':
         return handle_range_matched(db, recorded_by, connection_id, msg, t_ms)
-    elif msg_type == 'range_events':
-        return handle_range_events(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'range_blobs_sent':
+        return handle_range_blobs_sent(db, recorded_by, connection_id, msg, t_ms)
+    elif msg_type == 'range_mismatched':
+        return handle_range_mismatched(db, recorded_by, connection_id, msg, t_ms)
     else:
+        log.debug(f"negentropy: unknown message type: {msg_type}")
         return []  # Unknown message type
 
 
