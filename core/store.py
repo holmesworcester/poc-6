@@ -10,8 +10,22 @@ log = logging.getLogger(__name__)
 _batch_mode = False
 
 def blob(blob: bytes, t_ms: int, return_dupes: bool, unsafedb: UnsafeDB) -> str:
-    """Write a blob to the store and return the id unless return_dupes is False and it already exists."""
-    id = crypto.hash(blob)
+    """Write a blob to the store and return the id unless return_dupes is False and it already exists.
+
+    For v2 envelope format, the ID is computed on the inner encrypted blob,
+    not the envelope. This maintains backward compatibility - same encrypted
+    content has same ID regardless of envelope.
+    """
+    # Check for v2 envelope format - compute ID on inner blob for consistency
+    envelope, inner_blob, _, _ = crypto.parse_envelope(blob)
+    if envelope is not None:
+        # v2 envelope: ID based on inner encrypted blob
+        id = crypto.hash(inner_blob)
+        log.debug(f"store.blob() v2 envelope detected, computing ID on inner blob")
+    else:
+        # Legacy or plaintext: ID based on full blob
+        id = crypto.hash(blob)
+
     id_str = crypto.b64encode(id)
     log.debug(f"store.blob() storing blob with id={id_str}, size={len(blob)}B, t_ms={t_ms}, return_dupes={return_dupes}")
 

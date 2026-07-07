@@ -538,10 +538,18 @@ def _unwrap_common(wrapped_blob: bytes, recorded_by: str, db: Any,
     # Check if blob is plaintext JSON (starts with '{' or '[')
     if wrapped_blob and wrapped_blob[:1] in (b'{', b'['):
         try:
-            # Verify it's valid JSON
-            json.loads(wrapped_blob.decode('utf-8'))
-            log.debug(f"crypto._unwrap_common({namespace_name}) blob is plaintext JSON, returning as-is")
-            return (wrapped_blob, [])
+            # Check for v2 envelope format first
+            data = json.loads(wrapped_blob.decode('utf-8'))
+            if data.get('v') == ENVELOPE_VERSION:
+                # v2 envelope: extract inner blob and recursively unwrap
+                inner_b64 = data.get('encrypted', '')
+                inner_blob = b64decode(inner_b64)
+                log.debug(f"crypto._unwrap_common({namespace_name}) v2 envelope detected, unwrapping inner blob")
+                return _unwrap_common(inner_blob, recorded_by, db, key_lookup_fn, block_on_missing, namespace_name)
+            else:
+                # Regular plaintext JSON, return as-is
+                log.debug(f"crypto._unwrap_common({namespace_name}) blob is plaintext JSON, returning as-is")
+                return (wrapped_blob, [])
         except Exception:
             # Not valid JSON, continue with decrypt attempt
             pass
@@ -810,3 +818,152 @@ def derive_slice_nonce(nonce_prefix: bytes, slice_number: int) -> bytes:
     """
     slice_no_bytes = slice_number.to_bytes(4, byteorder='little')
     return nonce_prefix + slice_no_bytes
+
+
+# ===== Event Envelope Functions =====
+# These functions handle the v2 envelope format which puts created_at and ttl_ms
+# outside the encrypted payload for visibility before decryption.
+
+ENVELOPE_VERSION = 2
+
+
+def wrap_in_envelope(encrypted_blob: bytes, created_at: int, ttl_ms: int = 0) -> bytes:
+    """Wrap encrypted blob in v2 envelope with external metadata.
+
+    The envelope format allows created_at and ttl_ms to be read without decryption,
+    enabling:
+    - Blocked events to self-purge based on TTL
+    - Server helpers to enforce TTL without decryption keys
+    - Negentropy sync to use consistent timestamps
+
+    Args:
+        encrypted_blob: The encrypted event bytes (from wrap())
+        created_at: Event creation timestamp in milliseconds
+        ttl_ms: Time-to-live in milliseconds (0 = no expiry)
+
+    Returns:
+        Canonical JSON bytes of the envelope
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    envelope = {
+        'v': ENVELOPE_VERSION,
+        'created_at': created_at,
+        'ttl_ms': ttl_ms,
+        'encrypted': b64encode(encrypted_blob)
+    }
+    result = canonicalize_json(envelope)
+    log.debug(f"crypto.wrap_in_envelope() created envelope: created_at={created_at}, ttl_ms={ttl_ms}, size={len(result)}B")
+    return result
+
+
+def parse_envelope(blob: bytes) -> tuple[dict | None, bytes, int | None, int | None]:
+    """Parse event blob, extracting envelope metadata if present.
+
+    Handles three formats:
+    1. v2 envelope: JSON with 'v': 2, returns (envelope, encrypted_bytes, created_at, ttl_ms)
+    2. Plaintext JSON: Returns (None, blob, created_at, ttl_ms) from inner fields
+    3. Binary encrypted: Returns (None, blob, None, None) - legacy format
+
+    Args:
+        blob: Raw event bytes
+
+    Returns:
+        Tuple of (envelope_dict, inner_blob, created_at, ttl_ms)
+        - envelope_dict: The parsed envelope if v2 format, else None
+        - inner_blob: The encrypted bytes (v2) or original blob (legacy/plaintext)
+        - created_at: External timestamp if available, else None
+        - ttl_ms: External TTL if available, else None
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    # Check if JSON (starts with '{')
+    if blob and blob[:1] == b'{':
+        try:
+            data = json.loads(blob.decode('utf-8'))
+
+            if data.get('v') == ENVELOPE_VERSION:
+                # v2 envelope format
+                encrypted_b64 = data.get('encrypted', '')
+                encrypted_bytes = b64decode(encrypted_b64)
+                created_at = data.get('created_at')
+                ttl_ms = data.get('ttl_ms', 0)
+                log.debug(f"crypto.parse_envelope() v2 envelope: created_at={created_at}, ttl_ms={ttl_ms}")
+                return (data, encrypted_bytes, created_at, ttl_ms)
+            else:
+                # Plaintext JSON event (peer_shared, etc.)
+                created_at = data.get('created_at')
+                ttl_ms = data.get('ttl_ms', 0)
+                log.debug(f"crypto.parse_envelope() plaintext JSON: created_at={created_at}, ttl_ms={ttl_ms}")
+                return (None, blob, created_at, ttl_ms)
+
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            log.debug(f"crypto.parse_envelope() JSON parse failed: {e}")
+            # Fall through to binary handling
+
+    # Binary encrypted blob (legacy format)
+    log.debug(f"crypto.parse_envelope() binary blob (legacy), size={len(blob)}B")
+    return (None, blob, None, None)
+
+
+def is_envelope_format(blob: bytes) -> bool:
+    """Check if blob is in v2 envelope format.
+
+    Args:
+        blob: Raw event bytes
+
+    Returns:
+        True if v2 envelope, False otherwise
+    """
+    if not blob or blob[:1] != b'{':
+        return False
+    try:
+        data = json.loads(blob.decode('utf-8'))
+        return data.get('v') == ENVELOPE_VERSION
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+
+def verify_envelope_metadata(envelope: dict | None, inner_data: dict) -> bool:
+    """Verify external envelope metadata matches internal (signed) values.
+
+    This prevents tampering with created_at/ttl_ms in the envelope by ensuring
+    they match the values inside the signed event.
+
+    Args:
+        envelope: Parsed envelope dict (or None for legacy format)
+        inner_data: Decrypted event data dict
+
+    Returns:
+        True if metadata matches (or no envelope to verify), False on mismatch
+    """
+    import logging
+    log = logging.getLogger(__name__)
+
+    if envelope is None:
+        # Legacy format or plaintext - no envelope to verify
+        return True
+
+    # Verify created_at matches
+    external_created = envelope.get('created_at')
+    internal_created = inner_data.get('created_at')
+
+    if external_created is not None and internal_created is not None:
+        if external_created != internal_created:
+            log.warning(f"crypto.verify_envelope_metadata() created_at mismatch: "
+                       f"external={external_created}, internal={internal_created}")
+            return False
+
+    # Verify ttl_ms matches (inner may use 'ttl_ms' or 'disappearing_time_ms')
+    external_ttl = envelope.get('ttl_ms', 0) or 0
+    internal_ttl = inner_data.get('ttl_ms', 0) or inner_data.get('disappearing_time_ms', 0) or 0
+
+    if external_ttl != internal_ttl:
+        log.warning(f"crypto.verify_envelope_metadata() ttl_ms mismatch: "
+                   f"external={external_ttl}, internal={internal_ttl}")
+        return False
+
+    log.debug(f"crypto.verify_envelope_metadata() metadata verified OK")
+    return True

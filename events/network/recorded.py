@@ -285,8 +285,18 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
     if not event_blob:
         return [None, recorded_id]
 
+    # Check for v2 envelope format and extract external metadata
+    envelope, inner_blob, external_created_at, external_ttl_ms = crypto.parse_envelope(event_blob)
+    if envelope is not None:
+        log.info(f"recorded.project(): v2 envelope detected, created_at={external_created_at}, ttl_ms={external_ttl_ms}")
+        # Use inner blob for unwrapping
+        event_blob_to_unwrap = inner_blob
+    else:
+        # Legacy or plaintext format
+        event_blob_to_unwrap = event_blob
+
     # Try to unwrap (for encrypted events)
-    plaintext, missing_key_ids = crypto.unwrap_event(event_blob, recorded_by, db)
+    plaintext, missing_key_ids = crypto.unwrap_event(event_blob_to_unwrap, recorded_by, db)
 
     # DEBUG: Log unwrap results for all events to understand what's happening
     log.error(f"[UNWRAP_RESULT] ref_id={ref_id[:20]}... plaintext={'YES' if plaintext else 'NO'}, missing_keys={missing_key_ids}, temp_type={temp_type}")
@@ -305,6 +315,13 @@ def project(recorded_id: str, db: Any, _recursion_depth: int = 0, _triggered_by:
         event_type = event_data.get('type')
         if temp_type == 'sync':
             log.info(f"recorded.project(): SYNC parsed, event_type={event_type}")
+
+        # Verify envelope metadata matches internal (signed) values if v2 format
+        if envelope is not None and event_data:
+            if not crypto.verify_envelope_metadata(envelope, event_data):
+                log.warning(f"recorded.project(): envelope metadata mismatch, rejecting event ref_id={ref_id[:20]}...")
+                return [None, recorded_id]
+
     elif not missing_key_ids:
         # Not encrypted, try plaintext parsing
         try:

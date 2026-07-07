@@ -111,7 +111,11 @@ def create(peer_id: str, channel_id: str, content: str, t_ms: int, db: Any, retu
 
     # Wrap (canonicalize + encrypt)
     canonical = crypto.canonicalize_json(signed_event)
-    blob = crypto.wrap(canonical, key_data, db)
+    encrypted_blob = crypto.wrap(canonical, key_data, db)
+
+    # Wrap in v2 envelope with external metadata for visibility before decryption
+    # ttl_ms = disappearing_time_ms (duration in ms, 0 = permanent)
+    blob = crypto.wrap_in_envelope(encrypted_blob, t_ms, disappearing_time_ms)
 
     # Store event with recorded wrapper and projection
     event_id = store.event(blob, peer_id, t_ms, db)

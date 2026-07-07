@@ -105,18 +105,166 @@ Event structure:
 
 ## Implementation Design
 
-### 1. Event Storage Schema Changes
+### Approach: Dual Storage with Verification
 
-```sql
--- events_encrypted table
-ALTER TABLE events_encrypted ADD COLUMN created_at INTEGER;
--- Move from inside payload to outside
+Keep `created_at` and `ttl_ms` in BOTH locations:
+1. **Inside** the signed JSON (for signature integrity)
+2. **Outside** in the envelope (for visibility before decryption)
 
--- Backward compatibility: existing events have created_at = NULL (inside wrapper)
--- New events have created_at populated
+On decryption, verify they match. This preserves signature integrity without changing the signing process.
+
+### 1. JSON Envelope Format
+
+**New format for encrypted events:**
+```json
+{
+  "v": 2,
+  "created_at": 1700000000000,
+  "ttl_ms": 604800000,
+  "encrypted": "<base64 of encrypted inner JSON>"
+}
+```
+
+**Inner JSON (unchanged):**
+```json
+{
+  "type": "message",
+  "created_at": 1700000000000,
+  "ttl_ms": 604800000,
+  "channel_id": "...",
+  "signed_by": "...",
+  "content": "Hello",
+  "signature": "..."
+}
+```
+
+**Plaintext events (unchanged):**
+```json
+{
+  "type": "peer_shared",
+  "created_at": 1700000000000,
+  "public_key": "...",
+  "signature": "..."
+}
 ```
 
 ### 2. Event Creation Flow
+
+```python
+# Current flow in message.create():
+event_data = {
+    'type': 'message',
+    'created_at': t_ms,
+    'ttl_ms': ttl_ms,
+    'content': content,
+    ...
+}
+signed_event = crypto.sign_event(event_data, private_key)
+canonical = crypto.canonicalize_json(signed_event)
+blob = crypto.wrap(canonical, key_data, db)
+store.event(blob, peer_id, t_ms, db)
+
+# Proposed flow:
+event_data = {
+    'type': 'message',
+    'created_at': t_ms,      # Keep inside for signature
+    'ttl_ms': ttl_ms,
+    'content': content,
+    ...
+}
+signed_event = crypto.sign_event(event_data, private_key)
+canonical = crypto.canonicalize_json(signed_event)
+encrypted_blob = crypto.wrap(canonical, key_data, db)
+
+# NEW: Wrap in envelope with external metadata
+envelope = {
+    'v': 2,
+    'created_at': t_ms,       # Copy outside for visibility
+    'ttl_ms': ttl_ms,
+    'encrypted': crypto.b64encode(encrypted_blob)
+}
+final_blob = crypto.canonicalize_json(envelope)
+store.event(final_blob, peer_id, t_ms, db)
+```
+
+### 3. Event Parsing Flow
+
+```python
+def parse_event_blob(blob: bytes) -> tuple[dict, bytes, int, int]:
+    """Parse event blob, returning (envelope_or_event, inner_blob, created_at, ttl_ms).
+
+    For v2 envelope: returns (envelope, encrypted_bytes, created_at, ttl_ms)
+    For v1/legacy: returns (None, blob, None, None)  # created_at inside encrypted
+    For plaintext: returns (None, blob, created_at, ttl_ms)  # from JSON
+    """
+    # Check if plaintext JSON
+    if blob.startswith(b'{'):
+        data = json.loads(blob)
+        if data.get('v') == 2:
+            # New envelope format
+            return (data, b64decode(data['encrypted']),
+                    data['created_at'], data.get('ttl_ms', 0))
+        else:
+            # Plaintext event (peer_shared, etc.)
+            return (None, blob, data.get('created_at'), data.get('ttl_ms', 0))
+    else:
+        # Binary encrypted blob (legacy)
+        return (None, blob, None, None)
+```
+
+### 4. Event Verification Flow
+
+```python
+# After decryption, verify metadata matches:
+def verify_envelope_metadata(envelope: dict, inner_data: dict) -> bool:
+    """Verify external metadata matches internal (signed) values."""
+    if envelope is None:
+        return True  # Legacy format, no envelope to verify
+
+    external_created = envelope.get('created_at')
+    internal_created = inner_data.get('created_at')
+
+    if external_created != internal_created:
+        log.warning(f"created_at mismatch: external={external_created}, internal={internal_created}")
+        return False
+
+    external_ttl = envelope.get('ttl_ms', 0)
+    internal_ttl = inner_data.get('ttl_ms', 0) or inner_data.get('disappearing_time_ms', 0)
+
+    if external_ttl != internal_ttl:
+        log.warning(f"ttl_ms mismatch: external={external_ttl}, internal={internal_ttl}")
+        return False
+
+    return True
+```
+
+### 5. Backward Compatibility
+
+```python
+# Detection logic:
+def is_envelope_format(blob: bytes) -> bool:
+    if not blob.startswith(b'{'):
+        return False
+    try:
+        data = json.loads(blob)
+        return data.get('v') == 2
+    except:
+        return False
+
+# In recorded.project():
+if is_envelope_format(blob):
+    envelope, encrypted, created_at, ttl_ms = parse_event_blob(blob)
+    # Use external created_at/ttl_ms immediately (no decryption needed)
+else:
+    # Legacy: created_at only available after decryption
+    envelope, encrypted, created_at, ttl_ms = None, blob, None, None
+```
+
+### OLD DESIGN BELOW (for reference)
+
+The following was the original design which removes created_at from inner:
+
+### (OLD) Event Creation Flow
 
 ```python
 # Current flow in store.event():
@@ -152,7 +300,7 @@ def event(event_type, payload, peer_id, t_ms, db):
     # 5. Store with created_at outside
 ```
 
-### 3. Event Verification Flow
+### (OLD) Event Verification Flow
 
 ```python
 # Current verification:
