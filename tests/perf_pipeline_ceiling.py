@@ -221,7 +221,7 @@ def bench_mode(
     elapsed_receive, rounds_receive, complete_receive, next_t_ms = _run_until(
         db,
         {"receive"},
-        start_t_ms=None,
+        start_t_ms=5000,
         max_rounds=max_rounds,
         done_fn=done_receive,
     )

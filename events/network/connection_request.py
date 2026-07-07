@@ -514,7 +514,7 @@ def _send_ack_for_request(
             'key': their_key,
             'type': 'symmetric'
         }
-        wrapped = crypto.wrap(ack_blob, to_key, db)
+        wrapped = crypto.wrap(ack_blob, to_key, db, random_nonce=True)
 
         from core import transport
         # Use reply_addr first (from packet metadata), then fall back to lookups
@@ -568,7 +568,7 @@ def _send_ack_for_request(
         'type': 'symmetric'
     }
 
-    wrapped = crypto.wrap(ack_blob, to_key, db)
+    wrapped = crypto.wrap(ack_blob, to_key, db, random_nonce=True)
 
     from core import transport
     # Use reply_addr first (from packet metadata), then fall back to lookups
@@ -936,7 +936,7 @@ def _send_request(
     # Wrap and send via transport
     unsafedb = create_unsafe_db(db)
     request_blob = store.get(connection_id, unsafedb)
-    wrapped = crypto.wrap(request_blob, to_key, db)
+    wrapped = crypto.wrap(request_blob, to_key, db, random_nonce=True)
 
     from core import transport
 
@@ -1446,7 +1446,7 @@ def send(recorded_by: str, key_id: str, blob: bytes, t_ms: int, db: Any) -> bool
         'type': 'symmetric'
     }
 
-    wrapped = crypto.wrap(blob, to_key, db)
+    wrapped = crypto.wrap(blob, to_key, db, random_nonce=True)
 
     from core import transport
     # Use stored from_addr first (most reliable), then fall back to lookups
@@ -1463,6 +1463,76 @@ def send(recorded_by: str, key_id: str, blob: bytes, t_ms: int, db: Any) -> bool
 
     log.debug(f"connection_request.send: sent {len(blob)}B on {key_id[:20]}...")
     return True
+
+
+def send_batch(recorded_by: str, key_id: str, blobs: list[bytes], t_ms: int, db: Any) -> int:
+    """Send multiple blobs on an established connection (batched for performance).
+
+    Queries connection info once and sends all blobs. Use this instead of
+    calling send() in a loop for better throughput.
+
+    Args:
+        recorded_by: Local peer ID
+        key_id: Our key_id for this connection
+        blobs: List of raw blobs to send
+        t_ms: Current timestamp
+        db: Database connection
+
+    Returns:
+        Number of blobs sent
+    """
+    if not blobs:
+        return 0
+
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+
+    # Query connection info ONCE
+    conn = safedb.query_one("""
+        SELECT their_key_id, their_key, peer_shared_id, from_addr_ip, from_addr_port
+        FROM connections
+        WHERE key_id = ? AND recorded_by = ?
+    """, (key_id, recorded_by))
+
+    if not conn:
+        log.warning(f"connection_request.send_batch: no connection {key_id[:20]}...")
+        return 0
+
+    their_key_id = conn['their_key_id']
+    their_key = conn['their_key']
+    to_peer_shared_id = conn['peer_shared_id']
+
+    if not their_key or not their_key_id:
+        log.debug(f"connection_request.send_batch: connection {key_id[:20]}... not ready")
+        return 0
+
+    # Prepare key for wrapping (reused for all blobs)
+    to_key = {
+        'id': crypto.b64decode(their_key_id),
+        'key': their_key,
+        'type': 'symmetric'
+    }
+
+    # Resolve to_addr ONCE
+    from core import transport
+    to_addr = None
+    if conn['from_addr_ip']:
+        to_addr = (conn['from_addr_ip'], conn['from_addr_port'])
+    if not to_addr:
+        to_addr = get_address_for_peer(to_peer_shared_id, recorded_by, db)
+    if not to_addr:
+        to_addr = transport.get_peer_address(to_peer_shared_id)
+
+    from_addr = transport.get_listen_address() or ('127.0.0.1', 0)
+
+    # Send all blobs
+    sent = 0
+    for blob in blobs:
+        wrapped = crypto.wrap(blob, to_key, db, random_nonce=True)
+        transport.send(wrapped, from_addr, to_addr)
+        sent += 1
+
+    log.debug(f"connection_request.send_batch: sent {sent} blobs on {key_id[:20]}...")
+    return sent
 
 
 # ============================================================================

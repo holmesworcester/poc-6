@@ -90,6 +90,7 @@ def test_alice_creates_disappearing_channel_and_sends_messages(fresh_db):
 
 def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     """Alice and Bob both see messages disappear at the same time."""
+    from tests.utils.tick_helper import assert_eventually, initial_sync
 
     db = fresh_db
 
@@ -104,64 +105,61 @@ def test_alice_and_bob_see_messages_disappear_together(fresh_db):
 
     bob_peer_id = peer_module.create(t_ms=2000, db=db)
     bob = user.join(peer_id=bob_peer_id, invite_link=invite_link, name='Bob', t_ms=2000, db=db)
-    bob_peer_shared_id = bob['peer_shared_id']
     db.commit()
     print("✓ Alice and Bob set up")
 
-    # Sync phase: propagate group keys so Bob can decrypt Alice's channels
-    print("\n=== Sync phase: propagate group keys (ticks 2100-5000) ===")
-    for i in range(15):
-        tick.tick(t_ms=2100 + i*200, db=db)
-    db.commit()
-    print("✓ Sync complete, Bob should now have group keys")
+    # Initial sync for group keys
+    t_ms = initial_sync(db, start_t_ms=None)
+    print("✓ Initial sync complete")
 
-    # Create disappearing channel
-    print("\n=== Alice creates channel with 3-second disappearing time ===")
+    # Create disappearing channel with short TTL
+    disappearing_time_ms = 3000
+    print(f"\n=== Alice creates channel with {disappearing_time_ms}ms disappearing time ===")
     channel_id = channel.create(
         name='ephemeral',
         peer_id=alice['peer_id'],
         peer_shared_id=alice['peer_shared_id'],
-        t_ms=3000,
+        t_ms=t_ms,
         db=db,
-        disappearing_time_ms=3000
+        disappearing_time_ms=disappearing_time_ms
     )
     db.commit()
-
-    # Project channel for Bob (Alice already has it from create)
-    bob_recorded_id = recorded.create(channel_id, bob['peer_id'], 3500, db, return_dupes=False)
-    recorded.project(bob_recorded_id, db)
-    db.commit()
+    channel_created_at = t_ms
 
     # Alice sends a message
-    print("\n=== Alice sends message at t=4000 ===")
+    t_ms += 100
+    print(f"\n=== Alice sends message at t={t_ms} ===")
     msg_result = message.create(
         peer_id=alice['peer_id'],
         channel_id=channel_id,
         content="Secret message",
-        t_ms=4000,
+        t_ms=t_ms,
         db=db
     )
     message_id = msg_result['id']
+    message_created_at = t_ms
     db.commit()
 
-    # Project message for Bob (Alice already has it from create)
-    bob_msg_recorded_id = recorded.create(message_id, bob['peer_id'], 4500, db, return_dupes=False)
-    recorded.project(bob_msg_recorded_id, db)
-    db.commit()
+    # Wait for Bob to receive the message via sync
+    def bob_sees_message():
+        bob_messages = message.list(channel_id, bob['peer_id'], db)
+        assert len(bob_messages) == 1, f"Bob should have 1 message, got {len(bob_messages)}"
+        assert bob_messages[0]['content'] == "Secret message"
 
-    # Both see the message
+    t_ms = assert_eventually(bob_sees_message, db=db, start_t_ms=t_ms)
+    print("✓ Both Alice and Bob can read the message")
+
+    # Both should have the message before TTL expires
     alice_messages = message.list(channel_id, alice['peer_id'], db)
     bob_messages = message.list(channel_id, bob['peer_id'], db)
     assert len(alice_messages) == 1
     assert len(bob_messages) == 1
-    assert alice_messages[0]['content'] == "Secret message"
-    assert bob_messages[0]['content'] == "Secret message"
-    print("✓ Both Alice and Bob can read the message")
 
-    # Run purge at t=8000 (past expiry at 7000)
-    print("\n=== Run purge_expired at t=8000 (past expiry) ===")
-    cutoff_ms = 8000
-    purge_expired.run_purge_expired_for_all_peers(cutoff_ms, db)
+    # Run purge after message expires (message_created_at + disappearing_time_ms)
+    expiry_time = message_created_at + disappearing_time_ms
+    purge_time = expiry_time + 100
+    print(f"\n=== Run purge_expired at t={purge_time} (past expiry at {expiry_time}) ===")
+    purge_expired.run_purge_expired_for_all_peers(purge_time, db)
     db.commit()
 
     # Both should see empty message lists
@@ -170,6 +168,35 @@ def test_alice_and_bob_see_messages_disappear_together(fresh_db):
     assert len(alice_messages_after) == 0, "Alice should see no messages after expiry"
     assert len(bob_messages_after) == 0, "Bob should see no messages after expiry"
     print("✓ Message disappeared for both Alice and Bob")
+
+    # Verify TRUE purge at database level (not just filtered views)
+    from core.db import create_unsafe_db, create_safe_db
+    unsafedb = create_unsafe_db(db)
+
+    # Message blob should be truly purged from store
+    blob_exists = unsafedb.query_one("SELECT 1 FROM store WHERE id = ?", (message_id,))
+    assert blob_exists is None, "Message blob should be truly purged from store"
+
+    # Verify message rows are truly deleted from messages table
+    alice_safedb = create_safe_db(db, recorded_by=alice['peer_id'])
+    bob_safedb = create_safe_db(db, recorded_by=bob['peer_id'])
+
+    alice_msg_row = alice_safedb.query_one(
+        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (message_id, alice['peer_id'])
+    )
+    bob_msg_row = bob_safedb.query_one(
+        "SELECT 1 FROM messages WHERE message_id = ? AND recorded_by = ?",
+        (message_id, bob['peer_id'])
+    )
+    assert alice_msg_row is None, "Message row should be deleted from Alice's messages table"
+    assert bob_msg_row is None, "Message row should be deleted from Bob's messages table"
+
+    # Note: TTL-expired messages are purged but NOT added to deleted_events
+    # deleted_events is for explicit deletions (message_deletion events), not time-based expiry
+    # This is by design - expired events just cease to exist
+
+    print("✓ TRUE purge verified: blob deleted, message rows removed")
 
     print("\n✅ Multi-peer convergence test passed")
 
