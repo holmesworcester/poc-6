@@ -112,6 +112,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     else:
         log.warning(f"channel.create() NO admin_grant found - event may fail projection on receivers!")
 
+    # Build prior array for admin action chain
+    from events.identity import admin_action
+    prior = admin_action.build_prior(peer_shared_id, peer_id, db)
+    if prior:
+        log.info(f"channel.create() including prior chain: {[p[:20] + '...' if p else None for p in prior]}")
+
     # Determine group_id and key_id
     if member_user_ids:
         # Private channel: create a new group with specified members
@@ -237,6 +243,10 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
     if admin_grant_id:
         event_data['admin_grant'] = admin_grant_id
 
+    # Include prior for admin action chain
+    if prior:
+        event_data['prior'] = prior
+
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_event = crypto.sign_event(event_data, private_key)
@@ -318,6 +328,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"channel.project() signature verification FAILED for channel_id={event_id}")
         return None  # Reject unsigned or invalid signature
 
+    # Check if signer is removed and action is valid post-removal (DAG ancestry check)
+    from events.identity import admin_action
+    if not admin_action.is_valid_after_removal(event_id, signed_by, recorded_by, db):
+        log.warning(f"channel.project() rejecting post-removal action from {signed_by[:20]}...")
+        return None
+
     # Verify admin authorization via admin_grant chain
     # Channels require admin_grant unless they're bootstrap channels (no admin_grant field)
     admin_grant = event_data.get('admin_grant')
@@ -347,6 +363,20 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             return None  # Invalid authorization
 
         log.info(f"channel.project() admin authorization verified for channel {event_id[:20]}...")
+
+    # Record in admin_actions table for DAG tracking (if admin_grant is present)
+    if admin_grant:
+        from events.identity import admin_action
+        admin_action.record_action(
+            action_id=event_id,
+            action_type='channel',
+            peer_shared_id=signed_by,
+            prior=event_data.get('prior'),
+            created_at=event_data['created_at'],
+            recorded_by=recorded_by,
+            recorded_at=recorded_at,
+            db=db
+        )
 
     # Insert into channels table (use REPLACE to overwrite stubs from user.project())
     log.warning(f"[CHANNEL_PROJECT] Inserting into channels table: channel_id={event_id[:20]}... recorded_by={recorded_by[:20]}... recorded_at={recorded_at}")

@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 
 def create(key_id: str, peer_id: str, peer_shared_id: str,
-           recipient_peer_id: str, t_ms: int, db: Any) -> str:
+           recipient_peer_id: str, t_ms: int, db: Any,
+           prior: list[str] | None = None) -> str:
     """Create a shareable key_shared event from a local symmetric key.
 
     The symmetric key is sealed to the recipient's prekey using asymmetric encryption.
@@ -30,6 +31,7 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
         recipient_peer_id: Recipient's peer_id (to get their prekey for sealing)
         t_ms: Timestamp
         db: Database connection
+        prior: Optional prior array for removal tracking (e.g., [removal_id] when rotating keys)
 
     Returns:
         key_shared_id: The stored key_shared event ID
@@ -60,6 +62,10 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
         'created_at': t_ms
     }
 
+    # Include prior for removal tracking (when rotating keys after removal)
+    if prior:
+        inner_event_data['prior'] = prior
+
     # Sign the inner event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
     signed_inner_event = crypto.sign_event(inner_event_data, private_key)
@@ -76,7 +82,8 @@ def create(key_id: str, peer_id: str, peer_shared_id: str,
 
 
 def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
-                      invite_id: str, t_ms: int, db: Any) -> str:
+                      invite_id: str, t_ms: int, db: Any,
+                      prior: list[str] | None = None) -> str:
     """Create a shareable key_shared event sealed to invite prekey.
 
     Extracts the invite prekey from the stored invite event and wraps the group key to it.
@@ -89,6 +96,7 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
         invite_id: The invite event ID (contains invite_prekey_id and invite_pubkey)
         t_ms: Timestamp
         db: Database connection
+        prior: Optional prior array for removal tracking
 
     Returns:
         key_shared_id: The stored key_shared event ID
@@ -132,6 +140,10 @@ def create_for_invite(key_id: str, peer_id: str, peer_shared_id: str,
         'signed_by': peer_shared_id,
         'created_at': t_ms
     }
+
+    # Include prior for removal tracking (when rotating keys after removal)
+    if prior:
+        inner_event_data['prior'] = prior
 
     # Sign and wrap
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -217,12 +229,17 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
     # Extract recipient_prekey_id from blob (first 16 bytes is the hint/prekey_id)
     recipient_prekey_id = crypto.b64encode(blob[:crypto.ID_SIZE])
 
+    # Extract prior for removal tracking
+    prior = event_data.get('prior', [])
+    prior_0 = prior[0] if len(prior) > 0 else None
+    prior_1 = prior[1] if len(prior) > 1 else None
+
     # Insert into group_keys_shared table to track this event
     # Store original_key_id for auditing (what sender claimed), but we use computed_key_id
     safedb.execute(
         """INSERT OR IGNORE INTO group_keys_shared
-           (key_shared_id, original_key_id, recipient_prekey_id, signed_by, created_at, recorded_by, recorded_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (key_shared_id, original_key_id, recipient_prekey_id, signed_by, created_at, recorded_by, recorded_at, prior_0, prior_1)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             key_shared_id,
             computed_key_id,  # Use computed (deterministic) key_id
@@ -230,7 +247,9 @@ def project(key_shared_id: str, recorded_by: str, recorded_at: int, db: Any) -> 
             event_data['signed_by'],
             event_data['created_at'],
             recorded_by,
-            recorded_at
+            recorded_at,
+            prior_0,
+            prior_1
         )
     )
 
@@ -372,9 +391,85 @@ def retry_pending_name_updates(recorded_by: str, db: Any) -> None:
             )
 
 
+def can_share_key_with_peer(key_id: str, requester_peer_id: str,
+                             recorded_by: str, db: Any) -> bool:
+    """Check if a key can be shared with a (potentially removed) peer.
+
+    This prevents removed users from obtaining keys created after their removal
+    by checking the prior field on group_key_shared events.
+
+    Returns True if:
+    1. Requester is not removed, OR
+    2. Key has no group_key_shared events with prior (predates removal tracking), OR
+    3. Key's prior does NOT reference requester's removal (or is not an ancestor)
+
+    Args:
+        key_id: The key to check
+        requester_peer_id: The peer requesting the key
+        recorded_by: Peer perspective for queries
+        db: Database connection
+
+    Returns:
+        True if safe to share, False if key was created after requester's removal
+    """
+    from events.identity import admin_action
+
+    # Check if requester is removed
+    removal_id = admin_action.get_removal_for_user_of_peer(requester_peer_id, recorded_by, db)
+
+    if not removal_id:
+        # Requester is not removed - safe to share
+        return True
+
+    if removal_id == "REMOVED_NO_ACTION":
+        # Requester is removed but no action tracking - reject to be safe
+        log.warning(f"can_share_key_with_peer() requester {requester_peer_id[:20]}... is removed without action tracking")
+        return False
+
+    # Check if any group_key_shared for this key has prior referencing the removal
+    safedb = create_safe_db(db, recorded_by=recorded_by)
+    gks_rows = safedb.query(
+        """SELECT prior_0, prior_1 FROM group_keys_shared
+           WHERE original_key_id = ? AND recorded_by = ?""",
+        (key_id, recorded_by)
+    )
+
+    if not gks_rows:
+        # No group_key_shared events found - key predates tracking or we don't have it
+        # Safe to share (they might need it for historical content)
+        return True
+
+    for row in gks_rows:
+        prior_0 = row['prior_0']
+        prior_1 = row['prior_1']
+
+        # If prior is None, this key_shared predates removal tracking - OK to share
+        if not prior_0 and not prior_1:
+            continue
+
+        # Check if removal_id is an ancestor of (or equal to) any prior
+        # If so, the key was created AFTER the removal, so don't share
+        if prior_0:
+            # Check: is removal_id reachable from prior_0?
+            # If removal_id == prior_0 or is_dag_ancestor(removal_id, prior_0), the key was created
+            # at or after this removal
+            if removal_id == prior_0 or admin_action.is_dag_ancestor(removal_id, prior_0, recorded_by, db):
+                log.warning(f"can_share_key_with_peer() key {key_id[:20]}... has prior_0 referencing requester's removal")
+                return False
+
+        if prior_1:
+            if removal_id == prior_1 or admin_action.is_dag_ancestor(removal_id, prior_1, recorded_by, db):
+                log.warning(f"can_share_key_with_peer() key {key_id[:20]}... has prior_1 referencing requester's removal")
+                return False
+
+    # No blocking prior found - safe to share
+    return True
+
+
 def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
                                    peer_shared_id: str, t_ms: int, db: Any,
-                                   exclude_user_id: str | None = None) -> list[str]:
+                                   exclude_user_id: str | None = None,
+                                   prior: list[str] | None = None) -> list[str]:
     """Create key_shared events for all members of a group.
 
     Args:
@@ -385,6 +480,7 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
         t_ms: Base timestamp
         db: Database connection
         exclude_user_id: Optional user_id to exclude (e.g., removed member)
+        prior: Optional prior array for removal tracking (e.g., [removal_id] when rotating)
 
     Returns:
         List of key_shared event IDs created
@@ -421,7 +517,8 @@ def share_key_with_group_members(key_id: str, group_id: str, peer_id: str,
                 peer_shared_id=peer_shared_id,
                 recipient_peer_id=recipient_peer_id,
                 t_ms=t_ms + i + 1,  # Increment timestamp for each member
-                db=db
+                db=db,
+                prior=prior  # Pass removal tracking prior
             )
             key_shared_ids.append(key_shared_id)
             log.info(f"key_shared.share_key_with_group_members() created key_shared for {recipient_peer_id}")

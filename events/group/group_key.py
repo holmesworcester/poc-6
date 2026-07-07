@@ -220,7 +220,8 @@ def list(peer_id: str, db: Any) -> list[dict[str, Any]]:
 
 
 def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
-                       t_ms: int, removed_user_id: str, db: Any) -> str:
+                       t_ms: int, removed_user_id: str, db: Any,
+                       removal_id: str | None = None) -> str:
     """Rotate a group's encryption key when a member is removed.
 
     Creates a new key and shares it with all remaining members (excluding removed user).
@@ -232,6 +233,7 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
         t_ms: Base timestamp for key creation
         removed_user_id: User ID being removed (to exclude from sharing)
         db: Database connection
+        removal_id: The user_removed event ID (for prior tracking)
 
     Returns:
         new_key_id: The newly created group key ID
@@ -265,6 +267,7 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
     log.info(f"group_key.rotate_for_removal() updated group {group_id[:20]}... with new key")
 
     # Share new key with all remaining members (excluding removed user)
+    # Include removal_id as prior for removal tracking
     group_key_shared.share_key_with_group_members(
         key_id=new_key_id,
         group_id=group_id,
@@ -272,7 +275,8 @@ def rotate_for_removal(group_id: str, peer_id: str, peer_shared_id: str,
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
-        exclude_user_id=removed_user_id
+        exclude_user_id=removed_user_id,
+        prior=[removal_id] if removal_id else None
     )
 
     log.info(f"group_key.rotate_for_removal() completed rotation for group {group_id[:20]}..., new_key={new_key_id[:20]}...")

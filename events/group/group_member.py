@@ -103,6 +103,12 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     else:
         log.warning(f"group_member.create() NO admin_grant found - event may fail projection on receivers!")
 
+    # Build prior array for admin action chain
+    from events.identity import admin_action
+    prior = admin_action.build_prior(peer_shared_id, peer_id, db)
+    if prior:
+        log.info(f"group_member.create() including prior chain: {[p[:20] + '...' if p else None for p in prior]}")
+
     # Create event data
     event_data = {
         'type': 'group_member',
@@ -116,6 +122,10 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
     # Include explicit admin_grant dependency
     if admin_grant_id:
         event_data['admin_grant'] = admin_grant_id
+
+    # Include prior for admin action chain
+    if prior:
+        event_data['prior'] = prior
 
     # Sign the event with local peer's private key
     private_key = peer.get_private_key(peer_id, peer_id, db)
@@ -218,6 +228,12 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
         log.warning(f"group_member.project() signature verification FAILED for member_id={member_id}")
         return None  # Reject unsigned or invalid signature
 
+    # Check if signer is removed and action is valid post-removal (DAG ancestry check)
+    from events.identity import admin_action
+    if not admin_action.is_valid_after_removal(member_id, added_by, recorded_by, db):
+        log.warning(f"group_member.project() rejecting post-removal action from {added_by[:20]}...")
+        return None
+
     # Note: group_id and user_id dependencies are checked by recorded.check_deps()
     # before dispatch. If we get here, they're guaranteed to be in valid_events,
     # which means their projection succeeded and table rows exist.
@@ -264,6 +280,19 @@ def project(member_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
             recorded_by,
             recorded_at
         )
+    )
+
+    # Record in admin_actions table for DAG tracking
+    from events.identity import admin_action
+    admin_action.record_action(
+        action_id=member_id,
+        action_type='group_member',
+        peer_shared_id=added_by,
+        prior=event_data.get('prior'),
+        created_at=event_data['created_at'],
+        recorded_by=recorded_by,
+        recorded_at=recorded_at,
+        db=db
     )
 
     log.info(f"group_member.project() successfully projected member_id={member_id}")

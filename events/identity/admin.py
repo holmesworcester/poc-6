@@ -28,7 +28,8 @@ def create(
     t_ms: int,
     peer_id: str,
     db: Any,
-    admin_grant: str | None = None
+    admin_grant: str | None = None,
+    prior: list[str] | None = None
 ) -> str:
     """Create an admin event granting admin status to a user.
 
@@ -41,10 +42,19 @@ def create(
         peer_id: Local peer ID (for recording)
         db: Database connection
         admin_grant: Prior admin_id for authorization chain (None for bootstrap)
+        prior: Prior admin action chain (None for bootstrap, built automatically for ongoing)
 
     Returns:
         admin_id: The ID of the created admin event
     """
+    # Build prior array for admin action chain (only for ongoing, not bootstrap)
+    is_bootstrap = (signed_by == network_id)
+    if not is_bootstrap and prior is None:
+        from events.identity import admin_action
+        prior = admin_action.build_prior(signed_by, peer_id, db)
+        if prior:
+            log.info(f"admin.create() built prior chain: {[p[:20] + '...' if p else None for p in prior]}")
+
     event_data = {
         'type': 'admin',
         'user_id': user_id,
@@ -55,6 +65,10 @@ def create(
 
     if admin_grant:
         event_data['admin_grant'] = admin_grant
+
+    # Include prior for admin action chain (only for ongoing grants)
+    if not is_bootstrap and prior:
+        event_data['prior'] = prior
 
     # Sign the event
     signed_event = crypto.sign_event(event_data, signer_private_key)
@@ -141,6 +155,12 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             log.warning(f"[ADMIN_PROJECT_EARLY_RETURN] Ongoing signature verification failed")
             return None
 
+        # Check if signer is removed and action is valid post-removal (DAG ancestry check)
+        from events.identity import admin_action
+        if not admin_action.is_valid_after_removal(admin_id, signed_by, recorded_by, db):
+            log.warning(f"[ADMIN_PROJECT_EARLY_RETURN] Rejecting post-removal action from {signed_by[:20]}...")
+            return None
+
         # Validate admin_grant chain
         if not admin_grant:
             log.warning(f"[ADMIN_PROJECT_EARLY_RETURN] Ongoing admin grant requires admin_grant reference")
@@ -190,6 +210,20 @@ def project(admin_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
             recorded_at
         )
     )
+
+    # Record in admin_actions table for DAG tracking (only for ongoing, not bootstrap)
+    if not is_bootstrap:
+        from events.identity import admin_action
+        admin_action.record_action(
+            action_id=admin_id,
+            action_type='admin',
+            peer_shared_id=signed_by,
+            prior=event_data.get('prior'),
+            created_at=event_data['created_at'],
+            recorded_by=recorded_by,
+            recorded_at=recorded_at,
+            db=db
+        )
 
     # For bootstrap admin (signed_by == network_id), set creator_user_id on network
     # This makes the first admin the "creator" of the network

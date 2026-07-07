@@ -143,12 +143,18 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     # Look up the admin event that grants admin to this user
     from events.identity import admin as admin_module
+    from events.identity import admin_action
     admin_grant_id = admin_module.my_grant(inviter_user_id, network_id, peer_id, db)
     if admin_grant_id:
         log.info(f"invite.create() including admin_grant={admin_grant_id[:20]}... for ongoing invite")
     else:
         # This shouldn't happen if is_admin() passed, but warn just in case
         log.warning(f"invite.create() no admin_grant found for user {inviter_user_id[:20]}...")
+
+    # Build prior array for admin action chain
+    prior = admin_action.build_prior(peer_shared_id, peer_id, db)
+    if prior:
+        log.info(f"invite.create() including prior chain: {[p[:20] + '...' if p else None for p in prior]}")
 
     # Get key from all_users group
     group_row = safedb.query_one(
@@ -261,6 +267,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # Per spec: Ongoing invite(mode=user) must include admin_grant that authorizes the signer
     if admin_grant_id:
         invite_event_data['admin_grant'] = admin_grant_id
+
+    # Include prior for admin action chain (only for admin-gated invites, mode='user')
+    if mode == 'user' and prior:
+        invite_event_data['prior'] = prior
 
     # Add mode-specific fields
     if mode == 'peer':
@@ -492,6 +502,12 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
 
         log.info(f"invite.project() verified ongoing invite with signer pubkey")
 
+        # Check if signer is removed and action is valid post-removal (DAG ancestry check)
+        from events.identity import admin_action
+        if not admin_action.is_valid_after_removal(invite_id, signed_by, recorded_by, db):
+            log.warning(f"invite.project() rejecting post-removal action from {signed_by[:20]}...")
+            return None
+
         # Validate admin_grant chain for ongoing invite(mode=user)
         # The signer must be an admin, authorized by admin_grant
         admin_grant = event_data.get('admin_grant')
@@ -514,6 +530,21 @@ def project(invite_id: str, recorded_by: str, recorded_at: int, db: Any) -> str 
                     log.warning(f"invite.project() admin_grant {admin_grant[:20]}... does not authorize signer {signed_by[:20]}...")
 
     log.info(f"invite.project() validation passed")
+
+    # Record in admin_actions table for DAG tracking (only for mode='user' admin-gated invites)
+    # Bootstrap invites (signed_by=network_id) are not admin-gated
+    if signed_by != network_id and event_data.get('mode', 'user') == 'user':
+        from events.identity import admin_action
+        admin_action.record_action(
+            action_id=invite_id,
+            action_type='invite',
+            peer_shared_id=signed_by,
+            prior=event_data.get('prior'),
+            created_at=event_data['created_at'],
+            recorded_by=recorded_by,
+            recorded_at=recorded_at,
+            db=db
+        )
 
     # Insert into invites table
     mode = event_data.get('mode', 'user')  # Default to 'user' for backward compatibility

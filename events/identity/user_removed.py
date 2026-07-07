@@ -85,6 +85,12 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
     if not validate(removed_user_id, removed_by_peer_id, removed_by_local_peer_id, db):
         raise ValueError("Not authorized to remove this user")
 
+    # Build prior array for admin action chain
+    from events.identity import admin_action
+    prior = admin_action.build_prior(removed_by_peer_id, removed_by_local_peer_id, db)
+    if prior:
+        log.info(f"user_removed.create() including prior chain: {[p[:20] + '...' if p else None for p in prior]}")
+
     # Create event data
     event_data = {
         'type': 'user_removed',
@@ -92,6 +98,10 @@ def create(removed_user_id: str, removed_by_peer_id: str, removed_by_local_peer_
         'removed_by': removed_by_peer_id,
         'created_at': t_ms
     }
+
+    # Include prior for admin action chain
+    if prior:
+        event_data['prior'] = prior
 
     # Sign the event with remover's private key
     from events.identity import peer
@@ -169,6 +179,12 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         log.warning(f"user_removed.project() signer peer_shared not found for {event_id[:20]}...")
         return None
 
+    # Check if signer is removed and action is valid post-removal (DAG ancestry check)
+    from events.identity import admin_action
+    if not admin_action.is_valid_after_removal(event_id, signer_peer_shared_id, recorded_by, db):
+        log.warning(f"user_removed.project() rejecting post-removal action from {signer_peer_shared_id[:20]}...")
+        return None
+
     safedb = create_safe_db(db, recorded_by=recorded_by)
     unsafe_db = create_unsafe_db(db)
 
@@ -185,6 +201,19 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
         """INSERT OR IGNORE INTO removed_users (user_id, removed_at, signed_by, recorded_by)
            VALUES (?, ?, ?, ?)""",
         (removed_user_id, removed_at, signed_by, recorded_by)
+    )
+
+    # Record in admin_actions table for DAG tracking
+    from events.identity import admin_action
+    admin_action.record_action(
+        action_id=event_id,
+        action_type='user_removed',
+        peer_shared_id=removed_by,
+        prior=event_data.get('prior'),
+        created_at=removed_at,
+        recorded_by=recorded_by,
+        recorded_at=recorded_at,
+        db=db
     )
 
     # Cascade: Find all peers for this user from peers_shared and mark them as removed
@@ -219,14 +248,16 @@ def project(event_id: str, recorded_by: str, recorded_at: int, db: Any) -> str |
     )
     if peer_self_row and peer_self_row['peer_shared_id'] == removed_by:
         # This peer created the user_removed event - they should rotate keys
-        _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, db)
+        # Pass event_id (removal_id) for prior tracking in key sharing
+        _rotate_keys_for_removed_user(removed_user_id, recorded_by, removed_at, event_id, db)
     else:
         log.debug(f"user_removed.project() skipping key rotation - not the event creator")
 
     return event_id
 
 
-def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: int, db: Any) -> None:
+def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: int,
+                                   removal_id: str, db: Any) -> None:
     """Rotate group keys for all groups a removed user was a member of.
 
     This ensures the removed user cannot decrypt future messages in any group.
@@ -235,6 +266,7 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
         removed_user_id: User ID being removed
         recorded_by: Peer ID performing the removal (and key rotation)
         t_ms: Timestamp for key creation
+        removal_id: The user_removed event ID (for prior tracking in key sharing)
         db: Database connection
     """
     safedb = create_safe_db(db, recorded_by=recorded_by)
@@ -274,7 +306,8 @@ def _rotate_keys_for_removed_user(removed_user_id: str, recorded_by: str, t_ms: 
                 peer_shared_id=peer_shared_id,
                 t_ms=t_ms,  # No offset needed - DAG deps handle ordering
                 removed_user_id=removed_user_id,
-                db=db
+                db=db,
+                removal_id=removal_id  # Pass for prior tracking in key sharing
             )
             log.info(f"user_removed._rotate_keys_for_removed_user() rotated key for group {group_id[:20]}...")
         except Exception as e:

@@ -172,6 +172,11 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
             # Also check known reference fields that don't end in '_id'
             elif field in ('signed_by', 'added_by', 'created_by', 'admin_grant'):
                 dep_fields.append(field)
+            # Handle 'prior' array field (admin action chain)
+            elif field == 'prior' and isinstance(value, list):
+                # prior contains event IDs that are dependencies
+                # Will be handled specially below
+                pass
 
     missing_deps = []
 
@@ -196,6 +201,24 @@ def check_deps(event_data: dict[str, Any], recorded_by: str, db: Any) -> list[st
         if not valid:
             log.warning(f"recorded.check_deps() missing dep: {field}={dep_id[:20]}... for peer={recorded_by[:20]}...")
             missing_deps.append(dep_id)
+
+    # Handle 'prior' array field specially (admin action chain dependencies)
+    prior = event_data.get('prior')
+    if prior and isinstance(prior, list):
+        for i, prior_id in enumerate(prior):
+            if not prior_id:
+                continue  # Skip None entries (e.g., first action has prior=[None])
+            if not isinstance(prior_id, str) or len(prior_id) <= 10:
+                continue  # Skip invalid entries
+
+            # Check if this prior is valid for this peer
+            valid = safedb.query_one(
+                "SELECT 1 FROM valid_events WHERE event_id = ? AND recorded_by = ? LIMIT 1",
+                (prior_id, recorded_by)
+            )
+            if not valid:
+                log.warning(f"recorded.check_deps() missing prior[{i}]={prior_id[:20]}... for peer={recorded_by[:20]}...")
+                missing_deps.append(prior_id)
 
     if missing_deps:
         log.debug(f"recorded.check_deps() total missing deps: {missing_deps}")

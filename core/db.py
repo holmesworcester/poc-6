@@ -34,6 +34,8 @@ SUBJECTIVE_TABLES = {
     'peer_names',                  # Encrypted peer/device name updates (peer-scoped)
     'group_members',
     'admins',                      # Admin events for authorization chain (peer-scoped)
+    'admin_actions',               # Admin action DAG for removal validation (peer-scoped)
+    'removed_users',               # Removed users tracking (peer-scoped)
     'valid_events',
     'blocked_events_ephemeral',
     'blocked_event_deps_ephemeral',

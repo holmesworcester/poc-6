@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS group_keys_shared (
     created_at INTEGER NOT NULL,
     recorded_by TEXT NOT NULL,       -- Who decrypted and projected this event
     recorded_at INTEGER NOT NULL,
+    prior_0 TEXT,                    -- prior[0]: removal event ID (for removal tracking)
+    prior_1 TEXT,                    -- prior[1]: optional merge reference
     PRIMARY KEY (key_shared_id, recorded_by)
 );
 
