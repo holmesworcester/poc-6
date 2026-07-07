@@ -158,7 +158,8 @@ def _validate_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
            group_id: str | None = None, member_user_ids: list[str] | None = None,
            key_id: str | None = None, is_main: bool = False,
-           disappearing_time_ms: int = 0, admin_grant: str | None = None) -> str:
+           disappearing_time_ms: int = 0, admin_grant: str | None = None,
+           skip_admin_check: bool = False) -> str:
     """Create a shareable, encrypted channel event.
 
     Only admins can create channels (except during initial network setup where group_id is explicitly provided).
@@ -186,6 +187,10 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         disappearing_time_ms: Messages expire after this duration in ms (0 = permanent, >0 = milliseconds)
         admin_grant: Optional admin_id that grants authority to create channels.
                     If provided, used directly. If None, looked up from admins table.
+        skip_admin_check: If True, skip the pre-creation admin table lookup.
+                    NOTE: This only skips the fail-fast check. The projector ALWAYS
+                    verifies admin_grant dependency - that's the real authorization.
+                    Use True for bootstrap (allow blocking), False for API calls (fail fast).
 
     Returns:
         channel_id: The created channel event ID
@@ -197,9 +202,12 @@ def create(name: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
         raise ValueError("disappearing_time_ms must be non-negative")
 
     # Check authorization - only admins can create channels
+    # NOTE: skip_admin_check only skips this pre-creation table lookup.
+    # The projector ALWAYS verifies admin_grant dependency - that's the real auth check.
+    # This flag controls fail-fast (API calls) vs allow-blocking (bootstrap).
     admin_grant_id = admin_grant  # Use passed-in value if provided
 
-    if not _validate_admin(peer_shared_id, peer_id, db):
+    if not skip_admin_check and not _validate_admin(peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to create channels (only admins can)")
 
     # Get admin_grant for inclusion in event (REQUIRED for convergence)
@@ -506,7 +514,8 @@ def get(channel_id: str, recorded_by: str, db: Any) -> dict[str, Any] | None:
     )
 
 
-def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any) -> str:
+def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shared_id: str,
+                          t_ms: int, db: Any, skip_admin_check: bool = False) -> str:
     """Add a member to a private channel (admin-only).
 
     This adds the user as a member of the channel's underlying group, giving them
@@ -519,6 +528,9 @@ def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shar
         peer_shared_id: Public peer ID (for created_by)
         t_ms: Timestamp
         db: Database connection
+        skip_admin_check: If True, skip the pre-creation admin table lookup.
+                    NOTE: This only skips the fail-fast check. The projector ALWAYS
+                    verifies admin_grant dependency - that's the real authorization.
 
     Returns:
         member_id: The created group_member event ID
@@ -529,7 +541,9 @@ def add_member_to_channel(channel_id: str, user_id: str, peer_id: str, peer_shar
     safedb = create_safe_db(db, recorded_by=peer_id)
 
     # Check authorization - only admins can add members
-    if not _validate_admin(peer_shared_id, peer_id, db):
+    # NOTE: skip_admin_check only skips this pre-creation table lookup.
+    # The projector ALWAYS verifies admin_grant dependency - that's the real auth check.
+    if not skip_admin_check and not _validate_admin(peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to add members (only admins can)")
 
     # Get the channel to find its group_id

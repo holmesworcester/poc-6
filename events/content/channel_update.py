@@ -141,6 +141,7 @@ def create(
     db: Any,
     new_channel_name: str | None = None,
     new_disappearing_time_ms: int | None = None,
+    skip_admin_check: bool = False,
 ) -> str:
     """Create a channel update event (encrypted, shareable).
 
@@ -155,6 +156,9 @@ def create(
         db: Database connection
         new_channel_name: New channel name (or None to keep existing)
         new_disappearing_time_ms: New disappearing time in ms (or None to keep existing)
+        skip_admin_check: If True, skip the pre-creation admin table lookup.
+                    NOTE: This only skips the fail-fast check. The projector ALWAYS
+                    verifies admin_grant dependency - that's the real authorization.
 
     Returns:
         update_id: The created update event ID
@@ -163,7 +167,9 @@ def create(
         ValueError: If not authorized, channel not found, or invalid parameters
     """
     # Check authorization - only admins can update channels
-    if not _validate_admin(peer_shared_id, peer_id, db):
+    # NOTE: skip_admin_check only skips this pre-creation table lookup.
+    # The projector ALWAYS verifies admin_grant dependency - that's the real auth check.
+    if not skip_admin_check and not _validate_admin(peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to update channels (only admins can)")
 
     # Validate at least one field is provided

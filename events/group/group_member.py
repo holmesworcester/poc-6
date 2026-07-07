@@ -144,7 +144,7 @@ def _wire_shadow_group_member(
 
 
 def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms: int, db: Any,
-           admin_grant: str | None = None) -> str:
+           admin_grant: str | None = None, skip_admin_check: bool = False) -> str:
     """Create a group_member event to add a user to a group.
 
     Only admins can add new members to groups.
@@ -159,6 +159,9 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         db: Database connection
         admin_grant: Optional admin_id that grants authority to add members.
                     If provided, used directly. If None, looked up from admins table.
+        skip_admin_check: If True, skip the pre-creation admin table lookup.
+                    NOTE: This only skips the fail-fast check. The projector ALWAYS
+                    verifies admin_grant dependency - that's the real authorization.
 
     Returns:
         member_id: The stored group_member event ID
@@ -174,7 +177,9 @@ def create(group_id: str, user_id: str, peer_id: str, peer_shared_id: str, t_ms:
         raise ValueError(f"Group {group_id} not found")
 
     # Check authorization - caller must be admin to add members
-    if not validate(group_id, peer_shared_id, peer_id, db):
+    # NOTE: skip_admin_check only skips this pre-creation table lookup.
+    # The projector ALWAYS verifies admin_grant dependency - that's the real auth check.
+    if not skip_admin_check and not validate(group_id, peer_shared_id, peer_id, db):
         raise ValueError(f"User {peer_shared_id} not authorized to add members to group {group_id} (only admins can add members)")
 
     # Get admin_grant for the adding user (explicit dependency for convergence)

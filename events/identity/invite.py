@@ -214,7 +214,8 @@ def is_admin(peer_shared_id: str, recorded_by: str, db: Any) -> bool:
 
 
 def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | None = None,
-           address: str | None = None, port: int | None = None) -> tuple[str, str, dict[str, Any]]:
+           address: str | None = None, port: int | None = None,
+           skip_admin_check: bool = False) -> tuple[str, str, dict[str, Any]]:
     """Create an invite event and generate invite link.
 
     Automatically queries for the inviter's main group, main channel, and peer_shared_id.
@@ -233,6 +234,9 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
         user_id: Required for mode='peer', target user to link to. Must be None for mode='user'.
         address: Inviter's IP address (for connection bootstrapping)
         port: Inviter's port (for connection bootstrapping)
+        skip_admin_check: If True, skip the pre-creation admin table lookup.
+                    NOTE: This only skips the fail-fast check. The projector ALWAYS
+                    verifies admin_grant dependency - that's the real authorization.
 
     Returns:
         (invite_id, invite_link, invite_data): The stored invite event ID, the invite link, and the invite data dict
@@ -273,8 +277,10 @@ def create(peer_id: str, t_ms: int, db: Any, mode: str = 'user', user_id: str | 
     # Authorization check depends on mode:
     # - mode='user' (network join invites): requires admin
     # - mode='peer' (device linking): any user can create for their OWN user_id
+    # NOTE: skip_admin_check only skips this pre-creation table lookup.
+    # The projector ALWAYS verifies admin_grant dependency - that's the real auth check.
     if mode == 'user':
-        if not is_admin(peer_shared_id, peer_id, db):
+        if not skip_admin_check and not is_admin(peer_shared_id, peer_id, db):
             raise ValueError(f"Only admins can create network join invites. Peer {peer_id} is not an admin.")
     elif mode == 'peer':
         # Security: users can only create device link invites for themselves

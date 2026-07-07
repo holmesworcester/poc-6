@@ -44,8 +44,12 @@ def create(peer_id: str, cutoff_ms: int, t_ms: int, db: Any) -> str:
 
     blob = json.dumps(event_data).encode()
 
-    # Store without projection (purge_expired is local-only audit data)
-    purge_expired_id = store.batch_store_events([blob], peer_id, t_ms, db)[0]
+    # Store without projection or recorded wrapper (purge_expired is local-only audit data)
+    # Using store.blob() directly avoids creating recorded entries that would fail
+    # during re-projection since JSON blobs are no longer supported for event projection.
+    from .db import create_unsafe_db
+    unsafedb = create_unsafe_db(db)
+    purge_expired_id = store.blob(blob, t_ms, return_dupes=True, unsafedb=unsafedb)
 
     log.info(f"purge_expired.create() created purge_expired_id={purge_expired_id[:20]}...")
     return purge_expired_id

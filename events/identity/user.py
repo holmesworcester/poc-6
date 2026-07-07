@@ -426,13 +426,9 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
 
     # NOTE: peer_name_update for device_name is created by peer_shared.join() above
 
-    # Flush blocked events queue to ensure admin_grant and other events are projected
-    # before we check admin status in channel.create()
-    from core import queues
-    queues.blocked.flush(db)
-
     # 9. Create default channel (normal path - no bootstrap special case)
     # Pass admin_grant directly so the event has explicit dependency for convergence
+    # Use skip_admin_check=True since admin_grant may not be projected yet during bootstrap
     channel_id = channel.create(
         name='general',
         peer_id=peer_id,
@@ -440,7 +436,8 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
         is_main=True,
-        admin_grant=admin_grant_id  # Explicit dependency for convergence
+        admin_grant=admin_grant_id,  # Explicit dependency for convergence
+        skip_admin_check=True  # Bootstrap: allow blocking, admin verified by projector
     )
     log.info(f"new_network() created channel: {channel_id[:20]}...")
 
@@ -470,12 +467,18 @@ def new_network(name: str, t_ms: int, db: Any, device_name: str = "Device", netw
         peer_shared_id=peer_shared_id,
         t_ms=t_ms,  # No offset needed - DAG deps handle ordering
         db=db,
-        # NOTE: skip_admin_check removed - admin_grant is already projected by this point
-        admin_grant=admin_grant_id  # Explicit dependency for convergence
+        admin_grant=admin_grant_id,  # Explicit dependency for convergence
+        skip_admin_check=True  # Bootstrap: allow blocking, admin verified by projector
     )
     log.info(f"new_network() added user to all_users group: {all_users_member_id[:20]}...")
 
     db.commit()
+
+    # Process blocked events to ensure all bootstrap events are projected before returning.
+    # Use flush() which processes events for ALL local peers until no more events
+    # can be unblocked. This is more robust than running UnblockJob a fixed number of times.
+    from core import queues
+    queues.blocked.flush(db)
 
     return {
         'peer_id': peer_id,
@@ -771,8 +774,9 @@ def join(peer_id: str, invite_link: str, name: str, t_ms: int, db: Any,
 
     # NOTE: peer_name_update for device_name is created by peer_shared.join() above
 
-    # Flush blocked events queue to ensure all events are projected
-    # before we return (so caller can use peer_self, etc.)
+    # Process blocked events to ensure all join events are projected before returning.
+    # Use flush() which processes events for ALL local peers until no more events
+    # can be unblocked. This is more robust than running UnblockJob a fixed number of times.
     from core import queues
     queues.blocked.flush(db)
 
